@@ -1,0 +1,45 @@
+{
+  "name": "japanese-study-mcp",
+  "version": "0.1.0",
+  "description": "Private MCP adapter for the Japanese Study Hub.",
+  "type": "module",
+  "private": true,
+  "license": "UNLICENSED",
+  "bin": {
+    "japanese-study-mcp": "./dist/src/http-main.js",
+    "japanese-study-mcp-stdio": "./dist/src/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/tests/config.test.js dist/tests/api-client.test.js",
+    "smoke:http": "npm run build && node scripts/smoke-http.mjs",
+    "smoke:hub": "npm run build && node scripts/smoke-hub.mjs",
+    "smoke:live": "npm run build && node scripts/smoke-live.mjs",
+    "smoke:hub:write": "npm run build && node scripts/smoke-hub-write.mjs",
+    "tray:selftest": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tray.ps1 -SelfTest",
+    "tunnel:install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-tunnel-client.ps1",
+    "tunnel:selftest": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action SelfTest",
+    "tunnel:version": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action Version",
+    "tunnel:init": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action Init",
+    "tunnel:key:save": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action SaveKeyPrompt",
+    "tunnel:key:status": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action KeyStatus",
+    "tunnel:doctor": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action Doctor -Explain",
+    "tunnel:health": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action Health",
+    "tunnel:run": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action Run",
+    "startup:install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-startup.ps1",
+    "start": "node dist/src/http-main.js",
+    "start:http": "node dist/src/http-main.js",
+    "start:stdio": "node dist/src/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.20.2",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,236 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+
+export const DEFAULT_DENY_DIRS = [
+  ".git",
+  ".hg",
+  ".svn",
+  ".agents",
+  ".codex",
+  ".openai",
+  ".secrets",
+  ".tunnel-client",
+  ".cache",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".ruff_cache",
+  ".next",
+  ".nuxt",
+  ".turbo",
+  ".pnpm-store",
+  ".tmp",
+  "node_modules",
+  ".venv",
+  "venv",
+  "env",
+  "__pycache__",
+  "dist",
+  "build",
+  "coverage",
+  "$recycle.bin",
+  "system volume information",
+] as const;
+
+export const DEFAULT_DENY_EXTENSIONS = [
+  ".db",
+  ".sqlite",
+  ".sqlite3",
+  ".mdb",
+  ".accdb",
+  ".pem",
+  ".key",
+  ".pfx",
+  ".p12",
+  ".crt",
+  ".cer",
+  ".zip",
+  ".7z",
+  ".rar",
+  ".tar",
+  ".gz",
+  ".xz",
+  ".zst",
+  ".onnx",
+  ".safetensors",
+  ".pt",
+  ".pth",
+  ".ckpt",
+  ".bin",
+] as const;
+
+export interface ServerConfig {
+  defaultRootId: string;
+  root: string;
+  roots: Map<string, WorkspaceRootConfig>;
+  maxFileBytes: number;
+  maxReadLines: number;
+  maxSearchResults: number;
+  maxDirEntries: number;
+  searchTimeoutMs: number;
+  denyDirs: Set<string>;
+  denyExtensions: Set<string>;
+}
+
+export interface WorkspaceRootConfig {
+  id: string;
+  path: string;
+  denyDirs: Set<string>;
+}
+
+export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<ServerConfig> {
+  const denyDirs = mergeSet(DEFAULT_DENY_DIRS, env.WORKSPACE_MCP_EXTRA_DENY_DIRS);
+  const rootSpecs = parseRootSpecs(env.WORKSPACE_MCP_ROOTS, env.WORKSPACE_MCP_ROOT);
+  const rootDenyDirs = parseRootDenyDirs(env.WORKSPACE_MCP_ROOT_DENY_DIRS);
+  const roots = new Map<string, WorkspaceRootConfig>();
+  const resolvedPaths = new Set<string>();
+
+  for (const rootSpec of rootSpecs) {
+    const resolvedPath = await fs.realpath(path.resolve(rootSpec.path));
+    const normalizedPath = resolvedPath.toLowerCase();
+    if (resolvedPaths.has(normalizedPath)) {
+      throw new Error(`Workspace root path is configured more than once: ${resolvedPath}`);
+    }
+    resolvedPaths.add(normalizedPath);
+
+    const perRootDenyDirs = new Set(denyDirs);
+    for (const item of rootDenyDirs.get(rootSpec.id) ?? []) {
+      perRootDenyDirs.add(item);
+    }
+    roots.set(rootSpec.id, {
+      id: rootSpec.id,
+      path: resolvedPath,
+      denyDirs: perRootDenyDirs,
+    });
+  }
+  for (const rootId of rootDenyDirs.keys()) {
+    if (!roots.has(rootId)) {
+      throw new Error(
+        `WORKSPACE_MCP_ROOT_DENY_DIRS references unknown root ${rootId}. ` +
+          `Configured roots: ${Array.from(roots.keys()).join(", ")}`,
+      );
+    }
+  }
+
+  const requestedDefaultRoot = env.WORKSPACE_MCP_DEFAULT_ROOT?.trim();
+  const defaultRootId =
+    requestedDefaultRoot || (roots.has("projects") ? "projects" : roots.keys().next().value);
+  if (!defaultRootId || !roots.has(defaultRootId)) {
+    throw new Error(
+      `Unknown WORKSPACE_MCP_DEFAULT_ROOT: ${requestedDefaultRoot || "(empty)"}. ` +
+        `Configured roots: ${Array.from(roots.keys()).join(", ")}`,
+    );
+  }
+  const root = roots.get(defaultRootId)?.path;
+  if (!root) {
+    throw new Error(`Default workspace root is unavailable: ${defaultRootId}`);
+  }
+
+  return {
+    defaultRootId,
+    root,
+    roots,
+    maxFileBytes: parsePositiveInt(env.WORKSPACE_MCP_MAX_FILE_BYTES, 262_144),
+    maxReadLines: parsePositiveInt(env.WORKSPACE_MCP_MAX_READ_LINES, 300),
+    maxSearchResults: parsePositiveInt(env.WORKSPACE_MCP_MAX_SEARCH_RESULTS, 80),
+    maxDirEntries: parsePositiveInt(env.WORKSPACE_MCP_MAX_DIR_ENTRIES, 200),
+    searchTimeoutMs: parsePositiveInt(env.WORKSPACE_MCP_SEARCH_TIMEOUT_MS, 8_000),
+    denyDirs,
+    denyExtensions: mergeSet(DEFAULT_DENY_EXTENSIONS, env.WORKSPACE_MCP_EXTRA_DENY_EXTENSIONS),
+  };
+}
+
+function parseRootSpecs(
+  rootsValue: string | undefined,
+  legacyRootValue: string | undefined,
+): Array<{ id: string; path: string }> {
+  const rawRoots = rootsValue?.trim();
+  if (!rawRoots) {
+    return [
+      {
+        id: "projects",
+        path: legacyRootValue?.trim() || "C:\\project",
+      },
+    ];
+  }
+
+  const roots: Array<{ id: string; path: string }> = [];
+  const seenIds = new Set<string>();
+  for (const rawEntry of rawRoots.split(";")) {
+    const entry = rawEntry.trim();
+    if (!entry) {
+      continue;
+    }
+    const separatorIndex = entry.indexOf("=");
+    if (separatorIndex <= 0 || separatorIndex === entry.length - 1) {
+      throw new Error(`Invalid WORKSPACE_MCP_ROOTS entry: ${entry}`);
+    }
+    const id = entry.slice(0, separatorIndex).trim();
+    const rootPath = entry.slice(separatorIndex + 1).trim();
+    if (!/^[a-z][a-z0-9_-]{0,31}$/i.test(id)) {
+      throw new Error(`Invalid workspace root id: ${id}`);
+    }
+    if (seenIds.has(id)) {
+      throw new Error(`Workspace root id is configured more than once: ${id}`);
+    }
+    seenIds.add(id);
+    roots.push({ id, path: rootPath });
+  }
+  if (roots.length === 0) {
+    throw new Error("WORKSPACE_MCP_ROOTS did not contain any usable roots.");
+  }
+  return roots;
+}
+
+function parseRootDenyDirs(value: string | undefined): Map<string, Set<string>> {
+  const result = new Map<string, Set<string>>();
+  if (!value?.trim()) {
+    return result;
+  }
+
+  for (const rawEntry of value.split(";")) {
+    const entry = rawEntry.trim();
+    if (!entry) {
+      continue;
+    }
+    const separatorIndex = entry.indexOf("=");
+    if (separatorIndex <= 0 || separatorIndex === entry.length - 1) {
+      throw new Error(`Invalid WORKSPACE_MCP_ROOT_DENY_DIRS entry: ${entry}`);
+    }
+    const rootId = entry.slice(0, separatorIndex).trim();
+    const directories = entry
+      .slice(separatorIndex + 1)
+      .split(",")
+      .map((item) => item.trim().toLowerCase())
+      .filter(Boolean);
+    if (directories.length === 0) {
+      throw new Error(`No denied directories configured for root: ${rootId}`);
+    }
+    const current = result.get(rootId) ?? new Set<string>();
+    for (const directory of directories) {
+      current.add(directory);
+    }
+    result.set(rootId, current);
+  }
+  return result;
+}
+
+function parsePositiveInt(value: string | undefined, fallback: number): number {
+  if (!value) {
+    return fallback;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function mergeSet(defaults: readonly string[], extra: string | undefined): Set<string> {
+  const values = defaults.map((item) => item.toLowerCase());
+  if (extra) {
+    for (const item of extra.split(";")) {
+      const normalized = item.trim().toLowerCase();
+      if (normalized) {
+        values.push(normalized);
+      }
+    }
+  }
+  return new Set(values);
+}

@@ -1,0 +1,7 @@
+[mcp_servers.omi_search]
+command = "python"
+args = ["C:/GPT_MCPtool/OMI_search/server.py"]
+env = { OMI_SEARCH_API_BASE_URL = "http://127.0.0.1:8400" }
+default_tools_approval_mode = "prompt"
+tool_timeout_sec = 90
+startup_timeout_sec = 10

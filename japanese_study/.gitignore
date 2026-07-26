@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.tmp/
+.tunnel-client/
+.secrets/
+.local/
+docs/agent-runs/
+.env
+*.log
+*.pid
+*.key
+*.secret
+vendor/tunnel-client/tunnel-client.exe

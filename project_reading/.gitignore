@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.tmp/
+.secrets/
+.tunnel-client/
+.local/
+docs/agent-runs/
+.env
+.env.*
+!.env.example
+npm-debug.log*
+*.tsbuildinfo
+vendor/tunnel-client/tunnel-client.exe
+.DS_Store
+Thumbs.db

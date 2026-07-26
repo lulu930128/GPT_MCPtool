@@ -1,0 +1,7 @@
+[mcp_servers.project_workspace]
+command = "node"
+args = ["C:/GPT_MCPtool/project_reading/dist/src/index.js"]
+env = { WORKSPACE_MCP_ROOTS = "projects=C:\\project;mcp_tools=C:\\GPT_MCPtool;work=C:\\work", WORKSPACE_MCP_DEFAULT_ROOT = "projects" }
+default_tools_approval_mode = "prompt"
+tool_timeout_sec = 30
+startup_timeout_sec = 10

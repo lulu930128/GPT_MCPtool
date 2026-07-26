@@ -1,0 +1,282 @@
+OMI_search 公開工具界線與使用說明
+版本：0.2.0
+更新日期：2026-07-25
+
+一、目的
+
+OMI_search 是給 ChatGPT 網頁、Codex 或其他外部 MCP client 使用的 read-only
+adapter。它只負責工具 schema、輸入正規化、MCP transport 與 request forwarding；
+市場資料、target resolution、freshness、provider fallback、bounded refresh、
+evidence、decision、warnings 與 missing 狀態仍由 OMI backend 擁有。
+
+執行鏈：
+
+MCP client
+  -> OMI_search HTTP/stdio MCP
+  -> POST /api/ai/ask
+  -> OMI backend
+  -> unchanged omi.decision.v4 envelope
+
+OMI_search 不直接讀寫 OMI SQLite、不 import backend Python module、不直接呼叫
+市場 provider，也不在 adapter 內重做市場判斷。
+
+
+二、公開工具
+
+1. omi.ask
+
+用途：
+  Canonical OMI read-only 問答與決策入口。
+
+必要輸入：
+  question
+
+可用模式：
+  data_only、brief、full。
+
+固定安全條件：
+  contract_version=omi.decision.v4
+  caller_profile=omi_search
+  allow_llm=false
+  allow_write=false
+
+2. omi.read_market_overview
+
+用途：
+  讀取 bounded 市場概況。
+
+特性：
+  固定 mode=data_only。
+  預設 market=tw。
+  仍透過 POST /api/ai/ask，不直連 specialized route。
+
+3. omi.read_stock_context
+
+用途：
+  讀取單一台股、美股、日股或韓股的 evidence context。
+
+必要輸入：
+  symbol
+
+市場：
+  market=tw|us|jp|kr，預設 tw。
+
+特性：
+  固定 mode=data_only。
+  仍回傳 canonical v4 envelope。
+
+4. omi.read_data_freshness
+
+用途：
+  讀取資料 freshness 與缺口。
+
+特性：
+  固定 mode=data_only。
+  stale、partial、missing、best-effort 與 provider failure 不得被隱藏。
+
+5. omi.read_source_health
+
+用途：
+  讀取 provider/source health。
+
+可選 filter：
+  market、provider、resource、target_id、status_filter、problems_only、
+  include_healthy、limit。
+
+特性：
+  固定 mode=data_only。
+  filter 後仍保留 backend 提供的總數、匹配數與狀態語意。
+
+6. omi.read_capability_status
+
+用途：
+  讀取 OMI capability availability/status。
+
+可選 filter：
+  capability_id、market、status、enabled_only、include_children、limit。
+
+特性：
+  固定 mode=data_only。
+
+
+三、相容性工具
+
+omi.search
+
+狀態：
+  Legacy callable alias。
+
+行為：
+  不再出現在 tools/list，但仍接受舊 connector/schema cache 的 tools/call。
+  呼叫時走和 omi.ask 相同的 canonical v4 read-only 路徑。
+
+遷移：
+  新整合使用 omi.ask + question。
+  舊整合可暫時繼續使用 omi.search + query。
+
+
+四、不公開的工具與原因
+
+1. LLM/report 類
+
+例：
+  generate_*_llm_report
+
+原因：
+  可能呼叫付費或受限制 LLM，且 report 可能持久化。預設 ChatGPT connector
+  不應在沒有獨立 trust/approval policy 時公開。
+
+2. Memory 寫入類
+
+例：
+  write_memory、update_memory、archive_memory
+
+原因：
+  會修改系統狀態，目前沒有像 Memory Core 一樣完整的
+  candidate -> review -> approve 流程。
+
+3. Persist/save 類
+
+例：
+  save_stock_brief、save_watchlist_brief
+
+原因：
+  會持久化內容，不屬於預設 read-only connector。
+
+4. 大量重複的 market-specific alias
+
+例：
+  每個市場各自的 read/generate brief alias。
+
+原因：
+  它們與 omi.ask 的 target/mode 高度重疊，全部公開會增加 schema 體積與
+  tool-routing 歧義。只有具備獨立使用意圖、固定安全語意且能維持 canonical
+  v4 contract 的 shortcut 才進入公開清單。
+
+5. omi.ask_stream
+
+狀態：
+  本 adapter 暫不公開。
+
+原因：
+  MCP tools/call 目前仍是一次回傳一個結果；把 backend SSE events 收集後再一次
+  回傳不等於真正 UI streaming，且會增加 payload。需要逐步進度的 OMI UI/Kuro
+  應直接使用 POST /api/ai/ask/stream。
+
+
+五、refresh 與 write 的界線
+
+allow_write=false 表示不允許 report/memory 等 AI 持久化操作。
+
+refresh_if_missing=true 則表示 caller 允許 trusted OMI backend 在明確
+tool_budget 內嘗試補齊 stale/missing 市場 evidence。Backend 仍可能依既有
+trust、freshness 與 cache policy 更新市場資料 cache；這不是無限制寫入，也不
+保證所有 fill action 都會執行。
+
+Consumer 必須讀取：
+  execution.refresh_reconciliation
+  freshness
+  limitations
+  warnings
+  missing
+  status/readiness
+
+不得把 refresh failure、cached、stale、partial 或 missing 顯示成 current/ready。
+
+
+六、新工具的公開准入條件
+
+新工具必須同時符合：
+
+1. 有獨立且清楚的使用意圖，不只是 omi.ask 的同義名稱。
+2. 只透過 OMI backend public contract，不直接讀 DB 或 provider。
+3. 回傳 unchanged omi.decision.v4，或有明確、可版本化的 public contract。
+4. 保留 freshness、warnings、missing、provider status 與資料限制。
+5. 所有 refresh、筆數、時間與 payload 都有 bounded limits。
+6. 預設不呼叫 LLM、不寫 report、不寫 memory、不執行交易。
+7. 若有副作用，必須有獨立 approval、idempotency、audit 與失敗回報設計；
+   不得混入預設 read-only connector。
+8. 必須有 tools/list、payload mapping、business rejection 與 HTTP MCP session
+   regression tests。
+
+
+七、錯誤語意
+
+TARGET_NOT_FOUND、trust rejection、資料不足等 structured business rejection
+仍是成功的 MCP transport，因此 isError=false，caller 應讀 v4 envelope 的
+ok、request_status、error、limitations 與 status。
+
+只有下列錯誤使用 isError=true：
+  MCP protocol failure
+  Backend HTTP/transport failure
+  Serialization failure
+  Adapter internal failure
+
+
+八、驗證與 connector 更新
+
+本機驗證：
+
+  cd C:\GPT_MCPtool\OMI_search
+  python -B -m unittest discover -s tests
+
+HTTP MCP 驗證順序：
+
+1. GET http://127.0.0.1:8797/health
+2. POST initialize
+3. 保存 response 的 Mcp-Session-Id
+4. 用相同 Mcp-Session-Id 呼叫 tools/list
+5. 確認公開工具恰好是：
+
+   omi.ask
+   omi.read_market_overview
+   omi.read_stock_context
+   omi.read_data_freshness
+   omi.read_source_health
+   omi.read_capability_status
+
+部署新 schema 後：
+
+1. 重新啟動 OMI_search MCP server。
+2. 在 ChatGPT connector/plugin 管理介面 Refresh Actions、重新連線或重新載入
+   schema。
+3. 若 ChatGPT 暫時仍只看到 omi.search，代表 control-plane schema snapshot
+   尚未刷新；舊呼叫仍可工作，但新工作應在刷新後使用 omi.ask。
+
+
+九、呼叫範例
+
+Canonical ask：
+
+{
+  "question": "2330 最近量價、法人與分點資料",
+  "target": {"type": "tw_stock", "id": "2330"},
+  "mode": "data_only",
+  "refresh_if_missing": false
+}
+
+Stock context：
+
+{
+  "market": "us",
+  "symbol": "TSM",
+  "include_intraday": true,
+  "payload_level": "compact"
+}
+
+Source health：
+
+{
+  "market": "tw",
+  "problems_only": true,
+  "include_healthy": false,
+  "limit": 100
+}
+
+Capability status：
+
+{
+  "capability_id": "quote.snapshot",
+  "enabled_only": true,
+  "include_children": false
+}

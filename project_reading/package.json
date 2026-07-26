@@ -1,0 +1,50 @@
+{
+  "name": "gpt-project-workspace-mcp",
+  "version": "0.3.0",
+  "description": "Read-only Streamable HTTP MCP server that exposes bounded multi-root workspace context to ChatGPT.",
+  "type": "module",
+  "bin": {
+    "gpt-project-workspace-mcp": "./dist/src/http-main.js",
+    "gpt-project-workspace-mcp-stdio": "./dist/src/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node scripts/run-tests.mjs",
+    "smoke:http": "npm run build && node scripts/smoke-http.mjs",
+    "smoke:live": "node scripts/smoke-live-mcp.mjs",
+    "smoke:roots": "npm run build && node scripts/smoke-roots.mjs",
+    "tray:selftest": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tray.ps1 -SelfTest",
+    "tunnel:selftest": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action SelfTest",
+    "tunnel:version": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action Version",
+    "tunnel:init": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action Init",
+    "tunnel:key:save": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action SaveKey",
+    "tunnel:key:save-from-env": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action SaveKeyFromEnv",
+    "tunnel:key:status": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action KeyStatus",
+    "tunnel:doctor": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action Doctor -Explain",
+    "tunnel:health": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action Health",
+    "tunnel:run": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action Run",
+    "startup:install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-startup.ps1",
+    "start": "node dist/src/http-main.js",
+    "start:http": "node dist/src/http-main.js",
+    "start:stdio": "node dist/src/index.js"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "workspace",
+    "readonly"
+  ],
+  "license": "UNLICENSED",
+  "private": true,
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

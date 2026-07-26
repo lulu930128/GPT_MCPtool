@@ -1,0 +1,64 @@
+# Codex / local repository migration metadata
+/.agents/
+/.codex/
+/.repo-metadata-backup/
+**/.local/
+**/docs/agent-runs/
+
+# Local configuration, credentials, tunnel profiles, and runtime state
+**/.env
+**/.env.*
+!**/.env.example
+**/.secrets/
+**/.tunnel-client/
+**/.tmp/
+**/logs/
+
+# Private data, exports, and databases
+**/data/
+**/exports/
+**/backups/
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/*.sqlite
+**/*.sqlite3
+
+# Logs, process state, and credentials
+**/*.log
+**/*.pid
+**/*.key
+**/*.secret
+**/*.dpapi
+
+# Python
+**/.venv/
+**/.uv-cache/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.coverage
+**/htmlcov/
+**/dist/
+**/build/
+**/*.egg-info/
+
+# Node.js / TypeScript
+**/node_modules/
+**/*.tsbuildinfo
+**/npm-debug.log*
+
+# Downloaded or generated binaries and archives
+**/vendor/tunnel-client/tunnel-client.exe
+**/*.exe
+**/*.dll
+**/*.zip
+**/*.7z
+
+# IDE / OS
+**/.idea/
+**/.vscode/
+**/.DS_Store
+**/Thumbs.db

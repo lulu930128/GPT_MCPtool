@@ -1,0 +1,157 @@
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import {
+  DEFAULT_DENY_DIRS,
+  DEFAULT_DENY_EXTENSIONS,
+  loadConfig,
+  type ServerConfig,
+  type WorkspaceRootConfig,
+} from "../src/config.js";
+import { resolveWorkspacePath } from "../src/path-guard.js";
+import { listProjects, readWorkspaceFile } from "../src/workspace.js";
+
+test("resolveWorkspacePath allows files inside the workspace root", async () => {
+  const config = await makeFixture();
+  await fs.writeFile(path.join(config.root, "README.md"), "hello\nworld\n", "utf8");
+
+  const resolved = await resolveWorkspacePath(config, "README.md", "file");
+
+  assert.equal(resolved.relative, "README.md");
+});
+
+test("resolveWorkspacePath rejects traversal outside the workspace root", async () => {
+  const config = await makeFixture();
+
+  await assert.rejects(
+    () => resolveWorkspacePath(config, "..", "directory"),
+    /outside the configured workspace root/,
+  );
+});
+
+test("resolveWorkspacePath rejects denied secret-like files", async () => {
+  const config = await makeFixture();
+  await fs.writeFile(path.join(config.root, ".env"), "SECRET=1", "utf8");
+
+  await assert.rejects(() => resolveWorkspacePath(config, ".env", "file"), /denied file name/);
+});
+
+test("resolveWorkspacePath rejects globally denied runtime secret directories", async () => {
+  const config = await makeFixture();
+  const secretsDir = path.join(config.root, ".secrets");
+  await fs.mkdir(secretsDir);
+  await fs.writeFile(path.join(secretsDir, "key.txt"), "encrypted", "utf8");
+
+  await assert.rejects(
+    () => resolveWorkspacePath(config, ".secrets/key.txt", "file"),
+    /denied directory/,
+  );
+});
+
+test("loadConfig selects explicit roots and applies per-root denied directories", async () => {
+  const projectsRoot = await fs.mkdtemp(path.join(os.tmpdir(), "workspace-projects-"));
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "workspace-data-"));
+  const config = await loadConfig({
+    WORKSPACE_MCP_ROOTS: `projects=${projectsRoot};data=${dataRoot}`,
+    WORKSPACE_MCP_DEFAULT_ROOT: "projects",
+    WORKSPACE_MCP_ROOT_DENY_DIRS: "data=blocked-private",
+  });
+
+  await fs.mkdir(path.join(dataRoot, "blocked-private"));
+  await fs.writeFile(path.join(dataRoot, "blocked-private", "orders.txt"), "private", "utf8");
+  await fs.mkdir(path.join(dataRoot, "allowed-planning"));
+  await fs.writeFile(path.join(dataRoot, "allowed-planning", "plan.txt"), "allowed", "utf8");
+
+  await assert.rejects(
+    () => resolveWorkspacePath(config, "blocked-private/orders.txt", "file", "data"),
+    /denied directory/,
+  );
+  const allowed = await resolveWorkspacePath(config, "allowed-planning/plan.txt", "file", "data");
+  assert.equal(allowed.rootId, "data");
+  assert.equal(allowed.relative, "allowed-planning/plan.txt");
+});
+
+test("resolveWorkspacePath rejects unknown root ids", async () => {
+  const config = await makeFixture();
+
+  await assert.rejects(
+    () => resolveWorkspacePath(config, ".", "directory", "unknown"),
+    /Unknown workspace root/,
+  );
+});
+
+test("loadConfig rejects root-specific deny rules for unknown roots", async () => {
+  const projectsRoot = await fs.mkdtemp(path.join(os.tmpdir(), "workspace-projects-"));
+
+  await assert.rejects(
+    () =>
+      loadConfig({
+        WORKSPACE_MCP_ROOTS: `projects=${projectsRoot}`,
+        WORKSPACE_MCP_ROOT_DENY_DIRS: "data=private",
+      }),
+    /references unknown root data/,
+  );
+});
+
+test("readWorkspaceFile returns bounded line ranges", async () => {
+  const config = await makeFixture();
+  await fs.writeFile(path.join(config.root, "notes.txt"), "a\nb\nc\nd\n", "utf8");
+
+  const result = (await readWorkspaceFile(config, {
+    path: "notes.txt",
+    startLine: 2,
+    maxLines: 2,
+  })) as { text: string; returnedLines: number; truncated: boolean };
+
+  assert.equal(result.text, "b\nc");
+  assert.equal(result.returnedLines, 2);
+  assert.equal(result.truncated, true);
+});
+
+test("listProjects reports direct project metadata and skips denied folders", async () => {
+  const config = await makeFixture();
+  const project = path.join(config.root, "demo");
+  await fs.mkdir(project);
+  await fs.mkdir(path.join(config.root, "node_modules"));
+  await fs.mkdir(path.join(project, ".git"));
+  await fs.writeFile(path.join(project, "README.md"), "# Demo\n", "utf8");
+  await fs.writeFile(path.join(project, "AGENTS.md"), "# Rules\n", "utf8");
+
+  const result = (await listProjects(config)) as {
+    count: number;
+    skipped: number;
+    projects: Array<{ name: string; isGitRepo: boolean; hasReadme: boolean; hasAgents: boolean }>;
+  };
+
+  assert.equal(result.count, 1);
+  assert.equal(result.skipped, 1);
+  assert.equal(result.projects[0]?.name, "demo");
+  assert.equal(result.projects[0]?.isGitRepo, true);
+  assert.equal(result.projects[0]?.hasReadme, true);
+  assert.equal(result.projects[0]?.hasAgents, true);
+});
+
+async function makeFixture(): Promise<ServerConfig> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "workspace-mcp-"));
+  const realRoot = await fs.realpath(root);
+  const denyDirs = new Set(DEFAULT_DENY_DIRS);
+  const workspaceRoot: WorkspaceRootConfig = {
+    id: "projects",
+    path: realRoot,
+    denyDirs: new Set(denyDirs),
+  };
+  return {
+    defaultRootId: "projects",
+    root: realRoot,
+    roots: new Map([["projects", workspaceRoot]]),
+    maxFileBytes: 4096,
+    maxReadLines: 20,
+    maxSearchResults: 10,
+    maxDirEntries: 20,
+    searchTimeoutMs: 1000,
+    denyDirs,
+    denyExtensions: new Set(DEFAULT_DENY_EXTENSIONS),
+  };
+}
