@@ -1,5 +1,8 @@
 # GPT Project Workspace MCP
 
+圖片與 Office 檔案的公開讀取設計、限制與設定方式請見
+[docs/Asset-Readers.md](docs/Asset-Readers.md)。
+
 這是一個 read-only 的 MCP server，目標是讓 ChatGPT 以受限方式讀取明確 allowlist 內的多個本機 workspace root。
 
 預設範例提供三個 root id：

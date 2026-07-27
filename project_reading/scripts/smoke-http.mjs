@@ -35,7 +35,10 @@ try {
   const result = {
     healthStatus: healthResponse.status,
     healthOk: health.ok,
-    root: health.root,
+    defaultRoot: health.defaultRoot,
+    rootIds: health.rootIds,
+    assetScopeIds: health.assetScopeIds,
+    leaksAbsolutePaths: JSON.stringify(health).includes(":\\\\"),
     unauthorizedStatus: unauthorizedResponse.status,
     authorizedMissingSessionStatus: authorizedMissingSessionResponse.status,
   };
@@ -43,6 +46,9 @@ try {
 
   if (healthResponse.status !== 200 || health.ok !== true) {
     throw new Error("Health smoke failed.");
+  }
+  if (!Array.isArray(health.rootIds) || JSON.stringify(health).includes(":\\\\")) {
+    throw new Error("Health endpoint exposed an absolute root path.");
   }
   if (unauthorizedResponse.status !== 401) {
     throw new Error("Bearer token smoke failed.");

@@ -36,12 +36,9 @@ export async function startWorkspaceHttpServer(
         ok: true,
         service: "gpt-project-workspace-mcp",
         mode: "read-only",
-        root: config.root,
         defaultRoot: config.defaultRootId,
-        roots: Array.from(config.roots.values()).map((workspaceRoot) => ({
-          id: workspaceRoot.id,
-          path: workspaceRoot.path,
-        })),
+        rootIds: Array.from(config.roots.keys()),
+        assetScopeIds: Array.from(config.assetScopes.keys()),
       });
       return;
     }

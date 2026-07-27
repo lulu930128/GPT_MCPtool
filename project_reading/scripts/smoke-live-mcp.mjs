@@ -48,14 +48,33 @@ const initialized = await rpc("initialize", {
   capabilities: {},
   clientInfo: { name: "multi-root-live-smoke", version: "1.0" },
 });
-assert.equal(initialized.serverInfo.version, "0.3.0");
+assert.equal(initialized.serverInfo.version, "0.5.0");
 
 const listedTools = await rpc("tools/list", {});
 const tools = listedTools.tools;
-assert.equal(tools.length, 7);
+assert.equal(tools.length, 12);
+const readImageDescription =
+  "Read an allowed JPEG, PNG, WebP, or GIF image. Animated GIF files are decoded and returned as a static PNG frame; animation metadata such as frame count is included, but animation is discarded.";
+assert.equal(
+  tools.find((tool) => tool.name === "read_image")?.description,
+  readImageDescription,
+);
 assert.equal(
   tools.filter((tool) => tool.inputSchema?.properties?.root).length,
   6,
+);
+assert.deepEqual(
+  tools
+    .filter((tool) => tool.inputSchema?.properties?.scope)
+    .map((tool) => tool.name)
+    .sort(),
+  [
+    "inspect_asset",
+    "read_document",
+    "read_image",
+    "read_presentation",
+    "read_spreadsheet",
+  ],
 );
 
 const workspaceInfo = await callTool("workspace_info", {});
@@ -123,11 +142,13 @@ console.log(
   JSON.stringify(
     {
       ok: true,
-      serverVersion: initialized.serverInfo.version,
-      toolCount: tools.length,
+  serverVersion: initialized.serverInfo.version,
+  toolCount: tools.length,
+  readImageDescription,
       toolsWithRoot: tools.filter((tool) => tool.inputSchema?.properties?.root).length,
       defaultRoot: workspaceInfo.defaultRoot,
       roots: rootIds,
+      assetScopes: workspaceInfo.assetScopes.map((scope) => scope.id),
       rootCounts,
       approvedChecks,
       deniedChecks,

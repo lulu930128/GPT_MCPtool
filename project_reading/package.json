@@ -1,6 +1,6 @@
 {
   "name": "gpt-project-workspace-mcp",
-  "version": "0.3.0",
+  "version": "0.5.0",
   "description": "Read-only Streamable HTTP MCP server that exposes bounded multi-root workspace context to ChatGPT.",
   "type": "module",
   "bin": {
@@ -11,7 +11,9 @@
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node scripts/run-tests.mjs",
     "smoke:http": "npm run build && node scripts/smoke-http.mjs",
+    "smoke:assets": "npm run build && node scripts/smoke-assets.mjs",
     "smoke:live": "node scripts/smoke-live-mcp.mjs",
+    "smoke:live:assets": "node scripts/smoke-live-assets.mjs",
     "smoke:roots": "npm run build && node scripts/smoke-roots.mjs",
     "tray:selftest": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tray.ps1 -SelfTest",
     "tunnel:selftest": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action SelfTest",
@@ -38,10 +40,16 @@
   "private": true,
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.17.0",
+    "exceljs": "4.4.0",
+    "saxes": "6.0.0",
+    "sharp": "0.34.5",
+    "yauzl": "3.2.0",
     "zod": "^3.25.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "@types/yauzl": "2.10.3",
+    "jszip": "3.10.1",
     "typescript": "^5.8.0"
   },
   "engines": {

@@ -95,6 +95,42 @@ test("loadConfig rejects root-specific deny rules for unknown roots", async () =
   );
 });
 
+test("loadConfig accepts contained asset scopes and rejects unknown roots", async () => {
+  const projectsRoot = await fs.mkdtemp(path.join(os.tmpdir(), "workspace-projects-"));
+  await fs.mkdir(path.join(projectsRoot, "shared"));
+  const config = await loadConfig({
+    WORKSPACE_MCP_ROOTS: `projects=${projectsRoot}`,
+    WORKSPACE_MCP_ASSET_SCOPES: "shared_assets=projects:shared",
+  });
+
+  assert.deepEqual(config.assetScopes.get("shared_assets"), {
+    id: "shared_assets",
+    rootId: "projects",
+    path: "shared",
+  });
+  await assert.rejects(
+    () =>
+      loadConfig({
+        WORKSPACE_MCP_ROOTS: `projects=${projectsRoot}`,
+        WORKSPACE_MCP_ASSET_SCOPES: "bad=data:shared",
+      }),
+    /references unknown root/,
+  );
+});
+
+test("loadConfig rejects asset scopes that traverse above a root", async () => {
+  const projectsRoot = await fs.mkdtemp(path.join(os.tmpdir(), "workspace-projects-"));
+
+  await assert.rejects(
+    () =>
+      loadConfig({
+        WORKSPACE_MCP_ROOTS: `projects=${projectsRoot}`,
+        WORKSPACE_MCP_ASSET_SCOPES: "bad=projects:../private",
+      }),
+    /contained relative path/,
+  );
+});
+
 test("readWorkspaceFile returns bounded line ranges", async () => {
   const config = await makeFixture();
   await fs.writeFile(path.join(config.root, "notes.txt"), "a\nb\nc\nd\n", "utf8");
@@ -146,11 +182,31 @@ async function makeFixture(): Promise<ServerConfig> {
     defaultRootId: "projects",
     root: realRoot,
     roots: new Map([["projects", workspaceRoot]]),
+    assetScopes: new Map(),
     maxFileBytes: 4096,
     maxReadLines: 20,
     maxSearchResults: 10,
     maxDirEntries: 20,
     searchTimeoutMs: 1000,
+    maxImageFileBytes: 52_428_800,
+    maxImagePixels: 100_000_000,
+    maxImageDimension: 4_096,
+    maxImageOutputBytes: 12_582_912,
+    maxSpreadsheetFileBytes: 26_214_400,
+    maxSpreadsheetExpandedBytes: 104_857_600,
+    maxSpreadsheetZipEntries: 2_048,
+    maxSpreadsheetCells: 5_000,
+    maxSpreadsheetRows: 500,
+    maxSpreadsheetColumns: 100,
+    maxOfficeFileBytes: 104_857_600,
+    maxOfficeExpandedBytes: 524_288_000,
+    maxOfficeZipEntries: 4_096,
+    maxOfficeXmlPartBytes: 10_485_760,
+    maxOfficeXmlTotalBytes: 52_428_800,
+    maxOfficeTextChars: 100_000,
+    maxDocumentBlocks: 300,
+    maxDocumentTableCells: 5_000,
+    maxPresentationSlides: 50,
     denyDirs,
     denyExtensions: new Set(DEFAULT_DENY_EXTENSIONS),
   };

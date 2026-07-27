@@ -62,11 +62,31 @@ export interface ServerConfig {
   defaultRootId: string;
   root: string;
   roots: Map<string, WorkspaceRootConfig>;
+  assetScopes: Map<string, AssetScopeConfig>;
   maxFileBytes: number;
   maxReadLines: number;
   maxSearchResults: number;
   maxDirEntries: number;
   searchTimeoutMs: number;
+  maxImageFileBytes: number;
+  maxImagePixels: number;
+  maxImageDimension: number;
+  maxImageOutputBytes: number;
+  maxSpreadsheetFileBytes: number;
+  maxSpreadsheetExpandedBytes: number;
+  maxSpreadsheetZipEntries: number;
+  maxSpreadsheetCells: number;
+  maxSpreadsheetRows: number;
+  maxSpreadsheetColumns: number;
+  maxOfficeFileBytes: number;
+  maxOfficeExpandedBytes: number;
+  maxOfficeZipEntries: number;
+  maxOfficeXmlPartBytes: number;
+  maxOfficeXmlTotalBytes: number;
+  maxOfficeTextChars: number;
+  maxDocumentBlocks: number;
+  maxDocumentTableCells: number;
+  maxPresentationSlides: number;
   denyDirs: Set<string>;
   denyExtensions: Set<string>;
 }
@@ -75,6 +95,12 @@ export interface WorkspaceRootConfig {
   id: string;
   path: string;
   denyDirs: Set<string>;
+}
+
+export interface AssetScopeConfig {
+  id: string;
+  rootId: string;
+  path: string;
 }
 
 export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<ServerConfig> {
@@ -124,19 +150,119 @@ export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<
   if (!root) {
     throw new Error(`Default workspace root is unavailable: ${defaultRootId}`);
   }
+  const assetScopes = parseAssetScopes(env.WORKSPACE_MCP_ASSET_SCOPES, roots);
 
   return {
     defaultRootId,
     root,
     roots,
+    assetScopes,
     maxFileBytes: parsePositiveInt(env.WORKSPACE_MCP_MAX_FILE_BYTES, 262_144),
     maxReadLines: parsePositiveInt(env.WORKSPACE_MCP_MAX_READ_LINES, 300),
     maxSearchResults: parsePositiveInt(env.WORKSPACE_MCP_MAX_SEARCH_RESULTS, 80),
     maxDirEntries: parsePositiveInt(env.WORKSPACE_MCP_MAX_DIR_ENTRIES, 200),
     searchTimeoutMs: parsePositiveInt(env.WORKSPACE_MCP_SEARCH_TIMEOUT_MS, 8_000),
+    maxImageFileBytes: parsePositiveInt(env.WORKSPACE_MCP_MAX_IMAGE_FILE_BYTES, 52_428_800),
+    maxImagePixels: parsePositiveInt(env.WORKSPACE_MCP_MAX_IMAGE_PIXELS, 100_000_000),
+    maxImageDimension: parsePositiveInt(env.WORKSPACE_MCP_MAX_IMAGE_DIMENSION, 4_096),
+    maxImageOutputBytes: parsePositiveInt(env.WORKSPACE_MCP_MAX_IMAGE_OUTPUT_BYTES, 12_582_912),
+    maxSpreadsheetFileBytes: parsePositiveInt(
+      env.WORKSPACE_MCP_MAX_SPREADSHEET_FILE_BYTES,
+      26_214_400,
+    ),
+    maxSpreadsheetExpandedBytes: parsePositiveInt(
+      env.WORKSPACE_MCP_MAX_SPREADSHEET_EXPANDED_BYTES,
+      104_857_600,
+    ),
+    maxSpreadsheetZipEntries: parsePositiveInt(
+      env.WORKSPACE_MCP_MAX_SPREADSHEET_ZIP_ENTRIES,
+      2_048,
+    ),
+    maxSpreadsheetCells: parsePositiveInt(env.WORKSPACE_MCP_MAX_SPREADSHEET_CELLS, 5_000),
+    maxSpreadsheetRows: parsePositiveInt(env.WORKSPACE_MCP_MAX_SPREADSHEET_ROWS, 500),
+    maxSpreadsheetColumns: parsePositiveInt(env.WORKSPACE_MCP_MAX_SPREADSHEET_COLUMNS, 100),
+    maxOfficeFileBytes: parsePositiveInt(env.WORKSPACE_MCP_MAX_OFFICE_FILE_BYTES, 104_857_600),
+    maxOfficeExpandedBytes: parsePositiveInt(
+      env.WORKSPACE_MCP_MAX_OFFICE_EXPANDED_BYTES,
+      524_288_000,
+    ),
+    maxOfficeZipEntries: parsePositiveInt(env.WORKSPACE_MCP_MAX_OFFICE_ZIP_ENTRIES, 4_096),
+    maxOfficeXmlPartBytes: parsePositiveInt(
+      env.WORKSPACE_MCP_MAX_OFFICE_XML_PART_BYTES,
+      10_485_760,
+    ),
+    maxOfficeXmlTotalBytes: parsePositiveInt(
+      env.WORKSPACE_MCP_MAX_OFFICE_XML_TOTAL_BYTES,
+      52_428_800,
+    ),
+    maxOfficeTextChars: parsePositiveInt(env.WORKSPACE_MCP_MAX_OFFICE_TEXT_CHARS, 100_000),
+    maxDocumentBlocks: parsePositiveInt(env.WORKSPACE_MCP_MAX_DOCUMENT_BLOCKS, 300),
+    maxDocumentTableCells: parsePositiveInt(
+      env.WORKSPACE_MCP_MAX_DOCUMENT_TABLE_CELLS,
+      5_000,
+    ),
+    maxPresentationSlides: parsePositiveInt(
+      env.WORKSPACE_MCP_MAX_PRESENTATION_SLIDES,
+      50,
+    ),
     denyDirs,
     denyExtensions: mergeSet(DEFAULT_DENY_EXTENSIONS, env.WORKSPACE_MCP_EXTRA_DENY_EXTENSIONS),
   };
+}
+
+function parseAssetScopes(
+  value: string | undefined,
+  roots: Map<string, WorkspaceRootConfig>,
+): Map<string, AssetScopeConfig> {
+  const result = new Map<string, AssetScopeConfig>();
+  if (!value?.trim()) {
+    return result;
+  }
+
+  for (const rawEntry of value.split(";")) {
+    const entry = rawEntry.trim();
+    if (!entry) {
+      continue;
+    }
+    const separatorIndex = entry.indexOf("=");
+    const rootSeparatorIndex = entry.indexOf(":", separatorIndex + 1);
+    if (
+      separatorIndex <= 0 ||
+      rootSeparatorIndex <= separatorIndex + 1 ||
+      rootSeparatorIndex === entry.length - 1
+    ) {
+      throw new Error(`Invalid WORKSPACE_MCP_ASSET_SCOPES entry: ${entry}`);
+    }
+
+    const id = entry.slice(0, separatorIndex).trim();
+    const rootId = entry.slice(separatorIndex + 1, rootSeparatorIndex).trim();
+    const relativePath = entry.slice(rootSeparatorIndex + 1).trim();
+    if (!/^[a-z][a-z0-9_-]{0,31}$/i.test(id)) {
+      throw new Error(`Invalid asset scope id: ${id}`);
+    }
+    if (result.has(id)) {
+      throw new Error(`Asset scope id is configured more than once: ${id}`);
+    }
+    if (!roots.has(rootId)) {
+      throw new Error(`Asset scope ${id} references unknown root: ${rootId}`);
+    }
+    if (
+      relativePath.includes("\0") ||
+      path.isAbsolute(relativePath) ||
+      /^[a-z]:/i.test(relativePath) ||
+      relativePath.split(/[\\/]+/).includes("..")
+    ) {
+      throw new Error(`Asset scope ${id} must use a contained relative path.`);
+    }
+
+    result.set(id, {
+      id,
+      rootId,
+      path: path.normalize(relativePath || "."),
+    });
+  }
+
+  return result;
 }
 
 function parseRootSpecs(

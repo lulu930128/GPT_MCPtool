@@ -66,6 +66,11 @@ export async function getWorkspaceInfo(config: ServerConfig): Promise<unknown> {
         .filter((item) => !config.denyDirs.has(item))
         .sort(),
     })),
+    assetScopes: Array.from(config.assetScopes.values()).map((scope) => ({
+      id: scope.id,
+      root: scope.rootId,
+      path: scope.path,
+    })),
     mode: "read-only",
     transport: "stdio",
     limits: {
@@ -74,6 +79,31 @@ export async function getWorkspaceInfo(config: ServerConfig): Promise<unknown> {
       maxSearchResults: config.maxSearchResults,
       maxDirEntries: config.maxDirEntries,
       searchTimeoutMs: config.searchTimeoutMs,
+      image: {
+        maxSourceBytes: config.maxImageFileBytes,
+        maxPixels: config.maxImagePixels,
+        maxDimension: config.maxImageDimension,
+        maxOutputBytes: config.maxImageOutputBytes,
+      },
+      spreadsheet: {
+        maxSourceBytes: config.maxSpreadsheetFileBytes,
+        maxExpandedBytes: config.maxSpreadsheetExpandedBytes,
+        maxZipEntries: config.maxSpreadsheetZipEntries,
+        maxCells: config.maxSpreadsheetCells,
+        maxRows: config.maxSpreadsheetRows,
+        maxColumns: config.maxSpreadsheetColumns,
+      },
+      office: {
+        maxSourceBytes: config.maxOfficeFileBytes,
+        maxExpandedBytes: config.maxOfficeExpandedBytes,
+        maxZipEntries: config.maxOfficeZipEntries,
+        maxXmlPartBytes: config.maxOfficeXmlPartBytes,
+        maxXmlTotalBytes: config.maxOfficeXmlTotalBytes,
+        maxTextChars: config.maxOfficeTextChars,
+        maxDocumentBlocks: config.maxDocumentBlocks,
+        maxDocumentTableCells: config.maxDocumentTableCells,
+        maxPresentationSlides: config.maxPresentationSlides,
+      },
     },
     denyPolicy: {
       directories: Array.from(config.denyDirs).sort(),
