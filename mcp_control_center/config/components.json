@@ -1,0 +1,314 @@
+{
+  "schemaVersion": 1,
+  "settings": {
+    "initialDelaySeconds": 12,
+    "betweenComponentsSeconds": 3,
+    "probeTimeoutSeconds": 2,
+    "postStartTimeoutSeconds": 45,
+    "refreshIntervalSeconds": 30,
+    "eventRetentionDays": 30
+  },
+  "components": [
+    {
+      "id": "project_reading",
+      "displayName": "Project Reading",
+      "root": "..\\..\\project_reading",
+      "contractScript": "scripts\\tray.ps1",
+      "autoStart": true,
+      "startupOrder": 10,
+      "legacyStartup": {
+        "shortcutName": "GPT Workspace MCP.lnk",
+        "launcher": "scripts\\start-tray.vbs"
+      },
+      "actions": {
+        "start": { "kind": "vbs", "path": "scripts\\start-tray.vbs" },
+        "restart": { "kind": "vbs", "path": "scripts\\restart-tray.vbs" }
+      },
+      "probes": [
+        {
+          "id": "mcp",
+          "label": "MCP server",
+          "role": "core",
+          "kind": "json",
+          "url": "http://127.0.0.1:8787/health",
+          "port": 8787,
+          "required": true,
+          "expected": { "ok": true, "service": "gpt-project-workspace-mcp" },
+          "summaryFields": ["service"],
+          "ownerCommandContains": ["project_reading", "dist\\src\\http-main.js"]
+        },
+        {
+          "id": "tunnel",
+          "label": "Secure MCP Tunnel",
+          "role": "connectivity",
+          "kind": "text",
+          "url": "http://127.0.0.1:8788/readyz",
+          "port": 8788,
+          "required": true,
+          "expectedText": ["ready", "ok"],
+          "ownerCommandContains": ["project_reading", "tunnel-client"]
+        }
+      ]
+    },
+    {
+      "id": "omi_search",
+      "displayName": "OMI Search",
+      "root": "..\\..\\OMI_search",
+      "contractScript": "scripts\\tray.ps1",
+      "autoStart": true,
+      "startupOrder": 20,
+      "legacyStartup": {
+        "shortcutName": "OMI_search MCP Adapter.lnk",
+        "launcher": "scripts\\start-tray.vbs"
+      },
+      "actions": {
+        "start": { "kind": "vbs", "path": "scripts\\start-tray.vbs" },
+        "restart": { "kind": "vbs", "path": "scripts\\restart-tray.vbs" }
+      },
+      "probes": [
+        {
+          "id": "omi_backend",
+          "label": "OMI backend",
+          "role": "dependency",
+          "kind": "json",
+          "url": "http://127.0.0.1:8400/api/system/health",
+          "port": 8400,
+          "required": true,
+          "expected": { "status": "ok", "app_name": "Open Market Intelligence" },
+          "summaryFields": ["status", "app_name"]
+        },
+        {
+          "id": "mcp",
+          "label": "MCP server",
+          "role": "core",
+          "kind": "json",
+          "url": "http://127.0.0.1:8797/health",
+          "port": 8797,
+          "required": true,
+          "expected": { "ok": true, "service": "omi-search-http-mcp" },
+          "summaryFields": ["service", "version", "buildId", "omi_api_base_url"],
+          "ownerCommandContains": ["OMI_search", "http_server.py"]
+        },
+        {
+          "id": "tunnel",
+          "label": "Secure MCP Tunnel",
+          "role": "connectivity",
+          "kind": "text",
+          "url": "http://127.0.0.1:8799/readyz",
+          "port": 8799,
+          "required": true,
+          "expectedText": ["ready", "ok"],
+          "ownerCommandContains": ["OMI_search", "tunnel-client"]
+        }
+      ]
+    },
+    {
+      "id": "japanese_study",
+      "displayName": "Japanese Study",
+      "root": "..\\..\\japanese_study",
+      "contractScript": "scripts\\tray.ps1",
+      "autoStart": true,
+      "startupOrder": 30,
+      "legacyStartup": {
+        "shortcutName": "Japanese Study Hub.lnk",
+        "launcher": "scripts\\start-tray.vbs"
+      },
+      "actions": {
+        "start": { "kind": "vbs", "path": "scripts\\start-tray.vbs" },
+        "restart": { "kind": "vbs", "path": "scripts\\restart-tray.vbs" }
+      },
+      "probes": [
+        {
+          "id": "hub",
+          "label": "Japanese Study Hub",
+          "role": "core",
+          "kind": "json",
+          "url": "http://127.0.0.1:8791/health",
+          "port": 8791,
+          "required": true,
+          "expected": { "ok": true, "service": "japanese-study-hub" },
+          "summaryFields": ["service", "version"],
+          "ownerCommandContains": ["japanese-study-hub"]
+        },
+        {
+          "id": "mcp",
+          "label": "MCP server",
+          "role": "core",
+          "kind": "json",
+          "url": "http://127.0.0.1:8790/health",
+          "port": 8790,
+          "required": true,
+          "expected": { "ok": true, "service": "japanese-study-mcp" },
+          "summaryFields": ["service", "version", "contractVersion", "buildId", "toolCount"],
+          "ownerCommandContains": ["japanese_study", "dist\\src\\http-main.js"]
+        },
+        {
+          "id": "tunnel",
+          "label": "Secure MCP Tunnel",
+          "role": "connectivity",
+          "kind": "text",
+          "url": "http://127.0.0.1:8792/readyz",
+          "port": 8792,
+          "required": true,
+          "expectedText": ["ready", "ok"],
+          "ownerCommandContains": ["japanese_study", "tunnel-client"]
+        }
+      ]
+    },
+    {
+      "id": "memory_core",
+      "displayName": "Memory Core",
+      "root": "..\\..\\Memory Core",
+      "contractScript": "scripts\\memory_core_tray.ps1",
+      "autoStart": true,
+      "startupOrder": 40,
+      "legacyStartup": {
+        "shortcutName": "Memory Core MCP.lnk",
+        "launcher": "scripts\\start-memory-core-tray.vbs"
+      },
+      "actions": {
+        "start": { "kind": "vbs", "path": "scripts\\start-memory-core-tray.vbs" },
+        "restart": {
+          "kind": "powershell",
+          "path": "scripts\\memory_core_stack.ps1",
+          "arguments": ["-Action", "Restart"],
+          "wait": true
+        }
+      },
+      "probes": [
+        {
+          "id": "backend",
+          "label": "Memory Core backend",
+          "role": "core",
+          "kind": "json",
+          "url": "http://127.0.0.1:8765/health",
+          "port": 8765,
+          "required": true,
+          "expected": { "status": "ok", "database": "ok" },
+          "summaryFields": ["status", "database", "version"],
+          "ownerCommandContains": ["memory_core.main:app"],
+          "ownerManagedPidFile": "data\\runtime\\backend.pid",
+          "ownerManagedCommandContains": ["Memory Core", "memory_core.main:app"]
+        },
+        {
+          "id": "mcp",
+          "label": "MCP server",
+          "role": "core",
+          "kind": "json",
+          "url": "http://127.0.0.1:8818/health",
+          "port": 8818,
+          "required": true,
+          "expected": { "status": "ok", "service": "memory-core-mcp" },
+          "summaryFields": ["status", "service", "version"],
+          "ownerCommandContains": ["memory_core.mcp.main"],
+          "ownerManagedPidFile": "data\\runtime\\mcp.pid",
+          "ownerManagedCommandContains": ["Memory Core", "memory_core.mcp.main"]
+        },
+        {
+          "id": "tunnel",
+          "label": "Secure MCP Tunnel",
+          "role": "connectivity",
+          "kind": "text",
+          "url": "http://127.0.0.1:8800/readyz",
+          "port": 8800,
+          "required": true,
+          "expectedText": ["ready", "ok"],
+          "ownerCommandContains": ["memory-core", "tunnel-client"]
+        }
+      ]
+    },
+    {
+      "id": "codex_bridge",
+      "displayName": "Codex Bridge",
+      "root": "..\\..\\codex_bridge",
+      "contractScript": "scripts\\tray.ps1",
+      "autoStart": true,
+      "startupOrder": 50,
+      "legacyStartup": {
+        "shortcutName": "Codex Bridge MCP.lnk",
+        "launcher": "scripts\\start-tray.vbs"
+      },
+      "actions": {
+        "start": { "kind": "vbs", "path": "scripts\\start-tray.vbs" },
+        "restart": { "kind": "vbs", "path": "scripts\\restart-tray.vbs" }
+      },
+      "probes": [
+        {
+          "id": "mcp",
+          "label": "MCP server",
+          "role": "core",
+          "kind": "json",
+          "url": "http://127.0.0.1:8828/health",
+          "port": 8828,
+          "required": true,
+          "expected": { "ok": true, "service": "codex-handoff-bridge" },
+          "summaryFields": ["service", "version", "buildId", "controller"],
+          "ownerCommandContains": ["codex_bridge", "dist\\src\\http-main.js"]
+        },
+        {
+          "id": "tunnel",
+          "label": "Secure MCP Tunnel",
+          "role": "connectivity",
+          "kind": "text",
+          "url": "http://127.0.0.1:8829/readyz",
+          "port": 8829,
+          "required": true,
+          "expectedText": ["ready", "ok"],
+          "ownerCommandContains": ["codex_bridge", "tunnel-client"]
+        }
+      ]
+    },
+    {
+      "id": "personal_asset_os",
+      "displayName": "Personal Asset OS",
+      "root": "..\\..\\personal-asset-os",
+      "contractScript": "scripts\\tray.ps1",
+      "autoStart": true,
+      "startupOrder": 60,
+      "legacyStartup": {
+        "shortcutName": "Personal Asset OS.lnk",
+        "launcher": "scripts\\start-tray.vbs"
+      },
+      "actions": {
+        "start": { "kind": "vbs", "path": "scripts\\start-tray.vbs" },
+        "restart": { "kind": "vbs", "path": "scripts\\restart-tray.vbs" }
+      },
+      "probes": [
+        {
+          "id": "app",
+          "label": "Personal Asset OS",
+          "role": "core",
+          "kind": "json",
+          "url": "http://127.0.0.1:8876/api/health",
+          "port": 8876,
+          "required": true,
+          "expected": { "ok": true, "service": "personal-asset-os", "database": "ready" },
+          "summaryFields": ["service", "version", "buildId", "database", "schemaRevision"],
+          "ownerCommandContains": ["personal-asset-os", "personal_asset_os.cli"]
+        },
+        {
+          "id": "ready",
+          "label": "Dashboard readiness",
+          "role": "core",
+          "kind": "json",
+          "url": "http://127.0.0.1:8876/api/readyz",
+          "port": 8876,
+          "required": true,
+          "expected": { "ready": true, "databaseReady": true, "frontendReady": true },
+          "summaryFields": ["ready", "databaseReady", "frontendReady", "buildId"]
+        },
+        {
+          "id": "tunnel",
+          "label": "Secure MCP Tunnel",
+          "role": "connectivity",
+          "kind": "text",
+          "url": "http://127.0.0.1:8877/readyz",
+          "port": 8877,
+          "required": true,
+          "expectedText": ["ready", "ok"],
+          "ownerCommandContains": ["personal-asset-os", "tunnel-client"]
+        }
+      ]
+    }
+  ]
+}
