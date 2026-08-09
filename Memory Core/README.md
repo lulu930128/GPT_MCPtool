@@ -358,10 +358,17 @@ cd "C:\GPT_MCPtool\Memory Core"
 `Status` 的 `pid` 是 launcher 管理的 process-tree root；`listenerPids` 是目前實際綁定
 對應 loopback port 的程序。Windows venv shim 可能使兩者不同，診斷時應同時核對。
 
-設定完成後，建議雙擊 `scripts\start-memory-core-tray.vbs`。它會在 Windows 系統托盤常駐，並在需要時隱藏啟動整組服務；若只需要無托盤的背景啟動，仍可使用 `scripts\start-memory-core-stack.vbs`。兩個 script 本身都不會建立 Windows login 自動啟動或排程；目前這台機器另在使用者 Startup 資料夾設定了 `Memory Core MCP.lnk`，由正式根目錄自動啟動 tray。
+正式日常啟動由根目錄的 MCP Control Center 透過
+`control-center/component.json` 與 `scripts/runtime-control.ps1` 管理。Memory Core 仍
+保留自己的資料夾、stack、PID authority、Tkinter viewer、依賴與測試；Control Center
+不讀取 Memory Core 的正式資料或 credential。整合與 rollback 邊界詳見
+[`docs/ControlCenterIntegration.md`](docs/ControlCenterIntegration.md)。
 
-一般啟動不會取代已存在的 tray；更新托盤程式後使用 `scripts\Restart-Tray.cmd`。
-這個 replacement 只換 tray，本身不重啟健康中的 backend／MCP／tunnel。
+`scripts/start-memory-core-tray.vbs`、`scripts/Restart-Tray.cmd` 與舊 Startup shortcut
+暫時保留作 rollback，不再是統一架構的正式常駐入口。需要元件專屬診斷時，可由
+Control Center 開啟 `scripts/show-diagnostic-tray.vbs`；diagnostic tray 不會 auto-start、
+接管或停止 runtime，關閉它只會關閉該診斷 UI。無托盤背景啟動仍可使用
+`scripts/start-memory-core-stack.vbs` 作元件級維護。
 
 `Start`／`Restart` 會要求 backend、MCP 與 tunnel 各自連續通過三次 readiness probe，
 避免把冷開機時短暫可連線的程序誤判為穩定。啟動失敗時只會清理通過 ownership check
@@ -379,13 +386,14 @@ error code，不包含原始系統錯誤、secret 或資料內容。
 - 黃色警告圖示：正在執行啟停動作，或只有部分服務 ready。
 - 紅色錯誤圖示：整組服務已停止或無法連線。
 
-右鍵選單使用 `unified-always-on-v2` 契約。正式啟動會一起準備 backend、MCP adapter
-與 Secure MCP Tunnel；選單不提供 Start／Stop 或 tunnel restart。`Restart MCP server`
-只管理 backend 與 MCP；control center、backend docs 與 tunnel key/status 位於 `Exit`
-上方的元件特有區。
+舊托盤仍使用 `unified-always-on-v2` 契約；diagnostic 模式則把 reload 委派給
+`unified-lifecycle-v3` controller，並保留 viewer、backend docs、tunnel UI 與 key/status
+等元件特有入口。正式的 ensure、connectivity repair、core restart、full reload、shutdown
+與整體狀態都由單一 Control Center 托盤提供。
 
-雙擊托盤會直接開啟 control center。`Exit` 是唯一完整關閉入口，會在確認後停止
-backend、MCP adapter、tunnel 與 tray，並驗證三個 runtime endpoint 都已停止。
+上述 Copy／Open／viewer／backend docs／runtime key／key status 功能也已透過
+`component-menu-v1` 直接出現在 Control Center 子選單。中樞只傳送固定 action ID；viewer、
+stack prompt、credential 狀態與 storage path 仍由 `scripts/control-center-ui.ps1` 在元件內處理。
 
 ## Tkinter 本機控制中心
 
@@ -407,7 +415,7 @@ loopback FastAPI 操作資料，不會直接開啟 SQLite；所有新增、更�
 只以 Windows DPAPI current-user encryption 保存在 ignored `data/secrets/`，不與
 MCP、tunnel 或舊版 read-only viewer credential 共用。
 
-日常使用可雙擊托盤圖示，或選擇 `Open control center`。也可直接雙擊：
+日常使用可從 MCP Control Center 選擇 `Open Memory Core viewer`。也可直接雙擊：
 
 ```text
 scripts\start-memory-core-viewer.vbs

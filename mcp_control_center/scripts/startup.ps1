@@ -12,7 +12,7 @@ $ErrorActionPreference = "Stop"
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $modulePath = Join-Path $projectRoot "src\McpControlCenter.Core.psm1"
 Import-Module $modulePath -Force
-if ([string]::IsNullOrWhiteSpace($ManifestPath)) { $ManifestPath = Join-Path $projectRoot "config\components.json" }
+if ([string]::IsNullOrWhiteSpace($ManifestPath)) { $ManifestPath = Get-McpCcDefaultManifestPath }
 if ([string]::IsNullOrWhiteSpace($RuntimeRoot)) { $RuntimeRoot = Get-McpCcDefaultRuntimeRoot }
 
 $manifest = Read-McpCcManifest -Path $ManifestPath
@@ -76,7 +76,7 @@ function Get-ReversedItems {
 if ($Action -in @("Plan", "Adopt")) {
     $audit = Get-McpCcStartupAudit -Manifest $manifest -StartupDirectory $startupDirectory
     $managerStatus = Get-ManagerShortcutStatus
-    $alreadyAdopted = ($managerStatus -eq "Recognized" -and $audit.recognizedCount -eq 0 -and $audit.missingCount -eq @($manifest.components).Count)
+    $alreadyAdopted = ($managerStatus -eq "Recognized" -and $audit.recognizedCount -eq 0 -and $audit.missingCount -eq @($audit.entries).Count)
     $plan = [pscustomobject]@{
         action = if ($Action -eq "Plan") { "Plan" } else { "Adopt" }
         apply = [bool]$Apply
@@ -84,7 +84,7 @@ if ($Action -in @("Plan", "Adopt")) {
         alreadyAdopted = $alreadyAdopted
         managerShortcut = [pscustomobject]@{ path = $managerShortcutPath; status = $managerStatus; launcher = $managerLauncher }
         legacy = $audit
-        effect = "Move only recognized six-component shortcuts to a private backup, then install one MCP Control Center shortcut."
+        effect = "Move only recognized registered-component shortcuts to a private backup, then install one MCP Control Center shortcut."
     }
     if ($Action -eq "Plan" -or -not $Apply) {
         $plan | ConvertTo-Json -Depth 8

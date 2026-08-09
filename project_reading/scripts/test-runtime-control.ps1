@@ -60,7 +60,7 @@ function Invoke-TestController {
 
 try {
   New-Item -ItemType Directory -Force -Path (Join-Path $testRoot "scripts"), (Join-Path $testRoot "dist\src"), (Join-Path $testRoot "vendor\tunnel-client"), (Join-Path $testRoot ".tunnel-client") | Out-Null
-  foreach ($name in @("runtime-control.ps1", "project-reading-runtime.psm1", "key-store.ps1")) {
+  foreach ($name in @("runtime-control.ps1", "component-runtime.psm1", "project-reading-runtime.psm1", "key-store.ps1")) {
     Copy-Item -LiteralPath (Join-Path $projectRoot "scripts\$name") -Destination (Join-Path $testRoot "scripts\$name")
   }
 

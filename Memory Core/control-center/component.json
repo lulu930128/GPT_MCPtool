@@ -1,0 +1,117 @@
+{
+  "schemaVersion": 1,
+  "id": "memory_core",
+  "displayName": "Memory Core",
+  "runtimeMode": "component-controller",
+  "runtimeContract": "unified-lifecycle-v3",
+  "traits": ["tunnel", "multi-core", "data-sensitive", "primary-ui", "diagnostic-ui"],
+  "contractScript": "scripts\\runtime-control.ps1",
+  "capabilities": [
+    "ensure_running",
+    "repair_connectivity",
+    "restart_core",
+    "reload_runtime",
+    "shutdown_runtime",
+    "show_diagnostic_tray"
+  ],
+  "lifecycle": {
+    "controller": {
+      "kind": "powershell",
+      "path": "scripts\\runtime-control.ps1"
+    },
+    "diagnosticLauncher": {
+      "kind": "vbs",
+      "path": "scripts\\show-diagnostic-tray.vbs"
+    }
+  },
+  "legacyStartup": {
+    "shortcutName": "Memory Core MCP.lnk",
+    "launcher": "scripts\\start-memory-core-tray.vbs"
+  },
+  "timing": {
+    "postStartTimeoutSeconds": 120,
+    "controllerActionTimeoutSeconds": 180
+  },
+  "probes": [
+    {
+      "id": "backend",
+      "label": "Memory Core backend",
+      "role": "core",
+      "kind": "json",
+      "url": "http://127.0.0.1:18765/health",
+      "port": 18765,
+      "required": true,
+      "expected": { "status": "ok", "database": "ok" },
+      "publicSummaryFields": ["status", "database", "version"],
+      "ownership": {
+        "commandContains": ["memory_core.main:app"],
+        "managedPidFile": "data\\runtime\\backend.pid",
+        "managedCommandContains": ["Memory Core", "memory_core.main:app"]
+      }
+    },
+    {
+      "id": "mcp",
+      "label": "MCP server",
+      "role": "core",
+      "kind": "json",
+      "url": "http://127.0.0.1:8818/health",
+      "port": 8818,
+      "required": true,
+      "expected": { "status": "ok", "service": "memory-core-mcp" },
+      "publicSummaryFields": ["status", "service", "version"],
+      "ownership": {
+        "commandContains": ["memory_core.mcp.main"],
+        "managedPidFile": "data\\runtime\\mcp.pid",
+        "managedCommandContains": ["Memory Core", "memory_core.mcp.main"]
+      }
+    },
+    {
+      "id": "tunnel",
+      "label": "Secure MCP Tunnel",
+      "role": "connectivity",
+      "kind": "text",
+      "url": "http://127.0.0.1:8800/readyz",
+      "port": 8800,
+      "required": true,
+      "expectedText": ["ready", "ok"],
+      "ownership": {
+        "commandContains": ["memory-core", "tunnel-client"],
+        "managedPidFile": "data\\runtime\\tunnel-client.pid",
+        "managedCommandContains": ["memory-core", "tunnel-client"]
+      }
+    }
+  ],
+  "navigation": [
+    {
+      "id": "health",
+      "label": "Open health",
+      "kind": "probe",
+      "target": "mcp"
+    }
+  ],
+  "ui": {
+    "primaryLauncher": {
+      "kind": "vbs",
+      "path": "scripts\\start-memory-core-viewer.vbs"
+    },
+    "menuContract": "component-menu-v1",
+    "actionEntrypoint": { "kind": "powershell", "path": "scripts\\control-center-ui.ps1" },
+    "menuActions": [
+      { "id": "copy_mcp_url", "label": "Copy MCP URL", "group": "connection", "confirmation": "none" },
+      { "id": "copy_health_url", "label": "Copy health URL", "group": "connection", "confirmation": "none" },
+      { "id": "copy_tunnel_id", "label": "Copy tunnel ID", "group": "connection", "confirmation": "none" },
+      { "id": "open_mcp_health", "label": "Open MCP health", "group": "connection", "confirmation": "none" },
+      { "id": "open_tunnel_ui", "label": "Open tunnel UI", "group": "connection", "confirmation": "none" },
+      { "id": "open_runtime_logs", "label": "Open runtime logs", "group": "connection", "confirmation": "none" },
+      { "id": "open_control_center", "label": "Open Memory Core viewer", "group": "component", "confirmation": "none" },
+      { "id": "open_backend_api_docs", "label": "Open backend API docs", "group": "component", "confirmation": "none" },
+      { "id": "replace_runtime_tunnel_key", "label": "Replace tunnel runtime key...", "group": "component", "confirmation": "none" },
+      { "id": "show_key_status", "label": "Show key status", "group": "component", "confirmation": "none" }
+    ]
+  },
+  "safety": {
+    "managerDomainDataAccess": "none",
+    "managerSecretAccess": "none",
+    "shutdownConfirmation": "required"
+  }
+}

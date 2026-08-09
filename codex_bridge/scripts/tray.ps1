@@ -15,16 +15,29 @@ param(
   [string]$SecretPath,
   [switch]$NoAutoStart,
   [switch]$AutoStartTunnel,
+  [switch]$DiagnosticOnly,
   [switch]$ReplaceExisting,
   [switch]$SelfTest
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
-$TrayDisplayName = "Codex Bridge MCP"
+$TrayDisplayName = $(if($DiagnosticOnly){"Codex Bridge MCP Diagnostics"}else{"Codex Bridge MCP"})
 
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
   $ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+}
+$ComponentDescriptorPath = Join-Path $ProjectRoot "control-center\component.json"
+$V3ControllerActive = $false
+if (Test-Path -LiteralPath $ComponentDescriptorPath -PathType Leaf) {
+  try {
+    $ComponentDescriptor = [IO.File]::ReadAllText($ComponentDescriptorPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+    $V3ControllerActive = [string]$ComponentDescriptor.runtimeMode -eq "component-controller"
+  }
+  catch { throw "Invalid Codex Bridge control-center descriptor." }
+}
+if (-not $SelfTest -and -not $DiagnosticOnly -and $V3ControllerActive) {
+  throw "LEGACY_TRAY_DISABLED: Use MCP Control Center or the diagnostic launcher. Restore a legacy-tray descriptor only for rollback."
 }
 if ([string]::IsNullOrWhiteSpace($ProjectsFile)) {
   $ProjectsFile = Join-Path $ProjectRoot ".local\projects.json"
@@ -81,6 +94,7 @@ $TunnelUiUrl = "$($TunnelHealthUrl.TrimEnd('/'))/ui"
 $TmpDir = Join-Path $ProjectRoot ".tmp"
 $TunnelLogFile = Join-Path $TmpDir "tunnel-client.log"
 $TunnelPidFile = Join-Path $TmpDir "tunnel-client.pid"
+$ControllerPath = Join-Path $PSScriptRoot "runtime-control.ps1"
 
 function Test-BuildCurrent {
   if (-not (Test-Path -LiteralPath $HttpEntry)) { return $false }
@@ -122,6 +136,14 @@ if ($SelfTest) {
     tunnelHealthUrl = $TunnelHealthUrl
     replaceExistingSupported = $true
     trayMenuContract = "unified-always-on-v2"
+    lifecycleDelegated = [bool]$DiagnosticOnly
+    ownsRuntimeProcesses = -not [bool]$DiagnosticOnly
+    diagnosticOnlySupported = $true
+    diagnosticOnly = [bool]$DiagnosticOnly
+    exitUiStopsRuntime = -not [bool]$DiagnosticOnly
+    legacyRuntimeTrayBlocked = $V3ControllerActive
+    controllerPath = $ControllerPath
+    controllerExists = Test-Path -LiteralPath $ControllerPath -PathType Leaf
     autoStartServer = $true
     autoStartTunnel = $true
   } | ConvertTo-Json -Depth 4
@@ -129,6 +151,7 @@ if ($SelfTest) {
 }
 
 function Stop-ExistingCodexBridgeRuntime {
+  param([switch]$TrayOnly)
   $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $_.ProcessId -ne $PID -and -not [string]::IsNullOrWhiteSpace($_.CommandLine) })
   $targets = @()
   foreach ($process in $processes) {
@@ -136,10 +159,10 @@ function Stop-ExistingCodexBridgeRuntime {
     $executablePath = [string]$process.ExecutablePath
     $role = $null
     $priority = 99
-    if ($commandLine.IndexOf($HttpEntry, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and $executablePath.IndexOf("node", [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+    if (-not $TrayOnly -and $commandLine.IndexOf($HttpEntry, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and $executablePath.IndexOf("node", [StringComparison]::OrdinalIgnoreCase) -ge 0) {
       $role = "MCP"; $priority = 10
     }
-    elseif (($executablePath.Equals($TunnelClientPath, [StringComparison]::OrdinalIgnoreCase) -or $commandLine.IndexOf($TunnelClientPath, [StringComparison]::OrdinalIgnoreCase) -ge 0) -and $commandLine.IndexOf($TunnelProfileDir, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and $commandLine.IndexOf("--profile `"$TunnelProfile`"", [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+    elseif (-not $TrayOnly -and ($executablePath.Equals($TunnelClientPath, [StringComparison]::OrdinalIgnoreCase) -or $commandLine.IndexOf($TunnelClientPath, [StringComparison]::OrdinalIgnoreCase) -ge 0) -and $commandLine.IndexOf($TunnelProfileDir, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and $commandLine.IndexOf("--profile `"$TunnelProfile`"", [StringComparison]::OrdinalIgnoreCase) -ge 0) {
       $role = "Tunnel"; $priority = 20
     }
     elseif ($process.Name -in @("powershell.exe", "pwsh.exe") -and $commandLine -match ('(?i)(?:^|\s)-File\s+"?' + [Regex]::Escape($PSCommandPath) + '"?(?:\s|$)')) {
@@ -154,7 +177,7 @@ function Stop-ExistingCodexBridgeRuntime {
   if ($targets.Count -gt 0) { Start-Sleep -Milliseconds 600 }
 }
 
-if ($ReplaceExisting) { Stop-ExistingCodexBridgeRuntime }
+if ($ReplaceExisting) { Stop-ExistingCodexBridgeRuntime -TrayOnly:$DiagnosticOnly }
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -249,6 +272,11 @@ function Stop-TunnelClient {
 function Copy-TextToClipboard([string]$Text) { [System.Windows.Forms.Clipboard]::SetText($Text); $notifyIcon.ShowBalloonTip(900, $TrayDisplayName, "Copied: $Text", "Info") }
 function Open-RuntimeLogs { New-Item -ItemType Directory -Force -Path $TmpDir | Out-Null; Start-Process explorer.exe -ArgumentList "`"$TmpDir`"" }
 
+function Invoke-ControllerReload {
+  if(-not(Test-Path -LiteralPath $ControllerPath -PathType Leaf)){Show-Error "Runtime controller is missing.";return $false}
+  try{$output=@(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ControllerPath -Action ReloadRuntime -ProjectRoot $ProjectRoot 2>&1);$exitCode=$LASTEXITCODE;$result=($output-join[Environment]::NewLine)|ConvertFrom-Json;if($exitCode-ne 0-or$result.ok-ne$true){Show-Error "Runtime reload failed.`n$($result.errorCode): $($result.message)";return $false};return $true}catch{Show-Error "Runtime reload failed. Open runtime logs for details.";return $false}
+}
+
 function Update-TrayStatus {
   $ownedRunning = Test-OwnedServerRunning; $healthOk = Test-ServerHealth
   $tunnelOwned = Test-OwnedTunnelRunning; $tunnelReady = Test-TunnelReady
@@ -270,7 +298,7 @@ function Update-TrayStatus {
 
 $contextMenu = New-Object System.Windows.Forms.ContextMenu
 $statusItem = New-Object System.Windows.Forms.MenuItem "$TrayDisplayName | Server: Checking | Tunnel: Checking"; $statusItem.Enabled = $false
-$restartItem = New-Object System.Windows.Forms.MenuItem "Restart MCP server"
+$restartItem = New-Object System.Windows.Forms.MenuItem $(if($DiagnosticOnly){"Reload managed runtime"}else{"Restart MCP server"})
 $openTunnelUiItem = New-Object System.Windows.Forms.MenuItem "Open tunnel UI"
 $copyMcpItem = New-Object System.Windows.Forms.MenuItem "Copy MCP URL"
 $copyTunnelIdItem = New-Object System.Windows.Forms.MenuItem "Copy tunnel ID"; $copyTunnelIdItem.Enabled = -not [string]::IsNullOrWhiteSpace($TunnelId)
@@ -278,8 +306,8 @@ $copyHealthItem = New-Object System.Windows.Forms.MenuItem "Copy health URL"
 $openHealthItem = New-Object System.Windows.Forms.MenuItem "Open MCP health"
 $openRuntimeItem = New-Object System.Windows.Forms.MenuItem "Open runtime logs"
 $openJobsItem = New-Object System.Windows.Forms.MenuItem "Open jobs folder"
-$exitItem = New-Object System.Windows.Forms.MenuItem "Exit"
-$restartItem.add_Click({ Restart-CodexBridgeServer; Update-TrayStatus })
+$exitItem = New-Object System.Windows.Forms.MenuItem $(if($DiagnosticOnly){"Exit diagnostic tray only"}else{"Exit"})
+$restartItem.add_Click({if($DiagnosticOnly){Invoke-ControllerReload|Out-Null}else{Restart-CodexBridgeServer};Update-TrayStatus})
 $openTunnelUiItem.add_Click({ Start-Process $TunnelUiUrl })
 $copyMcpItem.add_Click({ Copy-TextToClipboard $McpUrl })
 $copyTunnelIdItem.add_Click({ Copy-TextToClipboard $TunnelId })
@@ -288,6 +316,7 @@ $openHealthItem.add_Click({ Start-Process $HealthUrl })
 $openRuntimeItem.add_Click({ Open-RuntimeLogs })
 $openJobsItem.add_Click({ New-Item -ItemType Directory -Force -Path $JobsDir | Out-Null; Start-Process explorer.exe -ArgumentList "`"$JobsDir`"" })
 $exitItem.add_Click({
+  if($DiagnosticOnly){$timer.Stop();$notifyIcon.Visible=$false;$notifyIcon.Dispose();$mutex.ReleaseMutex();$mutex.Dispose();[System.Windows.Forms.Application]::Exit();return}
   $choice = [System.Windows.Forms.MessageBox]::Show("Exit will stop the MCP server, tunnel, and tray. Continue?", $TrayDisplayName, "YesNo", "Warning")
   if ($choice -ne [System.Windows.Forms.DialogResult]::Yes) { return }
   $timer.Stop()
@@ -308,6 +337,6 @@ $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 2500
 $timer.add_Tick({ Update-TrayStatus })
 $timer.Start()
-if (-not $NoAutoStart) { Start-CodexBridgeServer; Start-TunnelClient }
+if (-not $DiagnosticOnly -and -not $NoAutoStart) { Start-CodexBridgeServer; Start-TunnelClient }
 Update-TrayStatus
 [System.Windows.Forms.Application]::Run()

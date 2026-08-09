@@ -10,17 +10,30 @@ param(
     [string]$TunnelHealthUrl = "http://127.0.0.1:8877",
     [switch]$NoAutoStart,
     [switch]$AutoStartTunnel,
+    [switch]$DiagnosticOnly,
     [switch]$ReplaceExisting,
     [switch]$SelfTest
 )
 
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = "Stop"
-$TrayDisplayName = "Personal Asset OS MCP"
+$TrayDisplayName = $(if ($DiagnosticOnly) { "Personal Asset OS Diagnostics" } else { "Personal Asset OS MCP" })
 $TrayMenuContract = "unified-always-on-v2"
 
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
     $ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+}
+$ComponentDescriptorPath = Join-Path $ProjectRoot "control-center\component.json"
+$V3ControllerActive = $false
+if (Test-Path -LiteralPath $ComponentDescriptorPath -PathType Leaf) {
+    try {
+        $ComponentDescriptor = [IO.File]::ReadAllText($ComponentDescriptorPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+        $V3ControllerActive = [string]$ComponentDescriptor.runtimeMode -eq "component-controller"
+    }
+    catch { throw "Invalid Personal Asset OS control-center descriptor." }
+}
+if (-not $SelfTest -and -not $DiagnosticOnly -and $V3ControllerActive) {
+    throw "LEGACY_TRAY_DISABLED: Use MCP Control Center or the diagnostic launcher. Restore a legacy-tray descriptor only for rollback."
 }
 . (Join-Path $PSScriptRoot "local-env.ps1")
 
@@ -52,6 +65,7 @@ $ResolvedDataDir = if ([string]::IsNullOrWhiteSpace($DataDir)) { $DefaultLocalRo
 $BackupDir = Join-Path $ResolvedDataDir "backups"
 $RuntimeDir = Join-Path $ResolvedDataDir "runtime"
 $TrayPidFile = Join-Path $RuntimeDir "tray.pid"
+$ControllerPath = Join-Path $PSScriptRoot "runtime-control.ps1"
 
 function Get-ExpectedBuildId {
     if (-not (Test-Path -LiteralPath $PythonPath)) { return $null }
@@ -120,19 +134,22 @@ function Test-ExactTrayProcess([object]$ProcessInfo) {
 }
 
 function Stop-ExistingRuntime {
+    param([switch]$TrayOnly)
     $processes = @(
         Get-CimInstance Win32_Process -ErrorAction Stop |
             Where-Object { $_.ProcessId -ne $PID -and -not [string]::IsNullOrWhiteSpace($_.CommandLine) }
     )
     $targets = @()
     foreach ($process in $processes) {
-        if (Test-ExactTunnelProcess $process) {
+        if (-not $TrayOnly -and (Test-ExactTunnelProcess $process)) {
             $targets += [pscustomobject]@{ ProcessId = [int]$process.ProcessId; Role = "Tunnel"; Priority = 10 }
         }
-        elseif (Test-ExactServerProcess $process) {
+        elseif (-not $TrayOnly -and (Test-ExactServerProcess $process)) {
             $targets += [pscustomobject]@{ ProcessId = [int]$process.ProcessId; Role = "Server"; Priority = 20 }
         }
         elseif (Test-ExactTrayProcess $process) {
+            $isDiagnostic = [string]$process.CommandLine -match '(?i)(?:^|\s)-DiagnosticOnly(?:\s|$)'
+            if ([bool]$DiagnosticOnly -ne [bool]$isDiagnostic) { continue }
             $targets += [pscustomobject]@{ ProcessId = [int]$process.ProcessId; Role = "Tray"; Priority = 30 }
         }
     }
@@ -164,7 +181,8 @@ if ($SelfTest) {
         mcpUrl = $McpUrl
         healthUrl = $HealthUrl
         readyUrl = $ReadyUrl
-        dataDir = $ResolvedDataDir
+        formalDataDirConfigured = -not [string]::IsNullOrWhiteSpace($ResolvedDataDir)
+        formalDataPathExposed = $false
         expectedBuildId = Get-ExpectedBuildId
         tunnelClientPath = $TunnelClientPath
         tunnelClientExists = Test-Path -LiteralPath $TunnelClientPath
@@ -178,6 +196,14 @@ if ($SelfTest) {
         autoStartServer = $true
         externalApiConfigured = -not [string]::IsNullOrWhiteSpace((Get-LocalEnvValue -ProjectRoot $ProjectRoot -Name "OPENAI_API_KEY"))
         replaceExistingSupported = $true
+        lifecycleDelegated = [bool]$DiagnosticOnly
+        ownsRuntimeProcesses = -not [bool]$DiagnosticOnly
+        diagnosticOnlySupported = $true
+        legacyRuntimeTrayBlocked = $V3ControllerActive
+        diagnosticOnly = [bool]$DiagnosticOnly
+        exitUiStopsRuntime = -not [bool]$DiagnosticOnly
+        controllerPath = $ControllerPath
+        controllerExists = Test-Path -LiteralPath $ControllerPath -PathType Leaf
         loopbackOnly = ($HostName -in @("127.0.0.1", "localhost", "::1"))
         credentialValuesExposed = $false
     } | ConvertTo-Json -Depth 4
@@ -187,14 +213,15 @@ if ($SelfTest) {
 if ($HostName -notin @("127.0.0.1", "localhost", "::1")) {
     throw "Personal Asset OS tray refuses non-loopback host: $HostName"
 }
-if ($ReplaceExisting) { Stop-ExistingRuntime }
+if ($ReplaceExisting) { Stop-ExistingRuntime -TrayOnly:$DiagnosticOnly }
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 $createdNew = $false
-$mutex = New-Object System.Threading.Mutex($true, "Local\PersonalAssetOsTray", [ref]$createdNew)
+$mutexName = $(if ($DiagnosticOnly) { "Local\PersonalAssetOsDiagnosticTray" } else { "Local\PersonalAssetOsTray" })
+$mutex = New-Object System.Threading.Mutex($true, $mutexName, [ref]$createdNew)
 if (-not $createdNew) {
     [System.Windows.Forms.MessageBox]::Show(
         "Personal Asset OS MCP is already running in the system tray.",
@@ -206,8 +233,10 @@ if (-not $createdNew) {
     exit 0
 }
 
-New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
-Set-Content -LiteralPath $TrayPidFile -Value $PID -Encoding ASCII
+if (-not $DiagnosticOnly) {
+    New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
+    Set-Content -LiteralPath $TrayPidFile -Value $PID -Encoding ASCII
+}
 $script:ServerProcess = $null
 $script:TunnelProcess = $null
 $script:Closing = $false
@@ -355,6 +384,21 @@ function Create-VerifiedBackup {
     catch { Show-Error "Backup failed.`n$($_.Exception.Message)" }
 }
 
+function Invoke-ControllerReload {
+    if (-not (Test-Path -LiteralPath $ControllerPath -PathType Leaf)) { Show-Error "Runtime controller is missing."; return $false }
+    try {
+        $output = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ControllerPath -Action ReloadRuntime -ProjectRoot $ProjectRoot 2>&1)
+        $exitCode = $LASTEXITCODE
+        $result = ($output -join [Environment]::NewLine) | ConvertFrom-Json
+        if ($exitCode -ne 0 -or $result.ok -ne $true) {
+            Show-Error "Runtime reload failed.`n$($result.errorCode): $($result.message)"
+            return $false
+        }
+        return $true
+    }
+    catch { Show-Error "Runtime reload failed. Open runtime logs for details."; return $false }
+}
+
 function Update-TrayStatus {
     if ($script:Closing) { return }
     $serverOwned = Test-OwnedServerRunning
@@ -442,7 +486,7 @@ function Exit-Tray([bool]$StopRuntime) {
 $contextMenu = New-Object System.Windows.Forms.ContextMenu
 $statusItem = New-Object System.Windows.Forms.MenuItem "$TrayDisplayName | Server: Checking | Tunnel: Checking"
 $statusItem.Enabled = $false
-$restartItem = New-Object System.Windows.Forms.MenuItem "Restart MCP server"
+$restartItem = New-Object System.Windows.Forms.MenuItem $(if ($DiagnosticOnly) { "Reload managed runtime" } else { "Restart MCP server" })
 $openTunnelUiItem = New-Object System.Windows.Forms.MenuItem "Open tunnel UI"
 $openDashboardItem = New-Object System.Windows.Forms.MenuItem "Open dashboard"
 $openQuickCaptureItem = New-Object System.Windows.Forms.MenuItem "Quick capture"
@@ -456,9 +500,9 @@ $openHealthItem = New-Object System.Windows.Forms.MenuItem "Open MCP health"
 $openRuntimeItem = New-Object System.Windows.Forms.MenuItem "Open runtime logs"
 $openDataItem = New-Object System.Windows.Forms.MenuItem "Open data folder"
 $openBackupItem = New-Object System.Windows.Forms.MenuItem "Open backup folder"
-$exitItem = New-Object System.Windows.Forms.MenuItem "Exit"
+$exitItem = New-Object System.Windows.Forms.MenuItem $(if ($DiagnosticOnly) { "Exit diagnostic tray only" } else { "Exit" })
 
-$restartItem.add_Click({ Restart-Server; Update-TrayStatus })
+$restartItem.add_Click({ if ($DiagnosticOnly) { Invoke-ControllerReload | Out-Null } else { Restart-Server }; Update-TrayStatus })
 $openTunnelUiItem.add_Click({ Open-LocalUrl $TunnelUiUrl })
 $openDashboardItem.add_Click({ Open-LocalUrl $AppUrl })
 $openQuickCaptureItem.add_Click({ Open-LocalUrl $QuickCaptureUrl })
@@ -471,7 +515,7 @@ $openHealthItem.add_Click({ Open-LocalUrl $HealthUrl })
 $openRuntimeItem.add_Click({ New-Item -ItemType Directory -Force -Path $TunnelTmpDir | Out-Null; Start-Process explorer.exe -ArgumentList $TunnelTmpDir })
 $openDataItem.add_Click({ New-Item -ItemType Directory -Force -Path $ResolvedDataDir | Out-Null; Start-Process explorer.exe -ArgumentList $ResolvedDataDir })
 $openBackupItem.add_Click({ New-Item -ItemType Directory -Force -Path $BackupDir | Out-Null; Start-Process explorer.exe -ArgumentList $BackupDir })
-$exitItem.add_Click({ Exit-Tray $true })
+$exitItem.add_Click({ Exit-Tray (-not [bool]$DiagnosticOnly) })
 
 $contextMenu.MenuItems.Add($statusItem) | Out-Null
 $contextMenu.MenuItems.Add("-") | Out-Null
@@ -506,7 +550,7 @@ $timer.Interval = 2500
 $timer.add_Tick({ Update-TrayStatus })
 $timer.Start()
 
-if (-not $NoAutoStart) {
+if (-not $DiagnosticOnly -and -not $NoAutoStart) {
     Start-Server
     Start-TunnelClient
 }

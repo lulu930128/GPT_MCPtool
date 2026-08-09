@@ -1,0 +1,116 @@
+{
+  "schemaVersion": 1,
+  "id": "personal_asset_os",
+  "displayName": "Personal Asset OS",
+  "runtimeMode": "component-controller",
+  "runtimeContract": "unified-lifecycle-v3",
+  "traits": ["tunnel", "data-sensitive", "primary-ui", "diagnostic-ui"],
+  "contractScript": "scripts\\runtime-control.ps1",
+  "capabilities": [
+    "ensure_running",
+    "repair_connectivity",
+    "restart_core",
+    "reload_runtime",
+    "shutdown_runtime",
+    "show_diagnostic_tray"
+  ],
+  "lifecycle": {
+    "controller": {
+      "kind": "powershell",
+      "path": "scripts\\runtime-control.ps1"
+    },
+    "diagnosticLauncher": {
+      "kind": "vbs",
+      "path": "scripts\\show-diagnostic-tray.vbs"
+    }
+  },
+  "legacyStartup": {
+    "shortcutName": "Personal Asset OS.lnk",
+    "launcher": "scripts\\start-tray.vbs"
+  },
+  "timing": {
+    "postStartTimeoutSeconds": 60,
+    "controllerActionTimeoutSeconds": 180
+  },
+  "probes": [
+    {
+      "id": "app",
+      "label": "Personal Asset OS",
+      "role": "core",
+      "kind": "json",
+      "url": "http://127.0.0.1:8876/api/health",
+      "port": 8876,
+      "required": true,
+      "expected": { "ok": true, "service": "personal-asset-os", "database": "ready" },
+      "publicSummaryFields": ["service", "version", "buildId", "database", "schemaRevision"],
+      "ownership": {
+        "commandContains": ["personal_asset_os.cli", "serve"],
+        "managedPidFile": ".tmp\\personal-asset-os-server.pid",
+        "managedCommandContains": ["personal_asset_os.cli", "serve"]
+      }
+    },
+    {
+      "id": "ready",
+      "label": "Dashboard readiness",
+      "role": "core",
+      "kind": "json",
+      "url": "http://127.0.0.1:8876/api/readyz",
+      "port": 8876,
+      "required": true,
+      "expected": { "ready": true, "databaseReady": true, "frontendReady": true },
+      "publicSummaryFields": ["ready", "databaseReady", "frontendReady", "buildId"]
+    },
+    {
+      "id": "tunnel",
+      "label": "Secure MCP Tunnel",
+      "role": "connectivity",
+      "kind": "text",
+      "url": "http://127.0.0.1:8877/readyz",
+      "port": 8877,
+      "required": true,
+      "expectedText": ["ready", "ok"],
+      "ownership": {
+        "commandContains": ["personal-asset-os", "tunnel-client"],
+        "managedPidFile": ".tmp\\tunnel-client.pid",
+        "managedCommandContains": ["personal-asset-os", "tunnel-client"]
+      }
+    }
+  ],
+  "navigation": [
+    {
+      "id": "health",
+      "label": "Open health",
+      "kind": "probe",
+      "target": "app"
+    },
+    {
+      "id": "primary_ui",
+      "label": "Open primary UI",
+      "kind": "loopback-url",
+      "target": "http://127.0.0.1:8876/"
+    }
+  ],
+  "ui": {
+    "menuContract": "component-menu-v1",
+    "actionEntrypoint": { "kind": "powershell", "path": "scripts\\control-center-ui.ps1" },
+    "menuActions": [
+      { "id": "copy_mcp_url", "label": "Copy MCP URL", "group": "connection", "confirmation": "none" },
+      { "id": "copy_health_url", "label": "Copy health URL", "group": "connection", "confirmation": "none" },
+      { "id": "copy_tunnel_id", "label": "Copy tunnel ID", "group": "connection", "confirmation": "none" },
+      { "id": "open_mcp_health", "label": "Open MCP health", "group": "connection", "confirmation": "none" },
+      { "id": "open_tunnel_ui", "label": "Open tunnel UI", "group": "connection", "confirmation": "none" },
+      { "id": "open_runtime_logs", "label": "Open runtime logs", "group": "connection", "confirmation": "none" },
+      { "id": "open_dashboard", "label": "Open dashboard", "group": "component", "confirmation": "none" },
+      { "id": "quick_capture", "label": "Quick capture", "group": "component", "confirmation": "none" },
+      { "id": "create_verified_backup", "label": "Create verified backup", "group": "component", "confirmation": "required" },
+      { "id": "copy_app_url", "label": "Copy app URL", "group": "component", "confirmation": "none" },
+      { "id": "open_data_folder", "label": "Open data folder", "group": "component", "confirmation": "none" },
+      { "id": "open_backup_folder", "label": "Open backup folder", "group": "component", "confirmation": "none" }
+    ]
+  },
+  "safety": {
+    "managerDomainDataAccess": "none",
+    "managerSecretAccess": "none",
+    "shutdownConfirmation": "required"
+  }
+}

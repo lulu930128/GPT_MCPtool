@@ -12,16 +12,29 @@ param(
   [string]$SecretPath,
   [switch]$NoAutoStart,
   [switch]$AutoStartTunnel,
+  [switch]$DiagnosticOnly,
   [switch]$ReplaceExisting,
   [switch]$SelfTest
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
-$TrayDisplayName = "Japanese Study MCP"
+$TrayDisplayName = $(if ($DiagnosticOnly) { "Japanese Study MCP Diagnostics" } else { "Japanese Study MCP" })
 
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
   $ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+}
+$ComponentDescriptorPath = Join-Path $ProjectRoot "control-center\component.json"
+$V3ControllerActive = $false
+if (Test-Path -LiteralPath $ComponentDescriptorPath -PathType Leaf) {
+  try {
+    $ComponentDescriptor = [IO.File]::ReadAllText($ComponentDescriptorPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+    $V3ControllerActive = [string]$ComponentDescriptor.runtimeMode -eq "component-controller"
+  }
+  catch { throw "Invalid Japanese Study control-center descriptor." }
+}
+if (-not $SelfTest -and -not $DiagnosticOnly -and $V3ControllerActive) {
+  throw "LEGACY_TRAY_DISABLED: Use MCP Control Center or the diagnostic launcher. Restore a legacy-tray descriptor only for rollback."
 }
 if ([string]::IsNullOrWhiteSpace($TunnelClientPath)) {
   $TunnelClientPath = Join-Path $ProjectRoot "vendor\tunnel-client\tunnel-client.exe"
@@ -71,6 +84,7 @@ $TunnelUiUrl = "$($TunnelHealthUrl.TrimEnd('/'))/ui"
 $TmpDir = Join-Path $ProjectRoot ".tmp"
 $TunnelLogFile = Join-Path $TmpDir "tunnel-client.log"
 $TunnelPidFile = Join-Path $TmpDir "tunnel-client.pid"
+$ControllerPath = Join-Path $PSScriptRoot "runtime-control.ps1"
 $NodePath = (Get-Command node -ErrorAction Stop).Source
 $UvPath = (Get-Command uv -ErrorAction Stop).Source
 
@@ -107,6 +121,7 @@ function Test-McpBuildFresh {
 }
 
 if ($SelfTest) {
+  $secretStatus = Test-ControlPlaneApiKeySecret -ProjectRoot $ProjectRoot -SecretPath $ResolvedSecretPath
   [pscustomobject]@{
     trayDisplayName = $TrayDisplayName
     projectRoot = $ProjectRoot
@@ -128,12 +143,19 @@ if ($SelfTest) {
     tunnelClientExists = Test-Path -LiteralPath $TunnelClientPath
     tunnelProfilePath = $TunnelProfilePath
     tunnelProfileExists = Test-Path -LiteralPath $TunnelProfilePath
-    secretStatus = Test-ControlPlaneApiKeySecret -ProjectRoot $ProjectRoot -SecretPath $ResolvedSecretPath
+    secretConfigured = ($secretStatus.exists -and $secretStatus.usable)
     tunnelIdConfigured = ($TunnelId -match '^tunnel_[A-Za-z0-9]+$')
-    tunnelIdSource = $TunnelIdSource
     tunnelHealthUrl = $TunnelHealthUrl
     replaceExistingSupported = $true
     trayMenuContract = "unified-always-on-v2"
+    lifecycleDelegated = [bool]$DiagnosticOnly
+    ownsRuntimeProcesses = -not [bool]$DiagnosticOnly
+    diagnosticOnlySupported = $true
+    diagnosticOnly = [bool]$DiagnosticOnly
+    exitUiStopsRuntime = -not [bool]$DiagnosticOnly
+    legacyRuntimeTrayBlocked = $V3ControllerActive
+    controllerPath = $ControllerPath
+    controllerExists = Test-Path -LiteralPath $ControllerPath -PathType Leaf
     autoStartServer = $true
     autoStartTunnel = $true
   } | ConvertTo-Json -Depth 5
@@ -141,6 +163,7 @@ if ($SelfTest) {
 }
 
 function Stop-ExistingJapaneseStudyRuntime {
+  param([switch]$TrayOnly)
   $processes = @(
     Get-CimInstance Win32_Process -ErrorAction Stop |
       Where-Object { $_.ProcessId -ne $PID -and -not [string]::IsNullOrWhiteSpace($_.CommandLine) }
@@ -151,21 +174,21 @@ function Stop-ExistingJapaneseStudyRuntime {
     $executablePath = [string]$process.ExecutablePath
     $role = $null
     $priority = 99
-    if (
+    if (-not $TrayOnly -and
       $commandLine.IndexOf("-m japanese_study_hub.cli serve", [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
       $commandLine.IndexOf($HubRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0
     ) {
       $role = "Hub"
       $priority = 10
     }
-    elseif (
+    elseif (-not $TrayOnly -and
       $commandLine.IndexOf($McpEntry, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
       $executablePath.IndexOf("node", [StringComparison]::OrdinalIgnoreCase) -ge 0
     ) {
       $role = "MCP"
       $priority = 20
     }
-    elseif (
+    elseif (-not $TrayOnly -and
       (
         $executablePath.Equals($TunnelClientPath, [StringComparison]::OrdinalIgnoreCase) -or
         $commandLine.IndexOf($TunnelClientPath, [StringComparison]::OrdinalIgnoreCase) -ge 0
@@ -184,6 +207,8 @@ function Stop-ExistingJapaneseStudyRuntime {
         '"?(?:\s|$)'
       )
     ) {
+      $isDiagnostic = $commandLine -match '(?i)(?:^|\s)-DiagnosticOnly(?:\s|$)'
+      if ([bool]$DiagnosticOnly -ne [bool]$isDiagnostic) { continue }
       $role = "Tray"
       $priority = 40
     }
@@ -212,7 +237,7 @@ function Stop-ExistingJapaneseStudyRuntime {
 }
 
 if ($ReplaceExisting) {
-  Stop-ExistingJapaneseStudyRuntime
+  Stop-ExistingJapaneseStudyRuntime -TrayOnly:$DiagnosticOnly
 }
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -220,7 +245,8 @@ Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 $createdNew = $false
-$mutex = New-Object System.Threading.Mutex($true, "Local\JapaneseStudyHubTray", [ref]$createdNew)
+$mutexName = $(if ($DiagnosticOnly) { "Local\JapaneseStudyHubDiagnosticTray" } else { "Local\JapaneseStudyHubTray" })
+$mutex = New-Object System.Threading.Mutex($true, $mutexName, [ref]$createdNew)
 if (-not $createdNew) {
   [System.Windows.Forms.MessageBox]::Show(
     "Japanese Study Hub is already running in the system tray.",
@@ -564,6 +590,18 @@ function Open-RuntimeLogs {
   Start-Process explorer.exe -ArgumentList "`"$TmpDir`""
 }
 
+function Invoke-ControllerReload {
+  if (-not (Test-Path -LiteralPath $ControllerPath -PathType Leaf)) { Show-Error "Runtime controller is missing."; return $false }
+  try {
+    $output = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ControllerPath -Action ReloadRuntime -ProjectRoot $ProjectRoot 2>&1)
+    $exitCode = $LASTEXITCODE
+    $result = ($output -join [Environment]::NewLine) | ConvertFrom-Json
+    if ($exitCode -ne 0 -or $result.ok -ne $true) { Show-Error "Runtime reload failed.`n$($result.errorCode): $($result.message)"; return $false }
+    return $true
+  }
+  catch { Show-Error "Runtime reload failed. Open runtime logs for details."; return $false }
+}
+
 function Update-TrayStatus {
   $hubHealthy = Test-HubHealth
   $mcpHealthy = Test-McpHealth
@@ -609,7 +647,7 @@ function Update-TrayStatus {
 $contextMenu = New-Object System.Windows.Forms.ContextMenu
 $statusItem = New-Object System.Windows.Forms.MenuItem "$TrayDisplayName | Server: Checking | Tunnel: Checking"
 $statusItem.Enabled = $false
-$restartItem = New-Object System.Windows.Forms.MenuItem "Restart MCP server"
+$restartItem = New-Object System.Windows.Forms.MenuItem $(if ($DiagnosticOnly) { "Reload managed runtime" } else { "Restart MCP server" })
 $saveKeyItem = New-Object System.Windows.Forms.MenuItem "Save tunnel key..."
 $keyStatusItem = New-Object System.Windows.Forms.MenuItem "Show key status"
 $copyMcpItem = New-Object System.Windows.Forms.MenuItem "Copy MCP URL"
@@ -619,9 +657,9 @@ $openHealthItem = New-Object System.Windows.Forms.MenuItem "Open MCP health"
 $openHubHealthItem = New-Object System.Windows.Forms.MenuItem "Open Hub health"
 $openTunnelUiItem = New-Object System.Windows.Forms.MenuItem "Open tunnel UI"
 $openRuntimeItem = New-Object System.Windows.Forms.MenuItem "Open runtime logs"
-$exitItem = New-Object System.Windows.Forms.MenuItem "Exit"
+$exitItem = New-Object System.Windows.Forms.MenuItem $(if ($DiagnosticOnly) { "Exit diagnostic tray only" } else { "Exit" })
 
-$restartItem.add_Click({ Restart-McpServer; Update-TrayStatus })
+$restartItem.add_Click({ if ($DiagnosticOnly) { Invoke-ControllerReload | Out-Null } else { Restart-McpServer }; Update-TrayStatus })
 $saveKeyItem.add_Click({ Save-KeyWithPrompt; Update-TrayStatus })
 $keyStatusItem.add_Click({ Show-KeyStatus })
 $copyMcpItem.add_Click({ Copy-TextToClipboard $McpUrl })
@@ -639,6 +677,15 @@ $openHubHealthItem.add_Click({ Start-Process $HubHealthUrl })
 $openTunnelUiItem.add_Click({ Start-Process $TunnelUiUrl })
 $openRuntimeItem.add_Click({ Open-RuntimeLogs })
 $exitItem.add_Click({
+  if ($DiagnosticOnly) {
+    $timer.Stop()
+    $notifyIcon.Visible = $false
+    $notifyIcon.Dispose()
+    $mutex.ReleaseMutex()
+    $mutex.Dispose()
+    [System.Windows.Forms.Application]::Exit()
+    return
+  }
   $choice = [System.Windows.Forms.MessageBox]::Show(
     "Exit will stop the MCP server, tunnel, and tray. Continue?",
     $TrayDisplayName,
@@ -692,7 +739,7 @@ $timer.Interval = 2500
 $timer.add_Tick({ Update-TrayStatus })
 $timer.Start()
 
-if (-not $NoAutoStart) {
+if (-not $DiagnosticOnly -and -not $NoAutoStart) {
   Start-McpServer
   Start-Tunnel
 }

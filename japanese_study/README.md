@@ -103,10 +103,20 @@ uses the exact-path `-ReplaceExisting` flow and reloads Hub, MCP, and tunnel
 without broad process-name termination. The normal Start entry remains
 non-destructive and does not replace an already-running instance.
 
-托盤使用 `unified-always-on-v2` 契約。正式啟動會一起準備 Hub、MCP adapter 與
+既有托盤 source 使用 `unified-always-on-v2` 契約。正式啟動會一起準備 Hub、MCP adapter 與
 Secure MCP Tunnel；選單不提供 Start／Stop 或 tunnel restart。`Restart MCP server`
 只重啟 Hub + adapter，Hub health 與 DPAPI key 操作位於 `Exit` 上方的元件特有區。
 `Exit` 會完整停止 Hub、adapter、tunnel 與 tray。
+
+Control Center 的正式整合使用 `unified-lifecycle-v3`。元件自己的 stateless controller
+依序管理 Hub、MCP adapter 與 tunnel，並以 exact PID／executable／command／listener
+lineage 驗證 ownership；中樞不讀取任何學習資料。既有 tray source 與 launcher 保留作
+rollback，`show-diagnostic-tray.vbs` 只開啟不持有 runtime 的診斷 UI。完整邊界與驗證方式見
+[`docs/ControlCenterIntegration.md`](docs/ControlCenterIntegration.md)。
+
+`component-menu-v1` 會在中樞子選單直接顯示原本的 connection、唯讀 Japanese Study
+browser、Hub health、Save tunnel key 與 Show key status。實際前端啟動、clipboard、DPAPI 與 tunnel profile 操作仍由本元件的
+`scripts/control-center-ui.ps1` 執行，不會讓中樞讀取學習資料或 credential。
 
 The tray refuses to start MCP when `src` is newer than `dist`, and it verifies
 MCP version, contract version, tool count, and the current core-artifact hash.

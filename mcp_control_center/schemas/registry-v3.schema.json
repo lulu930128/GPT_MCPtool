@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.invalid/mcp-control-center/registry-v3.schema.json",
+  "title": "MCP Control Center Registry v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "settings", "components"],
+  "properties": {
+    "schemaVersion": { "const": 3 },
+    "settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "initialDelaySeconds",
+        "betweenComponentsSeconds",
+        "probeTimeoutSeconds",
+        "postStartTimeoutSeconds",
+        "controllerActionTimeoutSeconds",
+        "refreshIntervalSeconds",
+        "eventRetentionDays"
+      ],
+      "properties": {
+        "initialDelaySeconds": { "type": "integer", "minimum": 0, "maximum": 300 },
+        "betweenComponentsSeconds": { "type": "integer", "minimum": 0, "maximum": 60 },
+        "probeTimeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 15 },
+        "postStartTimeoutSeconds": { "type": "integer", "minimum": 5, "maximum": 300 },
+        "controllerActionTimeoutSeconds": { "type": "integer", "minimum": 5, "maximum": 300 },
+        "refreshIntervalSeconds": { "type": "integer", "minimum": 10, "maximum": 3600 },
+        "eventRetentionDays": { "type": "integer", "minimum": 1, "maximum": 365 }
+      }
+    },
+    "components": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "root", "descriptor", "enabled", "autoStart", "startupOrder"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,63}$"
+          },
+          "root": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 260
+          },
+          "descriptor": {
+            "const": "control-center\\component.json"
+          },
+          "enabled": { "type": "boolean" },
+          "autoStart": { "type": "boolean" },
+          "startupOrder": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10000
+          }
+        }
+      }
+    }
+  }
+}

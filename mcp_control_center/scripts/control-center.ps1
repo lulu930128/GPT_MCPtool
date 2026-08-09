@@ -1,7 +1,9 @@
 param(
-    [ValidateSet("SelfTest", "Status", "Reconcile", "Start", "Restart", "RepairConnectivity", "RestartCore", "ShutdownRuntime", "ShowDiagnosticTray", "Doctor")]
+    [ValidateSet("SelfTest", "Status", "Reconcile", "Start", "Restart", "RepairConnectivity", "RestartCore", "ShutdownRuntime", "ShowDiagnosticTray", "ComponentMenuAction", "Doctor")]
     [string]$Action = "Status",
     [string]$Component,
+    [ValidatePattern('^[a-z][a-z0-9_]{0,63}$')]
+    [string]$UiAction,
     [string]$ManifestPath,
     [string]$RuntimeRoot,
     [switch]$PlanOnly,
@@ -16,7 +18,7 @@ $modulePath = Join-Path $projectRoot "src\McpControlCenter.Core.psm1"
 Import-Module $modulePath -Force
 
 if ([string]::IsNullOrWhiteSpace($ManifestPath)) {
-    $ManifestPath = Join-Path $projectRoot "config\components.json"
+    $ManifestPath = Get-McpCcDefaultManifestPath
 }
 if ([string]::IsNullOrWhiteSpace($RuntimeRoot)) {
     $RuntimeRoot = Get-McpCcDefaultRuntimeRoot
@@ -81,14 +83,16 @@ try {
             $selfTest = Test-McpCcManifest -Manifest $manifest
             $startup = Get-McpCcStartupAudit -Manifest $manifest
             $state = Invoke-StatusAndPublish -Manifest $manifest -BootId $bootId
+            $controllerAudit = Get-McpCcControllerAudit -Manifest $manifest -RuntimeRoot $RuntimeRoot
             $doctor = [pscustomobject]@{
                 schemaVersion = [int]$manifest.schemaVersion
                 generatedAt = [DateTime]::UtcNow.ToString("o")
                 bootId = $bootId
-                ok = ($selfTest.ok -and $startup.conflictCount -eq 0 -and $state.overall -eq "Ready")
+                ok = ($selfTest.ok -and $startup.conflictCount -eq 0 -and $state.overall -eq "Ready" -and $controllerAudit.unmanageableCount -eq 0)
                 selfTest = $selfTest
                 startup = $startup
                 state = $state
+                controllerAudit = $controllerAudit
             }
             $diagnosticsPath = Join-Path $RuntimeRoot "diagnostics\latest.json"
             Write-McpCcJsonAtomic -Path $diagnosticsPath -Document $doctor
@@ -96,6 +100,7 @@ try {
                 ok = $doctor.ok
                 overall = $state.overall
                 startupConflicts = $startup.conflictCount
+                unmanageableControllers = $controllerAudit.unmanageableCount
             }
             $doctor | ConvertTo-Json -Depth 12
             if (-not $doctor.ok) { exit 2 }
@@ -111,7 +116,7 @@ try {
             Start-Sleep -Seconds 2
             $definition = Get-McpCcComponent -Manifest $manifest -Id $Component
             $acceptedStates = @(Get-McpCcRunningAcceptanceStates -Component $definition)
-            $postStatus = Wait-ForComponentRunningState -Manifest $manifest -ComponentDefinition $definition -TimeoutSeconds ([int]$manifest.settings.postStartTimeoutSeconds)
+            $postStatus = Wait-ForComponentRunningState -Manifest $manifest -ComponentDefinition $definition -TimeoutSeconds (Get-McpCcComponentTimingSeconds -Manifest $manifest -Component $definition -Name "postStartTimeoutSeconds")
             $state = Invoke-StatusAndPublish -Manifest $manifest -BootId $bootId
             Write-McpCcEvent -RuntimeRoot $RuntimeRoot -BootId $bootId -Type "action_completed" -Component $Component -Details @{
                 action = "ensure_running"
@@ -131,7 +136,7 @@ try {
             Start-Sleep -Seconds 3
             $definition = Get-McpCcComponent -Manifest $manifest -Id $Component
             $acceptedStates = @(Get-McpCcRunningAcceptanceStates -Component $definition)
-            $postStatus = Wait-ForComponentRunningState -Manifest $manifest -ComponentDefinition $definition -TimeoutSeconds ([int]$manifest.settings.postStartTimeoutSeconds)
+            $postStatus = Wait-ForComponentRunningState -Manifest $manifest -ComponentDefinition $definition -TimeoutSeconds (Get-McpCcComponentTimingSeconds -Manifest $manifest -Component $definition -Name "postStartTimeoutSeconds")
             $state = Invoke-StatusAndPublish -Manifest $manifest -BootId $bootId
             Write-McpCcEvent -RuntimeRoot $RuntimeRoot -BootId $bootId -Type "action_completed" -Component $Component -Details @{
                 action = "reload_runtime"
@@ -151,7 +156,7 @@ try {
             Start-Sleep -Seconds 2
             $definition = Get-McpCcComponent -Manifest $manifest -Id $Component
             $acceptedStates = @(Get-McpCcRunningAcceptanceStates -Component $definition)
-            $postStatus = Wait-ForComponentRunningState -Manifest $manifest -ComponentDefinition $definition -TimeoutSeconds ([int]$manifest.settings.postStartTimeoutSeconds)
+            $postStatus = Wait-ForComponentRunningState -Manifest $manifest -ComponentDefinition $definition -TimeoutSeconds (Get-McpCcComponentTimingSeconds -Manifest $manifest -Component $definition -Name "postStartTimeoutSeconds")
             $state = Invoke-StatusAndPublish -Manifest $manifest -BootId $bootId
             Write-McpCcEvent -RuntimeRoot $RuntimeRoot -BootId $bootId -Type "action_completed" -Component $Component -Details @{
                 action = "restart_core"
@@ -171,7 +176,7 @@ try {
             Start-Sleep -Seconds 2
             $definition = Get-McpCcComponent -Manifest $manifest -Id $Component
             $acceptedStates = @(Get-McpCcRunningAcceptanceStates -Component $definition)
-            $postStatus = Wait-ForComponentRunningState -Manifest $manifest -ComponentDefinition $definition -TimeoutSeconds ([int]$manifest.settings.postStartTimeoutSeconds)
+            $postStatus = Wait-ForComponentRunningState -Manifest $manifest -ComponentDefinition $definition -TimeoutSeconds (Get-McpCcComponentTimingSeconds -Manifest $manifest -Component $definition -Name "postStartTimeoutSeconds")
             $state = Invoke-StatusAndPublish -Manifest $manifest -BootId $bootId
             Write-McpCcEvent -RuntimeRoot $RuntimeRoot -BootId $bootId -Type "action_completed" -Component $Component -Details @{
                 action = "repair_connectivity"
@@ -190,7 +195,7 @@ try {
             }
             Start-Sleep -Seconds 1
             $definition = Get-McpCcComponent -Manifest $manifest -Id $Component
-            $postStatus = Wait-ForComponentState -Manifest $manifest -ComponentDefinition $definition -TimeoutSeconds ([int]$manifest.settings.postStartTimeoutSeconds) -AcceptedStates @("Stopped")
+            $postStatus = Wait-ForComponentState -Manifest $manifest -ComponentDefinition $definition -TimeoutSeconds (Get-McpCcComponentTimingSeconds -Manifest $manifest -Component $definition -Name "postStartTimeoutSeconds") -AcceptedStates @("Stopped")
             $state = Invoke-StatusAndPublish -Manifest $manifest -BootId $bootId
             Write-McpCcEvent -RuntimeRoot $RuntimeRoot -BootId $bootId -Type "action_completed" -Component $Component -Details @{
                 action = "shutdown_runtime"
@@ -207,6 +212,21 @@ try {
                 Write-McpCcEvent -RuntimeRoot $RuntimeRoot -BootId $bootId -Type "action_completed" -Component $Component -Details @{ action = "show_diagnostic_tray"; result = "delegated" }
             }
             $delegation | ConvertTo-Json -Depth 6
+        }
+        "ComponentMenuAction" {
+            if ([string]::IsNullOrWhiteSpace($Component)) { throw "ComponentMenuAction requires -Component." }
+            if ([string]::IsNullOrWhiteSpace($UiAction)) { throw "ComponentMenuAction requires -UiAction." }
+            Write-McpCcEvent -RuntimeRoot $RuntimeRoot -BootId $bootId -Type "ui_action_requested" -Component $Component -Details @{ action = $UiAction }
+            $delegation = Invoke-McpCcComponentUiAction `
+                -Manifest $manifest `
+                -ComponentId $Component `
+                -ActionId $UiAction `
+                -PlanOnly:$PlanOnly `
+                -RuntimeRoot $RuntimeRoot
+            if (-not $PlanOnly) {
+                Write-McpCcEvent -RuntimeRoot $RuntimeRoot -BootId $bootId -Type "ui_action_completed" -Component $Component -Details @{ action = $UiAction; result = "delegated" }
+            }
+            $delegation | ConvertTo-Json -Depth 8
         }
         "Reconcile" {
             if (-not $NoInitialDelay -and -not $PlanOnly) {
@@ -228,12 +248,12 @@ try {
                 $definition = Get-McpCcComponent -Manifest $manifest -Id $item.component
                 $current = Get-McpCcComponentStatus -Component $definition -TimeoutSeconds ([int]$manifest.settings.probeTimeoutSeconds)
                 if ($current.status -eq "BlockedUpstream") {
-                    $current = Wait-ForComponentState -Manifest $manifest -ComponentDefinition $definition -TimeoutSeconds ([int]$manifest.settings.postStartTimeoutSeconds) -AcceptedStates @("Ready", "Stopped")
+                    $current = Wait-ForComponentState -Manifest $manifest -ComponentDefinition $definition -TimeoutSeconds (Get-McpCcComponentTimingSeconds -Manifest $manifest -Component $definition -Name "postStartTimeoutSeconds") -AcceptedStates @("Ready", "Stopped")
                 }
                 if ($current.status -eq "Stopped") {
                     $delegation = Invoke-McpCcComponentAction -Manifest $manifest -ComponentId $definition.id -Action ensure_running -RuntimeRoot $RuntimeRoot
                     Start-Sleep -Seconds 2
-                    $post = Wait-ForComponentRunningState -Manifest $manifest -ComponentDefinition $definition -TimeoutSeconds ([int]$manifest.settings.postStartTimeoutSeconds)
+                    $post = Wait-ForComponentRunningState -Manifest $manifest -ComponentDefinition $definition -TimeoutSeconds (Get-McpCcComponentTimingSeconds -Manifest $manifest -Component $definition -Name "postStartTimeoutSeconds")
                     $actions += [pscustomobject]@{ component = $definition.id; action = "Start"; before = $current.status; after = $post.status; delegation = $delegation }
                     Write-McpCcEvent -RuntimeRoot $RuntimeRoot -BootId $bootId -Type "reconcile_component" -Component $definition.id -Details @{ decision = "Start"; before = $current.status; after = $post.status }
                 }
@@ -259,10 +279,10 @@ catch {
     $message = ([string]$_.Exception.Message -replace '[\r\n]+', ' ').Trim()
     try {
         if (-not [string]::IsNullOrWhiteSpace($RuntimeRoot)) {
-            Write-McpCcEvent -RuntimeRoot $RuntimeRoot -BootId $(if ($null -ne $bootId) { $bootId } else { Get-McpCcBootId }) -Type "controller_error" -Component $Component -Details @{ action = $Action; error = $message }
+            Write-McpCcEvent -RuntimeRoot $RuntimeRoot -BootId $(if ($null -ne $bootId) { $bootId } else { Get-McpCcBootId }) -Type "controller_error" -Component $Component -Details @{ action = $Action; uiAction = $UiAction; error = $message }
         }
     }
     catch { }
-    [pscustomobject]@{ ok = $false; action = $Action; component = $Component; error = $message } | ConvertTo-Json -Depth 5
+    [pscustomobject]@{ ok = $false; action = $Action; component = $Component; uiAction = $UiAction; error = $message } | ConvertTo-Json -Depth 5
     exit 1
 }

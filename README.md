@@ -16,7 +16,7 @@
 | [`project_reading`](./project_reading/) | explicit allowlist、多 root、read-only workspace MCP | TypeScript / Node.js | 需要使用者自行設定允許讀取的本機 roots |
 | [`codex_bridge`](./codex_bridge/) | ChatGPT MCP Apps 到本機 Codex App Server 的受控工作交接 | TypeScript / Node.js | 需要可執行且已登入的 Codex CLI、專案 allowlist 與專屬 tunnel id |
 | [`personal-asset-os`](./personal-asset-os/) | local-first 個人資產帳本、dashboard 與唯讀 MCP | Python / FastAPI / React / SQLite | 正式財務資料只存在 `%LOCALAPPDATA%\PersonalAssetOS`，不進 Git |
-| [`mcp_control_center`](./mcp_control_center/) | 六個 MCP runtime 的 Windows orchestration／observability 中樞；本身不是 MCP | PowerShell / WinForms | 只使用各元件既有 lifecycle 與 loopback health／readyz |
+| [`mcp_control_center`](./mcp_control_center/) | 可擴充的 Windows runtime orchestration／observability 中樞；本身不是 MCP | PowerShell / WinForms | 只使用 registry 中各元件宣告的 lifecycle 與 loopback health／readyz |
 
 請先閱讀各目錄的 `README.md` 與 `AGENTS.md`；它們才是該元件的正式操作與安全規則。
 
@@ -92,22 +92,31 @@ Live backend、tunnel 與 browser／ChatGPT connector smoke 不是單純 source 
 預設驗證；需要驗證部署狀態時，應依各元件 README 另外確認正確 PID、port、owner
 與代表性 MCP call。
 
-## Windows 托盤慣例
+## Windows 托盤與統一 lifecycle
 
-六個元件使用 `unified-always-on-v2` 托盤契約：真實 Server／Tunnel 狀態、
-`Restart MCP server`、三個 Copy、三個 Open、元件特有操作，以及最後的 `Exit`。
-正式 tray 啟動會一起準備本機 server、已配置的外部 API 能力與 Secure MCP Tunnel；
-不提供 Start／Stop 或 tunnel restart 前端開關。外部 API 可用不代表背景自動呼叫，
-仍須由原本的明確操作觸發。`Exit` 是唯一完整關閉入口，會停止 server、tunnel 與 tray。
+目前六個元件都以 `unified-lifecycle-v3` component controller 接入單一可見的
+`MCP Control Center` tray。中樞統一提供狀態、ensure、connectivity repair、core restart、
+full reload、逐元件 shutdown，以及由 `component-menu-v1` 接回的舊托盤功能；不提供 Stop All，
+也不以 process name 廣泛終止程序。
 
-一般的 `Start-Tray.cmd` 不會取代既有 instance；程式更新後使用各元件
-`scripts\Restart-Tray.cmd`，由 exact-path replacement 流程重載並保留元件自己的資料與
-安全邊界。
+舊功能直接顯示於每個元件子選單，但由元件自己的 `control-center-ui.ps1` 執行；中樞不接觸
+credential、tunnel ID、domain payload 或備份內容。按需 diagnostic tray 則保留為
+`Open troubleshooting tools` 的完整故障處理 fallback，且不持有 runtime。v3 啟用後，舊 tray script 的持久化啟動會 fail closed，
+避免舊 Startup、helper 或 launcher 再次接管已由 Control Center 管理的服務。
+
+這個統一只涵蓋 lifecycle contract，不合併元件實作。六個 MCP 仍各自在頂層資料夾內
+持有依賴、資料、測試、安全界線、PID authority 與 primary/domain UI；個別差異由 descriptor
+traits/capabilities 與 component-owned controller module 表達。舊 `unified-always-on-v2` tray、
+launcher、Startup／restore artifact 目前保留作 rollback，但不再是正式常駐入口。
 
 托盤 Restart 只能證明本機 runtime 已重載。ChatGPT connector 若仍顯示舊的 tool schema，
 仍需在 host 端 Refresh Actions／重新連線或開新對話；不要把本機 process restart 當成
 host action snapshot 已更新的證據。
 
-`mcp_control_center` 可以在不合併元件資料或 domain contract 的前提下，集中檢查六條
-always-on chain、保存 boot／status／action 事件，並以可回復流程把六個 Startup shortcut
-收斂成一個入口。詳細操作與安全界線見 [`mcp_control_center/README.md`](./mcp_control_center/README.md)。
+`mcp_control_center` 從 registry 載入 component-owned descriptor、集中檢查六條 always-on
+chain、保存 boot／status／action 事件，並以可回復流程把 Startup 收斂成一個入口。
+`config/components.json` rollback manifest 仍保留。New Component Kit 提供單一 base template、
+read-only validator，以及 SHA-guarded Plan／Apply／receipt／rollback 註冊流程；新 entry 固定
+從 disabled、非 auto-start 開始，完成自己的 exact ownership 與 targeted lifecycle tests 後才可
+啟用。詳細操作與安全界線見
+[`mcp_control_center/README.md`](./mcp_control_center/README.md)。

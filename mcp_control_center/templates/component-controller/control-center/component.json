@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "id": "example_component",
+  "displayName": "Example Component",
+  "runtimeMode": "component-controller",
+  "runtimeContract": "unified-lifecycle-v3",
+  "traits": [],
+  "contractScript": "scripts\\runtime-control.ps1",
+  "capabilities": ["ensure_running", "reload_runtime", "shutdown_runtime"],
+  "lifecycle": {
+    "controller": {
+      "kind": "powershell",
+      "path": "scripts\\runtime-control.ps1"
+    }
+  },
+  "probes": [
+    {
+      "id": "core",
+      "label": "Core health",
+      "role": "core",
+      "kind": "json",
+      "url": "http://127.0.0.1:18990/health",
+      "port": 18990,
+      "required": true,
+      "expected": {
+        "status": "ok",
+        "service": "example_component"
+      },
+      "publicSummaryFields": ["status", "service", "version"],
+      "ownership": {
+        "commandContains": ["example_component", "component-runtime"]
+      }
+    }
+  ],
+  "navigation": [
+    {
+      "id": "health",
+      "label": "Open health",
+      "kind": "probe",
+      "target": "core"
+    }
+  ],
+  "ui": {
+    "menuContract": "component-menu-v1",
+    "actionEntrypoint": {
+      "kind": "powershell",
+      "path": "scripts\\control-center-ui.ps1"
+    },
+    "menuActions": [
+      { "id": "copy_mcp_url", "label": "Copy MCP URL", "group": "connection", "confirmation": "none" },
+      { "id": "copy_health_url", "label": "Copy health URL", "group": "connection", "confirmation": "none" },
+      { "id": "open_mcp_health", "label": "Open MCP health", "group": "connection", "confirmation": "none" },
+      { "id": "open_runtime_logs", "label": "Open runtime logs", "group": "connection", "confirmation": "none" }
+    ]
+  },
+  "safety": {
+    "managerDomainDataAccess": "none",
+    "managerSecretAccess": "none",
+    "shutdownConfirmation": "required"
+  }
+}

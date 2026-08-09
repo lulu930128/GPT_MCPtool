@@ -3,6 +3,7 @@ $ErrorActionPreference = "Stop"
 
 $script:ExpectedTrayContract = "unified-always-on-v2"
 $script:ExpectedLifecycleContract = "unified-lifecycle-v3"
+$script:ExpectedComponentMenuContract = "component-menu-v1"
 $script:ControllerCapabilities = @(
     "ensure_running",
     "repair_connectivity",
@@ -11,10 +12,40 @@ $script:ControllerCapabilities = @(
     "shutdown_runtime",
     "show_diagnostic_tray"
 )
+$script:ComponentTraits = @(
+    "tunnel",
+    "external-dependency",
+    "multi-core",
+    "data-sensitive",
+    "credential-sensitive",
+    "approval-sensitive",
+    "primary-ui",
+    "diagnostic-ui"
+)
+$script:SafeSummaryFields = @(
+    "service",
+    "status",
+    "version",
+    "buildId",
+    "contractVersion",
+    "toolCount",
+    "database",
+    "schemaRevision",
+    "ready",
+    "databaseReady",
+    "frontendReady",
+    "errorCode"
+)
+$script:MaximumRegistryComponents = 64
+$script:MaximumConfigBytes = 131072
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
 function Get-McpCcDefaultManifestPath {
     $moduleRoot = Split-Path -Parent $PSScriptRoot
+    $registryPath = Join-Path $moduleRoot "config\registry.json"
+    if (Test-Path -LiteralPath $registryPath -PathType Leaf) {
+        return $registryPath
+    }
     return Join-Path $moduleRoot "config\components.json"
 }
 
@@ -65,6 +96,14 @@ function Resolve-McpCcChildPath {
     if (-not (Test-McpCcPathWithinRoot -Path $resolved -Root $Root)) {
         throw "$Label escapes its component root."
     }
+    if ((Test-Path -LiteralPath $Root) -and (Test-Path -LiteralPath $resolved)) {
+        $physicalRoot = (Resolve-Path -LiteralPath $Root -ErrorAction Stop).Path
+        $physicalResolved = (Resolve-Path -LiteralPath $resolved -ErrorAction Stop).Path
+        if (-not (Test-McpCcPathWithinRoot -Path $physicalResolved -Root $physicalRoot)) {
+            throw "$Label escapes its component root after filesystem resolution."
+        }
+        return $physicalResolved
+    }
     return $resolved
 }
 
@@ -104,6 +143,106 @@ function Get-McpCcObjectProperty {
         return [pscustomobject]@{ found = $false; value = $null }
     }
     return [pscustomobject]@{ found = $true; value = $property.Value }
+}
+
+function Assert-McpCcObjectShape {
+    param(
+        [Parameter(Mandatory = $true)]$Object,
+        [Parameter(Mandatory = $true)][string[]]$Allowed,
+        [string[]]$Required = @(),
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    if ($null -eq $Object -or $Object -is [string] -or $Object -is [ValueType] -or $Object -is [System.Array]) {
+        throw "$Label must be an object."
+    }
+    $propertyNames = @($Object.PSObject.Properties.Name | ForEach-Object { [string]$_ })
+    $unknown = @($propertyNames | Where-Object { $_ -notin $Allowed })
+    if ($unknown.Count -gt 0) {
+        throw "$Label contains unsupported field(s): $($unknown -join ', ')."
+    }
+    $missing = @($Required | Where-Object { $_ -notin $propertyNames })
+    if ($missing.Count -gt 0) {
+        throw "$Label is missing required field(s): $($missing -join ', ')."
+    }
+}
+
+function Read-McpCcJsonFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string]$Label = "JSON document",
+        [int]$MaximumBytes = $script:MaximumConfigBytes
+    )
+    $resolved = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
+    $item = Get-Item -LiteralPath $resolved -ErrorAction Stop
+    if ($item.Length -gt $MaximumBytes) {
+        throw "$Label exceeds the $MaximumBytes byte limit."
+    }
+    try {
+        $document = Get-Content -LiteralPath $resolved -Encoding UTF8 -Raw | ConvertFrom-Json
+    }
+    catch {
+        throw "Invalid $Label at $resolved. $($_.Exception.Message)"
+    }
+    return [pscustomobject]@{ path = $resolved; document = $document }
+}
+
+function Assert-McpCcIntegerRange {
+    param(
+        $Value,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [Parameter(Mandatory = $true)][int]$Minimum,
+        [Parameter(Mandatory = $true)][int]$Maximum
+    )
+    if ($Value -isnot [int] -and $Value -isnot [long]) {
+        throw "$Label must be an integer."
+    }
+    $number = [long]$Value
+    if ($number -lt $Minimum -or $number -gt $Maximum) {
+        throw "$Label must be between $Minimum and $Maximum."
+    }
+    return [int]$number
+}
+
+function Assert-McpCcBoolean {
+    param($Value, [Parameter(Mandatory = $true)][string]$Label)
+    if ($Value -isnot [bool]) { throw "$Label must be boolean." }
+}
+
+function Assert-McpCcStringList {
+    param(
+        $Value,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [string[]]$Allowed,
+        [int]$MinimumCount = 0,
+        [int]$MaximumCount = 64
+    )
+    if ($null -eq $Value -or $Value -is [string]) {
+        throw "$Label must be an array."
+    }
+    $rawItems = @($Value)
+    if (@($rawItems | Where-Object { $_ -isnot [string] }).Count -gt 0) {
+        throw "$Label must contain strings only."
+    }
+    $items = @($rawItems | ForEach-Object { [string]$_ })
+    if ($items.Count -lt $MinimumCount -or $items.Count -gt $MaximumCount) {
+        throw "$Label must contain between $MinimumCount and $MaximumCount entries."
+    }
+    if (@($items | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -gt 0) {
+        throw "$Label must not contain blank entries."
+    }
+    if (@($items | Select-Object -Unique).Count -ne $items.Count) {
+        throw "$Label must not contain duplicate entries."
+    }
+    if ($null -ne $Allowed -and @($Allowed).Count -gt 0) {
+        $unknown = @($items | Where-Object { $_ -notin $Allowed })
+        if ($unknown.Count -gt 0) { throw "$Label contains unsupported value(s): $($unknown -join ', ')." }
+    }
+    return [string[]]$items
+}
+
+function Test-McpCcJsonScalar {
+    param($Value)
+    return $null -eq $Value -or $Value -is [string] -or $Value -is [bool] -or $Value -is [ValueType]
 }
 
 function Get-McpCcNestedProperty {
@@ -147,7 +286,7 @@ function Get-McpCcRuntimeMode {
 function Get-McpCcRequiredActionNames {
     param([Parameter(Mandatory = $true)]$Component)
     if ((Get-McpCcRuntimeMode -Component $Component) -eq "component-controller") {
-        return @($script:ControllerCapabilities)
+        return @($Component.capabilities)
     }
     return @("start", "restart")
 }
@@ -181,7 +320,7 @@ function Get-McpCcComponentActionBinding {
         $standardArguments = @()
     }
     elseif ($runtimeMode -eq "component-controller") {
-        if ($semanticAction -notin $script:ControllerCapabilities) {
+        if ($semanticAction -notin $script:ControllerCapabilities -or $semanticAction -notin @($Component.capabilities)) {
             throw "Component '$($Component.id)' does not support lifecycle action '$semanticAction'."
         }
         $manifestAction = $semanticAction
@@ -210,7 +349,21 @@ function Get-McpCcComponentActionBinding {
     }
 }
 
-function Read-McpCcManifest {
+function Get-McpCcComponentTimingSeconds {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)]$Component,
+        [Parameter(Mandatory = $true)][ValidateSet("postStartTimeoutSeconds", "controllerActionTimeoutSeconds")][string]$Name
+    )
+    $timingResult = Get-McpCcObjectProperty -Object $Component -Name "timing"
+    if ($timingResult.found -and $null -ne $timingResult.value) {
+        $overrideResult = Get-McpCcObjectProperty -Object $timingResult.value -Name $Name
+        if ($overrideResult.found) { return [int]$overrideResult.value }
+    }
+    return [int]$Manifest.settings.$Name
+}
+
+function Read-McpCcLegacyManifest {
     param([string]$Path = (Get-McpCcDefaultManifestPath))
     $manifestPath = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
     try {
@@ -292,6 +445,10 @@ function Read-McpCcManifest {
         $contractScript = Resolve-McpCcChildPath -Root $resolvedRoot -RelativePath ([string]$contractScriptResult.value) -Label "contractScript"
         $component | Add-Member -NotePropertyName resolvedContractScript -NotePropertyValue $contractScript -Force
 
+        $component | Add-Member -NotePropertyName capabilities -NotePropertyValue $(
+            if ($runtimeMode -eq "component-controller") { @($script:ControllerCapabilities) }
+            else { @("ensure_running", "reload_runtime") }
+        ) -Force
         $requiredActionNames = @(Get-McpCcRequiredActionNames -Component $component)
         foreach ($actionName in $requiredActionNames) {
             $actionResult = Get-McpCcObjectProperty -Object $component.actions -Name $actionName
@@ -316,11 +473,6 @@ function Read-McpCcManifest {
                 }
             }
         }
-        $component | Add-Member -NotePropertyName capabilities -NotePropertyValue $(
-            if ($runtimeMode -eq "component-controller") { @($script:ControllerCapabilities) }
-            else { @("ensure_running", "reload_runtime") }
-        ) -Force
-
         if (@($component.probes).Count -lt 2) {
             throw "Component '$($component.id)' requires core and connectivity probes."
         }
@@ -362,6 +514,549 @@ function Read-McpCcManifest {
     $manifest | Add-Member -NotePropertyName managerRoot -NotePropertyValue $managerRoot -Force
     $manifest | Add-Member -NotePropertyName workspaceRoot -NotePropertyValue $workspaceRoot -Force
     return $manifest
+}
+
+function Assert-McpCcLauncherSpec {
+    param(
+        [Parameter(Mandatory = $true)]$Spec,
+        [Parameter(Mandatory = $true)][ValidateSet("vbs", "powershell")][string]$Kind,
+        [Parameter(Mandatory = $true)][string]$ComponentRoot,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    Assert-McpCcObjectShape -Object $Spec -Allowed @("kind", "path") -Required @("kind", "path") -Label $Label
+    if ([string]$Spec.kind -ne $Kind) { throw "$Label must use kind '$Kind'." }
+    $path = [string]$Spec.path
+    if ([string]::IsNullOrWhiteSpace($path)) { throw "$Label requires a non-empty path." }
+    $extension = if ($Kind -eq "vbs") { ".vbs" } else { ".ps1" }
+    if (-not $path.EndsWith($extension, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "$Label must reference a $extension file."
+    }
+    $null = Resolve-McpCcChildPath -Root $ComponentRoot -RelativePath $path -Label $Label
+    return [pscustomobject]@{ kind = $Kind; path = $path }
+}
+
+function ConvertFrom-McpCcDescriptorProbe {
+    param(
+        [Parameter(Mandatory = $true)]$Probe,
+        [Parameter(Mandatory = $true)][string]$ComponentId,
+        [Parameter(Mandatory = $true)][string]$ComponentRoot
+    )
+    $label = "Probe '$ComponentId/$($Probe.id)'"
+    Assert-McpCcObjectShape `
+        -Object $Probe `
+        -Allowed @("id", "label", "role", "kind", "url", "port", "required", "expected", "expectedText", "publicSummaryFields", "ownership") `
+        -Required @("id", "label", "role", "kind", "url", "port", "required") `
+        -Label $label
+
+    if ([string]::IsNullOrWhiteSpace([string]$Probe.id) -or [string]$Probe.id -notmatch '^[a-z][a-z0-9_]{0,63}$') {
+        throw "$label has an invalid id."
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$Probe.label) -or ([string]$Probe.label).Length -gt 80) {
+        throw "$label requires a label of at most 80 characters."
+    }
+    if ([string]$Probe.role -notin @("core", "dependency", "connectivity")) {
+        throw "$label has unsupported role '$($Probe.role)'."
+    }
+    if ([string]$Probe.kind -notin @("json", "text")) {
+        throw "$label has unsupported kind '$($Probe.kind)'."
+    }
+    Assert-McpCcBoolean -Value $Probe.required -Label "$label required"
+    $port = Assert-McpCcIntegerRange -Value $Probe.port -Label "$label port" -Minimum 1 -Maximum 65535
+    Assert-McpCcLoopbackUrl -Url ([string]$Probe.url)
+    $uri = [Uri]([string]$Probe.url)
+    if ($uri.Port -ne $port) { throw "$label URL port must match its declared port." }
+
+    $expectedResult = Get-McpCcObjectProperty -Object $Probe -Name "expected"
+    $expectedTextResult = Get-McpCcObjectProperty -Object $Probe -Name "expectedText"
+    if ([string]$Probe.kind -eq "json") {
+        if (-not $expectedResult.found -or $null -eq $expectedResult.value) { throw "$label requires expected JSON fields." }
+        if ($expectedTextResult.found) { throw "$label must not declare expectedText for a JSON probe." }
+        Assert-McpCcObjectShape -Object $expectedResult.value -Allowed @($expectedResult.value.PSObject.Properties.Name) -Label "$label expected"
+        if (@($expectedResult.value.PSObject.Properties).Count -eq 0) { throw "$label expected must not be empty." }
+        foreach ($property in $expectedResult.value.PSObject.Properties) {
+            if (-not (Test-McpCcJsonScalar -Value $property.Value)) {
+                throw "$label expected field '$($property.Name)' must be a top-level scalar."
+            }
+        }
+    }
+    else {
+        if (-not $expectedTextResult.found) { throw "$label requires expectedText markers." }
+        if ($expectedResult.found) { throw "$label must not declare expected for a text probe." }
+        $null = Assert-McpCcStringList -Value $expectedTextResult.value -Label "$label expectedText" -MinimumCount 1 -MaximumCount 8
+    }
+
+    $summaryResult = Get-McpCcObjectProperty -Object $Probe -Name "publicSummaryFields"
+    $summaryFields = if ($summaryResult.found) {
+        @(Assert-McpCcStringList -Value $summaryResult.value -Label "$label publicSummaryFields" -Allowed $script:SafeSummaryFields -MaximumCount 16)
+    }
+    else { @() }
+
+    $normalized = [ordered]@{
+        id = [string]$Probe.id
+        label = [string]$Probe.label
+        role = [string]$Probe.role
+        kind = [string]$Probe.kind
+        url = [string]$Probe.url
+        port = $port
+        required = [bool]$Probe.required
+        summaryFields = $summaryFields
+        ownerCommandContains = @()
+        ownerManagedPidFile = $null
+        resolvedOwnerManagedPidFile = $null
+        ownerManagedCommandContains = @()
+    }
+    if ($expectedResult.found) { $normalized["expected"] = $expectedResult.value }
+    if ($expectedTextResult.found) { $normalized["expectedText"] = @($expectedTextResult.value | ForEach-Object { [string]$_ }) }
+
+    $ownershipResult = Get-McpCcObjectProperty -Object $Probe -Name "ownership"
+    if ($ownershipResult.found) {
+        if ([string]$Probe.role -eq "dependency") { throw "$label dependency probes must not declare ownership." }
+        Assert-McpCcObjectShape `
+            -Object $ownershipResult.value `
+            -Allowed @("commandContains", "managedPidFile", "managedCommandContains") `
+            -Label "$label ownership"
+        $commandResult = Get-McpCcObjectProperty -Object $ownershipResult.value -Name "commandContains"
+        if ($commandResult.found) {
+            $normalized["ownerCommandContains"] = @(Assert-McpCcStringList -Value $commandResult.value -Label "$label ownership.commandContains" -MinimumCount 1 -MaximumCount 8)
+        }
+        $pidResult = Get-McpCcObjectProperty -Object $ownershipResult.value -Name "managedPidFile"
+        $managedCommandResult = Get-McpCcObjectProperty -Object $ownershipResult.value -Name "managedCommandContains"
+        if ($managedCommandResult.found -and -not $pidResult.found) {
+            throw "$label ownership.managedCommandContains requires managedPidFile."
+        }
+        if ($pidResult.found) {
+            if ([string]::IsNullOrWhiteSpace([string]$pidResult.value)) { throw "$label ownership.managedPidFile must not be blank." }
+            $managedPidPath = Resolve-McpCcChildPath -Root $ComponentRoot -RelativePath ([string]$pidResult.value) -Label "$label managed PID file"
+            $normalized["ownerManagedPidFile"] = [string]$pidResult.value
+            $normalized["resolvedOwnerManagedPidFile"] = $managedPidPath
+        }
+        if ($managedCommandResult.found) {
+            $normalized["ownerManagedCommandContains"] = @(Assert-McpCcStringList -Value $managedCommandResult.value -Label "$label ownership.managedCommandContains" -MinimumCount 1 -MaximumCount 8)
+        }
+        if (-not $commandResult.found -and -not $pidResult.found) {
+            throw "$label ownership must declare commandContains or managedPidFile."
+        }
+    }
+    return [pscustomobject]$normalized
+}
+
+function ConvertFrom-McpCcComponentDescriptor {
+    param(
+        [Parameter(Mandatory = $true)]$Descriptor,
+        [Parameter(Mandatory = $true)]$RegistryEntry,
+        [Parameter(Mandatory = $true)][string]$ResolvedRoot,
+        [Parameter(Mandatory = $true)][string]$DescriptorPath
+    )
+    $componentId = [string]$RegistryEntry.id
+    Assert-McpCcObjectShape `
+        -Object $Descriptor `
+        -Allowed @("schemaVersion", "id", "displayName", "runtimeMode", "runtimeContract", "traits", "contractScript", "capabilities", "lifecycle", "legacyStartup", "timing", "probes", "navigation", "ui", "safety") `
+        -Required @("schemaVersion", "id", "displayName", "runtimeMode", "runtimeContract", "traits", "contractScript", "capabilities", "lifecycle", "probes", "navigation", "safety") `
+        -Label "Component descriptor '$componentId'"
+    if ($Descriptor.schemaVersion -isnot [int] -and $Descriptor.schemaVersion -isnot [long]) { throw "Component descriptor '$componentId' schemaVersion must be an integer." }
+    if ([int]$Descriptor.schemaVersion -ne 1) { throw "Component descriptor '$componentId' has unsupported schemaVersion '$($Descriptor.schemaVersion)'." }
+    if (-not ([string]$Descriptor.id).Equals($componentId, [StringComparison]::Ordinal)) {
+        throw "Registry id '$componentId' does not match descriptor id '$($Descriptor.id)'."
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$Descriptor.displayName) -or ([string]$Descriptor.displayName).Length -gt 80) {
+        throw "Component descriptor '$componentId' requires displayName of at most 80 characters."
+    }
+    $runtimeMode = [string]$Descriptor.runtimeMode
+    if ($runtimeMode -notin @("legacy-tray", "component-controller")) {
+        throw "Component descriptor '$componentId' has unsupported runtimeMode '$runtimeMode'."
+    }
+    $expectedContract = if ($runtimeMode -eq "legacy-tray") { $script:ExpectedTrayContract } else { $script:ExpectedLifecycleContract }
+    if ([string]$Descriptor.runtimeContract -ne $expectedContract) {
+        throw "Component descriptor '$componentId' runtimeContract must be '$expectedContract'."
+    }
+    $traits = @(Assert-McpCcStringList -Value $Descriptor.traits -Label "Component '$componentId' traits" -Allowed $script:ComponentTraits -MaximumCount $script:ComponentTraits.Count)
+    $capabilities = @(Assert-McpCcStringList -Value $Descriptor.capabilities -Label "Component '$componentId' capabilities" -Allowed $script:ControllerCapabilities -MinimumCount 1 -MaximumCount $script:ControllerCapabilities.Count)
+    if ($runtimeMode -eq "legacy-tray") {
+        if ($capabilities.Count -ne 2 -or "ensure_running" -notin $capabilities -or "reload_runtime" -notin $capabilities) {
+            throw "Legacy component '$componentId' must declare exactly ensure_running and reload_runtime."
+        }
+    }
+    else {
+        $missingBase = @(@("ensure_running", "reload_runtime", "shutdown_runtime") | Where-Object { $_ -notin $capabilities })
+        if ($missingBase.Count -gt 0) { throw "Controller component '$componentId' is missing required capability(s): $($missingBase -join ', ')." }
+    }
+
+    if ([string]::IsNullOrWhiteSpace([string]$Descriptor.contractScript)) { throw "Component '$componentId' requires contractScript." }
+    $resolvedContractScript = Resolve-McpCcChildPath -Root $ResolvedRoot -RelativePath ([string]$Descriptor.contractScript) -Label "contractScript"
+    Assert-McpCcObjectShape -Object $Descriptor.lifecycle -Allowed @("ensureLauncher", "reloadLauncher", "controller", "diagnosticLauncher") -Label "Component '$componentId' lifecycle"
+    $actions = [ordered]@{}
+    if ($runtimeMode -eq "legacy-tray") {
+        $ensureResult = Get-McpCcObjectProperty -Object $Descriptor.lifecycle -Name "ensureLauncher"
+        $reloadResult = Get-McpCcObjectProperty -Object $Descriptor.lifecycle -Name "reloadLauncher"
+        if (-not $ensureResult.found -or -not $reloadResult.found) { throw "Legacy component '$componentId' requires ensureLauncher and reloadLauncher." }
+        foreach ($forbidden in @("controller", "diagnosticLauncher")) {
+            if ((Get-McpCcObjectProperty -Object $Descriptor.lifecycle -Name $forbidden).found) { throw "Legacy component '$componentId' must not declare lifecycle.$forbidden." }
+        }
+        $actions["start"] = Assert-McpCcLauncherSpec -Spec $ensureResult.value -Kind "vbs" -ComponentRoot $ResolvedRoot -Label "Component '$componentId' ensureLauncher"
+        $actions["restart"] = Assert-McpCcLauncherSpec -Spec $reloadResult.value -Kind "vbs" -ComponentRoot $ResolvedRoot -Label "Component '$componentId' reloadLauncher"
+    }
+    else {
+        $controllerResult = Get-McpCcObjectProperty -Object $Descriptor.lifecycle -Name "controller"
+        if (-not $controllerResult.found) { throw "Controller component '$componentId' requires lifecycle.controller." }
+        foreach ($forbidden in @("ensureLauncher", "reloadLauncher")) {
+            if ((Get-McpCcObjectProperty -Object $Descriptor.lifecycle -Name $forbidden).found) { throw "Controller component '$componentId' must not declare lifecycle.$forbidden." }
+        }
+        $controller = Assert-McpCcLauncherSpec -Spec $controllerResult.value -Kind "powershell" -ComponentRoot $ResolvedRoot -Label "Component '$componentId' controller"
+        $diagnosticResult = Get-McpCcObjectProperty -Object $Descriptor.lifecycle -Name "diagnosticLauncher"
+        $diagnostic = $null
+        if ($diagnosticResult.found) {
+            $diagnostic = Assert-McpCcLauncherSpec -Spec $diagnosticResult.value -Kind "vbs" -ComponentRoot $ResolvedRoot -Label "Component '$componentId' diagnosticLauncher"
+        }
+        foreach ($capability in $capabilities) {
+            if ($capability -eq "show_diagnostic_tray") {
+                if ($null -eq $diagnostic) { throw "Component '$componentId' declares show_diagnostic_tray without diagnosticLauncher." }
+                $actions[$capability] = $diagnostic
+            }
+            else { $actions[$capability] = $controller }
+        }
+        if ($null -ne $diagnostic -and "show_diagnostic_tray" -notin $capabilities) {
+            throw "Component '$componentId' diagnosticLauncher requires show_diagnostic_tray capability."
+        }
+    }
+
+    $timing = [pscustomobject]@{}
+    $timingResult = Get-McpCcObjectProperty -Object $Descriptor -Name "timing"
+    if ($timingResult.found) {
+        Assert-McpCcObjectShape -Object $timingResult.value -Allowed @("postStartTimeoutSeconds", "controllerActionTimeoutSeconds") -Label "Component '$componentId' timing"
+        $postStartResult = Get-McpCcObjectProperty -Object $timingResult.value -Name "postStartTimeoutSeconds"
+        $controllerTimeoutResult = Get-McpCcObjectProperty -Object $timingResult.value -Name "controllerActionTimeoutSeconds"
+        $timingHash = [ordered]@{}
+        if ($postStartResult.found) { $timingHash["postStartTimeoutSeconds"] = Assert-McpCcIntegerRange -Value $postStartResult.value -Label "Component '$componentId' postStartTimeoutSeconds" -Minimum 5 -Maximum 300 }
+        if ($controllerTimeoutResult.found) { $timingHash["controllerActionTimeoutSeconds"] = Assert-McpCcIntegerRange -Value $controllerTimeoutResult.value -Label "Component '$componentId' controllerActionTimeoutSeconds" -Minimum 5 -Maximum 300 }
+        $timing = [pscustomobject]$timingHash
+    }
+
+    if ($null -eq $Descriptor.probes -or $Descriptor.probes -is [string]) { throw "Component '$componentId' probes must be an array." }
+    $probeDocuments = @($Descriptor.probes)
+    if ($probeDocuments.Count -lt 1 -or $probeDocuments.Count -gt 16) { throw "Component '$componentId' requires between 1 and 16 probes." }
+    $probeIds = @{}
+    $probes = @()
+    foreach ($probeDocument in $probeDocuments) {
+        $probe = ConvertFrom-McpCcDescriptorProbe -Probe $probeDocument -ComponentId $componentId -ComponentRoot $ResolvedRoot
+        if ($probeIds.ContainsKey([string]$probe.id)) { throw "Component '$componentId' has duplicate probe id '$($probe.id)'." }
+        $probeIds[[string]$probe.id] = $true
+        $probes += $probe
+    }
+    if (@($probes | Where-Object { $_.required -and $_.role -eq "core" }).Count -eq 0) {
+        throw "Component '$componentId' requires at least one required core probe."
+    }
+    if ("tunnel" -in $traits) {
+        if (@($probes | Where-Object { $_.required -and $_.role -eq "connectivity" }).Count -eq 0) { throw "Component '$componentId' tunnel trait requires a required connectivity probe." }
+        if ($runtimeMode -eq "component-controller" -and "repair_connectivity" -notin $capabilities) { throw "Controller component '$componentId' tunnel trait requires repair_connectivity." }
+    }
+    if ("external-dependency" -in $traits -and @($probes | Where-Object { $_.role -eq "dependency" }).Count -eq 0) {
+        throw "Component '$componentId' external-dependency trait requires a dependency probe."
+    }
+    foreach ($role in @("core", "connectivity")) {
+        $roleProbes = @($probes | Where-Object { $_.required -and $_.role -eq $role })
+        if ($roleProbes.Count -gt 0 -and @($roleProbes | Where-Object { @($_.ownerCommandContains).Count -gt 0 -or -not [string]::IsNullOrWhiteSpace([string]$_.ownerManagedPidFile) }).Count -eq 0) {
+            throw "Component '$componentId' required $role probes need ownership evidence."
+        }
+    }
+
+    if ($null -eq $Descriptor.navigation -or $Descriptor.navigation -is [string]) { throw "Component '$componentId' navigation must be an array." }
+    $navigationDocuments = @($Descriptor.navigation)
+    if ($navigationDocuments.Count -gt 16) { throw "Component '$componentId' navigation exceeds 16 entries." }
+    $navigationIds = @{}
+    $navigation = @()
+    foreach ($item in $navigationDocuments) {
+        Assert-McpCcObjectShape -Object $item -Allowed @("id", "label", "kind", "target") -Required @("id", "label", "kind", "target") -Label "Component '$componentId' navigation item"
+        $navigationId = [string]$item.id
+        if ([string]::IsNullOrWhiteSpace($navigationId) -or $navigationId -notmatch '^[a-z][a-z0-9_]{0,63}$' -or $navigationIds.ContainsKey($navigationId)) {
+            throw "Component '$componentId' has invalid or duplicate navigation id '$navigationId'."
+        }
+        $navigationIds[$navigationId] = $true
+        if ([string]::IsNullOrWhiteSpace([string]$item.label) -or ([string]$item.label).Length -gt 80) { throw "Component '$componentId' navigation '$navigationId' has an invalid label." }
+        $kind = [string]$item.kind
+        $target = [string]$item.target
+        if ($kind -eq "probe") {
+            if (-not $probeIds.ContainsKey($target)) { throw "Component '$componentId' navigation '$navigationId' references unknown probe '$target'." }
+        }
+        elseif ($kind -eq "component-path") {
+            $resolvedNavigationPath = Resolve-McpCcChildPath -Root $ResolvedRoot -RelativePath $target -Label "Component '$componentId' navigation '$navigationId'"
+            if (-not (Test-Path -LiteralPath $resolvedNavigationPath)) { throw "Component '$componentId' navigation '$navigationId' path does not exist." }
+        }
+        elseif ($kind -eq "loopback-url") { Assert-McpCcLoopbackUrl -Url $target }
+        else { throw "Component '$componentId' navigation '$navigationId' has unsupported kind '$kind'." }
+        $navigation += [pscustomobject]@{ id = $navigationId; label = [string]$item.label; kind = $kind; target = $target }
+    }
+
+    $uiHash = [ordered]@{}
+    $uiResult = Get-McpCcObjectProperty -Object $Descriptor -Name "ui"
+    if ($uiResult.found) {
+        Assert-McpCcObjectShape -Object $uiResult.value -Allowed @("primaryLauncher", "menuContract", "actionEntrypoint", "menuActions") -Label "Component '$componentId' ui"
+        $primaryLauncherResult = Get-McpCcObjectProperty -Object $uiResult.value -Name "primaryLauncher"
+        if ($primaryLauncherResult.found) {
+            $uiHash["primaryLauncher"] = Assert-McpCcLauncherSpec -Spec $primaryLauncherResult.value -Kind "vbs" -ComponentRoot $ResolvedRoot -Label "Component '$componentId' primaryLauncher"
+        }
+        $menuContractResult = Get-McpCcObjectProperty -Object $uiResult.value -Name "menuContract"
+        $actionEntrypointResult = Get-McpCcObjectProperty -Object $uiResult.value -Name "actionEntrypoint"
+        $menuActionsResult = Get-McpCcObjectProperty -Object $uiResult.value -Name "menuActions"
+        $menuFieldCount = @(@($menuContractResult, $actionEntrypointResult, $menuActionsResult) | Where-Object { $_.found }).Count
+        if ($menuFieldCount -gt 0 -and $menuFieldCount -ne 3) {
+            throw "Component '$componentId' ui menu requires menuContract, actionEntrypoint, and menuActions together."
+        }
+        if ($menuFieldCount -eq 3) {
+            if ($runtimeMode -ne "component-controller") { throw "Component '$componentId' component menu requires component-controller mode." }
+            if ([string]$menuContractResult.value -ne $script:ExpectedComponentMenuContract) {
+                throw "Component '$componentId' ui.menuContract must be '$script:ExpectedComponentMenuContract'."
+            }
+            $actionEntrypoint = Assert-McpCcLauncherSpec -Spec $actionEntrypointResult.value -Kind "powershell" -ComponentRoot $ResolvedRoot -Label "Component '$componentId' UI action entrypoint"
+            if ($menuActionsResult.value -is [string]) { throw "Component '$componentId' ui.menuActions must be an array." }
+            $menuActionDocuments = @($menuActionsResult.value)
+            if ($menuActionDocuments.Count -lt 1 -or $menuActionDocuments.Count -gt 24) {
+                throw "Component '$componentId' ui.menuActions requires between 1 and 24 entries."
+            }
+            $menuActionIds = @{}
+            $menuActions = @()
+            foreach ($menuAction in $menuActionDocuments) {
+                Assert-McpCcObjectShape -Object $menuAction -Allowed @("id", "label", "group", "confirmation") -Required @("id", "label", "group", "confirmation") -Label "Component '$componentId' UI menu action"
+                $menuActionId = [string]$menuAction.id
+                if ([string]::IsNullOrWhiteSpace($menuActionId) -or $menuActionId -notmatch '^[a-z][a-z0-9_]{0,63}$' -or $menuActionIds.ContainsKey($menuActionId)) {
+                    throw "Component '$componentId' has invalid or duplicate UI menu action id '$menuActionId'."
+                }
+                if ([string]::IsNullOrWhiteSpace([string]$menuAction.label) -or ([string]$menuAction.label).Length -gt 80) {
+                    throw "Component '$componentId' UI menu action '$menuActionId' has an invalid label."
+                }
+                $menuActionGroup = [string]$menuAction.group
+                if ($menuActionGroup -notin @("connection", "component")) {
+                    throw "Component '$componentId' UI menu action '$menuActionId' has unsupported group '$menuActionGroup'."
+                }
+                $menuActionConfirmation = [string]$menuAction.confirmation
+                if ($menuActionConfirmation -notin @("none", "required")) {
+                    throw "Component '$componentId' UI menu action '$menuActionId' has unsupported confirmation '$menuActionConfirmation'."
+                }
+                $menuActionIds[$menuActionId] = $true
+                $menuActions += [pscustomobject]@{
+                    id = $menuActionId
+                    label = [string]$menuAction.label
+                    group = $menuActionGroup
+                    confirmation = $menuActionConfirmation
+                }
+            }
+            $uiHash["menuContract"] = $script:ExpectedComponentMenuContract
+            $uiHash["actionEntrypoint"] = $actionEntrypoint
+            $uiHash["menuActions"] = $menuActions
+        }
+    }
+    $primaryNavigationCount = @($navigation | Where-Object { $_.id -eq "primary_ui" -and $_.kind -eq "loopback-url" }).Count
+    $primaryLauncherCount = if ($uiHash.Contains("primaryLauncher")) { 1 } else { 0 }
+    if ("primary-ui" -in $traits) {
+        if (($primaryNavigationCount + $primaryLauncherCount) -ne 1) { throw "Component '$componentId' primary-ui trait requires exactly one primary UI target." }
+    }
+    elseif (($primaryNavigationCount + $primaryLauncherCount) -gt 0) { throw "Component '$componentId' primary UI target requires primary-ui trait." }
+    if ($runtimeMode -eq "component-controller") {
+        if ("diagnostic-ui" -in $traits -and "show_diagnostic_tray" -notin $capabilities) {
+            throw "Controller component '$componentId' diagnostic-ui trait requires show_diagnostic_tray."
+        }
+        if ("show_diagnostic_tray" -in $capabilities -and "diagnostic-ui" -notin $traits) {
+            throw "Controller component '$componentId' show_diagnostic_tray capability requires diagnostic-ui trait."
+        }
+    }
+
+    Assert-McpCcObjectShape -Object $Descriptor.safety -Allowed @("managerDomainDataAccess", "managerSecretAccess", "shutdownConfirmation") -Required @("managerDomainDataAccess", "managerSecretAccess", "shutdownConfirmation") -Label "Component '$componentId' safety"
+    if ([string]$Descriptor.safety.managerDomainDataAccess -ne "none" -or [string]$Descriptor.safety.managerSecretAccess -ne "none" -or [string]$Descriptor.safety.shutdownConfirmation -ne "required") {
+        throw "Component '$componentId' safety contract must deny manager domain/secret access and require shutdown confirmation."
+    }
+
+    $legacyStartup = $null
+    $legacyStartupResult = Get-McpCcObjectProperty -Object $Descriptor -Name "legacyStartup"
+    if ($legacyStartupResult.found) {
+        Assert-McpCcObjectShape -Object $legacyStartupResult.value -Allowed @("shortcutName", "launcher") -Required @("shortcutName", "launcher") -Label "Component '$componentId' legacyStartup"
+        if (-not ([string]$legacyStartupResult.value.shortcutName).EndsWith(".lnk", [StringComparison]::OrdinalIgnoreCase)) { throw "Component '$componentId' legacy shortcut must end in .lnk." }
+        $null = Resolve-McpCcChildPath -Root $ResolvedRoot -RelativePath ([string]$legacyStartupResult.value.launcher) -Label "Component '$componentId' legacy startup launcher"
+        $legacyStartup = [pscustomobject]@{ shortcutName = [string]$legacyStartupResult.value.shortcutName; launcher = [string]$legacyStartupResult.value.launcher }
+    }
+
+    return [pscustomobject]@{
+        id = $componentId
+        displayName = [string]$Descriptor.displayName
+        root = [string]$RegistryEntry.root
+        resolvedRoot = $ResolvedRoot
+        descriptorPath = $DescriptorPath
+        descriptorSchemaVersion = 1
+        runtimeMode = $runtimeMode
+        runtimeContract = $expectedContract
+        contractScript = [string]$Descriptor.contractScript
+        resolvedContractScript = $resolvedContractScript
+        enabled = [bool]$RegistryEntry.enabled
+        autoStart = [bool]$RegistryEntry.autoStart
+        startupOrder = [int]$RegistryEntry.startupOrder
+        traits = $traits
+        capabilities = $capabilities
+        actions = [pscustomobject]$actions
+        legacyStartup = $legacyStartup
+        timing = $timing
+        probes = $probes
+        navigation = $navigation
+        ui = [pscustomobject]$uiHash
+        safety = [pscustomobject]@{
+            managerDomainDataAccess = "none"
+            managerSecretAccess = "none"
+            shutdownConfirmation = "required"
+        }
+    }
+}
+
+function Read-McpCcComponentCandidate {
+    param(
+        [Parameter(Mandatory = $true)][string]$ComponentRoot,
+        [string]$WorkspaceRoot = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),
+        [ValidateRange(0, 10000)][int]$StartupOrder = 0
+    )
+    $resolvedWorkspace = (Resolve-Path -LiteralPath $WorkspaceRoot -ErrorAction Stop).Path
+    $resolvedRoot = (Resolve-Path -LiteralPath $ComponentRoot -ErrorAction Stop).Path
+    if (-not (Test-Path -LiteralPath $resolvedRoot -PathType Container)) {
+        throw "Component candidate root does not exist: $resolvedRoot"
+    }
+    $resolvedParent = Split-Path -Parent $resolvedRoot
+    if (-not $resolvedParent.Equals($resolvedWorkspace, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Component candidate root must be a direct child of the workspace root."
+    }
+    $rootItem = Get-Item -LiteralPath $resolvedRoot -Force -ErrorAction Stop
+    if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Component candidate root must not be a reparse point."
+    }
+    $descriptorPath = Join-Path $resolvedRoot "control-center\component.json"
+    $descriptorRead = Read-McpCcJsonFile -Path $descriptorPath -Label "component candidate descriptor"
+    $idResult = Get-McpCcObjectProperty -Object $descriptorRead.document -Name "id"
+    if (-not $idResult.found -or [string]::IsNullOrWhiteSpace([string]$idResult.value)) {
+        throw "Component candidate descriptor requires id."
+    }
+    $entry = [pscustomobject]@{
+        id = [string]$idResult.value
+        root = Split-Path -Leaf $resolvedRoot
+        descriptor = "control-center\component.json"
+        enabled = $false
+        autoStart = $false
+        startupOrder = $StartupOrder
+    }
+    return ConvertFrom-McpCcComponentDescriptor `
+        -Descriptor $descriptorRead.document `
+        -RegistryEntry $entry `
+        -ResolvedRoot $resolvedRoot `
+        -DescriptorPath $descriptorRead.path
+}
+
+function Read-McpCcRegistryManifest {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]$Registry
+    )
+    Assert-McpCcObjectShape -Object $Registry -Allowed @("schemaVersion", "settings", "components") -Required @("schemaVersion", "settings", "components") -Label "Registry v3"
+    if ($Registry.schemaVersion -isnot [int] -and $Registry.schemaVersion -isnot [long]) { throw "Registry schemaVersion must be an integer." }
+    if ([int]$Registry.schemaVersion -ne 3) { throw "Unsupported registry schemaVersion '$($Registry.schemaVersion)'." }
+    Assert-McpCcObjectShape `
+        -Object $Registry.settings `
+        -Allowed @("initialDelaySeconds", "betweenComponentsSeconds", "probeTimeoutSeconds", "postStartTimeoutSeconds", "controllerActionTimeoutSeconds", "refreshIntervalSeconds", "eventRetentionDays") `
+        -Required @("initialDelaySeconds", "betweenComponentsSeconds", "probeTimeoutSeconds", "postStartTimeoutSeconds", "controllerActionTimeoutSeconds", "refreshIntervalSeconds", "eventRetentionDays") `
+        -Label "Registry settings"
+    foreach ($setting in @(
+        @{ Name = "initialDelaySeconds"; Min = 0; Max = 300 },
+        @{ Name = "betweenComponentsSeconds"; Min = 0; Max = 60 },
+        @{ Name = "probeTimeoutSeconds"; Min = 1; Max = 15 },
+        @{ Name = "postStartTimeoutSeconds"; Min = 5; Max = 300 },
+        @{ Name = "controllerActionTimeoutSeconds"; Min = 5; Max = 300 },
+        @{ Name = "refreshIntervalSeconds"; Min = 10; Max = 3600 },
+        @{ Name = "eventRetentionDays"; Min = 1; Max = 365 }
+    )) {
+        $settingName = [string]$setting.Name
+        $settingProperty = $Registry.settings.PSObject.Properties[$settingName]
+        $settingProperty.Value = Assert-McpCcIntegerRange -Value $settingProperty.Value -Label "Registry setting '$settingName'" -Minimum $setting.Min -Maximum $setting.Max
+    }
+    if ($null -eq $Registry.components -or $Registry.components -is [string]) { throw "Registry components must be an array." }
+    $entries = @($Registry.components)
+    if ($entries.Count -lt 1 -or $entries.Count -gt $script:MaximumRegistryComponents) {
+        throw "Registry must contain between 1 and $script:MaximumRegistryComponents components."
+    }
+
+    $manifestPath = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
+    $manifestDirectory = Split-Path -Parent $manifestPath
+    $managerRoot = Split-Path -Parent $manifestDirectory
+    $workspaceRoot = Split-Path -Parent $managerRoot
+    $ids = @{}
+    $roots = @{}
+    $orders = @{}
+    $ownedPorts = @{}
+    $registeredEntries = @()
+    $registeredComponents = @()
+    $activeComponents = @()
+    foreach ($entry in $entries) {
+        Assert-McpCcObjectShape -Object $entry -Allowed @("id", "root", "descriptor", "enabled", "autoStart", "startupOrder") -Required @("id", "root", "descriptor", "enabled", "autoStart", "startupOrder") -Label "Registry component entry"
+        $id = [string]$entry.id
+        if ([string]::IsNullOrWhiteSpace($id) -or $id -notmatch '^[a-z][a-z0-9_]{0,63}$') { throw "Every registry component requires a stable lowercase id." }
+        if ($ids.ContainsKey($id)) { throw "Duplicate component id '$id'." }
+        $ids[$id] = $true
+        if ([IO.Path]::IsPathRooted([string]$entry.root) -or [string]::IsNullOrWhiteSpace([string]$entry.root)) { throw "Component '$id' root must be relative." }
+        $resolvedRoot = [IO.Path]::GetFullPath((Join-Path $manifestDirectory ([string]$entry.root)))
+        $resolvedParent = Split-Path -Parent $resolvedRoot
+        if (-not $resolvedParent.Equals($workspaceRoot, [StringComparison]::OrdinalIgnoreCase)) { throw "Component '$id' root must be a direct child of the workspace root." }
+        if ($roots.ContainsKey($resolvedRoot)) { throw "Duplicate component root '$resolvedRoot'." }
+        $roots[$resolvedRoot] = $true
+        if (-not (Test-Path -LiteralPath $resolvedRoot -PathType Container)) { throw "Component '$id' root does not exist." }
+        if (-not ([string]$entry.descriptor).Equals("control-center\component.json", [StringComparison]::OrdinalIgnoreCase)) { throw "Component '$id' descriptor must be 'control-center\component.json'." }
+        Assert-McpCcBoolean -Value $entry.enabled -Label "Component '$id' enabled"
+        Assert-McpCcBoolean -Value $entry.autoStart -Label "Component '$id' autoStart"
+        if (-not [bool]$entry.enabled -and [bool]$entry.autoStart) { throw "Disabled component '$id' must set autoStart=false." }
+        $startupOrder = Assert-McpCcIntegerRange -Value $entry.startupOrder -Label "Component '$id' startupOrder" -Minimum 0 -Maximum 10000
+        if ($orders.ContainsKey($startupOrder)) { throw "Duplicate startupOrder '$startupOrder'." }
+        $orders[$startupOrder] = $true
+        $descriptorPath = Resolve-McpCcChildPath -Root $resolvedRoot -RelativePath ([string]$entry.descriptor) -Label "Component '$id' descriptor"
+        $descriptorRead = Read-McpCcJsonFile -Path $descriptorPath -Label "component descriptor '$id'"
+        $component = ConvertFrom-McpCcComponentDescriptor -Descriptor $descriptorRead.document -RegistryEntry $entry -ResolvedRoot $resolvedRoot -DescriptorPath $descriptorRead.path
+        foreach ($probe in @($component.probes | Where-Object { $_.role -in @("core", "connectivity") })) {
+            $portKey = [string][int]$probe.port
+            if ($ownedPorts.ContainsKey($portKey)) {
+                $existingOwner = $ownedPorts[$portKey]
+                if (-not ([string]$existingOwner.componentId).Equals($id, [StringComparison]::OrdinalIgnoreCase)) {
+                    throw "Owned port '$portKey' is duplicated by '$id/$($probe.id)' and '$($existingOwner.label)'."
+                }
+                continue
+            }
+            $ownedPorts[$portKey] = [pscustomobject]@{ componentId = $id; label = "$id/$($probe.id)" }
+        }
+        $registeredEntries += [pscustomobject]@{
+            id = $id
+            root = [string]$entry.root
+            resolvedRoot = $resolvedRoot
+            descriptor = [string]$entry.descriptor
+            descriptorPath = $descriptorRead.path
+            enabled = [bool]$entry.enabled
+            autoStart = [bool]$entry.autoStart
+            startupOrder = $startupOrder
+        }
+        $registeredComponents += $component
+        if ([bool]$entry.enabled) { $activeComponents += $component }
+    }
+    if ($activeComponents.Count -eq 0) { throw "Registry requires at least one enabled component." }
+    return [pscustomobject]@{
+        schemaVersion = 3
+        settings = $Registry.settings
+        components = $activeComponents
+        registryEntries = $registeredEntries
+        registeredComponents = $registeredComponents
+        registeredCount = $registeredEntries.Count
+        enabledCount = $activeComponents.Count
+        sourcePath = $manifestPath
+        managerRoot = $managerRoot
+        workspaceRoot = $workspaceRoot
+    }
+}
+
+function Read-McpCcManifest {
+    param([string]$Path = (Get-McpCcDefaultManifestPath))
+    $read = Read-McpCcJsonFile -Path $Path -Label "control-center manifest"
+    Assert-McpCcObjectShape -Object $read.document -Allowed @($read.document.PSObject.Properties.Name) -Required @("schemaVersion") -Label "Control-center manifest"
+    if ($read.document.schemaVersion -isnot [int] -and $read.document.schemaVersion -isnot [long]) { throw "Manifest schemaVersion must be an integer." }
+    $schemaVersion = [int]$read.document.schemaVersion
+    if ($schemaVersion -in @(1, 2)) { return Read-McpCcLegacyManifest -Path $read.path }
+    if ($schemaVersion -eq 3) { return Read-McpCcRegistryManifest -Path $read.path -Registry $read.document }
+    throw "Unsupported manifest schemaVersion '$schemaVersion'."
 }
 
 function Get-McpCcComponent {
@@ -653,12 +1348,18 @@ function Get-McpCcProbeResult {
     $ownerFragmentsResult = Get-McpCcObjectProperty -Object $Probe -Name "ownerCommandContains"
     $managedPidPathResult = Get-McpCcObjectProperty -Object $Probe -Name "resolvedOwnerManagedPidFile"
     $managedFragmentsResult = Get-McpCcObjectProperty -Object $Probe -Name "ownerManagedCommandContains"
+    # Passing an inline subexpression that emits an empty array can make Windows
+    # PowerShell bind the following named argument as this parameter's value.
+    # Materialize each value first so managed-PID-only ownership stays exact.
+    $ownerFragments = @(if ($ownerFragmentsResult.found) { @($ownerFragmentsResult.value) } else { @() })
+    $managedPidPath = if ($managedPidPathResult.found) { [string]$managedPidPathResult.value } else { $null }
+    $managedFragments = @(if ($managedFragmentsResult.found) { @($managedFragmentsResult.value) } else { @() })
     $owner = if ($tcpOpen) {
         Get-McpCcPortOwner `
             -Port ([int]$Probe.port) `
-            -ExpectedCommandFragments $(if ($ownerFragmentsResult.found) { @($ownerFragmentsResult.value) } else { @() }) `
-            -ManagedPidPath $(if ($managedPidPathResult.found) { [string]$managedPidPathResult.value } else { $null }) `
-            -ManagedExpectedCommandFragments $(if ($managedFragmentsResult.found) { @($managedFragmentsResult.value) } else { @() })
+            -ExpectedCommandFragments $ownerFragments `
+            -ManagedPidPath $managedPidPath `
+            -ManagedExpectedCommandFragments $managedFragments
     }
     else {
         [pscustomobject]@{
@@ -922,6 +1623,55 @@ function Publish-McpCcState {
     return $State
 }
 
+function Test-McpCcComponentMenuContract {
+    param([Parameter(Mandatory = $true)]$Component)
+    $uiResult = Get-McpCcObjectProperty -Object $Component -Name "ui"
+    if (-not $uiResult.found -or $null -eq $uiResult.value) {
+        return [pscustomobject]@{ configured = $false; ok = $true; menuContract = $null; actions = @(); error = $null }
+    }
+    $menuContractResult = Get-McpCcObjectProperty -Object $uiResult.value -Name "menuContract"
+    if (-not $menuContractResult.found) {
+        return [pscustomobject]@{ configured = $false; ok = $true; menuContract = $null; actions = @(); error = $null }
+    }
+    try {
+        $entrypoint = Resolve-McpCcChildPath -Root $Component.resolvedRoot -RelativePath ([string]$Component.ui.actionEntrypoint.path) -Label "Component '$($Component.id)' UI action entrypoint"
+        if (-not (Test-Path -LiteralPath $entrypoint -PathType Leaf)) { throw "component UI action entrypoint is missing" }
+        $output = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $entrypoint -SelfTest 2>&1)
+        $exitCode = $LASTEXITCODE
+        $outputText = ($output -join [Environment]::NewLine)
+        if ([Text.Encoding]::UTF8.GetByteCount($outputText) -gt 65536) { throw "component UI SelfTest exceeded the output limit" }
+        if ($exitCode -ne 0) { throw "component UI SelfTest exited with code $exitCode" }
+        $document = $outputText | ConvertFrom-Json
+        $declaredActions = @($document.actions | ForEach-Object { [string]$_ })
+        $expectedActions = @($Component.ui.menuActions | ForEach-Object { [string]$_.id })
+        $missingActions = @($expectedActions | Where-Object { $_ -notin $declaredActions })
+        $unexpectedActions = @($declaredActions | Where-Object { $_ -notin $expectedActions })
+        $ok = (
+            $document.ok -eq $true -and
+            [string]$document.menuContract -eq $script:ExpectedComponentMenuContract -and
+            $missingActions.Count -eq 0 -and
+            $unexpectedActions.Count -eq 0
+        )
+        return [pscustomobject]@{
+            configured = $true
+            ok = $ok
+            menuContract = [string]$document.menuContract
+            actions = $declaredActions
+            expectedActions = $expectedActions
+            error = if ($ok) { $null } else { "component does not satisfy component-menu-v1 contract" }
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            configured = $true
+            ok = $false
+            menuContract = $script:ExpectedComponentMenuContract
+            actions = @()
+            error = ([string]$_.Exception.Message -replace '[\r\n]+', ' ')
+        }
+    }
+}
+
 function Test-McpCcComponentContract {
     param([Parameter(Mandatory = $true)]$Component)
     if (-not (Test-Path -LiteralPath $Component.resolvedContractScript -PathType Leaf)) {
@@ -939,19 +1689,27 @@ function Test-McpCcComponentContract {
         $exitCode = $LASTEXITCODE
         if ($exitCode -ne 0) { throw "component SelfTest exited with code $exitCode" }
         $document = ($output -join [Environment]::NewLine) | ConvertFrom-Json
+        $componentMenu = Test-McpCcComponentMenuContract -Component $Component
         if ($runtimeMode -eq "component-controller") {
             $declaredCapabilities = @($document.capabilities | ForEach-Object { [string]$_ })
-            $missingCapabilities = @($script:ControllerCapabilities | Where-Object { $_ -notin $declaredCapabilities })
+            $expectedCapabilities = @($Component.capabilities | ForEach-Object { [string]$_ })
+            $missingCapabilities = @($expectedCapabilities | Where-Object { $_ -notin $declaredCapabilities })
+            $unexpectedCapabilities = @($declaredCapabilities | Where-Object { $_ -notin $expectedCapabilities })
+            $expectsDiagnosticTray = "show_diagnostic_tray" -in $expectedCapabilities
+            $traitsResult = Get-McpCcObjectProperty -Object $Component -Name "traits"
+            $expectsTunnel = if ($traitsResult.found) { "tunnel" -in @($traitsResult.value) } else { $true }
             $ok = (
                 [string]$document.runtimeContract -eq $script:ExpectedLifecycleContract -and
                 [string]$document.lifecycleModel -eq "stateless-controller" -and
-                $document.supportsDiagnosticTray -eq $true -and
+                $document.supportsDiagnosticTray -eq $expectsDiagnosticTray -and
                 $document.controllerEntryExists -eq $true -and
                 $document.autoStartCore -eq $true -and
-                $document.autoStartTunnel -eq $true -and
+                $document.autoStartTunnel -eq $expectsTunnel -and
                 $document.exitUiStopsRuntime -eq $false -and
                 $document.exactOwnershipEnforced -eq $true -and
-                $missingCapabilities.Count -eq 0
+                $missingCapabilities.Count -eq 0 -and
+                $unexpectedCapabilities.Count -eq 0 -and
+                $componentMenu.ok
             )
             return [pscustomobject]@{
                 id = [string]$Component.id
@@ -960,12 +1718,15 @@ function Test-McpCcComponentContract {
                 runtimeContract = [string]$document.runtimeContract
                 lifecycleModel = [string]$document.lifecycleModel
                 capabilities = $declaredCapabilities
+                expectedCapabilities = $expectedCapabilities
+                supportsDiagnosticTray = [bool]$document.supportsDiagnosticTray
                 controllerEntryExists = [bool]$document.controllerEntryExists
                 autoStartCore = [bool]$document.autoStartCore
                 autoStartTunnel = [bool]$document.autoStartTunnel
                 exitUiStopsRuntime = [bool]$document.exitUiStopsRuntime
                 exactOwnershipEnforced = [bool]$document.exactOwnershipEnforced
-                error = if ($ok) { $null } else { "component does not satisfy unified lifecycle controller contract" }
+                componentMenu = $componentMenu
+                error = if ($ok) { $null } elseif (-not $componentMenu.ok) { $componentMenu.error } else { "component does not satisfy unified lifecycle controller contract" }
             }
         }
         else {
@@ -981,6 +1742,7 @@ function Test-McpCcComponentContract {
                 trayMenuContract = [string]$document.trayMenuContract
                 autoStartServer = [bool]$document.autoStartServer
                 autoStartTunnel = [bool]$document.autoStartTunnel
+                componentMenu = $componentMenu
                 error = if ($ok) { $null } else { "component does not satisfy unified always-on contract" }
             }
         }
@@ -1018,8 +1780,11 @@ function Test-McpCcManifest {
         ok = $ok
         expectedTrayContract = $script:ExpectedTrayContract
         expectedLifecycleContract = $script:ExpectedLifecycleContract
+        expectedComponentMenuContract = $script:ExpectedComponentMenuContract
         manifestPath = $Manifest.sourcePath
         componentCount = $components.Count
+        registeredCount = if ((Get-McpCcObjectProperty -Object $Manifest -Name "registeredCount").found) { [int]$Manifest.registeredCount } else { $components.Count }
+        enabledCount = if ((Get-McpCcObjectProperty -Object $Manifest -Name "enabledCount").found) { [int]$Manifest.enabledCount } else { $components.Count }
         components = $components
     }
 }
@@ -1157,6 +1922,106 @@ function Assert-McpCcControllerActionResult {
     }
 }
 
+function Assert-McpCcComponentUiActionResult {
+    param(
+        [Parameter(Mandatory = $true)]$Document,
+        [Parameter(Mandatory = $true)][string]$ExpectedAction
+    )
+    foreach ($name in @("ok", "action", "errorCode", "message")) {
+        if (-not (Get-McpCcObjectProperty -Object $Document -Name $name).found) {
+            throw "Component UI action result is missing required field '$name'."
+        }
+    }
+    if ($Document.ok -isnot [bool]) { throw "Component UI action result field 'ok' must be boolean." }
+    if (-not ([string]$Document.action).Equals($ExpectedAction, [StringComparison]::Ordinal)) {
+        throw "Component UI action result action does not match the requested action."
+    }
+    if (([string]$Document.message).Length -gt 512 -or ([string]$Document.errorCode).Length -gt 80) {
+        throw "Component UI action result exceeds the safe message limit."
+    }
+    if (-not [bool]$Document.ok) {
+        $errorCode = [string]$Document.errorCode
+        if ([string]::IsNullOrWhiteSpace($errorCode)) { $errorCode = "COMPONENT_UI_ACTION_FAILED" }
+        throw "Component UI action reported failure '$errorCode'; inspect the component-owned UI or runtime log."
+    }
+}
+
+function Invoke-McpCcComponentUiAction {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ComponentId,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[a-z][a-z0-9_]{0,63}$')][string]$ActionId,
+        [switch]$PlanOnly,
+        [string]$RuntimeRoot = (Get-McpCcDefaultRuntimeRoot),
+        [int]$ActionTimeoutSeconds = 0,
+        [ValidateRange(1024, 1048576)][int]$MaxCapturedOutputBytes = 65536
+    )
+    $component = Get-McpCcComponent -Manifest $Manifest -Id $ComponentId
+    if ((Get-McpCcRuntimeMode -Component $component) -ne "component-controller") {
+        throw "Component '$ComponentId' UI actions require component-controller mode."
+    }
+    $menuContractResult = Get-McpCcObjectProperty -Object $component.ui -Name "menuContract"
+    if (-not $menuContractResult.found -or [string]$menuContractResult.value -ne $script:ExpectedComponentMenuContract) {
+        throw "Component '$ComponentId' does not declare '$script:ExpectedComponentMenuContract'."
+    }
+    $menuAction = @($component.ui.menuActions | Where-Object { [string]$_.id -eq $ActionId } | Select-Object -First 1)
+    if ($menuAction.Count -ne 1) { throw "Component '$ComponentId' does not declare UI action '$ActionId'." }
+    $entrypoint = Resolve-McpCcChildPath -Root $component.resolvedRoot -RelativePath ([string]$component.ui.actionEntrypoint.path) -Label "Component '$ComponentId' UI action entrypoint"
+    if (-not (Test-Path -LiteralPath $entrypoint -PathType Leaf)) {
+        throw "Component UI action entrypoint is missing for '$ComponentId': $entrypoint"
+    }
+    if ($PlanOnly) {
+        return [pscustomobject]@{
+            component = $ComponentId
+            action = $ActionId
+            menuContract = $script:ExpectedComponentMenuContract
+            planned = $true
+            path = $entrypoint
+            arguments = @("-Action", $ActionId)
+        }
+    }
+    $mutex = New-Object Threading.Mutex($false, "Local\McpControlCenter.Action.$ComponentId")
+    $mutexAcquired = $false
+    try {
+        try { $mutexAcquired = $mutex.WaitOne(0, $false) }
+        catch [Threading.AbandonedMutexException] { $mutexAcquired = $true }
+        if (-not $mutexAcquired) { throw "Another manager action is already active for component '$ComponentId'." }
+        $timeoutSeconds = if ($ActionTimeoutSeconds -gt 0) { $ActionTimeoutSeconds } else { Get-McpCcComponentTimingSeconds -Manifest $Manifest -Component $component -Name "controllerActionTimeoutSeconds" }
+        $started = [Diagnostics.Stopwatch]::StartNew()
+        $execution = Invoke-McpCcBoundedPowerShell `
+            -ScriptPath $entrypoint `
+            -Arguments @("-Action", $ActionId) `
+            -WorkingDirectory $component.resolvedRoot `
+            -RuntimeRoot $RuntimeRoot `
+            -TimeoutSeconds $timeoutSeconds `
+            -MaxCapturedOutputBytes $MaxCapturedOutputBytes
+        if ($execution.exitCode -ne 0) {
+            throw "Component UI action failed with exit code $($execution.exitCode). Inspect the component-owned UI or runtime log."
+        }
+        $outputText = ([string]$execution.stdout).Trim()
+        if ([string]::IsNullOrWhiteSpace($outputText)) { throw "Component UI action returned no JSON result." }
+        try { $actionResult = $outputText | ConvertFrom-Json }
+        catch { throw "Component UI action returned invalid JSON." }
+        Assert-McpCcComponentUiActionResult -Document $actionResult -ExpectedAction $ActionId
+        $started.Stop()
+        return [pscustomobject]@{
+            component = $ComponentId
+            action = $ActionId
+            menuContract = $script:ExpectedComponentMenuContract
+            planned = $false
+            delegated = $true
+            processId = $execution.processId
+            exitCode = $execution.exitCode
+            result = (ConvertTo-McpCcSafeObject -Value $actionResult)
+            elapsedMs = [int]$started.ElapsedMilliseconds
+        }
+    }
+    finally {
+        if ($mutexAcquired) { $mutex.ReleaseMutex() }
+        $mutex.Dispose()
+    }
+}
+
 function Invoke-McpCcComponentAction {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
@@ -1220,7 +2085,7 @@ function Invoke-McpCcComponentAction {
                 $specArguments = Get-McpCcObjectProperty -Object $actionSpec -Name "arguments"
                 if ($specArguments.found) { $arguments += @($specArguments.value | ForEach-Object { [string]$_ }) }
             }
-            $timeoutSeconds = if ($ActionTimeoutSeconds -gt 0) { $ActionTimeoutSeconds } else { [int]$Manifest.settings.controllerActionTimeoutSeconds }
+            $timeoutSeconds = if ($ActionTimeoutSeconds -gt 0) { $ActionTimeoutSeconds } else { Get-McpCcComponentTimingSeconds -Manifest $Manifest -Component $component -Name "controllerActionTimeoutSeconds" }
             $execution = Invoke-McpCcBoundedPowerShell -ScriptPath $actionPath -Arguments $arguments -WorkingDirectory $component.resolvedRoot -RuntimeRoot $RuntimeRoot -TimeoutSeconds $timeoutSeconds -MaxCapturedOutputBytes $MaxCapturedOutputBytes
             $pid = $execution.processId
             $exitCode = $execution.exitCode
@@ -1261,6 +2126,89 @@ function Invoke-McpCcComponentAction {
     finally {
         if ($mutexAcquired) { $mutex.ReleaseMutex() }
         $mutex.Dispose()
+    }
+}
+
+function Get-McpCcControllerAudit {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [string]$RuntimeRoot = (Get-McpCcDefaultRuntimeRoot),
+        [scriptblock]$StatusInvoker
+    )
+    $runtimeRootPath = Assert-McpCcSafeRuntimeRoot -RuntimeRoot $RuntimeRoot
+    $entries = @()
+    foreach ($component in @($Manifest.components | Sort-Object startupOrder)) {
+        $started = [Diagnostics.Stopwatch]::StartNew()
+        try {
+            if ((Get-McpCcRuntimeMode -Component $component) -ne "component-controller") {
+                throw "The component is not using the v3 controller contract."
+            }
+            if ($null -ne $StatusInvoker) {
+                $document = & $StatusInvoker $component $runtimeRootPath
+            }
+            else {
+                $timeoutSeconds = Get-McpCcComponentTimingSeconds -Manifest $Manifest -Component $component -Name "controllerActionTimeoutSeconds"
+                $execution = Invoke-McpCcBoundedPowerShell `
+                    -ScriptPath $component.resolvedContractScript `
+                    -Arguments @("-Action", "Status") `
+                    -WorkingDirectory $component.resolvedRoot `
+                    -RuntimeRoot $runtimeRootPath `
+                    -TimeoutSeconds $timeoutSeconds `
+                    -MaxCapturedOutputBytes 65536
+                if ($execution.exitCode -ne 0) {
+                    throw "The component controller status action exited with code $($execution.exitCode)."
+                }
+                $outputText = ([string]$execution.stdout).Trim()
+                if ([string]::IsNullOrWhiteSpace($outputText)) {
+                    throw "The component controller returned no status document."
+                }
+                try { $document = $outputText | ConvertFrom-Json }
+                catch { throw "The component controller returned an invalid status document." }
+            }
+            foreach ($field in @("ok", "action", "after", "elapsedMs", "errorCode", "message")) {
+                if (-not (Get-McpCcObjectProperty -Object $document -Name $field).found) {
+                    throw "The component controller status document is missing '$field'."
+                }
+            }
+            if ($document.ok -isnot [bool] -or -not [bool]$document.ok) {
+                throw "The component controller did not complete its status action."
+            }
+            if (-not ([string]$document.action).Equals("Status", [StringComparison]::Ordinal)) {
+                throw "The component controller returned the wrong action identity."
+            }
+            $statusProperty = Get-McpCcObjectProperty -Object $document.after -Name "status"
+            if (-not $statusProperty.found -or [string]::IsNullOrWhiteSpace([string]$statusProperty.value)) {
+                throw "The component controller status document has no runtime status."
+            }
+            $status = [string]$statusProperty.value
+            $knownStatuses = @("Ready", "Degraded", "BlockedUpstream", "Stopped", "Unhealthy", "OwnershipMismatch")
+            if ($status -notin $knownStatuses) {
+                throw "The component controller returned an unknown runtime status."
+            }
+            $started.Stop()
+            $entries += [pscustomobject]@{
+                component = [string]$component.id
+                status = $status
+                manageable = ($status -ne "OwnershipMismatch")
+                errorCode = $null
+                elapsedMs = [int]$started.ElapsedMilliseconds
+            }
+        }
+        catch {
+            $started.Stop()
+            $entries += [pscustomobject]@{
+                component = [string]$component.id
+                status = "ControllerError"
+                manageable = $false
+                errorCode = "CONTROLLER_STATUS_FAILED"
+                elapsedMs = [int]$started.ElapsedMilliseconds
+            }
+        }
+    }
+    return [pscustomobject]@{
+        entries = $entries
+        manageableCount = @($entries | Where-Object { $_.manageable }).Count
+        unmanageableCount = @($entries | Where-Object { -not $_.manageable }).Count
     }
 }
 
@@ -1313,6 +2261,7 @@ function Get-McpCcStartupAudit {
     $entries = @()
     foreach ($component in @($Manifest.components | Sort-Object startupOrder)) {
         $legacy = $component.legacyStartup
+        if ($null -eq $legacy) { continue }
         $shortcutPath = Join-Path $StartupDirectory ([string]$legacy.shortcutName)
         $launcher = Resolve-McpCcChildPath -Root $component.resolvedRoot -RelativePath ([string]$legacy.launcher) -Label "legacy startup launcher"
         if (-not (Test-Path -LiteralPath $shortcutPath -PathType Leaf)) {
@@ -1353,7 +2302,9 @@ Export-ModuleMember -Function @(
     "Test-McpCcCommandLineContains",
     "Get-McpCcProcessLineage",
     "Read-McpCcManifest",
+    "Read-McpCcComponentCandidate",
     "Get-McpCcComponent",
+    "Get-McpCcComponentTimingSeconds",
     "Get-McpCcProbeResult",
     "Resolve-McpCcComponentState",
     "Get-McpCcRunningAcceptanceStates",
@@ -1367,6 +2318,8 @@ Export-ModuleMember -Function @(
     "Test-McpCcComponentContract",
     "Test-McpCcManifest",
     "Invoke-McpCcComponentAction",
+    "Invoke-McpCcComponentUiAction",
+    "Get-McpCcControllerAudit",
     "Get-McpCcReconcilePlan",
     "Test-McpCcShortcutMatches",
     "Get-McpCcStartupAudit"

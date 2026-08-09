@@ -86,8 +86,16 @@ controller 會先等待 MCP health 通過才啟動 tunnel，避免 OAuth discove
 
 `scripts\show-diagnostic-tray.vbs` 只開啟 optional diagnostic UI；關閉它不會停止 runtime。
 既有 `start-tray.vbs` 與 `Restart-Tray.cmd` 暫時保留為 legacy rollback 入口，但 tray 本身
-也只委派 controller，不再保存 server／tunnel handles。MCP Control Center 的 live manifest
-在 Gate C 確認前仍維持 `legacy-tray`，因此 source 變更本身不會切換正式 runtime。
+也只委派 controller，不再保存 server／tunnel handles。MCP Control Center 的 registry v3
+已將六個元件登記為 `component-controller`。Project Reading 原托盤的 URL／tunnel ID 複製、
+health／tunnel UI／runtime logs 操作透過 `component-menu-v1` 直接顯示在中樞子選單，實際值
+仍只由 `scripts\control-center-ui.ps1` 在元件內處理，不會回傳給中樞。
+
+Project Reading 同時是 New Component Kit 的 conformance reference：
+`scripts\component-runtime.psm1` 提供標準 facade，實際 exact-path lifecycle 仍由
+`scripts\project-reading-runtime.psm1` 擁有；`tests\test-runtime-control.ps1` 是標準 targeted-test
+入口。完整邊界與驗證方式見
+[`docs/ControlCenterIntegration.md`](docs/ControlCenterIntegration.md)。
 
 或從終端測試 tray 設定：
 
@@ -95,6 +103,7 @@ controller 會先等待 MCP health 通過才啟動 tunnel，避免 OAuth discove
 npm run tray:selftest
 npm run runtime:selftest
 npm run runtime:test
+npm run component:test
 ```
 
 這個資料夾也已內建 OpenAI `tunnel-client`：

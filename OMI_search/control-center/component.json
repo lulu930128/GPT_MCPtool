@@ -1,0 +1,106 @@
+{
+  "schemaVersion": 1,
+  "id": "omi_search",
+  "displayName": "OMI Search",
+  "runtimeMode": "component-controller",
+  "runtimeContract": "unified-lifecycle-v3",
+  "traits": ["tunnel", "external-dependency", "diagnostic-ui"],
+  "contractScript": "scripts\\runtime-control.ps1",
+  "capabilities": [
+    "ensure_running",
+    "repair_connectivity",
+    "restart_core",
+    "reload_runtime",
+    "shutdown_runtime",
+    "show_diagnostic_tray"
+  ],
+  "lifecycle": {
+    "controller": {
+      "kind": "powershell",
+      "path": "scripts\\runtime-control.ps1"
+    },
+    "diagnosticLauncher": {
+      "kind": "vbs",
+      "path": "scripts\\show-diagnostic-tray.vbs"
+    }
+  },
+  "legacyStartup": {
+    "shortcutName": "OMI_search MCP Adapter.lnk",
+    "launcher": "scripts\\start-tray.vbs"
+  },
+  "probes": [
+    {
+      "id": "omi_backend",
+      "label": "OMI backend",
+      "role": "dependency",
+      "kind": "json",
+      "url": "http://127.0.0.1:8797/upstream-health",
+      "port": 8797,
+      "required": true,
+      "expected": { "ok": true, "status": "ready" },
+      "publicSummaryFields": ["service", "status", "errorCode"]
+    },
+    {
+      "id": "mcp",
+      "label": "MCP server",
+      "role": "core",
+      "kind": "json",
+      "url": "http://127.0.0.1:8797/health",
+      "port": 8797,
+      "required": true,
+      "expected": { "ok": true, "service": "omi-search-http-mcp" },
+      "publicSummaryFields": ["service", "version", "buildId"],
+      "ownership": {
+        "managedPidFile": ".tmp\\omi-search-http-server.pid",
+        "managedCommandContains": ["OMI_search", "http_server.py"]
+      }
+    },
+    {
+      "id": "tunnel",
+      "label": "Secure MCP Tunnel",
+      "role": "connectivity",
+      "kind": "text",
+      "url": "http://127.0.0.1:8799/readyz",
+      "port": 8799,
+      "required": true,
+      "expectedText": ["ready", "ok"],
+      "ownership": {
+        "managedPidFile": ".tmp\\tunnel-client.pid",
+        "managedCommandContains": ["OMI_search", "tunnel-client"]
+      }
+    }
+  ],
+  "navigation": [
+    {
+      "id": "health",
+      "label": "Open MCP health",
+      "kind": "probe",
+      "target": "mcp"
+    },
+    {
+      "id": "upstream_health",
+      "label": "Open upstream status",
+      "kind": "probe",
+      "target": "omi_backend"
+    }
+  ],
+  "ui": {
+    "menuContract": "component-menu-v1",
+    "actionEntrypoint": { "kind": "powershell", "path": "scripts\\control-center-ui.ps1" },
+    "menuActions": [
+      { "id": "copy_mcp_url", "label": "Copy MCP URL", "group": "connection", "confirmation": "none" },
+      { "id": "copy_health_url", "label": "Copy health URL", "group": "connection", "confirmation": "none" },
+      { "id": "copy_tunnel_id", "label": "Copy tunnel ID", "group": "connection", "confirmation": "none" },
+      { "id": "open_mcp_health", "label": "Open MCP health", "group": "connection", "confirmation": "none" },
+      { "id": "open_tunnel_ui", "label": "Open tunnel UI", "group": "connection", "confirmation": "none" },
+      { "id": "open_runtime_logs", "label": "Open runtime logs", "group": "connection", "confirmation": "none" },
+      { "id": "save_control_plane_key", "label": "Save CONTROL_PLANE_API_KEY...", "group": "component", "confirmation": "none" },
+      { "id": "show_key_status", "label": "Show key status", "group": "component", "confirmation": "none" }
+    ]
+  },
+  "safety": {
+    "managerDomainDataAccess": "none",
+    "managerSecretAccess": "none",
+    "shutdownConfirmation": "required"
+  }
+}

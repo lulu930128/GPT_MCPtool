@@ -11,18 +11,31 @@ param(
   [string]$SecretPath,
   [switch]$NoAutoStart,
   [switch]$AutoStartTunnel,
+  [switch]$DiagnosticOnly,
   [switch]$ReplaceExisting,
   [switch]$SelfTest
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
-$TrayDisplayName = "OMI Search MCP"
+$TrayDisplayName = $(if ($DiagnosticOnly) { "OMI Search MCP Diagnostics" } else { "OMI Search MCP" })
 
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
   $ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 }
-
+$ComponentDescriptorPath = Join-Path $ProjectRoot "control-center\component.json"
+$V3ControllerActive = $false
+if (Test-Path -LiteralPath $ComponentDescriptorPath -PathType Leaf) {
+  try {
+    $ComponentDescriptor = [IO.File]::ReadAllText($ComponentDescriptorPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+    $V3ControllerActive = [string]$ComponentDescriptor.runtimeMode -eq "component-controller"
+  }
+  catch { throw "Invalid OMI Search control-center descriptor." }
+}
+if (-not $SelfTest -and -not $DiagnosticOnly -and $V3ControllerActive) {
+  [Console]::Error.WriteLine("LEGACY_TRAY_DISABLED: Use MCP Control Center or the diagnostic launcher. Restore a legacy-tray descriptor only for rollback.")
+  exit 3
+}
 $HttpEntry = Join-Path $ProjectRoot "http_server.py"
 $SourceBuildFiles = @(
   $HttpEntry,
@@ -49,6 +62,7 @@ $ServerPidFile = Join-Path $TmpDir "omi-search-http-server.pid"
 $TrayPidFile = Join-Path $TmpDir "omi-search-tray.pid"
 $TrayLogFile = Join-Path $TmpDir "omi-search-tray.log"
 $PythonPath = (Get-Command python -ErrorAction Stop).Source
+$ControllerPath = Join-Path $PSScriptRoot "runtime-control.ps1"
 
 function Get-ExpectedSourceBuildId {
   $artifactHashes = @()
@@ -216,6 +230,14 @@ if ($SelfTest) {
     secretDecryptable = $keyStatus.decryptable
     secretUsable = $keyStatus.usable
     trayMenuContract = "unified-always-on-v2"
+    lifecycleDelegated = [bool]$DiagnosticOnly
+    ownsRuntimeProcesses = -not [bool]$DiagnosticOnly
+    diagnosticOnlySupported = $true
+    diagnosticOnly = [bool]$DiagnosticOnly
+    exitUiStopsRuntime = -not [bool]$DiagnosticOnly
+    legacyRuntimeTrayBlocked = $V3ControllerActive
+    controllerPath = $ControllerPath
+    controllerExists = Test-Path -LiteralPath $ControllerPath -PathType Leaf
     autoStartServer = $true
     autoStartTunnel = $true
   } | ConvertTo-Json -Depth 4
@@ -866,6 +888,27 @@ function Open-RuntimeLogs {
   Start-Process explorer.exe -ArgumentList "`"$TmpDir`""
 }
 
+function Invoke-ControllerReload {
+  if (-not (Test-Path -LiteralPath $ControllerPath -PathType Leaf)) {
+    Show-Error "Runtime controller is missing."
+    return $false
+  }
+  try {
+    $output = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ControllerPath -Action ReloadRuntime -ProjectRoot $ProjectRoot 2>&1)
+    $exitCode = $LASTEXITCODE
+    $result = ($output -join [Environment]::NewLine) | ConvertFrom-Json
+    if ($exitCode -ne 0 -or $result.ok -ne $true) {
+      Show-Error "Runtime reload failed.`n$($result.errorCode): $($result.message)"
+      return $false
+    }
+    return $true
+  }
+  catch {
+    Show-Error "Runtime reload failed. Open the component runtime log for details."
+    return $false
+  }
+}
+
 function Update-TrayStatus {
   $ownedRunning = Test-OwnedServerRunning
   $endpointOk = Test-ServerEndpoint
@@ -920,7 +963,7 @@ function Update-TrayStatus {
 $contextMenu = New-Object System.Windows.Forms.ContextMenu
 $statusItem = New-Object System.Windows.Forms.MenuItem "$TrayDisplayName | Server: Checking | Tunnel: Checking"
 $statusItem.Enabled = $false
-$restartItem = New-Object System.Windows.Forms.MenuItem "Restart MCP server"
+$restartItem = New-Object System.Windows.Forms.MenuItem $(if ($DiagnosticOnly) { "Reload managed runtime" } else { "Restart MCP server" })
 $saveKeyItem = New-Object System.Windows.Forms.MenuItem "Save CONTROL_PLANE_API_KEY..."
 $keyStatusItem = New-Object System.Windows.Forms.MenuItem "Show key status"
 $copyMcpItem = New-Object System.Windows.Forms.MenuItem "Copy MCP URL"
@@ -929,9 +972,13 @@ $copyHealthItem = New-Object System.Windows.Forms.MenuItem "Copy health URL"
 $openHealthItem = New-Object System.Windows.Forms.MenuItem "Open MCP health"
 $openTunnelUiItem = New-Object System.Windows.Forms.MenuItem "Open tunnel UI"
 $openRuntimeItem = New-Object System.Windows.Forms.MenuItem "Open runtime logs"
-$exitItem = New-Object System.Windows.Forms.MenuItem "Exit"
+$exitItem = New-Object System.Windows.Forms.MenuItem $(if ($DiagnosticOnly) { "Exit diagnostic tray only" } else { "Exit" })
 
-$restartItem.add_Click({ Restart-OmiSearchServer; Update-TrayStatus })
+$restartItem.add_Click({
+  if ($DiagnosticOnly) { Invoke-ControllerReload | Out-Null }
+  else { Restart-OmiSearchServer | Out-Null }
+  Update-TrayStatus
+})
 $saveKeyItem.add_Click({ Save-ControlPlaneApiKeyFromPrompt | Out-Null; Update-TrayStatus })
 $keyStatusItem.add_Click({ Show-ControlPlaneApiKeyStatus })
 $copyMcpItem.add_Click({ Copy-TextToClipboard $McpUrl })
@@ -941,6 +988,17 @@ $openHealthItem.add_Click({ Start-Process $HealthUrl })
 $openTunnelUiItem.add_Click({ Start-Process $TunnelUiUrl })
 $openRuntimeItem.add_Click({ Open-RuntimeLogs })
 $exitItem.add_Click({
+  if ($DiagnosticOnly) {
+    $timer.Stop()
+    $recordedTrayPid = 0
+    if ((Test-Path -LiteralPath $TrayPidFile -PathType Leaf) -and [int]::TryParse(([IO.File]::ReadAllText($TrayPidFile).Trim()), [ref]$recordedTrayPid) -and $recordedTrayPid -eq $PID) {
+      Remove-PidFile $TrayPidFile
+    }
+    $notifyIcon.Visible = $false
+    $notifyIcon.Dispose()
+    [System.Windows.Forms.Application]::Exit()
+    return
+  }
   $choice = [System.Windows.Forms.MessageBox]::Show(
     "Exit will stop the MCP server, tunnel, and tray. Continue?",
     $TrayDisplayName,
@@ -988,14 +1046,16 @@ $timer.Start()
 if ($ReplaceExisting) {
   Write-TrayLog "ReplaceExisting requested currentPid=$PID"
   Stop-RecordedProcess $TrayPidFile "previous OMI_search tray" @("powershell", "pwsh") $PSCommandPath | Out-Null
-  Stop-TunnelClient
-  Stop-OmiSearchServer
+  if (-not $DiagnosticOnly) {
+    Stop-TunnelClient
+    Stop-OmiSearchServer
+  }
 }
 
 Write-PidFile $TrayPidFile $PID
 Write-TrayLog "Tray pid recorded pid=$PID"
 
-if (-not $NoAutoStart) {
+if (-not $DiagnosticOnly -and -not $NoAutoStart) {
   Start-OmiSearchServer
   Start-TunnelClient
 }

@@ -1,5 +1,6 @@
 param(
     [switch]$NoAutoStart,
+    [switch]$DiagnosticOnly,
     [switch]$ReplaceExisting,
     [switch]$SelfTest,
     [ValidateRange(1, 65535)]
@@ -8,12 +9,25 @@ param(
 
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = "Stop"
-$TrayDisplayName = "Memory Core MCP"
+$TrayDisplayName = $(if ($DiagnosticOnly) { "Memory Core Diagnostics" } else { "Memory Core MCP" })
 
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+$componentDescriptorPath = Join-Path $projectRoot "control-center\component.json"
+$v3ControllerActive = $false
+if (Test-Path -LiteralPath $componentDescriptorPath -PathType Leaf) {
+    try {
+        $componentDescriptor = [IO.File]::ReadAllText($componentDescriptorPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+        $v3ControllerActive = [string]$componentDescriptor.runtimeMode -eq "component-controller"
+    }
+    catch { throw "Invalid Memory Core control-center descriptor." }
+}
+if (-not $SelfTest -and -not $DiagnosticOnly -and $v3ControllerActive) {
+    throw "LEGACY_TRAY_DISABLED: Use MCP Control Center or the diagnostic launcher. Restore a legacy-tray descriptor only for rollback."
+}
 $stackScript = Join-Path $PSScriptRoot "memory_core_stack.ps1"
+$controllerScript = Join-Path $PSScriptRoot "runtime-control.ps1"
 $viewerScript = Join-Path $PSScriptRoot "start_memory_core_viewer.ps1"
-$runtimeDir = Join-Path $projectRoot "data\runtime"
+$runtimeDir = $(if ($DiagnosticOnly) { Join-Path $projectRoot ".tmp" } else { Join-Path $projectRoot "data\runtime" })
 $trayPidPath = Join-Path $runtimeDir "memory-core-tray.pid"
 $trayLogPath = Join-Path $runtimeDir "memory-core-tray.log"
 $actionStdoutPath = Join-Path $runtimeDir "memory-core-tray-action.stdout.log"
@@ -87,8 +101,7 @@ if ($SelfTest) {
         viewerScriptExists = Test-Path -LiteralPath $viewerScript
         powershellPath = $powershellPath
         powershellExists = Test-Path -LiteralPath $powershellPath
-        trayPidPath = $trayPidPath
-        trayPid = Read-PidFile $trayPidPath
+        formalDataPathExposed = $false
         backendHealthy = Test-HttpEndpoint $backendHealthUrl
         backendPort = $BackendPort
         mcpHealthy = Test-HttpEndpoint $mcpHealthUrl
@@ -98,8 +111,15 @@ if ($SelfTest) {
         tunnelIdConfigured = -not [string]::IsNullOrWhiteSpace($tunnelId)
         tunnelUiUrl = $tunnelUiUrl
         trayMenuContract = "unified-always-on-v2"
-        autoStartServer = $true
-        autoStartTunnel = $true
+        autoStartServer = -not [bool]$DiagnosticOnly
+        autoStartTunnel = -not [bool]$DiagnosticOnly
+        lifecycleDelegated = [bool]$DiagnosticOnly
+        ownsRuntimeProcesses = -not [bool]$DiagnosticOnly
+        diagnosticOnlySupported = $true
+        legacyRuntimeTrayBlocked = $v3ControllerActive
+        diagnosticOnly = [bool]$DiagnosticOnly
+        exitUiStopsRuntime = -not [bool]$DiagnosticOnly
+        controllerExists = Test-Path -LiteralPath $controllerScript -PathType Leaf
     } | ConvertTo-Json -Depth 4
     exit 0
 }
@@ -273,6 +293,29 @@ function Complete-StackAction {
     }
 }
 
+function Invoke-ControllerReload {
+    if (-not (Test-Path -LiteralPath $controllerScript -PathType Leaf)) {
+        Show-Error "Runtime controller is missing."
+        return $false
+    }
+    try {
+        $rawResult = & $powershellPath -NoProfile -ExecutionPolicy Bypass -File $controllerScript `
+            -Action ReloadRuntime -ProjectRoot $projectRoot -BackendPort $BackendPort 2>$null | Out-String
+        $exitCode = $LASTEXITCODE
+        $result = $rawResult | ConvertFrom-Json
+        if ($exitCode -ne 0 -or $result.ok -ne $true) {
+            Show-Error "Runtime reload failed.`n$($result.errorCode): $($result.message)"
+            return $false
+        }
+        Show-Balloon "Managed runtime reloaded." ([System.Windows.Forms.ToolTipIcon]::Info)
+        return $true
+    }
+    catch {
+        Show-Error "Runtime reload failed. Open runtime logs for details."
+        return $false
+    }
+}
+
 function Copy-TextToClipboard([string]$Text, [string]$Label) {
     [System.Windows.Forms.Clipboard]::SetText($Text)
     Show-Balloon "$Label copied." ([System.Windows.Forms.ToolTipIcon]::Info)
@@ -435,7 +478,7 @@ function Exit-Tray([bool]$StopStack) {
 $contextMenu = New-Object System.Windows.Forms.ContextMenu
 $statusItem = New-Object System.Windows.Forms.MenuItem "$TrayDisplayName | Server: Checking | Tunnel: Checking"
 $statusItem.Enabled = $false
-$restartItem = New-Object System.Windows.Forms.MenuItem "Restart MCP server"
+$restartItem = New-Object System.Windows.Forms.MenuItem $(if ($DiagnosticOnly) { "Reload managed runtime" } else { "Restart MCP server" })
 $openViewerItem = New-Object System.Windows.Forms.MenuItem "Open control center"
 $openBackendItem = New-Object System.Windows.Forms.MenuItem "Open backend API docs"
 $openTunnelUiItem = New-Object System.Windows.Forms.MenuItem "Open tunnel UI"
@@ -447,9 +490,13 @@ $openHealthItem = New-Object System.Windows.Forms.MenuItem "Open MCP health"
 $saveKeyItem = New-Object System.Windows.Forms.MenuItem "Replace tunnel runtime key..."
 $keyStatusItem = New-Object System.Windows.Forms.MenuItem "Show key status"
 $openRuntimeItem = New-Object System.Windows.Forms.MenuItem "Open runtime logs"
-$exitItem = New-Object System.Windows.Forms.MenuItem "Exit"
+$exitItem = New-Object System.Windows.Forms.MenuItem $(if ($DiagnosticOnly) { "Exit diagnostic tray only" } else { "Exit" })
 
-$restartItem.add_Click({ Start-StackAction "RestartCore" | Out-Null; Update-TrayStatus })
+$restartItem.add_Click({
+    if ($DiagnosticOnly) { Invoke-ControllerReload | Out-Null }
+    else { Start-StackAction "RestartCore" | Out-Null }
+    Update-TrayStatus
+})
 $openViewerItem.add_Click({ Open-MemoryViewer })
 $openBackendItem.add_Click({ Open-LocalUrl $backendDocsUrl })
 $openTunnelUiItem.add_Click({ Open-LocalUrl $tunnelUiUrl })
@@ -460,7 +507,7 @@ $openHealthItem.add_Click({ Open-LocalUrl $mcpHealthUrl })
 $saveKeyItem.add_Click({ Open-RuntimeKeyPrompt })
 $keyStatusItem.add_Click({ Show-KeyStatus })
 $openRuntimeItem.add_Click({ Start-Process explorer.exe -ArgumentList "`"$runtimeDir`"" })
-$exitItem.add_Click({ Exit-Tray -StopStack $true })
+$exitItem.add_Click({ Exit-Tray -StopStack (-not [bool]$DiagnosticOnly) })
 
 $contextMenu.MenuItems.Add($statusItem) | Out-Null
 $contextMenu.MenuItems.Add("-") | Out-Null
@@ -502,7 +549,7 @@ $timer.Start()
 
 try {
     Update-TrayStatus
-    if (-not $NoAutoStart) {
+    if (-not $DiagnosticOnly -and -not $NoAutoStart) {
         $allReady = (Test-HttpEndpoint $backendHealthUrl) -and
             (Test-HttpEndpoint $mcpHealthUrl) -and
             (Test-HttpEndpoint $tunnelReadyUrl)

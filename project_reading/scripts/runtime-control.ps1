@@ -39,7 +39,7 @@ if (Test-Path -LiteralPath $localSettingsPath -PathType Leaf) {
 }
 if ([string]::IsNullOrWhiteSpace($DefaultWorkspaceRoot)) { $DefaultWorkspaceRoot = "projects" }
 
-$modulePath = Join-Path $PSScriptRoot "project-reading-runtime.psm1"
+$modulePath = Join-Path $PSScriptRoot "component-runtime.psm1"
 Import-Module $modulePath -Force
 $context = New-PrRuntimeContext `
   -ProjectRoot $ProjectRoot `

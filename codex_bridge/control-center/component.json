@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "id": "codex_bridge",
+  "displayName": "Codex Bridge",
+  "runtimeMode": "component-controller",
+  "runtimeContract": "unified-lifecycle-v3",
+  "traits": ["tunnel", "approval-sensitive", "diagnostic-ui"],
+  "contractScript": "scripts\\runtime-control.ps1",
+  "capabilities": [
+    "ensure_running",
+    "repair_connectivity",
+    "restart_core",
+    "reload_runtime",
+    "shutdown_runtime",
+    "show_diagnostic_tray"
+  ],
+  "lifecycle": {
+    "controller": {
+      "kind": "powershell",
+      "path": "scripts\\runtime-control.ps1"
+    },
+    "diagnosticLauncher": {
+      "kind": "vbs",
+      "path": "scripts\\show-diagnostic-tray.vbs"
+    }
+  },
+  "legacyStartup": {
+    "shortcutName": "Codex Bridge MCP.lnk",
+    "launcher": "scripts\\start-tray.vbs"
+  },
+  "probes": [
+    {
+      "id": "mcp",
+      "label": "MCP server",
+      "role": "core",
+      "kind": "json",
+      "url": "http://127.0.0.1:8828/health",
+      "port": 8828,
+      "required": true,
+      "expected": { "ok": true, "service": "codex-handoff-bridge" },
+      "publicSummaryFields": ["service", "version", "buildId"],
+      "ownership": {
+        "managedPidFile": ".tmp\\codex-bridge-http-server.pid",
+        "managedCommandContains": ["codex_bridge", "dist\\src\\http-main.js"]
+      }
+    },
+    {
+      "id": "tunnel",
+      "label": "Secure MCP Tunnel",
+      "role": "connectivity",
+      "kind": "text",
+      "url": "http://127.0.0.1:8829/readyz",
+      "port": 8829,
+      "required": true,
+      "expectedText": ["ready", "ok"],
+      "ownership": {
+        "managedPidFile": ".tmp\\tunnel-client.pid",
+        "managedCommandContains": ["codex_bridge", "tunnel-client"]
+      }
+    }
+  ],
+  "navigation": [
+    {
+      "id": "health",
+      "label": "Open health",
+      "kind": "probe",
+      "target": "mcp"
+    }
+  ],
+  "ui": {
+    "menuContract": "component-menu-v1",
+    "actionEntrypoint": { "kind": "powershell", "path": "scripts\\control-center-ui.ps1" },
+    "menuActions": [
+      { "id": "copy_mcp_url", "label": "Copy MCP URL", "group": "connection", "confirmation": "none" },
+      { "id": "copy_health_url", "label": "Copy health URL", "group": "connection", "confirmation": "none" },
+      { "id": "copy_tunnel_id", "label": "Copy tunnel ID", "group": "connection", "confirmation": "none" },
+      { "id": "open_mcp_health", "label": "Open MCP health", "group": "connection", "confirmation": "none" },
+      { "id": "open_tunnel_ui", "label": "Open tunnel UI", "group": "connection", "confirmation": "none" },
+      { "id": "open_runtime_logs", "label": "Open runtime logs", "group": "connection", "confirmation": "none" },
+      { "id": "open_jobs_folder", "label": "Open jobs folder", "group": "component", "confirmation": "none" }
+    ]
+  },
+  "safety": {
+    "managerDomainDataAccess": "none",
+    "managerSecretAccess": "none",
+    "shutdownConfirmation": "required"
+  }
+}

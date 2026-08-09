@@ -1,29 +1,35 @@
 # MCP Control Center
 
-`MCP Control Center` 是六個本機 MCP runtime 的 Windows 中樞。它不是第七個 MCP，
+`MCP Control Center` 是可擴充的本機 MCP runtime Windows 中樞。它不是第七個 MCP，
 不持有任何市場、記憶、學習、workspace、Codex job 或財務資料；即使 MCP server 或
 Secure MCP Tunnel 故障，中樞仍可獨立檢查、記錄與協調啟動。
 
-目前 live manifest 的六個 component tray 皆通過共同的 `unified-always-on-v2` contract：
+目前預設的 registry v3 已接上六個元件，全部使用 `unified-lifecycle-v3`
+component controller，並由各元件自己持有 runtime ownership。OMI backend 維持 external
+dependency，不屬於 Control Center lifecycle ownership；Memory Core 與 Personal Asset OS
+的正式私人資料也不屬於 manager authority：
 
 - `autoStartServer=true`
 - `autoStartTunnel=true`
 - production Start 不取代既有 instance
 - replacement／restart 使用 component 自己的 exact-path lifecycle
-- `Exit` 仍由 component tray 負責完整停止該 component
+- legacy tray 的 `Exit` 維持完整停止；v3 diagnostic UI 的 `Exit` 只關閉 UI
 
-第一版保留六個 component tray 作為各自的 lifecycle owner。中樞提供單一狀態與操作入口，
-但不隱藏或取代 component-specific action，也不提供危險的 Stop All／kill-by-name。
+目前保留全部舊 component tray source、launcher、Startup／restore artifact 與
+`config/components.json` rollback manifest。中樞提供單一狀態與操作入口，但不隱藏或取代
+component-specific action，也不提供危險的 Stop All／kill-by-name。六個元件皆已完成
+controller 遷移、零重啟 live adoption 與 legacy tray closure；舊 artifact 尚未刪除。
 
-中樞 source 同時支援下一階段的 manifest schema v2 與 `unified-lifecycle-v3`。v3 採用
+中樞 source 同時支援 registry schema v3、舊 manifest schema v1／v2 與
+`unified-lifecycle-v3`。v3 採用
 component-owned stateless lifecycle controller：controller 以 mutex、PID file、exact
 executable／command、listener ownership 與必要的 process lineage 管理 detached child
-runtime，完成 action 後退出。中樞不持有 child process handle，也不新增 IPC。尚未遷移的
-元件繼續以 schema v1／`legacy-tray` 運作，因此加入相容層本身不會改變目前 runtime。
+runtime，完成 action 後退出。中樞不持有 child process handle，也不新增 IPC。Loader 仍保留
+`legacy-tray` 相容能力，供 rollback 或尚未升級的新註冊元件使用；目前預設六元件皆為 v3。
 
 ## 能力
 
-- 依序檢查六個元件的 core、dependency 與 tunnel readiness。
+- 依 registry 的 `startupOrder` 檢查所有 enabled 元件的 core、dependency 與 tunnel readiness。
 - 在可取得 Windows listener 資訊時，比對 PID、process name 與 expected command fragments；
   對 Windows venv shim 產生的 listener，可再驗證 component 內 managed PID 檔、managed
   process command line，以及 listener 到 managed PID 的父子程序鏈。
@@ -36,7 +42,7 @@ runtime，完成 action 後退出。中樞不持有 child process handle，也�
 - 開機 reconciliation 只對真正 `Stopped` 的元件呼叫既有非破壞性 Start；不自動 Restart
   `Unhealthy`、上游阻塞或 ownership 不明的程序。
 - 人工 Start／Repair connectivity／Restart core／Reload／Stop 會委派給 manifest 中已驗證、位於 component root 內的固定 entrypoint；Stop 必須逐元件確認，不提供 Stop All。
-- Startup adoption 會先驗證六個 shortcut target，再移到 private backup；不直接刪除，並可依 receipt 回復。
+- Startup adoption 會先驗證各 descriptor 宣告的 legacy shortcut target，再移到 private backup；不直接刪除，並可依 receipt 回復。
 
 ## Runtime 資料
 
@@ -48,6 +54,10 @@ runtime，完成 action 後退出。中樞不持有 child process handle，也�
 ├── tray.pid
 ├── events\YYYY-MM-DD.jsonl
 ├── diagnostics\latest.json
+├── registration-receipts\<timestamp-component-id>\
+│   ├── registry.before.json
+│   ├── receipt.json
+│   └── rollback.json
 └── startup-adoptions\<timestamp>\
     ├── receipt.json
     └── <原 Startup shortcuts>
@@ -93,11 +103,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\control-center.ps1 `
 .\scripts\Restart-Tray.cmd
 ```
 
-中樞 tray 的 `Exit control center only` 只關閉中樞，不停止六個 component。
+中樞 tray 的 `Exit control center only` 只關閉中樞，不停止任何 component。
+
+六個元件都使用 `component-menu-v1`，把舊托盤的 Copy／Open／金鑰狀態／備份等功能直接列在
+Control Center 的元件子選單。中樞只渲染 descriptor 內固定的 action ID，再委派給元件自己的
+`scripts/control-center-ui.ps1`；它不接收任意 arguments，也不讀 tunnel ID、credential、備份結果
+或 domain payload。`Open troubleshooting tools` 仍可按需開啟 component-owned diagnostic UI，
+作為 action adapter 無法使用時的完整故障處理 fallback。兩種啟動路徑都與背景
+`Status`／`Doctor` 程序彼此獨立；關閉 diagnostic UI 只關閉臨時圖示，不停止或接管 runtime。
 
 ## 採用單一 Startup 入口
 
-先預覽目前六個 shortcut；任何 target conflict 都會阻止 adoption：
+先預覽目前已註冊的 legacy shortcut；任何 target conflict 都會阻止 adoption：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\startup.ps1 -Action Plan
@@ -109,7 +126,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\startup.ps1 -Action 
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\startup.ps1 -Action Adopt -Apply
 ```
 
-Adopt 只移動 manifest 中六個已識別的 component shortcut，其他 Startup 項目與
+Adopt 只移動 descriptor 中已識別的 component shortcut，其他 Startup 項目與
 `Open Market Intelligence Launcher.lnk` 不在操作範圍。中樞登入後先等待設定的 initial delay，
 再按 `startupOrder` 逐一檢查；已 Ready 的元件不會重複啟動。
 
@@ -125,31 +142,50 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\startup.ps1 -Action 
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\startup.ps1 -Action Restore -Apply
 ```
 
-## Manifest
+## Registry 與 component descriptor
 
-[`config/components.json`](config/components.json) 只保存公開的 source-relative path、loopback
-endpoint、port、expected health fields 與 ownership fragment。它不保存 tunnel ID、token、
-資料目錄內容或 credential。Loader 接受 schema v1 與 v2；schema v1 會正規化成
-`runtimeMode=legacy-tray`，schema v2 則要求每個元件明確宣告 `legacy-tray` 或
-`component-controller`。Loader 會拒絕：
+預設入口是 [`config/registry.json`](config/registry.json)。registry schema v3 只保存元件的
+穩定 ID、workspace 直接子目錄、固定 descriptor path、enabled／autoStart 與
+`startupOrder`；每個元件的公開運行契約則由自己的 `control-center/component.json` 持有。
+正式結構可參考 [`schemas/registry-v3.schema.json`](schemas/registry-v3.schema.json) 與
+[`schemas/component-descriptor-v1.schema.json`](schemas/component-descriptor-v1.schema.json)。
+
+舊 [`config/components.json`](config/components.json) 仍保留作 rollback，並可用
+`-ManifestPath` 明確載入。Loader 接受 manifest schema v1／v2 與 registry schema v3，且不會在
+registry 已存在但無效時靜默退回舊版。所有設定只包含公開的 source-relative path、loopback
+endpoint、port、expected health fields 與 ownership fragment；不得保存 tunnel ID、token、
+資料內容、resolved upstream URL 或 credential。Loader 會拒絕：
 
 - 非 loopback 或非 HTTP probe。
 - 逃出 component root 的 action path。
 - 不是 workspace 直接子目錄的 component root。
 - 不符合 `unified-always-on-v2` 的 tray `SelfTest`。
 - 不符合 `unified-lifecycle-v3` 的 stateless controller `SelfTest`。
-- controller 缺少 `ensure_running`、`repair_connectivity`、`restart_core`、
-  `reload_runtime`、`shutdown_runtime`、`show_diagnostic_tray` 任一固定 capability。
+- controller SelfTest capability 與 descriptor 宣告不完全一致。
 - controller action 使用錯誤 launcher kind，或由 manifest 自訂 PowerShell arguments。
-- 重複 component／probe id 或無效 port。
+- `component-menu-v1` 缺少固定 PowerShell entrypoint、宣告未知 action group／confirmation、
+  重複 action ID、逃出 component root，或 component SelfTest 與 descriptor action ID 不一致。
+- 未知欄位、未知 trait／capability、registry／descriptor ID 不一致、重複 component／root／
+  `startupOrder`、不同元件宣告相同 owned port、URL／port 不一致、無 ownership evidence 或
+  超過 128 KiB 的設定檔。同一元件的多個 health endpoint 可以共用它自己的 port。
+- `publicSummaryFields` 不在安全 allowlist，或 navigation／launcher／PID path 逃出 component root。
 
 v3 lifecycle action 的 `-Action EnsureRunning|RepairConnectivity|RestartCore|ReloadRuntime|ShutdownRuntime` 參數由 manager
 依 semantic action 固定產生；manifest 只能選擇 component root 內的相對 entrypoint，不能
 注入 command string 或 arguments。`show_diagnostic_tray` 只能使用 component 內的 VBS launcher。
-PowerShell controller 執行會以 component-specific manager mutex 防止重疊，沿用
-`postStartTimeoutSeconds` 作 action timeout，stdout + stderr 合計上限 64 KiB；capture file
+PowerShell controller 執行會以 component-specific manager mutex 防止重疊，預設沿用 registry
+的 `controllerActionTimeoutSeconds`，descriptor 可用 bounded `timing` 覆寫；action 後的 readiness
+等待同理使用 `postStartTimeoutSeconds`。stdout + stderr 合計上限 64 KiB；capture file
 在解析後立即刪除。v3 成功結果必須是完整 bounded JSON contract，非 JSON、缺欄、timeout
 或超量輸出都會安全失敗，且不會把 stderr 寫入 manager event。
+
+`component-menu-v1` 同樣採固定語意委派：descriptor 只能宣告 `id`、`label`、`group` 與
+`confirmation`，不能提供 command、argument、URL 或 secret。manager 固定呼叫 component root
+內的 `control-center-ui.ps1 -Action <declared-id>`，並要求 component SelfTest 回報完全一致的 action
+集合。選單順序固定為狀態、共同 lifecycle、connection actions、component-specific actions、
+troubleshooting 與 component folder；元件可省略不適用的 action，也可在 component group 加入自己的
+功能。像 Personal Asset OS verified backup 這類有 side effect 的操作必須宣告
+`confirmation: required`，實作與結果內容仍完全由元件擁有。
 
 `ownerManagedPidFile` 是可選的 component-relative runtime PID 檔。設定後，中樞不會只靠
 listener module 名稱判定 ownership，而會要求 listener 等於該 managed PID，或位於其
@@ -162,9 +198,92 @@ OMI backend URL 仍由 OMI launcher 與 adapter 擁有。中樞不讀 OMI launch
 也不保存 resolved URL 或 upstream response。Memory Core internal backend 預設使用 `18765`；
 MCP `8818` 與 tunnel `8800` 保持不變。
 
+## New Component Kit
+
+[`templates/component-controller`](templates/component-controller) 是新增元件的唯一 base template；
+預設產生 `ensure_running`、`reload_runtime`、`shutdown_runtime` 三個 controller capabilities，
+可用 `-IncludeDiagnosticUi` 加入 component-owned `diagnostic-ui` trait 與
+`show_diagnostic_tray`。模板包含：
+
+```text
+<component>\
+├── control-center\component.json
+├── scripts\runtime-control.ps1
+├── scripts\component-runtime.psm1
+├── scripts\control-center-ui.ps1
+├── tests\test-runtime-control.ps1
+└── docs\ControlCenterIntegration.md
+```
+
+先預覽 scaffold；`-Plan` 不建立目錄：
+
+```powershell
+cd C:\GPT_MCPtool\mcp_control_center
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\New-McpComponent.ps1 `
+  -Id example_component -DisplayName "Example Component" -CorePort 18990 `
+  -IncludeDiagnosticUi -Plan
+```
+
+確認後建立 source。目標只能是 workspace 的直接子目錄，已存在時會 fail closed，不覆寫任何檔案：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\New-McpComponent.ps1 `
+  -Id example_component -DisplayName "Example Component" -CorePort 18990 `
+  -IncludeDiagnosticUi -Apply
+```
+
+新模板的 `component-runtime.psm1` 故意是安全的 `not_implemented` stub；`control-center-ui.ps1`
+則提供只含 MCP URL／health／runtime logs 的固定安全起點。它可通過 descriptor、controller／menu
+SelfTest 與 source completeness 驗證，因此是 `registrationReady=true`；但在換成元件真正的
+exact-path lifecycle、ownership 與 targeted tests 前，會維持 `activationReady=false`，不會啟動程序：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Test-McpComponent.ps1 `
+  -ComponentRoot C:\GPT_MCPtool\example_component
+```
+
+註冊固定分成 Plan／Apply。Plan 會重跑 validator、檢查 ID、root、startup order 與跨元件 owned
+port 衝突，並輸出目前 registry SHA-256；它不修改 registry：
+
+```powershell
+$plan = powershell -NoProfile -ExecutionPolicy Bypass `
+  -File scripts\Register-McpComponent.ps1 `
+  -ComponentRoot C:\GPT_MCPtool\example_component -Plan | ConvertFrom-Json
+
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Register-McpComponent.ps1 `
+  -ComponentRoot C:\GPT_MCPtool\example_component `
+  -ExpectedRegistrySha256 $plan.registrySha256 -Apply
+```
+
+Apply 會在 mutation mutex 內再次驗證 hash、candidate 與 conflicts，只新增一筆
+`enabled=false`、`autoStart=false` entry；不修改 component source、Startup，也不建立 process。
+registry 的 exact-byte backup 與 receipt 只寫到 `%LOCALAPPDATA%\McpControlCenter\registration-receipts`，
+或明確指定的 repo-external `-ReceiptRoot`。若 receipt root 位於 source workspace 內會被拒絕。
+
+需要撤回該次 registry mutation 時，先預覽並使用 plan 回傳的 current SHA：
+
+```powershell
+$rollback = powershell -NoProfile -ExecutionPolicy Bypass `
+  -File scripts\Register-McpComponent.ps1 -RollbackReceipt <receipt.json> -Plan | ConvertFrom-Json
+
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Register-McpComponent.ps1 `
+  -RollbackReceipt <receipt.json> `
+  -ExpectedRegistrySha256 $rollback.currentRegistrySha256 -Apply
+```
+
+Rollback 只還原 receipt 中的 exact registry bytes，保留 component root、receipt、Startup 與 runtime。
+註冊不是啟用；完成真實 lifecycle、隔離 smoke、`tests\run-tests.ps1`、Control Center `SelfTest`
+與人工 adoption review 前，不應把新元件設為 enabled 或 auto-start。
+
 ## 驗證界線
 
-`Status` 與 `Doctor` 是 read-only runtime probe；`Start` 只委派非破壞性 launcher；
+`Status` 與 `Doctor` 不改變 runtime；`Doctor` 另外逐一呼叫 v3 controller 的 `Status`，
+所以 health probe 即使為 Ready，只要 controller 回報 ownership mismatch，完整診斷仍會失敗，
+不會把「可連線」誤當成「可安全管理」。`Start` 只委派非破壞性 launcher；
 `Restart`／`Reload component` 是人工 side effect。完整 MCP protocol smoke、ChatGPT action cache
 刷新與 component-specific domain 驗證仍由各元件自己的 README／測試負責，中樞不把 HTTP 200
 冒充成完整 protocol 或目前 source 已採用的證明。
+
+v3 descriptor 啟用時，六個舊 tray script 會拒絕任何非 `DiagnosticOnly` 的持久化啟動。
+舊 source 與 launcher 仍保留作 rollback；只有把 descriptor 明確回復為 `legacy-tray` 後，
+舊托盤才可重新取得 lifecycle ownership。

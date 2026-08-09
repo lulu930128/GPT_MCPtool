@@ -14,7 +14,7 @@ $modulePath = Join-Path $projectRoot "src\McpControlCenter.Core.psm1"
 $controllerPath = Join-Path $PSScriptRoot "control-center.ps1"
 Import-Module $modulePath -Force
 
-if ([string]::IsNullOrWhiteSpace($ManifestPath)) { $ManifestPath = Join-Path $projectRoot "config\components.json" }
+if ([string]::IsNullOrWhiteSpace($ManifestPath)) { $ManifestPath = Get-McpCcDefaultManifestPath }
 if ([string]::IsNullOrWhiteSpace($RuntimeRoot)) { $RuntimeRoot = Get-McpCcDefaultRuntimeRoot }
 $manifest = Read-McpCcManifest -Path $ManifestPath
 if (Test-McpCcPathWithinRoot -Path $RuntimeRoot -Root $manifest.workspaceRoot) {
@@ -36,8 +36,11 @@ if ($SelfTest) {
         expectedTrayContract = $selfTestResult.expectedTrayContract
         expectedLifecycleContract = $selfTestResult.expectedLifecycleContract
         componentContractsValid = $selfTestResult.ok
+        componentMenuContract = $selfTestResult.expectedComponentMenuContract
+        componentMenuComponentCount = @($manifest.components | Where-Object { $null -ne $_.PSObject.Properties["ui"] -and $null -ne $_.ui.PSObject.Properties["menuContract"] -and [string]$_.ui.menuContract -eq $selfTestResult.expectedComponentMenuContract }).Count
         replaceExistingSupported = $true
         autoReconcile = [bool]$AutoReconcile
+        troubleshootingToolsIndependent = $true
     } | ConvertTo-Json -Depth 6
     if (-not $selfTestResult.ok -or -not (Test-Path -LiteralPath $controllerPath -PathType Leaf)) { exit 1 }
     exit 0
@@ -95,6 +98,7 @@ $script:PendingLabel = $null
 $script:SecondsSinceRefresh = 0
 $script:Closing = $false
 $script:ComponentUi = @{}
+$script:IndependentProcesses = @()
 
 function Set-NotifyText([string]$Text) {
     if ($Text.Length -gt 63) { $Text = $Text.Substring(0, 63) }
@@ -159,6 +163,44 @@ function Start-ControllerAction {
     Set-NotifyText "$trayDisplayName | $($script:PendingLabel)"
 }
 
+function Start-IndependentControllerAction {
+    param(
+        [ValidateSet("ShowDiagnosticTray", "ComponentMenuAction")][string]$Action,
+        [Parameter(Mandatory = $true)][string]$Component,
+        [string]$UiAction
+    )
+    $arguments = @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", $controllerPath,
+        "-Action", $Action,
+        "-Component", $Component,
+        "-ManifestPath", $ManifestPath,
+        "-RuntimeRoot", $RuntimeRoot
+    )
+    if ($Action -eq "ComponentMenuAction") {
+        if ([string]::IsNullOrWhiteSpace($UiAction)) { throw "ComponentMenuAction requires UiAction." }
+        $arguments += @("-UiAction", $UiAction)
+    }
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    $startInfo.FileName = (Get-Command powershell.exe -ErrorAction Stop).Source
+    $startInfo.Arguments = ($arguments | ForEach-Object { Quote-ProcessArgument ([string]$_) }) -join " "
+    $startInfo.WorkingDirectory = $projectRoot
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    try {
+        $process = [Diagnostics.Process]::Start($startInfo)
+        if ($null -eq $process) { throw "The troubleshooting launcher did not start." }
+        $script:IndependentProcesses += [pscustomobject]@{
+            process = $process
+            label = if ($Action -eq "ComponentMenuAction") { "$Component / $UiAction" } else { "$Component / troubleshooting tools" }
+        }
+    }
+    catch {
+        Show-Warning "Could not delegate $Action for $Component. Run full diagnostics for details."
+    }
+}
+
 function Update-UiFromState {
     $state = Read-McpCcState -RuntimeRoot $RuntimeRoot
     if ($null -eq $state) {
@@ -180,12 +222,12 @@ function Update-UiFromState {
         $label = Get-StatusLabel ([string]$component.status)
         $ui.status.Text = "Status: $label"
         $ui.parent.Text = "$($component.displayName) - $label"
-        $ui.start.Enabled = ([string]$component.status -eq "Stopped")
-        $ui.restart.Enabled = ([string]$component.status -notin @("NotInstalled", "Misconfigured", "OwnershipMismatch"))
-        $ui.repair.Enabled = ($ui.isController -and [string]$component.status -notin @("Stopped", "NotInstalled", "Misconfigured", "OwnershipMismatch"))
-        $ui.restartCore.Enabled = ($ui.isController -and [string]$component.status -notin @("Stopped", "NotInstalled", "Misconfigured", "OwnershipMismatch"))
-        $ui.shutdown.Enabled = ($ui.isController -and [string]$component.status -notin @("Stopped", "NotInstalled", "Misconfigured", "OwnershipMismatch"))
-        $ui.diagnostic.Enabled = $ui.isController
+        $ui.start.Enabled = ($ui.supportsStart -and [string]$component.status -eq "Stopped")
+        $ui.restart.Enabled = ($ui.supportsReload -and [string]$component.status -notin @("NotInstalled", "Misconfigured", "OwnershipMismatch"))
+        $ui.repair.Enabled = ($ui.supportsRepair -and [string]$component.status -notin @("Stopped", "NotInstalled", "Misconfigured", "OwnershipMismatch"))
+        $ui.restartCore.Enabled = ($ui.supportsRestartCore -and [string]$component.status -notin @("Stopped", "NotInstalled", "Misconfigured", "OwnershipMismatch"))
+        $ui.shutdown.Enabled = ($ui.supportsShutdown -and [string]$component.status -notin @("Stopped", "NotInstalled", "Misconfigured", "OwnershipMismatch"))
+        $ui.diagnostic.Enabled = $ui.supportsDiagnostic
         $ui.health.Enabled = -not [string]::IsNullOrWhiteSpace([string]$component.healthUrl)
     }
     if ($state.overall -eq "Ready") { $notifyIcon.Icon = [Drawing.SystemIcons]::Information }
@@ -206,7 +248,29 @@ $contextMenu.MenuItems.Add("-") | Out-Null
 foreach ($component in @($manifest.components | Sort-Object startupOrder)) {
     $componentId = [string]$component.id
     $componentName = [string]$component.displayName
-    $isController = ([string]$component.runtimeMode -eq "component-controller")
+    $capabilities = @($component.capabilities | ForEach-Object { [string]$_ })
+    $supportsStart = "ensure_running" -in $capabilities
+    $supportsRepair = "repair_connectivity" -in $capabilities
+    $supportsRestartCore = "restart_core" -in $capabilities
+    $supportsReload = "reload_runtime" -in $capabilities
+    $supportsShutdown = "shutdown_runtime" -in $capabilities
+    $supportsDiagnostic = "show_diagnostic_tray" -in $capabilities
+    $navigationDefinitions = @(if ($null -ne $component.PSObject.Properties["navigation"]) { $component.navigation } else { @() })
+    $primaryLauncher = $null
+    $componentMenuActions = @()
+    $usesComponentMenu = $false
+    if ($null -ne $component.PSObject.Properties["ui"] -and $null -ne $component.ui -and $null -ne $component.ui.PSObject.Properties["primaryLauncher"]) {
+        $primaryLauncher = $component.ui.primaryLauncher
+    }
+    if (
+        $null -ne $component.PSObject.Properties["ui"] -and
+        $null -ne $component.ui -and
+        $null -ne $component.ui.PSObject.Properties["menuContract"] -and
+        [string]$component.ui.menuContract -eq "component-menu-v1"
+    ) {
+        $usesComponentMenu = $true
+        $componentMenuActions = @($component.ui.menuActions)
+    }
     $parent = New-Object Windows.Forms.MenuItem "$componentName - Not checked"
     $statusItem = New-Object Windows.Forms.MenuItem "Status: Not checked"
     $statusItem.Enabled = $false
@@ -215,10 +279,11 @@ foreach ($component in @($manifest.components | Sort-Object startupOrder)) {
     $restartCoreItem = New-Object Windows.Forms.MenuItem "Restart MCP server"
     $restartItem = New-Object Windows.Forms.MenuItem "Reload component"
     $shutdownItem = New-Object Windows.Forms.MenuItem "Stop component"
-    $diagnosticItem = New-Object Windows.Forms.MenuItem "Show diagnostic tray"
+    $diagnosticItem = New-Object Windows.Forms.MenuItem "Open troubleshooting tools"
     $healthItem = New-Object Windows.Forms.MenuItem "Open health"
     $healthItem.Enabled = $false
     $folderItem = New-Object Windows.Forms.MenuItem "Open component folder"
+    $primaryUiItem = New-Object Windows.Forms.MenuItem "Open primary UI"
     $definition = $component
     $startItem.add_Click(({ Start-ControllerAction -Action Start -Component $componentId }).GetNewClosure())
     $repairItem.add_Click(({
@@ -265,7 +330,7 @@ foreach ($component in @($manifest.components | Sort-Object startupOrder)) {
             Start-ControllerAction -Action ShutdownRuntime -Component $componentId
         }
     }).GetNewClosure())
-    $diagnosticItem.add_Click(({ Start-ControllerAction -Action ShowDiagnosticTray -Component $componentId }).GetNewClosure())
+    $diagnosticItem.add_Click(({ Start-IndependentControllerAction -Action ShowDiagnosticTray -Component $componentId }).GetNewClosure())
     $healthItem.add_Click(({
         $state = Read-McpCcState -RuntimeRoot $RuntimeRoot
         $current = @($state.components | Where-Object { $_.id -eq $componentId } | Select-Object -First 1)
@@ -273,17 +338,76 @@ foreach ($component in @($manifest.components | Sort-Object startupOrder)) {
             Start-Process ([string]$current[0].healthUrl)
         }
     }).GetNewClosure())
+    if ($null -ne $primaryLauncher) {
+        $primaryLauncherPath = Resolve-McpCcChildPath -Root $component.resolvedRoot -RelativePath ([string]$primaryLauncher.path) -Label "primary UI launcher"
+        $primaryUiItem.add_Click(({
+            $wscript = Join-Path $env:WINDIR "System32\wscript.exe"
+            Start-Process -FilePath $wscript -ArgumentList "`"$primaryLauncherPath`"" -WorkingDirectory $definition.resolvedRoot -WindowStyle Hidden
+        }).GetNewClosure())
+    }
     $folderItem.add_Click(({ Start-Process explorer.exe -ArgumentList "`"$($definition.resolvedRoot)`"" }).GetNewClosure())
     $parent.MenuItems.Add($statusItem) | Out-Null
     $parent.MenuItems.Add("-") | Out-Null
-    $parent.MenuItems.Add($startItem) | Out-Null
-    if ($isController) { $parent.MenuItems.Add($repairItem) | Out-Null }
-    if ($isController) { $parent.MenuItems.Add($restartCoreItem) | Out-Null }
-    $parent.MenuItems.Add($restartItem) | Out-Null
-    if ($isController) { $parent.MenuItems.Add($shutdownItem) | Out-Null }
-    if ($isController) { $parent.MenuItems.Add($diagnosticItem) | Out-Null }
+    if ($supportsStart) { $parent.MenuItems.Add($startItem) | Out-Null }
+    if ($supportsRepair) { $parent.MenuItems.Add($repairItem) | Out-Null }
+    if ($supportsRestartCore) { $parent.MenuItems.Add($restartCoreItem) | Out-Null }
+    if ($supportsReload) { $parent.MenuItems.Add($restartItem) | Out-Null }
+    if ($supportsShutdown) { $parent.MenuItems.Add($shutdownItem) | Out-Null }
     $parent.MenuItems.Add("-") | Out-Null
-    $parent.MenuItems.Add($healthItem) | Out-Null
+    if ($usesComponentMenu) {
+        $previousGroup = $null
+        foreach ($menuActionDefinition in $componentMenuActions) {
+            $menuActionId = [string]$menuActionDefinition.id
+            $menuActionLabel = [string]$menuActionDefinition.label
+            $menuActionGroup = [string]$menuActionDefinition.group
+            $menuActionConfirmation = [string]$menuActionDefinition.confirmation
+            if ($null -ne $previousGroup -and $menuActionGroup -ne $previousGroup) {
+                $parent.MenuItems.Add("-") | Out-Null
+            }
+            $menuActionItem = New-Object Windows.Forms.MenuItem $menuActionLabel
+            $menuActionItem.add_Click(({
+                if ($menuActionConfirmation -eq "required") {
+                    $choice = [Windows.Forms.MessageBox]::Show(
+                        "Run '$menuActionLabel' for $componentName?",
+                        $trayDisplayName,
+                        [Windows.Forms.MessageBoxButtons]::YesNo,
+                        [Windows.Forms.MessageBoxIcon]::Warning
+                    )
+                    if ($choice -ne [Windows.Forms.DialogResult]::Yes) { return }
+                }
+                Start-IndependentControllerAction -Action ComponentMenuAction -Component $componentId -UiAction $menuActionId
+            }).GetNewClosure())
+            $parent.MenuItems.Add($menuActionItem) | Out-Null
+            $previousGroup = $menuActionGroup
+        }
+    }
+    else {
+        if ($null -ne $primaryLauncher) { $parent.MenuItems.Add($primaryUiItem) | Out-Null }
+        if ($navigationDefinitions.Count -eq 0) {
+            $parent.MenuItems.Add($healthItem) | Out-Null
+        }
+        else {
+            foreach ($navigationDefinition in $navigationDefinitions) {
+                $navigationItem = New-Object Windows.Forms.MenuItem ([string]$navigationDefinition.label)
+                $navigationKind = [string]$navigationDefinition.kind
+                $navigationTarget = [string]$navigationDefinition.target
+                $navigationResolvedTarget = switch ($navigationKind) {
+                    "probe" { [string]@($component.probes | Where-Object { $_.id -eq $navigationTarget } | Select-Object -First 1)[0].url }
+                    "loopback-url" { $navigationTarget }
+                    "component-path" { Resolve-McpCcChildPath -Root $component.resolvedRoot -RelativePath $navigationTarget -Label "navigation target" }
+                }
+                $navigationItem.add_Click(({
+                    if ($navigationKind -eq "component-path") {
+                        Start-Process explorer.exe -ArgumentList "`"$navigationResolvedTarget`""
+                    }
+                    else { Start-Process $navigationResolvedTarget }
+                }).GetNewClosure())
+                $parent.MenuItems.Add($navigationItem) | Out-Null
+            }
+        }
+    }
+    $parent.MenuItems.Add("-") | Out-Null
+    if ($supportsDiagnostic) { $parent.MenuItems.Add($diagnosticItem) | Out-Null }
     $parent.MenuItems.Add($folderItem) | Out-Null
     $contextMenu.MenuItems.Add($parent) | Out-Null
     $script:ComponentUi[$componentId] = [pscustomobject]@{
@@ -295,7 +419,12 @@ foreach ($component in @($manifest.components | Sort-Object startupOrder)) {
         restart = $restartItem
         shutdown = $shutdownItem
         diagnostic = $diagnosticItem
-        isController = $isController
+        supportsStart = $supportsStart
+        supportsRepair = $supportsRepair
+        supportsRestartCore = $supportsRestartCore
+        supportsReload = $supportsReload
+        supportsShutdown = $supportsShutdown
+        supportsDiagnostic = $supportsDiagnostic
         health = $healthItem
     }
 }
@@ -342,6 +471,22 @@ $notifyIcon.Visible = $true
 $timer = New-Object Windows.Forms.Timer
 $timer.Interval = 1000
 $timer.add_Tick({
+    $remainingIndependent = @()
+    foreach ($entry in @($script:IndependentProcesses)) {
+        if ($entry.process.HasExited) {
+            $independentExitCode = $entry.process.ExitCode
+            $independentLabel = [string]$entry.label
+            $entry.process.Dispose()
+            if ($independentExitCode -eq 0) {
+                $notifyIcon.ShowBalloonTip(1200, $trayDisplayName, "$independentLabel completed.", [Windows.Forms.ToolTipIcon]::Info)
+            }
+            else {
+                $notifyIcon.ShowBalloonTip(1800, $trayDisplayName, "$independentLabel needs attention. Run full diagnostics for details.", [Windows.Forms.ToolTipIcon]::Warning)
+            }
+        }
+        else { $remainingIndependent += $entry }
+    }
+    $script:IndependentProcesses = $remainingIndependent
     if ($null -ne $script:ControllerProcess -and $script:ControllerProcess.HasExited) {
         $exitCode = $script:ControllerProcess.ExitCode
         $completedLabel = $script:PendingLabel
@@ -376,6 +521,7 @@ finally {
     if ($null -ne $script:ControllerProcess -and -not $script:ControllerProcess.HasExited) {
         $script:ControllerProcess.Dispose()
     }
+    foreach ($entry in @($script:IndependentProcesses)) { $entry.process.Dispose() }
     $notifyIcon.Visible = $false
     $notifyIcon.Dispose()
     if ((Read-TrayPid) -eq $PID) { Remove-Item -LiteralPath $trayPidPath -Force -ErrorAction SilentlyContinue }

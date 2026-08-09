@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 3,
+  "settings": {
+    "initialDelaySeconds": 12,
+    "betweenComponentsSeconds": 3,
+    "probeTimeoutSeconds": 2,
+    "postStartTimeoutSeconds": 45,
+    "controllerActionTimeoutSeconds": 180,
+    "refreshIntervalSeconds": 30,
+    "eventRetentionDays": 30
+  },
+  "components": [
+    {
+      "id": "project_reading",
+      "root": "..\\..\\project_reading",
+      "descriptor": "control-center\\component.json",
+      "enabled": true,
+      "autoStart": true,
+      "startupOrder": 10
+    },
+    {
+      "id": "omi_search",
+      "root": "..\\..\\OMI_search",
+      "descriptor": "control-center\\component.json",
+      "enabled": true,
+      "autoStart": true,
+      "startupOrder": 20
+    },
+    {
+      "id": "japanese_study",
+      "root": "..\\..\\japanese_study",
+      "descriptor": "control-center\\component.json",
+      "enabled": true,
+      "autoStart": true,
+      "startupOrder": 30
+    },
+    {
+      "id": "memory_core",
+      "root": "..\\..\\Memory Core",
+      "descriptor": "control-center\\component.json",
+      "enabled": true,
+      "autoStart": true,
+      "startupOrder": 40
+    },
+    {
+      "id": "codex_bridge",
+      "root": "..\\..\\codex_bridge",
+      "descriptor": "control-center\\component.json",
+      "enabled": true,
+      "autoStart": true,
+      "startupOrder": 50
+    },
+    {
+      "id": "personal_asset_os",
+      "root": "..\\..\\personal-asset-os",
+      "descriptor": "control-center\\component.json",
+      "enabled": true,
+      "autoStart": true,
+      "startupOrder": 60
+    }
+  ]
+}

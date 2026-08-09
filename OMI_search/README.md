@@ -8,12 +8,13 @@ MCP client
   -> OMI launcher-selected loopback backend
   -> GET  /api/ai/tools
   -> POST /api/ai/ask
+  -> GET  /api/ai/refresh-status/{job_id}
   -> unchanged omi.decision.v4 envelope
 ```
 
 ## 文件導覽
 
-- [公開 MCP 契約](docs/PublicContract.md)：責任邊界、六個公開 tools、schema owner、
+- [公開 MCP 契約](docs/PublicContract.md)：責任邊界、七個公開 tools、schema owner、
   refresh 與錯誤語意。
 - [故障排除](docs/Troubleshooting.md)：adapter／backend／tunnel／ChatGPT action cache 的
   分層診斷。
@@ -44,6 +45,7 @@ Adapter 不負責：
 ## 公開 tools
 
 - `omi.ask`：canonical `omi.decision.v4` read-only 入口。
+- `omi.read_refresh_status`：依正整數 `job_id` 讀取 redacted refresh operation/evidence 狀態與 cache-only resume template。
 - `omi.read_market_overview`：將明確 market 映射成 market target。
 - `omi.read_stock_context`：將明確 market + symbol 映射成 stock target。
 - `omi.read_data_freshness`：映射成 data-freshness target。
@@ -56,7 +58,7 @@ Shortcuts 只依 tool 名稱與明確 arguments 做機械映射，固定使用 `
 
 ## Schema owner 與離線 fallback
 
-正常執行時，`tools/list` 會從 OMI backend `GET /api/ai/tools` 取得 `omi.ask` input schema。Target registry、capability registry、typed parameters、selection version 與 public contract digest 都由 backend 擁有。
+正常執行時，`tools/list` 會從 OMI backend `GET /api/ai/tools` 取得 `omi.ask` 與 `omi.read_refresh_status` input schema。Target registry、capability registry、typed parameters、selection version 與 public contract digest 都由 backend 擁有。
 
 Adapter 只投影自己的安全 surface：
 
@@ -135,6 +137,7 @@ Legacy caller 可暫時使用：
 - `TARGET_NOT_FOUND`、missing evidence 等 structured business result 仍是成功的 MCP transport，`isError=false`。
 - Protocol、HTTP、serialization、non-v4 backend contract 或 adapter internal failure 才是 `isError=true`。
 - `include_raw` 只為舊 caller 保留；無論其值為何，response 都不會被投影或裁切。
+- Refresh job 的 operation 完成只表示刷新工作結束；consumer 必須依 `evidence.status` 與 cache-only `resume` 重建 evidence，不能直接宣稱資料已 fresh。
 
 ## 環境變數
 
@@ -198,6 +201,20 @@ Tunnel；選單不提供 Start／Stop 或 tunnel restart。OMI backend 仍由正
 caller 明確傳入 `refresh_if_missing=true` 時啟用，不因 tray 啟動而自動抓取資料。
 Tray 會從正式 OMI launcher 的 bounded runtime evidence 解析實際 backend loopback URL，
 因此 Control Center 不硬編碼或猜測 launcher 動態選用的 port。
+
+### Control Center v3
+
+`control-center/component.json` 是 OMI Search 的正式 runtime descriptor。
+`scripts/runtime-control.ps1` 只管理 adapter HTTP server 與 Secure MCP Tunnel；
+OMI backend 仍是 `external-dependency`，不會被 Control Center 啟動、停止或讀取 domain payload。
+
+`scripts/show-diagnostic-tray.vbs` 是 optional diagnostic UI。關閉它只會關閉 UI，
+不會停止 adapter、tunnel 或 OMI backend。完整 ownership、能力矩陣與隔離驗證方式見
+[`docs/ControlCenterIntegration.md`](docs/ControlCenterIntegration.md)。
+
+原托盤的 Copy／Open 操作與 `CONTROL_PLANE_API_KEY` prompt／status 已透過
+`component-menu-v1` 直接接回中樞子選單。中樞只委派固定 action ID；DPAPI、tunnel ID、
+resolved backend URL 與市場資料都不會離開 OMI Search 的 `control-center-ui.ps1`。
 
 本機 build 驗證成功不會自動刷新 ChatGPT 已快取的 action/schema。若 ChatGPT 仍顯示
 舊欄位，請另外執行 Refresh Actions／重新連線或開新對話。

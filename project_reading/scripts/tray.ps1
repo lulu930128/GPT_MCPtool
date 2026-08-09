@@ -28,6 +28,18 @@ $TrayDisplayName = "Project Reading MCP"
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
   $ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 }
+$ComponentDescriptorPath = Join-Path $ProjectRoot "control-center\component.json"
+$V3ControllerActive = $false
+if (Test-Path -LiteralPath $ComponentDescriptorPath -PathType Leaf) {
+  try {
+    $ComponentDescriptor = [IO.File]::ReadAllText($ComponentDescriptorPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+    $V3ControllerActive = [string]$ComponentDescriptor.runtimeMode -eq "component-controller"
+  }
+  catch { throw "Invalid Project Reading control-center descriptor." }
+}
+if (-not $SelfTest -and -not $DiagnosticOnly -and $V3ControllerActive) {
+  throw "LEGACY_TRAY_DISABLED: Use MCP Control Center or the diagnostic launcher. Restore a legacy-tray descriptor only for rollback."
+}
 $ControllerPath = Join-Path $PSScriptRoot "runtime-control.ps1"
 $McpUrl = "http://${HostName}:${Port}/mcp"
 $HealthUrl = "http://${HostName}:${Port}/health"
@@ -59,6 +71,7 @@ if ($SelfTest) {
     lifecycleDelegated = $true
     ownsRuntimeProcesses = $false
     diagnosticOnlySupported = $true
+    legacyRuntimeTrayBlocked = $V3ControllerActive
     replaceExistingSupported = $true
     autoStartServer = $true
     autoStartTunnel = $true

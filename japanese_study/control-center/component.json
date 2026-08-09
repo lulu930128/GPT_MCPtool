@@ -1,0 +1,103 @@
+{
+  "schemaVersion": 1,
+  "id": "japanese_study",
+  "displayName": "Japanese Study",
+  "runtimeMode": "component-controller",
+  "runtimeContract": "unified-lifecycle-v3",
+  "traits": ["tunnel", "multi-core", "credential-sensitive", "primary-ui", "diagnostic-ui"],
+  "contractScript": "scripts\\runtime-control.ps1",
+  "capabilities": ["ensure_running", "repair_connectivity", "restart_core", "reload_runtime", "shutdown_runtime", "show_diagnostic_tray"],
+  "lifecycle": {
+    "controller": {
+      "kind": "powershell",
+      "path": "scripts\\runtime-control.ps1"
+    },
+    "diagnosticLauncher": {
+      "kind": "vbs",
+      "path": "scripts\\show-diagnostic-tray.vbs"
+    }
+  },
+  "legacyStartup": {
+    "shortcutName": "Japanese Study Hub.lnk",
+    "launcher": "scripts\\start-tray.vbs"
+  },
+  "probes": [
+    {
+      "id": "hub",
+      "label": "Japanese Study Hub",
+      "role": "core",
+      "kind": "json",
+      "url": "http://127.0.0.1:8791/health",
+      "port": 8791,
+      "required": true,
+      "expected": { "ok": true, "service": "japanese-study-hub" },
+      "publicSummaryFields": ["service", "version"],
+      "ownership": {
+        "managedPidFile": ".tmp\\japanese-study-hub-runner.pid",
+        "managedCommandContains": ["uv", "japanese_study_hub.cli serve"]
+      }
+    },
+    {
+      "id": "mcp",
+      "label": "MCP server",
+      "role": "core",
+      "kind": "json",
+      "url": "http://127.0.0.1:8790/health",
+      "port": 8790,
+      "required": true,
+      "expected": { "ok": true, "service": "japanese-study-mcp" },
+      "publicSummaryFields": ["service", "version", "contractVersion", "buildId", "toolCount"],
+      "ownership": {
+        "managedPidFile": ".tmp\\japanese-study-mcp.pid",
+        "managedCommandContains": ["japanese_study", "dist\\src\\http-main.js"]
+      }
+    },
+    {
+      "id": "tunnel",
+      "label": "Secure MCP Tunnel",
+      "role": "connectivity",
+      "kind": "text",
+      "url": "http://127.0.0.1:8792/readyz",
+      "port": 8792,
+      "required": true,
+      "expectedText": ["ready", "ok"],
+      "ownership": {
+        "managedPidFile": ".tmp\\tunnel-client.pid",
+        "managedCommandContains": ["japanese_study", "tunnel-client"]
+      }
+    }
+  ],
+  "navigation": [
+    {
+      "id": "health",
+      "label": "Open health",
+      "kind": "probe",
+      "target": "mcp"
+    }
+  ],
+  "ui": {
+    "primaryLauncher": {
+      "kind": "vbs",
+      "path": "scripts\\start-japanese-study-desktop.vbs"
+    },
+    "menuContract": "component-menu-v1",
+    "actionEntrypoint": { "kind": "powershell", "path": "scripts\\control-center-ui.ps1" },
+    "menuActions": [
+      { "id": "copy_mcp_url", "label": "Copy MCP URL", "group": "connection", "confirmation": "none" },
+      { "id": "copy_health_url", "label": "Copy health URL", "group": "connection", "confirmation": "none" },
+      { "id": "copy_tunnel_id", "label": "Copy tunnel ID", "group": "connection", "confirmation": "none" },
+      { "id": "open_mcp_health", "label": "Open MCP health", "group": "connection", "confirmation": "none" },
+      { "id": "open_tunnel_ui", "label": "Open tunnel UI", "group": "connection", "confirmation": "none" },
+      { "id": "open_runtime_logs", "label": "Open runtime logs", "group": "connection", "confirmation": "none" },
+      { "id": "open_study_browser", "label": "Open Japanese Study browser", "group": "component", "confirmation": "none" },
+      { "id": "open_hub_health", "label": "Open Hub health", "group": "component", "confirmation": "none" },
+      { "id": "save_tunnel_key", "label": "Save tunnel key...", "group": "component", "confirmation": "none" },
+      { "id": "show_key_status", "label": "Show key status", "group": "component", "confirmation": "none" }
+    ]
+  },
+  "safety": {
+    "managerDomainDataAccess": "none",
+    "managerSecretAccess": "none",
+    "shutdownConfirmation": "required"
+  }
+}

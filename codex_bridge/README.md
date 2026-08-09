@@ -137,6 +137,21 @@ access。安裝目前使用者的 Startup shortcut：
 npm run startup:install
 ```
 
+### Control Center v3
+
+正式 registry 使用 `control-center/component.json` 與
+`scripts/runtime-control.ps1` 管理 Bridge server／tunnel。舊 tray 與 launcher 保留作 rollback；
+`scripts/show-diagnostic-tray.vbs` 只在需要時開啟 component-owned diagnostic UI，關閉 UI
+不會停止 runtime。
+
+原托盤的 Copy／Open 操作與 Jobs folder 已透過 `component-menu-v1` 直接接回 Control Center
+子選單；中樞只委派固定 action ID，不讀 jobs、allowlist、project path、approval 或 tunnel ID。
+
+Codex Bridge 是 `approval-sensitive` 元件。health 若顯示 active job 或 pending approval，
+controller 會拒絕 core restart、full reload 與 shutdown，並保持 PID 不變。controller 不讀 job
+payload，也沒有 dispatch、turn、steer、cancel 或 approval decision 能力。完整契約與隔離驗證見
+[`docs/ControlCenterIntegration.md`](docs/ControlCenterIntegration.md)。
+
 ## Secure MCP Tunnel
 
 此元件重用 `project_reading` 已安裝的 `vendor\tunnel-client\tunnel-client.exe` 與目前使用者的
