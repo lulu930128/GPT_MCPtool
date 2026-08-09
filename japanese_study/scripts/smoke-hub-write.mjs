@@ -15,7 +15,7 @@ const config = loadConfig({
   JSTUDY_MCP_HTTP_TOKEN: "",
 });
 const handle = await startJapaneseStudyHttpServer(config);
-const client = new Client({ name: "japanese-study-hub-write-smoke", version: "0.1.0" });
+const client = new Client({ name: "japanese-study-hub-write-smoke", version: "0.3.0" });
 const transport = new StreamableHTTPClientTransport(new URL(handle.url));
 
 try {

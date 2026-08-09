@@ -1,9 +1,17 @@
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { JapaneseStudyMcpConfig } from "./config.js";
-import { createJapaneseStudyMcpServer } from "./server.js";
+import {
+  createJapaneseStudyMcpServer,
+  JAPANESE_STUDY_CONTRACT_VERSION,
+  JAPANESE_STUDY_MCP_VERSION,
+  JAPANESE_STUDY_TOOL_COUNT,
+} from "./server.js";
+
+const JAPANESE_STUDY_BUILD_ID = computeBuildId();
 
 export interface JapaneseStudyHttpServerHandle {
   host: string;
@@ -27,7 +35,10 @@ export async function startJapaneseStudyHttpServer(
       sendJson(res, 200, {
         ok: true,
         service: "japanese-study-mcp",
-        version: "0.1.0",
+        version: JAPANESE_STUDY_MCP_VERSION,
+        contractVersion: JAPANESE_STUDY_CONTRACT_VERSION,
+        buildId: JAPANESE_STUDY_BUILD_ID,
+        toolCount: JAPANESE_STUDY_TOOL_COUNT,
         archetype: "tool-only",
         hub: config.hubBaseUrl,
         auth: config.httpToken ? "bearer" : "loopback-only",
@@ -92,6 +103,27 @@ export async function startJapaneseStudyHttpServer(
       });
     },
   };
+}
+
+function computeBuildId(): string {
+  try {
+    const artifactHashes = [
+      "./api-client.js",
+      "./config.js",
+      "./http-server.js",
+      "./server.js",
+    ].map((artifact) =>
+      createHash("sha256")
+        .update(readFileSync(new URL(artifact, import.meta.url)))
+        .digest("hex"),
+    );
+    return createHash("sha256")
+      .update(artifactHashes.join(""), "utf8")
+      .digest("hex")
+      .slice(0, 16);
+  } catch {
+    return "unavailable";
+  }
 }
 
 async function handlePost(

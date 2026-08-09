@@ -14,9 +14,19 @@ contract without reading source files or legacy progress data directly.
 | `study_get_plan` | Read a bounded prioritized study list |
 | `study_set_manual_labels` | Retry-safe upsert of known/unknown/uncertain/suspended labels |
 | `study_record_attempt` | Append one retry-safe attempt using a caller event id |
+| `study_preview_practice_record` | Validate a complete practice session without writing |
+| `study_record_practice` | Atomically store a complete retry-safe practice session |
+| `study_preview_target_resolution` | Normalize new selectors and read bounded candidates |
+| `study_list_practice_sessions` | List sessions with filters, score summaries, and cursor pagination |
+| `study_preview_practice_target_resolution` | Preview unresolved targets, evidence, duplicates, and fingerprint |
+| `study_apply_practice_target_overrides` | Apply confirmed exact item ids with a retry-stable operation id |
+| `study_supersede_practice_session` | Link an immutable corrected session as the current revision |
+| `study_get_practice_session` | Read immutable questions, answers, targets, evidence, and score |
 
 There are intentionally no file browser, SQL, delete, reset, bulk import, shell,
-Anki write, or legacy-migration MCP tools.
+Anki write, general batch resolver, evidence rebuild, catalog admin, or
+legacy-migration MCP tools. Search selectors return candidates only. Target
+repair writes require exact stable item ids from a prior fingerprinted preview.
 
 ## Setup
 
@@ -37,11 +47,19 @@ npm run smoke:http
 npm run start:http
 ```
 
+`npm run smoke:practice` is a write test and refuses to run unless
+`JSTUDY_ALLOW_TEST_WRITE=1` is explicitly set. Point it only at a loopback MCP
+instance backed by a disposable Hub database.
+
 Defaults:
 
 - Hub: `http://127.0.0.1:8791`
 - MCP: `http://127.0.0.1:8790/mcp`
 - Health: `http://127.0.0.1:8790/health`
+
+The health response identifies the loaded contract and artifact with
+`contractVersion`, `toolCount`, and `buildId`. A plain HTTP 200 is not enough
+to prove that ChatGPT is using the latest tool schema.
 
 Copy `.env.example` values into the process environment as needed. This project
 does not automatically load `.env`, which avoids accidentally coupling runtime
@@ -70,6 +88,19 @@ For normal use, double-click `scripts\Start-Tray.cmd`. The tray owns the Hub,
 MCP adapter, and tunnel processes and exposes health/status actions. After the
 full chain is verified, install login startup with `npm run startup:install`.
 
+After rebuilding the adapter, double-click `scripts\\Restart-Tray.cmd`. This
+uses the exact-path `-ReplaceExisting` flow and reloads Hub, MCP, and tunnel
+without broad process-name termination. The normal Start entry remains
+non-destructive and does not replace an already-running instance.
+
+托盤使用 `unified-always-on-v2` 契約。正式啟動會一起準備 Hub、MCP adapter 與
+Secure MCP Tunnel；選單不提供 Start／Stop 或 tunnel restart。`Restart MCP server`
+只重啟 Hub + adapter，Hub health 與 DPAPI key 操作位於 `Exit` 上方的元件特有區。
+`Exit` 會完整停止 Hub、adapter、tunnel 與 tray。
+
+The tray refuses to start MCP when `src` is newer than `dist`, and it verifies
+MCP version, contract version, tool count, and the current core-artifact hash.
+
 ## Kuro desktop pet
 
 Kuro can later register the STDIO entry point without changing this adapter:
@@ -90,3 +121,8 @@ The dedicated tunnel profile is configured locally. See `docs/ChatGPT-Setup.md`
 for runtime validation and ChatGPT Developer Mode connection. Never paste
 credentials into this README, `.env.example`, source files, command history, or
 chat messages.
+
+Practice previews may warn when `answerResult` and `awardedPoints` do not match
+the default scoring policy. Recording rejects that mismatch unless the caller
+provides a non-empty per-question `gradingOverrideReason`; the Hub preserves
+that reason as grading provenance.

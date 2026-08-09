@@ -12,6 +12,7 @@ param(
   [string]$SecretPath,
   [switch]$NoAutoStart,
   [switch]$AutoStartTunnel,
+  [switch]$ReplaceExisting,
   [switch]$SelfTest
 )
 
@@ -50,6 +51,16 @@ if ([string]::IsNullOrWhiteSpace($TunnelId)) {
 . (Join-Path $PSScriptRoot "key-store.ps1")
 $ResolvedSecretPath = Get-ControlPlaneSecretPath -ProjectRoot $ProjectRoot -SecretPath $SecretPath
 $McpEntry = Join-Path $ProjectRoot "dist\src\http-main.js"
+$McpServerEntry = Join-Path $ProjectRoot "dist\src\server.js"
+$McpBuildArtifacts = @(
+  (Join-Path $ProjectRoot "dist\src\api-client.js"),
+  (Join-Path $ProjectRoot "dist\src\config.js"),
+  (Join-Path $ProjectRoot "dist\src\http-server.js"),
+  $McpServerEntry
+)
+$ExpectedMcpVersion = "0.3.1"
+$ExpectedMcpContractVersion = "practice-resolution-v4.1"
+$ExpectedMcpToolCount = 14
 $HubPyproject = Join-Path $HubRoot "pyproject.toml"
 $McpUrl = "http://${HostName}:${McpPort}/mcp"
 $McpHealthUrl = "http://${HostName}:${McpPort}/health"
@@ -63,6 +74,38 @@ $TunnelPidFile = Join-Path $TmpDir "tunnel-client.pid"
 $NodePath = (Get-Command node -ErrorAction Stop).Source
 $UvPath = (Get-Command uv -ErrorAction Stop).Source
 
+function Get-ExpectedMcpBuildId {
+  $artifactHashes = @()
+  foreach ($artifact in $McpBuildArtifacts) {
+    if (-not (Test-Path -LiteralPath $artifact)) {
+      return ""
+    }
+    $artifactHashes += (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
+  }
+  $bytes = [System.Text.Encoding]::UTF8.GetBytes(($artifactHashes -join ""))
+  $sha256 = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $hash = $sha256.ComputeHash($bytes)
+    return (-join ($hash | ForEach-Object { $_.ToString("x2") })).Substring(0, 16)
+  }
+  finally {
+    $sha256.Dispose()
+  }
+}
+
+function Test-McpBuildFresh {
+  if (-not (Test-Path -LiteralPath $McpEntry) -or -not (Test-Path -LiteralPath $McpServerEntry)) {
+    return $false
+  }
+  $sourceFiles = @(Get-ChildItem -LiteralPath (Join-Path $ProjectRoot "src") -Filter "*.ts" -File -Recurse)
+  if ($sourceFiles.Count -eq 0) {
+    return $false
+  }
+  $latestSource = $sourceFiles | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+  $entryArtifact = Get-Item -LiteralPath $McpEntry
+  return $entryArtifact.LastWriteTimeUtc -ge $latestSource.LastWriteTimeUtc
+}
+
 if ($SelfTest) {
   [pscustomobject]@{
     trayDisplayName = $TrayDisplayName
@@ -72,6 +115,11 @@ if ($SelfTest) {
     uvPath = $UvPath
     mcpEntry = $McpEntry
     mcpEntryExists = Test-Path -LiteralPath $McpEntry
+    mcpBuildFresh = Test-McpBuildFresh
+    expectedMcpVersion = $ExpectedMcpVersion
+    expectedMcpContractVersion = $ExpectedMcpContractVersion
+    expectedMcpToolCount = $ExpectedMcpToolCount
+    expectedMcpBuildId = Get-ExpectedMcpBuildId
     hubPyproject = $HubPyproject
     hubExists = Test-Path -LiteralPath $HubPyproject
     mcpUrl = $McpUrl
@@ -84,8 +132,87 @@ if ($SelfTest) {
     tunnelIdConfigured = ($TunnelId -match '^tunnel_[A-Za-z0-9]+$')
     tunnelIdSource = $TunnelIdSource
     tunnelHealthUrl = $TunnelHealthUrl
+    replaceExistingSupported = $true
+    trayMenuContract = "unified-always-on-v2"
+    autoStartServer = $true
+    autoStartTunnel = $true
   } | ConvertTo-Json -Depth 5
   exit 0
+}
+
+function Stop-ExistingJapaneseStudyRuntime {
+  $processes = @(
+    Get-CimInstance Win32_Process -ErrorAction Stop |
+      Where-Object { $_.ProcessId -ne $PID -and -not [string]::IsNullOrWhiteSpace($_.CommandLine) }
+  )
+  $targets = @()
+  foreach ($process in $processes) {
+    $commandLine = [string]$process.CommandLine
+    $executablePath = [string]$process.ExecutablePath
+    $role = $null
+    $priority = 99
+    if (
+      $commandLine.IndexOf("-m japanese_study_hub.cli serve", [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+      $commandLine.IndexOf($HubRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    ) {
+      $role = "Hub"
+      $priority = 10
+    }
+    elseif (
+      $commandLine.IndexOf($McpEntry, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+      $executablePath.IndexOf("node", [StringComparison]::OrdinalIgnoreCase) -ge 0
+    ) {
+      $role = "MCP"
+      $priority = 20
+    }
+    elseif (
+      (
+        $executablePath.Equals($TunnelClientPath, [StringComparison]::OrdinalIgnoreCase) -or
+        $commandLine.IndexOf($TunnelClientPath, [StringComparison]::OrdinalIgnoreCase) -ge 0
+      ) -and
+      $commandLine.IndexOf($TunnelProfileDir, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+      $commandLine.IndexOf("--profile `"$TunnelProfile`"", [StringComparison]::OrdinalIgnoreCase) -ge 0
+    ) {
+      $role = "Tunnel"
+      $priority = 30
+    }
+    elseif (
+      $process.Name -in @("powershell.exe", "pwsh.exe") -and
+      $commandLine -match (
+        '(?i)(?:^|\s)-File\s+"?' +
+        [Regex]::Escape($PSCommandPath) +
+        '"?(?:\s|$)'
+      )
+    ) {
+      $role = "Tray"
+      $priority = 40
+    }
+    if ($role) {
+      $targets += [pscustomobject]@{
+        ProcessId = [int]$process.ProcessId
+        Role = $role
+        Priority = $priority
+      }
+    }
+  }
+  foreach ($target in @($targets | Sort-Object Priority, ProcessId)) {
+    try {
+      Stop-Process -Id $target.ProcessId -Force -ErrorAction Stop
+      Wait-Process -Id $target.ProcessId -Timeout 3 -ErrorAction SilentlyContinue
+    }
+    catch {
+      if (Get-Process -Id $target.ProcessId -ErrorAction SilentlyContinue) {
+        throw "Could not replace Japanese Study $($target.Role) PID $($target.ProcessId): $($_.Exception.Message)"
+      }
+    }
+  }
+  if ($targets.Count -gt 0) {
+    Start-Sleep -Milliseconds 600
+  }
+}
+
+if ($ReplaceExisting) {
+  Stop-ExistingJapaneseStudyRuntime
 }
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -130,7 +257,20 @@ function Test-HubHealth {
 }
 
 function Test-McpHealth {
-  return Test-JsonHealth -Url $McpHealthUrl
+  try {
+    $health = Invoke-RestMethod -UseBasicParsing -Uri $McpHealthUrl -TimeoutSec 2
+    return (
+      $health.ok -eq $true -and
+      $health.service -eq "japanese-study-mcp" -and
+      $health.version -eq $ExpectedMcpVersion -and
+      $health.contractVersion -eq $ExpectedMcpContractVersion -and
+      [int]$health.toolCount -eq $ExpectedMcpToolCount -and
+      $health.buildId -eq (Get-ExpectedMcpBuildId)
+    )
+  }
+  catch {
+    return $false
+  }
 }
 
 function Test-TunnelReady {
@@ -229,6 +369,10 @@ function Start-Hub {
 }
 
 function Start-Mcp {
+  if (-not (Test-McpBuildFresh)) {
+    Show-Warning "MCP source is newer than dist, or the build artifact is missing.`nRun npm run build before starting the runtime."
+    return
+  }
   if ((Test-OwnedProcess $script:McpProcess) -or (Test-McpHealth)) {
     return
   }
@@ -324,26 +468,27 @@ function Stop-OwnedProcess([ref]$ProcessReference) {
   }
 }
 
-function Start-All {
+function Start-McpServer {
   Start-Hub
   Wait-ForHealth { Test-HubHealth } | Out-Null
   Start-Mcp
   Wait-ForHealth { Test-McpHealth } | Out-Null
-  if ($AutoStartTunnel) {
-    Start-Tunnel
-  }
 }
 
-function Stop-All {
-  Stop-OwnedProcess ([ref]$script:TunnelProcess)
+function Stop-McpServer {
   Stop-OwnedProcess ([ref]$script:McpProcess)
   Stop-OwnedProcess ([ref]$script:HubProcess)
 }
 
-function Restart-All {
-  Stop-All
+function Restart-McpServer {
+  Stop-McpServer
   Start-Sleep -Milliseconds 400
-  Start-All
+  Start-McpServer
+}
+
+function Stop-All {
+  Stop-OwnedProcess ([ref]$script:TunnelProcess)
+  Stop-McpServer
 }
 
 function Copy-TextToClipboard([string]$Text) {
@@ -414,6 +559,11 @@ function Show-KeyStatus {
   Show-Info "Saved: $($status.exists)`nDecryptable: $($status.decryptable)`nUsable: $($status.usable)`nPath: $($status.path)"
 }
 
+function Open-RuntimeLogs {
+  New-Item -ItemType Directory -Force -Path $TmpDir | Out-Null
+  Start-Process explorer.exe -ArgumentList "`"$TmpDir`""
+}
+
 function Update-TrayStatus {
   $hubHealthy = Test-HubHealth
   $mcpHealthy = Test-McpHealth
@@ -425,9 +575,23 @@ function Update-TrayStatus {
   $hubStatus = if ($hubHealthy) { if ($hubOwned) { "Ready" } else { "Ready external" } } elseif ($hubOwned) { "Starting" } else { "Stopped" }
   $mcpStatus = if ($mcpHealthy) { if ($mcpOwned) { "Ready" } else { "Ready external" } } elseif ($mcpOwned) { "Starting" } else { "Stopped" }
   $tunnelStatus = if ($tunnelReady) { if ($tunnelOwned) { "Ready" } else { "Ready external" } } elseif ($tunnelOwned) { "Starting" } else { "Stopped" }
+  $serverHealthy = $hubHealthy -and $mcpHealthy
+  $serverOwned = $hubOwned -or $mcpOwned
+  $serverStatus = if ($serverHealthy) {
+    if ($serverOwned) { "Running" } else { "Running external" }
+  }
+  elseif ($hubHealthy -or $mcpHealthy) {
+    "Partial"
+  }
+  elseif ($serverOwned) {
+    "Starting"
+  }
+  else {
+    "Stopped"
+  }
 
-  $statusItem.Text = "$TrayDisplayName | Hub: $hubStatus | MCP: $mcpStatus | Tunnel: $tunnelStatus"
-  Set-NotifyText "$TrayDisplayName | $hubStatus / $mcpStatus / $tunnelStatus"
+  $statusItem.Text = "$TrayDisplayName | Server: $serverStatus | Tunnel: $tunnelStatus"
+  Set-NotifyText "$TrayDisplayName | $serverStatus / $tunnelStatus"
   if ($hubHealthy -and $mcpHealthy -and $tunnelReady) {
     $notifyIcon.Icon = [System.Drawing.SystemIcons]::Information
   }
@@ -438,36 +602,29 @@ function Update-TrayStatus {
     $notifyIcon.Icon = [System.Drawing.SystemIcons]::Error
   }
 
-  $startAllItem.Enabled = -not ($hubHealthy -and $mcpHealthy -and $tunnelReady)
-  $stopAllItem.Enabled = ($hubOwned -or $mcpOwned -or $tunnelOwned)
-  $startTunnelItem.Enabled = (-not $tunnelReady -and -not $tunnelOwned)
-  $stopTunnelItem.Enabled = $tunnelOwned
+  $restartItem.Enabled = $true
   $openTunnelUiItem.Enabled = ($tunnelReady -or $tunnelOwned)
 }
 
 $contextMenu = New-Object System.Windows.Forms.ContextMenu
-$statusItem = New-Object System.Windows.Forms.MenuItem "$TrayDisplayName | Hub: Checking | MCP: Checking | Tunnel: Checking"
+$statusItem = New-Object System.Windows.Forms.MenuItem "$TrayDisplayName | Server: Checking | Tunnel: Checking"
 $statusItem.Enabled = $false
-$startAllItem = New-Object System.Windows.Forms.MenuItem "Start all"
-$stopAllItem = New-Object System.Windows.Forms.MenuItem "Stop all"
-$restartAllItem = New-Object System.Windows.Forms.MenuItem "Restart all"
-$startTunnelItem = New-Object System.Windows.Forms.MenuItem "Start tunnel"
-$stopTunnelItem = New-Object System.Windows.Forms.MenuItem "Stop tunnel"
+$restartItem = New-Object System.Windows.Forms.MenuItem "Restart MCP server"
 $saveKeyItem = New-Object System.Windows.Forms.MenuItem "Save tunnel key..."
 $keyStatusItem = New-Object System.Windows.Forms.MenuItem "Show key status"
+$copyMcpItem = New-Object System.Windows.Forms.MenuItem "Copy MCP URL"
 $copyTunnelIdItem = New-Object System.Windows.Forms.MenuItem "Copy tunnel ID"
+$copyHealthItem = New-Object System.Windows.Forms.MenuItem "Copy health URL"
+$openHealthItem = New-Object System.Windows.Forms.MenuItem "Open MCP health"
 $openHubHealthItem = New-Object System.Windows.Forms.MenuItem "Open Hub health"
-$openMcpHealthItem = New-Object System.Windows.Forms.MenuItem "Open MCP health"
 $openTunnelUiItem = New-Object System.Windows.Forms.MenuItem "Open tunnel UI"
+$openRuntimeItem = New-Object System.Windows.Forms.MenuItem "Open runtime logs"
 $exitItem = New-Object System.Windows.Forms.MenuItem "Exit"
 
-$startAllItem.add_Click({ Start-All; Start-Tunnel; Update-TrayStatus })
-$stopAllItem.add_Click({ Stop-All; Update-TrayStatus })
-$restartAllItem.add_Click({ Restart-All; Start-Tunnel; Update-TrayStatus })
-$startTunnelItem.add_Click({ Start-Tunnel; Update-TrayStatus })
-$stopTunnelItem.add_Click({ Stop-OwnedProcess ([ref]$script:TunnelProcess); Update-TrayStatus })
+$restartItem.add_Click({ Restart-McpServer; Update-TrayStatus })
 $saveKeyItem.add_Click({ Save-KeyWithPrompt; Update-TrayStatus })
 $keyStatusItem.add_Click({ Show-KeyStatus })
+$copyMcpItem.add_Click({ Copy-TextToClipboard $McpUrl })
 $copyTunnelIdItem.add_Click({
   if ($TunnelId -match '^tunnel_[A-Za-z0-9]+$') {
     Copy-TextToClipboard $TunnelId
@@ -476,12 +633,29 @@ $copyTunnelIdItem.add_Click({
     Show-Warning "No tunnel id is configured in ignored local settings."
   }
 })
+$copyHealthItem.add_Click({ Copy-TextToClipboard $McpHealthUrl })
+$openHealthItem.add_Click({ Start-Process $McpHealthUrl })
 $openHubHealthItem.add_Click({ Start-Process $HubHealthUrl })
-$openMcpHealthItem.add_Click({ Start-Process $McpHealthUrl })
 $openTunnelUiItem.add_Click({ Start-Process $TunnelUiUrl })
+$openRuntimeItem.add_Click({ Open-RuntimeLogs })
 $exitItem.add_Click({
+  $choice = [System.Windows.Forms.MessageBox]::Show(
+    "Exit will stop the MCP server, tunnel, and tray. Continue?",
+    $TrayDisplayName,
+    [System.Windows.Forms.MessageBoxButtons]::YesNo,
+    [System.Windows.Forms.MessageBoxIcon]::Warning
+  )
+  if ($choice -ne [System.Windows.Forms.DialogResult]::Yes) { return }
   $timer.Stop()
-  Stop-All
+  try {
+    Stop-All
+    Stop-ExistingJapaneseStudyRuntime
+  }
+  catch {
+    $timer.Start()
+    Show-Error "Exit could not stop the full Japanese Study runtime.`n$($_.Exception.Message)"
+    return
+  }
   $notifyIcon.Visible = $false
   $notifyIcon.Dispose()
   $mutex.ReleaseMutex()
@@ -491,20 +665,19 @@ $exitItem.add_Click({
 
 $contextMenu.MenuItems.Add($statusItem) | Out-Null
 $contextMenu.MenuItems.Add("-") | Out-Null
-$contextMenu.MenuItems.Add($startAllItem) | Out-Null
-$contextMenu.MenuItems.Add($stopAllItem) | Out-Null
-$contextMenu.MenuItems.Add($restartAllItem) | Out-Null
+$contextMenu.MenuItems.Add($restartItem) | Out-Null
 $contextMenu.MenuItems.Add("-") | Out-Null
-$contextMenu.MenuItems.Add($startTunnelItem) | Out-Null
-$contextMenu.MenuItems.Add($stopTunnelItem) | Out-Null
-$contextMenu.MenuItems.Add($openTunnelUiItem) | Out-Null
-$contextMenu.MenuItems.Add("-") | Out-Null
-$contextMenu.MenuItems.Add($saveKeyItem) | Out-Null
-$contextMenu.MenuItems.Add($keyStatusItem) | Out-Null
+$contextMenu.MenuItems.Add($copyMcpItem) | Out-Null
+$contextMenu.MenuItems.Add($copyHealthItem) | Out-Null
 $contextMenu.MenuItems.Add($copyTunnelIdItem) | Out-Null
 $contextMenu.MenuItems.Add("-") | Out-Null
+$contextMenu.MenuItems.Add($openHealthItem) | Out-Null
+$contextMenu.MenuItems.Add($openTunnelUiItem) | Out-Null
+$contextMenu.MenuItems.Add($openRuntimeItem) | Out-Null
+$contextMenu.MenuItems.Add("-") | Out-Null
 $contextMenu.MenuItems.Add($openHubHealthItem) | Out-Null
-$contextMenu.MenuItems.Add($openMcpHealthItem) | Out-Null
+$contextMenu.MenuItems.Add($saveKeyItem) | Out-Null
+$contextMenu.MenuItems.Add($keyStatusItem) | Out-Null
 $contextMenu.MenuItems.Add("-") | Out-Null
 $contextMenu.MenuItems.Add($exitItem) | Out-Null
 
@@ -520,9 +693,7 @@ $timer.add_Tick({ Update-TrayStatus })
 $timer.Start()
 
 if (-not $NoAutoStart) {
-  Start-All
-}
-if ($AutoStartTunnel) {
+  Start-McpServer
   Start-Tunnel
 }
 

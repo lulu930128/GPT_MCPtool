@@ -24,7 +24,10 @@ environment-variable reference, never the runtime key.
 5. Double-click `scripts\Start-Tray.cmd`; wait until Hub, MCP, and Tunnel all
    report Ready.
 6. Confirm `npm run tunnel:health` or open the local tunnel admin UI.
-7. Only after the chain is stable, run `npm run startup:install`.
+7. Confirm `http://127.0.0.1:8790/health` reports
+   `contractVersion=practice-resolution-v4.1`, `toolCount=14`, and a
+   16-character `buildId`.
+8. Only after the chain is stable, run `npm run startup:install`.
 
 ## Create the private ChatGPT app
 
@@ -34,8 +37,15 @@ environment-variable reference, never the runtime key.
    Study tunnel.
 4. Suggested name: `Japanese Study Hub`.
 5. Suggested description: `Practice and manage my Japanese vocabulary, study plans, mastery labels, and answer history.`
-6. Verify discovery shows exactly six tools.
-7. Test one read call first, then one harmless idempotent label update.
+6. Verify discovery shows exactly fourteen tools.
+7. Test one read call first, then use `study_preview_practice_record` with a
+   small completed session. Preview is read-only; save only when the user
+   explicitly asks to record the completed practice.
+
+If local `npm run smoke:live` reports fourteen tools but ChatGPT still shows an
+older count, rebuild and use `scripts\\Restart-Tray.cmd`, then refresh or
+reconnect the ChatGPT connector. Do not rewrite the Hub resolver to work around
+a stale connector schema.
 
 If the tunnel is not listed, verify that it is associated with the target
 ChatGPT workspace and that the current user has `Tunnels Read + Use`. Developer
@@ -44,7 +54,12 @@ mode permission and Platform tunnel permission are separate.
 ## Safety boundary
 
 - There is no file browser, arbitrary SQL, shell, delete, reset, bulk import,
-  Anki write, or legacy migration tool.
+  general batch resolver, evidence rebuild, catalog admin, Anki write, or
+  legacy migration tool.
+- Target-resolution preview is read-only. Search returns candidates only.
+  `study_apply_practice_target_overrides` requires explicit user confirmation,
+  exact item ids, an unchanged preview fingerprint, and a retry-stable
+  operation id.
 - Tunnel transport is not a replacement for multi-user authorization. Before a
   public or multi-user deployment, add OAuth 2.1 and per-user Hub isolation.
 - The legacy Kuro tracker remains unchanged until migration is separately
