@@ -25,6 +25,8 @@
 - [Security Policy](SECURITY.md)：漏洞回報、敏感資訊處理、元件 trust boundary 與事件原則。
 - [Contributing](CONTRIBUTING.md)：元件邊界、文件／驗證標準、Git 與公開安全流程。
 - [Changelog](CHANGELOG.md)：尚未發布與未來 tagged release 的變更紀錄。
+- [Code of Conduct](CODE_OF_CONDUCT.md)：公開互動、執行標準與事件回報原則。
+- [Support](SUPPORT.md)：支援範圍、提問方式、必要診斷資訊與隱私界線。
 
 本 repository 目前未加入 `LICENSE`；公開可見不等於授予軟體使用或再散布權利。
 

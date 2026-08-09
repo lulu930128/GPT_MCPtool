@@ -14,6 +14,9 @@ The repository does not currently publish versioned GitHub releases, so entries 
   `personal-asset-os`.
 - Explicit ledger, read-only MCP, backup/recovery, and USB mobile-ingest documentation for
   `personal-asset-os`.
+- GitHub community health files, structured issue forms, pull-request guidance, code ownership,
+  support guidance, and repository conduct standards.
+- Repository About metadata, discoverability topics, and private vulnerability reporting.
 
 ### Changed
 

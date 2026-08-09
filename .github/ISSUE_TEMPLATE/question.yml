@@ -1,0 +1,48 @@
+name: 使用問題
+description: 釐清已文件化設定、操作或元件責任邊界
+title: "[Question]: "
+labels:
+  - question
+body:
+  - type: dropdown
+    id: component
+    attributes:
+      label: 相關元件
+      options:
+        - OMI_search
+        - Memory Core
+        - japanese_study
+        - project_reading
+        - codex_bridge
+        - personal-asset-os
+        - mcp_control_center
+        - Workspace / repository
+        - 不確定
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: 想完成的事情
+      description: 描述 outcome 與目前卡住的位置。
+    validations:
+      required: true
+  - type: textarea
+    id: attempted
+    attributes:
+      label: 已閱讀與嘗試的內容
+      description: 列出文件、命令及已去識別的結果。
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 必要環境資訊
+      description: 只提供診斷所需版本與 synthetic 設定，不要貼完整環境 dump。
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: 公開安全確認
+      options:
+        - label: 我已移除 credential、私人資料、內部路徑、tunnel identity 與正式 log。
+          required: true

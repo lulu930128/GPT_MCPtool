@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全漏洞與敏感資料事件
+    url: https://github.com/lulu930128/GPT_MCPtool/blob/main/SECURITY.md
+    about: 請先閱讀私密回報與禁止公開內容的規則。
+  - name: 支援範圍與提問準備
+    url: https://github.com/lulu930128/GPT_MCPtool/blob/main/SUPPORT.md
+    about: 了解 best-effort 支援、必要診斷資訊與隱私界線。

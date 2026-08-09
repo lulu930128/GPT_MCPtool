@@ -1,0 +1,33 @@
+name: 文件問題
+description: 回報缺漏、矛盾、過時內容或失效連結
+title: "[Docs]: "
+labels:
+  - documentation
+body:
+  - type: input
+    id: location
+    attributes:
+      label: 文件位置
+      description: 提供 repository-relative path、章節標題或公開 URL。
+      placeholder: 例如 OMI_search/docs/PublicContract.md - Error semantics
+    validations:
+      required: true
+  - type: textarea
+    id: issue
+    attributes:
+      label: 問題
+      description: 說明內容為何不清楚、不一致、過時或無法操作。
+    validations:
+      required: true
+  - type: textarea
+    id: correction
+    attributes:
+      label: 建議修正與依據
+      description: 若知道正確內容，請附 source、test、contract 或可重現證據；不要貼私人資料。
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: 公開安全確認
+      options:
+        - label: 此回報不包含 secret、私人資料、內部路徑或正式 runtime artifact。
+          required: true
