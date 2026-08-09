@@ -10,7 +10,9 @@ import uvicorn
 
 from personal_asset_os.app import create_app
 from personal_asset_os.build import source_build_id
+from personal_asset_os.database import Database
 from personal_asset_os.migrations import run_migrations
+from personal_asset_os.services import mobile_sync
 from personal_asset_os.services.ai import check_connection
 from personal_asset_os.services.backup import create_backup, restore_backup, verify_backup
 from personal_asset_os.settings import Settings
@@ -75,6 +77,66 @@ def _openai_check(args: argparse.Namespace) -> None:
     _json(check_connection(settings))
 
 
+def _mobile_database(args: argparse.Namespace) -> tuple[Settings, Database]:
+    settings = _settings_from_args(args)
+    settings.ensure_directories()
+    run_migrations(settings.database_path, settings.project_root)
+    return settings, Database(settings.database_path)
+
+
+def _mobile_pair(args: argparse.Namespace) -> None:
+    settings, database = _mobile_database(args)
+    try:
+        with database.session() as session:
+            pairing, code = mobile_sync.create_pairing_session(session)
+            _json(
+                {
+                    "pairing_code": code,
+                    "expires_at": pairing.expires_at,
+                    "endpoint": f"http://127.0.0.1:{settings.port}/api/mobile",
+                    "transport": "adb_reverse",
+                    "note": "配對碼只顯示這一次，請勿寫入檔案或聊天紀錄。",
+                }
+            )
+    finally:
+        database.engine.dispose()
+
+
+def _mobile_devices(args: argparse.Namespace) -> None:
+    _, database = _mobile_database(args)
+    try:
+        with database.session() as session:
+            devices = mobile_sync.list_devices(session)
+            _json(
+                {
+                    "devices": [
+                        {
+                            "id": device.id,
+                            "display_name": device.display_name,
+                            "status": "revoked" if device.revoked_at else "active",
+                            "paired_at": device.paired_at,
+                            "last_seen_at": device.last_seen_at,
+                            "last_accepted_sequence": device.last_accepted_sequence,
+                            "revoked_at": device.revoked_at,
+                        }
+                        for device in devices
+                    ]
+                }
+            )
+    finally:
+        database.engine.dispose()
+
+
+def _mobile_revoke(args: argparse.Namespace) -> None:
+    _, database = _mobile_database(args)
+    try:
+        with database.session() as session:
+            device, changed = mobile_sync.revoke_device(session, str(args.device_id))
+            _json({"device_id": device.id, "revoked": True, "changed": changed})
+    finally:
+        database.engine.dispose()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="personal-asset-os")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -110,6 +172,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Make one minimal OpenAI call without sending personal finance data",
     )
     openai_check.set_defaults(handler=_openai_check)
+
+    mobile_pair = subparsers.add_parser(
+        "mobile-pair", help="Create a one-time code for a loopback mobile pairing"
+    )
+    mobile_pair.add_argument("--data-dir", default=None)
+    mobile_pair.add_argument("--port", type=int, default=None)
+    mobile_pair.set_defaults(handler=_mobile_pair)
+
+    mobile_devices = subparsers.add_parser(
+        "mobile-devices", help="List paired mobile devices without credential material"
+    )
+    mobile_devices.add_argument("--data-dir", default=None)
+    mobile_devices.set_defaults(handler=_mobile_devices)
+
+    mobile_revoke = subparsers.add_parser(
+        "mobile-revoke", help="Revoke one paired mobile device"
+    )
+    mobile_revoke.add_argument("device_id")
+    mobile_revoke.add_argument("--data-dir", default=None)
+    mobile_revoke.set_defaults(handler=_mobile_revoke)
     return parser
 
 

@@ -123,7 +123,12 @@ class FinancialEvent(Base):
     __table_args__ = (
         CheckConstraint("amount > 0", name="ck_financial_event_amount_positive"),
         Index("ix_financial_events_status_occurred", "status", "occurred_at"),
-        Index("ix_financial_events_device_sequence", "device_id", "local_sequence"),
+        Index(
+            "ix_financial_events_device_sequence",
+            "device_id",
+            "local_sequence",
+            unique=True,
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -166,6 +171,38 @@ class FinancialEvent(Base):
 
     transaction_links: Mapped[list[FinancialEventTransactionLink]] = relationship(
         back_populates="event", cascade="all, delete-orphan"
+    )
+
+
+class MobileDevice(Base):
+    __tablename__ = "mobile_devices"
+    __table_args__ = (
+        CheckConstraint(
+            "last_accepted_sequence >= 0",
+            name="ck_mobile_device_last_sequence_nonnegative",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    paired_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=utc_now)
+    last_seen_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    last_accepted_sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+
+
+class MobilePairingSession(Base):
+    __tablename__ = "mobile_pairing_sessions"
+    __table_args__ = (Index("ix_mobile_pairing_sessions_expires", "expires_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    code_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=utc_now)
+    used_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    paired_device_id: Mapped[str | None] = mapped_column(
+        ForeignKey("mobile_devices.id", ondelete="RESTRICT")
     )
 
 

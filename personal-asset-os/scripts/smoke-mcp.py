@@ -11,6 +11,7 @@ EXPECTED_TOOLS = {
     "list_asset_accounts",
     "list_asset_positions",
     "list_recent_asset_transactions",
+    "get_pending_financial_events",
     "get_reconciliation_status",
     "get_asset_system_status",
 }

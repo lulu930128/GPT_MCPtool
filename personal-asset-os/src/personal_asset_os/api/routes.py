@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 from collections.abc import Generator
-from typing import cast
+from typing import Annotated, cast
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Header, Query, Request
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, selectinload
 
@@ -20,6 +20,8 @@ from personal_asset_os.api.schemas import (
     FinancialEventUpdate,
     IncomeRequest,
     InstrumentCreate,
+    MobileEventIngestRequest,
+    MobilePairRequest,
     MonthCloseRequest,
     OpeningBalanceRequest,
     PriceCreate,
@@ -36,17 +38,19 @@ from personal_asset_os.domain.enums import (
     FinancialEventStatus,
     TradeSide,
 )
+from personal_asset_os.errors import AuthenticationError
 from personal_asset_os.models import (
     Account,
     AuditLog,
     FinancialEvent,
     Instrument,
     LedgerTransaction,
+    MobileDevice,
     Snapshot,
 )
 from personal_asset_os.services import ai as ai_service
 from personal_asset_os.services import backup as backup_service
-from personal_asset_os.services import financial_events, ledger, portfolio, reporting
+from personal_asset_os.services import financial_events, ledger, mobile_sync, portfolio, reporting
 from personal_asset_os.settings import Settings
 
 router = APIRouter(prefix="/api")
@@ -63,6 +67,18 @@ def get_settings(request: Request) -> Settings:
 def get_session(database: Database = Depends(get_database)) -> Generator[Session, None, None]:
     with database.session() as session:
         yield session
+
+
+def get_mobile_device(
+    authorization: Annotated[str | None, Header()] = None,
+    session: Session = Depends(get_session),
+) -> MobileDevice:
+    if authorization is None:
+        raise AuthenticationError("缺少裝置憑證")
+    scheme, separator, token = authorization.partition(" ")
+    if separator != " " or scheme.lower() != "bearer" or not token.strip():
+        raise AuthenticationError("裝置憑證格式不正確")
+    return mobile_sync.authenticate_device(session, token)
 
 
 def transaction_payload(
@@ -128,6 +144,18 @@ def financial_event_payload(
     if created is not None:
         payload["created"] = created
     return payload
+
+
+def mobile_device_payload(device: MobileDevice) -> dict[str, object]:
+    return {
+        "id": device.id,
+        "display_name": device.display_name,
+        "paired_at": device.paired_at,
+        "last_seen_at": device.last_seen_at,
+        "last_accepted_sequence": device.last_accepted_sequence,
+        "revoked_at": device.revoked_at,
+        "status": "revoked" if device.revoked_at is not None else "active",
+    }
 
 
 @router.get("/health")
@@ -298,6 +326,45 @@ def finalize_financial_event(
         "event": financial_event_payload(event),
         "transaction": transaction_payload(transaction, created=created),
         "created": created,
+    }
+
+
+@router.post("/mobile/pair", status_code=201)
+def pair_mobile_device(
+    payload: MobilePairRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    device, token = mobile_sync.pair_device(session, **payload.model_dump())
+    return {
+        "device": mobile_device_payload(device),
+        "token": token,
+        "token_type": "Bearer",
+    }
+
+
+@router.get("/mobile/session")
+def mobile_session(device: MobileDevice = Depends(get_mobile_device)) -> dict[str, object]:
+    return {"device": mobile_device_payload(device), "ingest_only": True}
+
+
+@router.post("/mobile/events", status_code=201)
+def ingest_mobile_event(
+    payload: MobileEventIngestRequest,
+    device: MobileDevice = Depends(get_mobile_device),
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    values = payload.model_dump()
+    payload_hash = cast(str, values.pop("payload_hash"))
+    event, created = mobile_sync.capture_mobile_event(
+        session,
+        device=device,
+        payload=values,
+        payload_hash=payload_hash,
+    )
+    return {
+        "event": financial_event_payload(event, created=created),
+        "accepted_payload_hash": payload_hash.lower(),
+        "ingest_only": True,
     }
 
 

@@ -7,7 +7,7 @@ def test_health_and_empty_dashboard(client: TestClient) -> None:
     health = client.get("/api/health")
     assert health.status_code == 200
     assert health.json()["ok"] is True
-    assert health.json()["schemaRevision"] == "0002_financial_events"
+    assert health.json()["schemaRevision"] == "0003_mobile_connection"
     assert len(health.json()["buildId"]) == 16
 
     dashboard = client.get("/api/dashboard")

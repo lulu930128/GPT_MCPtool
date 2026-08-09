@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -192,6 +193,63 @@ class FinancialEventFinalizeRequest(StrictModel):
     expected_version: int = Field(ge=1)
     payment_account_id: str | None = None
     destination_account_id: str | None = None
+
+
+class MobilePairRequest(StrictModel):
+    pairing_code: str = Field(min_length=12, max_length=20)
+    device_id: str = Field(min_length=1, max_length=80)
+    display_name: str = Field(min_length=1, max_length=120)
+
+
+class MobileEventIngestRequest(StrictModel):
+    schema_version: Literal[1]
+    id: str = Field(min_length=36, max_length=36)
+    event_kind: Literal[FinancialEventKind.EXPENSE, FinancialEventKind.INCOME]
+    occurred_at: str = Field(min_length=24, max_length=24)
+    captured_at: str = Field(min_length=24, max_length=24)
+    amount: str = Field(pattern=r"^(?:0|[1-9]\d{0,12})(?:\.\d?[1-9])?$")
+    currency: Literal["TWD"]
+    description: str = Field(min_length=1, max_length=240)
+    merchant: str | None = Field(default=None, max_length=120)
+    note: str | None = Field(default=None, max_length=500)
+    payment_hint: str | None = Field(default=None, max_length=120)
+    source: Literal["mobile_sync"]
+    device_id: str = Field(min_length=1, max_length=80)
+    local_sequence: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=8, max_length=120)
+    payload_hash: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+
+    @field_validator("id")
+    @classmethod
+    def validate_canonical_event_id(cls, value: str) -> str:
+        try:
+            canonical = str(UUID(value))
+        except ValueError as exc:
+            raise ValueError("id 必須是 UUID") from exc
+        if value != canonical:
+            raise ValueError("id 必須使用標準小寫 UUID 格式")
+        return value
+
+    @field_validator("occurred_at", "captured_at")
+    @classmethod
+    def validate_mobile_timestamp(cls, value: str) -> str:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("時間必須是 UTC ISO 8601 格式") from exc
+        canonical = parsed.astimezone(UTC).isoformat(timespec="milliseconds").replace(
+            "+00:00", "Z"
+        )
+        if value != canonical:
+            raise ValueError("時間必須是 UTC ISO 8601 毫秒格式")
+        return value
+
+    @field_validator("amount")
+    @classmethod
+    def validate_mobile_amount(cls, value: str) -> str:
+        if Decimal(value) <= 0:
+            raise ValueError("amount 必須大於零")
+        return value
 
 
 class ErrorEnvelope(BaseModel):

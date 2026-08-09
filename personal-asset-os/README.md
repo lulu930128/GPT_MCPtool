@@ -17,7 +17,7 @@ Personal Asset OS 是本機優先的個人資產與帳務系統。目前提供�
 - 由 Windows 托盤固定準備 server、外部 API 能力與 Secure MCP Tunnel，並可重啟 server、開啟 dashboard、執行備份與檢查 health。
 - 使用固定 synthetic prompt 驗證 OpenAI Responses API；該檢查不傳送個人財務資料。
 
-目前不包含手機同步、一般雲端 relay、銀行／券商自動匯入、完整多幣別、稅務引擎或 AI 寫入。dashboard 與 REST API 永遠只綁定 loopback；唯一遠端路徑是 OpenAI Secure MCP Tunnel 對 `/mcp` 的私有 outbound-only 轉送。
+目前不包含一般雲端 relay、跨網路手機同步、銀行／券商自動匯入、完整多幣別、稅務引擎或 AI 寫入。dashboard 與 REST API 永遠只綁定 loopback；OpenAI Secure MCP Tunnel 仍只對 read-only `/mcp` 做私有 outbound-only 轉送。Android 寫入路徑只透過本機 USB/ADB reverse 進入 Financial Event 待審核區。
 
 ## 文件導覽
 
@@ -26,8 +26,21 @@ Personal Asset OS 是本機優先的個人資產與帳務系統。目前提供�
 - [安全與隱私](docs/SecurityAndPrivacy.md)：本機資料、loopback、read-only MCP、手機與備份邊界。
 - [MCP 工具參考](docs/McpToolReference.md)：七個唯讀工具及 freshness／quality／warning 語意。
 - [備份與還原](docs/BackupRecovery.md)：online backup、integrity、new-path restore 與 recovery acceptance。
+- [手機同步](docs/MobileSync.md)：一次性配對、SecureStore、USB/ADB、outbox retry 與 ingest-only contract。
 - [產品方向](docs/product/ProductVision.md)、[Operating Model](docs/product/OperatingModel.md)、
   [Quality Bar](docs/product/QualityBar.md)、[Roadmap](docs/product/Roadmap.md)。
+
+## Android 手機預覽版
+
+`mobile/` 提供 Android-first Expo App。v0.1 已實作輕鬆淺咖啡色的 Quick Capture、手機 SQLite outbox、一次性配對、SecureStore 裝置 token 與 USB/ADB loopback 手動同步。同步只 staging Financial Event，不連接公網 Relay，也不直接寫入正式帳本。
+
+```powershell
+cd C:\GPT_MCPtool\personal-asset-os\mobile
+npm install
+npm run android:lan
+```
+
+也可在不安裝 Expo Go 的情況下產生本機 standalone APK。開發、安全邊界、建置命令及實機 smoke 步驟見 `mobile/README.md`。
 
 ## 資料位置
 
@@ -94,9 +107,26 @@ Restart 只會終止 command line、Python entry 與本專案 exact path 相符�
 - `直接入帳`：限資料完整的 expense／income，必須選擇付款／收款帳戶；桌面端 finalize service 建立正式雙式交易。
 - Pending Inbox：可修改 event 版本、正式入帳或保留 rejected tombstone，不會直接覆寫 posted transaction。
 - 相同 idempotency key 搭配相同內容會回傳既有 event；搭配不同內容會回傳 conflict。
-- 手機 App 尚未實作。未來手機是主要日常入口，可一次核准低風險事件，但不會直接寫資料庫；desktop 仍負責裝置、版本、帳戶與 ledger invariant 驗證。
+- 手機 App 可透過 USB/ADB loopback 配對並 staging event；相同 device sequence 與 idempotency key 受唯一性及 payload hash 保護。
+- 手機仍不能 finalize 或直接寫 `transactions + postings`；desktop 負責裝置撤銷、版本、帳戶與 ledger invariant 驗證。
+- 配對管理命令為 `personal-asset-os mobile-pair`、`mobile-devices` 與 `mobile-revoke <device-id>`；完整步驟見 `mobile/README.md`。
 
 ## 私有 MCP 連線
+
+### Control Center lifecycle
+
+`control-center/component.json` 將 server 與 Secure MCP Tunnel 接到
+`MCP Control Center` 的 `unified-lifecycle-v3` 合約。Control Center 只做
+loopback health、exact PID／程序血緣驗證與 lifecycle 協調；不讀取帳本、
+Financial Event、投資資料、報表、備份或正式資料路徑。
+
+dashboard 仍是主要 UI。Control Center 可開啟 primary UI 或按需啟動
+component-owned diagnostic tray；diagnostic tray 關閉時不會停止 runtime。
+完整邊界與 rollback 見 [Control Center Integration](docs/ControlCenterIntegration.md)。
+
+原托盤的 dashboard、Quick Capture、verified backup、URL 與資料夾操作已透過
+`component-menu-v1` 直接接回中樞子選單。verified backup 仍需明確確認，且完全由本元件
+執行；中樞不會取得正式資料路徑、備份路徑、帳務內容或 tunnel ID。
 
 連線採用 [OpenAI Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)，不開 inbound firewall port，也不建立 public URL。`tunnel-client` executable、profile、log、PID、`.env` 與 credential 都是 Git-ignored local runtime state。
 

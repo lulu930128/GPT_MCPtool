@@ -13,6 +13,11 @@ class PersonalAssetError(Exception):
         self.details = details or {}
 
 
+class AuthenticationError(PersonalAssetError):
+    code = "AUTHENTICATION_ERROR"
+    status_code = 401
+
+
 class ValidationError(PersonalAssetError):
     code = "VALIDATION_ERROR"
     status_code = 422

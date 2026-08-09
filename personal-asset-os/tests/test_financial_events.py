@@ -220,7 +220,7 @@ def test_migration_round_trip_from_0001_expands_audit_contract(
 
     with database.session() as session:
         revision = session.scalar(text("SELECT version_num FROM alembic_version"))
-        assert revision == "0002_financial_events"
+        assert revision == "0003_mobile_connection"
         event, _ = financial_events.capture_event(
             session,
             event_kind=FinancialEventKind.EXPENSE,
