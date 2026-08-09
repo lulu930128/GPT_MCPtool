@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import hmac
 import json
 import os
 import sys
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -18,6 +20,25 @@ SERVER_VERSION = "0.2.0"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8797
 MAX_BODY_BYTES = 1_048_576
+UPSTREAM_HEALTH_TIMEOUT_SECONDS = 2
+SOURCE_BUILD_FILES = (
+    Path(__file__).resolve(),
+    Path(omi_search_stdio.__file__).resolve(),
+    Path(__file__).resolve().with_name("public_contract_snapshot.json"),
+)
+
+
+def _source_build_id() -> str:
+    artifact_hashes: list[str] = []
+    for path in SOURCE_BUILD_FILES:
+        if not path.is_file():
+            return ""
+        artifact_hashes.append(hashlib.sha256(path.read_bytes()).hexdigest())
+    combined = "".join(artifact_hashes).encode("utf-8")
+    return hashlib.sha256(combined).hexdigest()[:16]
+
+
+SOURCE_BUILD_ID = _source_build_id()
 
 
 def _env_int(name: str, default: int) -> int:
@@ -49,6 +70,44 @@ def _authorized(headers: Any, bearer_token: str | None) -> bool:
     return hmac.compare_digest(candidate, bearer_token)
 
 
+def _upstream_health_document() -> dict[str, Any]:
+    base = {
+        "service": "omi-search-upstream",
+    }
+    try:
+        payload = omi_search_stdio._api_request(
+            "GET",
+            "/api/system/health",
+            timeout_seconds=UPSTREAM_HEALTH_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        return {
+            **base,
+            "ok": False,
+            "status": "unavailable",
+            "errorCode": "UPSTREAM_UNAVAILABLE",
+        }
+
+    if (
+        not isinstance(payload, dict)
+        or payload.get("status") != "ok"
+        or payload.get("app_name") != "Open Market Intelligence"
+    ):
+        return {
+            **base,
+            "ok": False,
+            "status": "unavailable",
+            "errorCode": "UPSTREAM_CONTRACT_MISMATCH",
+        }
+
+    return {
+        **base,
+        "ok": True,
+        "status": "ready",
+        "errorCode": None,
+    }
+
+
 class OmiSearchHttpServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
@@ -76,10 +135,15 @@ class OmiSearchHttpHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "service": SERVER_NAME,
                     "version": SERVER_VERSION,
+                    "buildId": SOURCE_BUILD_ID,
                     "mcp_url": f"http://{self.server.server_address[0]}:{self.server.server_address[1]}/mcp",
                     "omi_api_base_url": omi_search_stdio.API_BASE_URL,
                 },
             )
+            return
+
+        if self.path_without_query == "/upstream-health":
+            self.send_json(HTTPStatus.OK, _upstream_health_document())
             return
 
         if self.path_without_query == "/mcp":

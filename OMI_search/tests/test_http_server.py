@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 from threading import Thread
 import unittest
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from http_server import OmiSearchHttpHandler, OmiSearchHttpServer
+from http_server import SOURCE_BUILD_ID, OmiSearchHttpHandler, OmiSearchHttpServer
 
 
 def request_json(
@@ -56,7 +57,84 @@ class OmiSearchHttpServerTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertTrue(body["ok"])
             self.assertEqual(body["service"], "omi-search-http-mcp")
+            self.assertEqual(body["buildId"], SOURCE_BUILD_ID)
+            self.assertRegex(body["buildId"], r"^[0-9a-f]{16}$")
             self.assertIn("/mcp", body["mcp_url"])
+        finally:
+            handle.close()
+
+    def test_upstream_health_ready_contract(self) -> None:
+        handle = HttpServerHandle()
+        try:
+            with patch(
+                "http_server.omi_search_stdio._api_request",
+                return_value={
+                    "status": "ok",
+                    "app_name": "Open Market Intelligence",
+                    "private": "must-not-be-forwarded",
+                },
+            ) as request:
+                status, body, _headers = request_json(
+                    f"{handle.base_url}/upstream-health"
+                )
+
+            self.assertEqual(status, 200)
+            self.assertEqual(
+                body,
+                {
+                    "service": "omi-search-upstream",
+                    "ok": True,
+                    "status": "ready",
+                    "errorCode": None,
+                },
+            )
+            request.assert_called_once_with(
+                "GET", "/api/system/health", timeout_seconds=2
+            )
+        finally:
+            handle.close()
+
+    def test_upstream_health_redacts_transport_failure(self) -> None:
+        handle = HttpServerHandle()
+        try:
+            with patch(
+                "http_server.omi_search_stdio._api_request",
+                side_effect=TimeoutError(
+                    "private backend URL, credential, and exception text"
+                ),
+            ):
+                status, body, _headers = request_json(
+                    f"{handle.base_url}/upstream-health"
+                )
+
+            self.assertEqual(status, 200)
+            self.assertEqual(body["ok"], False)
+            self.assertEqual(body["status"], "unavailable")
+            self.assertEqual(body["errorCode"], "UPSTREAM_UNAVAILABLE")
+            self.assertNotIn("private", json.dumps(body))
+            self.assertEqual(
+                set(body), {"service", "ok", "status", "errorCode"}
+            )
+        finally:
+            handle.close()
+
+    def test_upstream_health_rejects_malformed_contract(self) -> None:
+        handle = HttpServerHandle()
+        try:
+            with patch(
+                "http_server.omi_search_stdio._api_request",
+                return_value={"status": "ok", "app_name": "unexpected"},
+            ):
+                status, body, _headers = request_json(
+                    f"{handle.base_url}/upstream-health"
+                )
+
+            self.assertEqual(status, 200)
+            self.assertEqual(body["ok"], False)
+            self.assertEqual(body["status"], "unavailable")
+            self.assertEqual(
+                body["errorCode"], "UPSTREAM_CONTRACT_MISMATCH"
+            )
         finally:
             handle.close()
 

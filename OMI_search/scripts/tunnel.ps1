@@ -73,7 +73,7 @@ switch ($Action) {
       profileExists = Test-Path -LiteralPath $profilePath
       secretPath = $ResolvedSecretPath
       secretExists = Test-Path -LiteralPath $ResolvedSecretPath
-      tunnelId = $TunnelId
+      tunnelIdConfigured = -not [string]::IsNullOrWhiteSpace($TunnelId)
       mcpUrl = $McpUrl
       adminBaseUrl = Get-AdminBaseUrl
       apiKeyReference = $ControlPlaneApiKeyRef

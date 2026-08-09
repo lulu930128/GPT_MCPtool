@@ -24,6 +24,11 @@ if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
 }
 
 $HttpEntry = Join-Path $ProjectRoot "http_server.py"
+$SourceBuildFiles = @(
+  $HttpEntry,
+  (Join-Path $ProjectRoot "server.py"),
+  (Join-Path $ProjectRoot "public_contract_snapshot.json")
+)
 $McpUrl = "http://${HostName}:${Port}/mcp"
 $HealthUrl = "http://${HostName}:${Port}/health"
 $TunnelProfileDir = Join-Path $ProjectRoot ".tunnel-client"
@@ -44,6 +49,25 @@ $ServerPidFile = Join-Path $TmpDir "omi-search-http-server.pid"
 $TrayPidFile = Join-Path $TmpDir "omi-search-tray.pid"
 $TrayLogFile = Join-Path $TmpDir "omi-search-tray.log"
 $PythonPath = (Get-Command python -ErrorAction Stop).Source
+
+function Get-ExpectedSourceBuildId {
+  $artifactHashes = @()
+  foreach ($artifact in $SourceBuildFiles) {
+    if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
+      return ""
+    }
+    $artifactHashes += (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
+  }
+  $bytes = [System.Text.Encoding]::UTF8.GetBytes(($artifactHashes -join ""))
+  $sha256 = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $hash = $sha256.ComputeHash($bytes)
+    return (-join ($hash | ForEach-Object { $_.ToString("x2") })).Substring(0, 16)
+  }
+  finally {
+    $sha256.Dispose()
+  }
+}
 
 function Write-TrayLog([string]$Message) {
   try {
@@ -172,6 +196,7 @@ if ($SelfTest) {
     pythonPath = $PythonPath
     httpEntry = $HttpEntry
     httpEntryExists = Test-Path -LiteralPath $HttpEntry
+    expectedSourceBuildId = Get-ExpectedSourceBuildId
     omiApiBaseUrl = $OmiApiBaseUrl
     mcpUrl = $McpUrl
     healthUrl = $HealthUrl
@@ -179,7 +204,7 @@ if ($SelfTest) {
     tunnelClientExists = Test-Path -LiteralPath $TunnelClientPath
     tunnelProfilePath = $TunnelProfilePath
     tunnelProfileExists = Test-Path -LiteralPath $TunnelProfilePath
-    tunnelId = $TunnelId
+    tunnelIdConfigured = -not [string]::IsNullOrWhiteSpace($TunnelId)
     tunnelHealthUrl = $TunnelHealthUrl
     tunnelUiUrl = $TunnelUiUrl
     serverPidFile = $ServerPidFile
@@ -190,6 +215,9 @@ if ($SelfTest) {
     secretExists = $keyStatus.exists
     secretDecryptable = $keyStatus.decryptable
     secretUsable = $keyStatus.usable
+    trayMenuContract = "unified-always-on-v2"
+    autoStartServer = $true
+    autoStartTunnel = $true
   } | ConvertTo-Json -Depth 4
   exit 0
 }
@@ -197,6 +225,27 @@ if ($SelfTest) {
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
+
+if (-not $ReplaceExisting -and (Test-Path -LiteralPath $TrayPidFile)) {
+  $existingTrayPid = 0
+  $existingTrayPidText = (Get-Content -LiteralPath $TrayPidFile -Raw -ErrorAction SilentlyContinue).Trim()
+  if ([int]::TryParse($existingTrayPidText, [ref]$existingTrayPid) -and $existingTrayPid -ne $PID) {
+    $existingTray = Get-CimInstance Win32_Process -Filter "ProcessId=$existingTrayPid" -ErrorAction SilentlyContinue
+    if (
+      $null -ne $existingTray -and
+      -not [string]::IsNullOrWhiteSpace([string]$existingTray.CommandLine) -and
+      ([string]$existingTray.CommandLine).IndexOf($PSCommandPath, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    ) {
+      [System.Windows.Forms.MessageBox]::Show(
+        "OMI Search MCP is already running in the system tray.",
+        $TrayDisplayName,
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Information
+      ) | Out-Null
+      exit 0
+    }
+  }
+}
 
 $script:ServerProcess = $null
 $script:TunnelProcess = $null
@@ -241,8 +290,32 @@ function Test-HttpReady([string]$Url) {
   }
 }
 
+function Get-ServerHealth {
+  try {
+    return Invoke-RestMethod -UseBasicParsing -Uri $HealthUrl -TimeoutSec 1
+  }
+  catch {
+    return $null
+  }
+}
+
+function Test-ServerEndpoint {
+  $health = Get-ServerHealth
+  return ($null -ne $health -and $health.ok -eq $true -and $health.service -eq "omi-search-http-mcp")
+}
+
 function Test-ServerHealth {
-  return Test-HttpHealth $HealthUrl
+  $health = Get-ServerHealth
+  $expectedBuildId = Get-ExpectedSourceBuildId
+  $buildIdProperty = if ($null -eq $health) { $null } else { $health.PSObject.Properties["buildId"] }
+  return (
+    $null -ne $health -and
+    $health.ok -eq $true -and
+    $health.service -eq "omi-search-http-mcp" -and
+    -not [string]::IsNullOrWhiteSpace($expectedBuildId) -and
+    $null -ne $buildIdProperty -and
+    [string]$buildIdProperty.Value -eq $expectedBuildId
+  )
 }
 
 function Test-TunnelReady {
@@ -325,7 +398,7 @@ function Clear-ProxyEnvironment($StartInfo) {
   Set-ProcessEnvironmentValue $StartInfo "no_proxy" "127.0.0.1,localhost"
 }
 
-function Get-RecordedProcess([string]$Path, [string[]]$AllowedNames) {
+function Get-RecordedProcess([string]$Path, [string[]]$AllowedNames, [string]$ExpectedCommandFragment) {
   $processId = Read-PidFile $Path
   if ($processId -eq $null) {
     return $null
@@ -338,13 +411,26 @@ function Get-RecordedProcess([string]$Path, [string[]]$AllowedNames) {
     return $null
   }
   if ($AllowedNames -and $AllowedNames.Count -gt 0 -and ($AllowedNames -notcontains $process.ProcessName)) {
+    Remove-PidFile $Path
     return $null
+  }
+  if (-not [string]::IsNullOrWhiteSpace($ExpectedCommandFragment)) {
+    $cimProcess = Get-CimInstance Win32_Process -Filter "ProcessId=$processId" -ErrorAction SilentlyContinue
+    if (
+      $null -eq $cimProcess -or
+      [string]::IsNullOrWhiteSpace([string]$cimProcess.CommandLine) -or
+      ([string]$cimProcess.CommandLine).IndexOf($ExpectedCommandFragment, [StringComparison]::OrdinalIgnoreCase) -lt 0
+    ) {
+      Write-TrayLog "WARN ignoring stale pid file=$Path pid=$processId because command ownership did not match $ExpectedCommandFragment"
+      Remove-PidFile $Path
+      return $null
+    }
   }
   return $process
 }
 
-function Stop-RecordedProcess([string]$Path, [string]$Label, [string[]]$AllowedNames) {
-  $process = Get-RecordedProcess $Path $AllowedNames
+function Stop-RecordedProcess([string]$Path, [string]$Label, [string[]]$AllowedNames, [string]$ExpectedCommandFragment) {
+  $process = Get-RecordedProcess $Path $AllowedNames $ExpectedCommandFragment
   if ($process -eq $null) {
     return $false
   }
@@ -590,9 +676,13 @@ function Ensure-ControlPlaneApiKeyAvailable {
 }
 
 function Start-OmiSearchServer {
-  Write-TrayLog "Start-OmiSearchServer requested health=$(Test-ServerHealth) owned=$(Test-OwnedServerRunning)"
+  Write-TrayLog "Start-OmiSearchServer requested health=$(Test-ServerHealth) endpoint=$(Test-ServerEndpoint) owned=$(Test-OwnedServerRunning) expectedBuild=$(Get-ExpectedSourceBuildId)"
   if ((Test-OwnedServerRunning) -or (Test-ServerHealth)) {
     Write-TrayLog "Start-OmiSearchServer skipped because server already appears healthy or owned"
+    return
+  }
+  if (Test-ServerEndpoint) {
+    Show-Warning "OMI Search MCP is running an older source build on port $Port.`nUse Restart MCP server to replace and verify it."
     return
   }
   if (-not (Test-Path -LiteralPath $HttpEntry)) {
@@ -647,17 +737,50 @@ function Stop-OmiSearchServer {
       Remove-PidFile $ServerPidFile
     }
   }
-  Stop-RecordedProcess $ServerPidFile "OMI_search MCP HTTP server" @("python", "python3", "pythonw") | Out-Null
-  Stop-ListeningProcess $Port { Test-ServerHealth } "OMI_search MCP HTTP server" @("python", "python3", "pythonw") | Out-Null
-  if (-not (Test-ServerHealth)) {
+  Stop-RecordedProcess $ServerPidFile "OMI_search MCP HTTP server" @("python", "python3", "pythonw") $HttpEntry | Out-Null
+  Stop-ListeningProcess $Port { Test-ServerEndpoint } "OMI_search MCP HTTP server" @("python", "python3", "pythonw") | Out-Null
+  if (-not (Test-ServerEndpoint)) {
     Remove-PidFile $ServerPidFile
   }
 }
 
 function Restart-OmiSearchServer {
+  $previousPid = Get-ListeningPid $Port
+  $expectedBuildId = Get-ExpectedSourceBuildId
+  Write-TrayLog "Restart-OmiSearchServer requested previousPid=$previousPid expectedBuild=$expectedBuildId"
   Stop-OmiSearchServer
-  Start-Sleep -Milliseconds 300
+  for ($attempt = 0; $attempt -lt 30; $attempt++) {
+    if ($null -eq (Get-ListeningPid $Port)) {
+      break
+    }
+    Start-Sleep -Milliseconds 200
+  }
+  if ($null -ne (Get-ListeningPid $Port)) {
+    Write-TrayLog "ERROR restart could not release port=$Port previousPid=$previousPid"
+    Show-Error "Could not restart OMI Search MCP because port $Port is still in use."
+    return $false
+  }
   Start-OmiSearchServer
+  for ($attempt = 0; $attempt -lt 30; $attempt++) {
+    if (Test-ServerHealth) {
+      $currentPid = Get-ListeningPid $Port
+      Write-TrayLog "Restart-OmiSearchServer verified previousPid=$previousPid currentPid=$currentPid build=$expectedBuildId"
+      $notifyIcon.ShowBalloonTip(
+        2500,
+        $TrayDisplayName,
+        "MCP restarted and source build $expectedBuildId was verified. Refresh ChatGPT Actions separately if its schema still looks old.",
+        [System.Windows.Forms.ToolTipIcon]::Info
+      )
+      return $true
+    }
+    Start-Sleep -Milliseconds 300
+  }
+  $actualHealth = Get-ServerHealth
+  $actualBuildProperty = if ($null -eq $actualHealth) { $null } else { $actualHealth.PSObject.Properties["buildId"] }
+  $actualBuildId = if ($null -eq $actualBuildProperty) { "unavailable" } else { [string]$actualBuildProperty.Value }
+  Write-TrayLog "ERROR restart verification failed expectedBuild=$expectedBuildId actualBuild=$actualBuildId"
+  Show-Error "OMI Search MCP restart could not be verified.`nExpected build: $expectedBuildId`nLoaded build: $actualBuildId"
+  return $false
 }
 
 function Start-TunnelClient {
@@ -723,7 +846,7 @@ function Stop-TunnelClient {
       Remove-PidFile $TunnelPidFile
     }
   }
-  Stop-RecordedProcess $TunnelPidFile "OMI_search tunnel client" @("tunnel-client") | Out-Null
+  Stop-RecordedProcess $TunnelPidFile "OMI_search tunnel client" @("tunnel-client") $TunnelClientPath | Out-Null
   $tunnelUri = [Uri]$TunnelHealthUrl
   if ($tunnelUri.Port -gt 0) {
     Stop-ListeningProcess $tunnelUri.Port { Test-TunnelReady } "OMI_search tunnel client" @("tunnel-client") | Out-Null
@@ -738,52 +861,45 @@ function Copy-TextToClipboard([string]$Text) {
   $notifyIcon.ShowBalloonTip(900, $TrayDisplayName, "Copied: $Text", [System.Windows.Forms.ToolTipIcon]::Info)
 }
 
+function Open-RuntimeLogs {
+  New-Item -ItemType Directory -Force -Path $TmpDir | Out-Null
+  Start-Process explorer.exe -ArgumentList "`"$TmpDir`""
+}
+
 function Update-TrayStatus {
   $ownedRunning = Test-OwnedServerRunning
+  $endpointOk = Test-ServerEndpoint
   $healthOk = Test-ServerHealth
   $tunnelOwned = Test-OwnedTunnelRunning
   $tunnelReady = Test-TunnelReady
 
   if ($ownedRunning -and $healthOk) {
     $serverStatus = "Running"
-    $startItem.Enabled = $false
-    $stopItem.Enabled = $true
   }
   elseif ($ownedRunning) {
-    $serverStatus = "Starting"
-    $startItem.Enabled = $false
-    $stopItem.Enabled = $true
+    $serverStatus = if ($endpointOk) { "Outdated" } else { "Starting" }
   }
   elseif ($healthOk) {
     $serverStatus = "Running external"
-    $startItem.Enabled = $false
-    $stopItem.Enabled = $true
+  }
+  elseif ($endpointOk) {
+    $serverStatus = "Outdated external"
   }
   else {
     $serverStatus = "Stopped"
-    $startItem.Enabled = $true
-    $stopItem.Enabled = $false
   }
 
   if ($tunnelOwned -and $tunnelReady) {
     $tunnelStatus = "Ready"
-    $startTunnelItem.Enabled = $false
-    $stopTunnelItem.Enabled = $true
   }
   elseif ($tunnelOwned) {
     $tunnelStatus = "Starting"
-    $startTunnelItem.Enabled = $false
-    $stopTunnelItem.Enabled = $true
   }
   elseif ($tunnelReady) {
     $tunnelStatus = "Ready external"
-    $startTunnelItem.Enabled = $false
-    $stopTunnelItem.Enabled = $true
   }
   else {
     $tunnelStatus = "Stopped"
-    $startTunnelItem.Enabled = $true
-    $stopTunnelItem.Enabled = $false
   }
 
   if ($healthOk -and $tunnelReady) {
@@ -804,25 +920,18 @@ function Update-TrayStatus {
 $contextMenu = New-Object System.Windows.Forms.ContextMenu
 $statusItem = New-Object System.Windows.Forms.MenuItem "$TrayDisplayName | Server: Checking | Tunnel: Checking"
 $statusItem.Enabled = $false
-$startItem = New-Object System.Windows.Forms.MenuItem "Start MCP server"
-$stopItem = New-Object System.Windows.Forms.MenuItem "Stop MCP server"
 $restartItem = New-Object System.Windows.Forms.MenuItem "Restart MCP server"
-$startTunnelItem = New-Object System.Windows.Forms.MenuItem "Start tunnel"
-$stopTunnelItem = New-Object System.Windows.Forms.MenuItem "Stop tunnel"
 $saveKeyItem = New-Object System.Windows.Forms.MenuItem "Save CONTROL_PLANE_API_KEY..."
 $keyStatusItem = New-Object System.Windows.Forms.MenuItem "Show key status"
 $copyMcpItem = New-Object System.Windows.Forms.MenuItem "Copy MCP URL"
 $copyTunnelIdItem = New-Object System.Windows.Forms.MenuItem "Copy tunnel ID"
 $copyHealthItem = New-Object System.Windows.Forms.MenuItem "Copy health URL"
-$openHealthItem = New-Object System.Windows.Forms.MenuItem "Open health check"
+$openHealthItem = New-Object System.Windows.Forms.MenuItem "Open MCP health"
 $openTunnelUiItem = New-Object System.Windows.Forms.MenuItem "Open tunnel UI"
+$openRuntimeItem = New-Object System.Windows.Forms.MenuItem "Open runtime logs"
 $exitItem = New-Object System.Windows.Forms.MenuItem "Exit"
 
-$startItem.add_Click({ Start-OmiSearchServer; Update-TrayStatus })
-$stopItem.add_Click({ Stop-OmiSearchServer; Update-TrayStatus })
 $restartItem.add_Click({ Restart-OmiSearchServer; Update-TrayStatus })
-$startTunnelItem.add_Click({ Start-TunnelClient; Update-TrayStatus })
-$stopTunnelItem.add_Click({ Stop-TunnelClient; Update-TrayStatus })
 $saveKeyItem.add_Click({ Save-ControlPlaneApiKeyFromPrompt | Out-Null; Update-TrayStatus })
 $keyStatusItem.add_Click({ Show-ControlPlaneApiKeyStatus })
 $copyMcpItem.add_Click({ Copy-TextToClipboard $McpUrl })
@@ -830,7 +939,15 @@ $copyTunnelIdItem.add_Click({ Copy-TextToClipboard $TunnelId })
 $copyHealthItem.add_Click({ Copy-TextToClipboard $HealthUrl })
 $openHealthItem.add_Click({ Start-Process $HealthUrl })
 $openTunnelUiItem.add_Click({ Start-Process $TunnelUiUrl })
+$openRuntimeItem.add_Click({ Open-RuntimeLogs })
 $exitItem.add_Click({
+  $choice = [System.Windows.Forms.MessageBox]::Show(
+    "Exit will stop the MCP server, tunnel, and tray. Continue?",
+    $TrayDisplayName,
+    [System.Windows.Forms.MessageBoxButtons]::YesNo,
+    [System.Windows.Forms.MessageBoxIcon]::Warning
+  )
+  if ($choice -ne [System.Windows.Forms.DialogResult]::Yes) { return }
   $timer.Stop()
   Stop-TunnelClient
   Stop-OmiSearchServer
@@ -842,21 +959,18 @@ $exitItem.add_Click({
 
 $contextMenu.MenuItems.Add($statusItem) | Out-Null
 $contextMenu.MenuItems.Add("-") | Out-Null
-$contextMenu.MenuItems.Add($startItem) | Out-Null
-$contextMenu.MenuItems.Add($stopItem) | Out-Null
 $contextMenu.MenuItems.Add($restartItem) | Out-Null
 $contextMenu.MenuItems.Add("-") | Out-Null
-$contextMenu.MenuItems.Add($startTunnelItem) | Out-Null
-$contextMenu.MenuItems.Add($stopTunnelItem) | Out-Null
+$contextMenu.MenuItems.Add($copyMcpItem) | Out-Null
+$contextMenu.MenuItems.Add($copyHealthItem) | Out-Null
+$contextMenu.MenuItems.Add($copyTunnelIdItem) | Out-Null
+$contextMenu.MenuItems.Add("-") | Out-Null
+$contextMenu.MenuItems.Add($openHealthItem) | Out-Null
 $contextMenu.MenuItems.Add($openTunnelUiItem) | Out-Null
+$contextMenu.MenuItems.Add($openRuntimeItem) | Out-Null
 $contextMenu.MenuItems.Add("-") | Out-Null
 $contextMenu.MenuItems.Add($saveKeyItem) | Out-Null
 $contextMenu.MenuItems.Add($keyStatusItem) | Out-Null
-$contextMenu.MenuItems.Add("-") | Out-Null
-$contextMenu.MenuItems.Add($copyMcpItem) | Out-Null
-$contextMenu.MenuItems.Add($copyTunnelIdItem) | Out-Null
-$contextMenu.MenuItems.Add($copyHealthItem) | Out-Null
-$contextMenu.MenuItems.Add($openHealthItem) | Out-Null
 $contextMenu.MenuItems.Add("-") | Out-Null
 $contextMenu.MenuItems.Add($exitItem) | Out-Null
 
@@ -873,7 +987,7 @@ $timer.Start()
 
 if ($ReplaceExisting) {
   Write-TrayLog "ReplaceExisting requested currentPid=$PID"
-  Stop-RecordedProcess $TrayPidFile "previous OMI_search tray" @("powershell", "pwsh") | Out-Null
+  Stop-RecordedProcess $TrayPidFile "previous OMI_search tray" @("powershell", "pwsh") $PSCommandPath | Out-Null
   Stop-TunnelClient
   Stop-OmiSearchServer
 }
@@ -883,9 +997,6 @@ Write-TrayLog "Tray pid recorded pid=$PID"
 
 if (-not $NoAutoStart) {
   Start-OmiSearchServer
-}
-
-if ($AutoStartTunnel) {
   Start-TunnelClient
 }
 

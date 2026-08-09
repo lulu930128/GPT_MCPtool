@@ -1,62 +1,92 @@
 # OMI Search MCP Adapter
 
-`OMI_search` 是一個獨立的 stdio MCP adapter。它不讀 OMI SQLite、不 import OMI backend code，也不自己打市場資料來源；它只把 MCP tool request 轉成 OMI 既有 `POST /api/ai/ask` payload，並原樣交付 `omi.decision.v4`，讓 OMI backend 繼續負責 target resolution、freshness、bounded refresh、evidence、decision 與 warnings。
-
-## 架構
+`OMI_search` 是 OMI 的 standalone MCP 映射層。它只處理 MCP protocol、公開 tool surface、相容欄位映射與 HTTP transport；所有市場資料與回答判斷都由 OMI backend 擁有。
 
 ```text
 MCP client
   -> C:\GPT_MCPtool\OMI_search\server.py
-  -> POST http://127.0.0.1:8400/api/ai/ask
-  -> OMI backend
+  -> OMI launcher-selected loopback backend
+  -> GET  /api/ai/tools
+  -> POST /api/ai/ask
   -> unchanged omi.decision.v4 envelope
 ```
+
+## 嚴格責任邊界
+
+Adapter 只負責：
+
+- MCP `initialize`、`tools/list`、`tools/call` 與 JSON serialization。
+- 將 canonical tool arguments 映射到 `POST /api/ai/ask`。
+- 固定 `contract_version=omi.decision.v4`、`caller_profile=omi_search`、`allow_llm=false`、`allow_write=false`。
+- 將 caller 明確指定的 `refresh_if_missing` 映射成 `allow_external_fetch`。
+- 將 compatibility alias `include_intraday` / `intraday_limit` 合併到 `market_data_params`。
+- 將 backend `omi.decision.v4` envelope 原樣放入 MCP `content` 與 `structuredContent`。
+
+Adapter 不負責：
+
+- 解析 question 關鍵字、判斷 query intent 或改寫 question。
+- 推斷 target、market、analysis horizon、freshness 或 refresh 時機。
+- 自行補 strategy、ranking、limit、refresh policy 或 tool budget 預設值。
+- clamp 或重解釋 backend contract 欄位。
+- 裁切、摘要、重組或重新判定 backend response。
+- 讀寫 OMI SQLite、import OMI backend code、呼叫市場 provider、執行 LLM 或寫入 report。
+
+因此，像 `TSM intraday live quote` 這類問題會完整不變地送到 backend。是否屬於 intraday、資料是否 stale、是否需要 refresh、能否執行 external fetch，以及如何產出 evidence/answer，都由 OMI backend 決定。
 
 ## 公開 tools
 
 - `omi.ask`：canonical `omi.decision.v4` read-only 入口。
-- `omi.read_market_overview`：bounded 市場概況。
-- `omi.read_stock_context`：台股、美股、日股、韓股個股 evidence。
-- `omi.read_data_freshness`：freshness 與資料缺口。
-- `omi.read_source_health`：provider/source health。
-- `omi.read_capability_status`：capability availability/status。
+- `omi.read_market_overview`：將明確 market 映射成 market target。
+- `omi.read_stock_context`：將明確 market + symbol 映射成 stock target。
+- `omi.read_data_freshness`：映射成 data-freshness target。
+- `omi.read_source_health`：映射成 source-health target 與 filters。
+- `omi.read_capability_status`：映射成 capability-status target 與 filters。
 
-舊 `omi.search` 不再列在 `tools/list`，但仍保留 callable alias，讓尚未刷新
-schema 的既有 connector 繼續工作。新 caller 應使用 `omi.ask` 與
-`question`。完整公開/隱藏界線見
-[docs/OMI_search-Public-Tool-Boundary.txt](docs/OMI_search-Public-Tool-Boundary.txt)。
+`omi.search` 不出現在 `tools/list`，但仍保留為 legacy callable alias。只有這個 legacy alias 會把 `query` 映射成 `question`，並支援舊的 `stock_id` / `symbol` target alias。新 caller 必須使用 `omi.ask`、`question` 與明確 `target`。
 
-安全預設：
+Shortcuts 只依 tool 名稱與明確 arguments 做機械映射，固定使用 `mode=data_only`；不從自然語言推斷 target。
 
-- `allow_llm=false`
-- `allow_write=false`
-- `mode=data_only`
-- `refresh_if_missing=false`
+## Schema owner 與離線 fallback
 
-如果呼叫時設定 `refresh_if_missing=true`，adapter 只會把
-`allow_external_fetch=true` 與 bounded `tool_budget` 傳給 OMI backend。
-這表示允許主規劃器在同一請求內嘗試 refresh，不保證所有後續 fill action 都會
-自動執行。Consumer 應讀 `execution.refresh_reconciliation` 判斷實際 attempt、
-tool outcome、payload 是否進入 evidence，以及仍保留哪些 fill action。
+正常執行時，`tools/list` 會從 OMI backend `GET /api/ai/tools` 取得 `omi.ask` input schema。Target registry、capability registry、typed parameters、selection version 與 public contract digest 都由 backend 擁有。
 
-目前 `target.type` 對齊 OMI public ask contract，支援台股 market、freshness、stock、watchlist、index、futures；美股、日股與韓股 stock/index/watchlist；crypto market/asset；resource asset、portfolio、US macro、source health 與 capability status 等 read-only evidence target。`mode` 支援 `data_only`、`brief` 與 `full`；`analysis` / `report` 仍不開放，因為這個 adapter 固定不呼叫 LLM、不寫入 report。
+Adapter 只投影自己的安全 surface：
 
-目前 request 固定使用 `contract_version=omi.decision.v4`。不論
-`include_raw` 為何，adapter 都原樣交付 backend canonical envelope，避免產生第二套
-answer/readiness 語意；資料量應以 `selection.fields`、`selection.limits` 與
-`selection.max_response_bytes` 控制。
-MCP tool call 會同時輸出文字 `content` 與同內容的 `structuredContent`。
-Backend 回傳的 structured business rejection（例如 `TARGET_NOT_FOUND`）仍是
-成功的 MCP transport，因此 `isError=false`；只有 protocol、HTTP transport、
-serialization 或 adapter internal failure 才使用 `isError=true`。
+- 隱藏 caller 不可控制的 `allow_llm`、`allow_write`、`allow_external_fetch`、`caller_profile`。
+- `mode` 只開放 `data_only`、`brief`、`full`。
+- 新增 adapter alias `refresh_if_missing`、`include_intraday`、`intraday_limit`、`include_raw`。
 
-## 常用輸入
+Backend 暫時無法連線時，`tools/list` 使用 `public_contract_snapshot.json`。Snapshot 必須由 OMI repo 的 generator 產生，不可在 adapter 手工維護市場契約：
+
+```powershell
+cd "C:\project\Open Market Intelligence"
+.\.venv\Scripts\python.exe .\scripts\generate-ai-public-contract-snapshot.py `
+  --output .\agents\omi_mcp_server\public_contract_snapshot.json `
+  --output C:\GPT_MCPtool\OMI_search\public_contract_snapshot.json
+```
+
+Live schema 與 snapshot 的 `x-omi-public-contract-digest` 必須一致。
+
+## Canonical request
 
 ```json
 {
-  "question": "2330 最近量價、法人、券商分點資料",
-  "target": { "type": "tw_stock", "id": "2330" },
+  "question": "2330 最新量價與籌碼 evidence",
+  "target": {"type": "tw_stock", "id": "2330"},
   "mode": "data_only",
+  "output": "evidence_only",
+  "selection": {
+    "include": ["quote.snapshot", "chips.institutional"]
+  }
+}
+```
+
+沒有明確要求 refresh 時，adapter 固定傳送 `allow_external_fetch=false`。只有 caller 明確設定下列欄位時才會開啟：
+
+```json
+{
+  "question": "MU 最新資料",
+  "target": {"type": "us_stock", "id": "MU"},
   "refresh_if_missing": true,
   "tool_budget": {
     "max_calls": 3,
@@ -66,80 +96,51 @@ serialization 或 adapter internal failure 才使用 `isError=true`。
 }
 ```
 
-舊 `omi.search` 可繼續使用 `query`；新 `omi.ask` 使用 `question`。也可以使用
-`omi.ask` 的便利欄位：
+Adapter 不替 `tool_budget` 補值或 clamp；backend schema、trust policy 與 runtime policy 負責驗證及執行。
 
-```json
-{ "question": "台積電最近資料", "stock_id": "2330" }
-```
-
-```json
-{ "question": "MU 最新資料", "symbol": "MU", "refresh_if_missing": true }
-```
-
-需要指定 OMI 市場資料形狀時，可傳 `market_data_params`，或用 top-level `include_intraday`、`payload_level`、`intraday_limit` 讓 adapter 合併進 `market_data_params`：
+Compatibility aliases 只做欄位搬移，nested canonical value 優先：
 
 ```json
 {
-  "question": "BTC 最近 1m compact context",
-  "target": { "type": "crypto_asset", "id": "BTC" },
-  "mode": "data_only",
-  "refresh_if_missing": true,
+  "question": "BTC compact context",
+  "target": {"type": "crypto_asset", "id": "BTC"},
   "market_data_params": {
     "provider": "binance",
-    "symbol": "BTCUSDT",
-    "interval": "1m"
+    "include_intraday": false
   },
   "include_intraday": true,
-  "payload_level": "summary",
   "intraday_limit": 80
 }
 ```
 
-模型可直接選 capability、欄位、筆數與 response byte budget：
+上例送到 backend 後，`market_data_params.include_intraday` 仍是 `false`，`intraday_limit` 被加入 nested object。數值範圍由 backend 驗證。
+
+Legacy caller 可暫時使用：
 
 ```json
-{
-  "question": "只要 2330 即時價與資料時間",
-  "target": { "type": "tw_stock", "id": "2330" },
-  "output": "evidence_only",
-  "realtime_policy": "require_live",
-  "selection": {
-    "include": ["quote.snapshot"],
-    "fields": {
-      "quote.snapshot": ["price", "quote_time", "provider", "freshness"]
-    },
-    "max_response_bytes": 12000
-  }
-}
+{"query": "讀取 2330", "stock_id": "2330"}
 ```
 
-```json
-{
-  "question": "KOSPI weekly evidence",
-  "target": { "type": "kr_index", "id": "KOSPI" },
-  "mode": "full",
-  "market_data_params": {
-    "timeframe": "weekly",
-    "bars": 26,
-    "payload_level": "standard"
-  }
-}
-```
+## Response 與錯誤語意
+
+- Backend `omi.decision.v4` 一律原樣回傳，不由 adapter 產生第二份摘要或 compact contract。
+- `TARGET_NOT_FOUND`、missing evidence 等 structured business result 仍是成功的 MCP transport，`isError=false`。
+- Protocol、HTTP、serialization、non-v4 backend contract 或 adapter internal failure 才是 `isError=true`。
+- `include_raw` 只為舊 caller 保留；無論其值為何，response 都不會被投影或裁切。
 
 ## 環境變數
 
 ```powershell
 $env:OMI_SEARCH_API_BASE_URL = "http://127.0.0.1:8400"
 $env:OMI_SEARCH_API_TIMEOUT_SECONDS = "90"
+$env:OMI_SEARCH_SCHEMA_TIMEOUT_SECONDS = "2"
 $env:OMI_SEARCH_AI_TRUST_TOKEN = ""
-$env:OMI_SEARCH_DEFAULT_REFRESH_IF_MISSING = "false"
 $env:OMI_SEARCH_TUNNEL_ID = ""
 ```
 
-`OMI_SEARCH_AI_TRUST_TOKEN` 只用來設定 `X-OMI-AI-Trust-Token` header。adapter 不讀、不保存、不轉送 OpenAI API key。
+`OMI_SEARCH_AI_TRUST_TOKEN` 只設定 `X-OMI-AI-Trust-Token` header。Adapter 不讀、不保存、不轉送 OpenAI API key。
 
-## 本機測試
+## 驗證
 
 ```powershell
 cd C:\GPT_MCPtool\OMI_search
@@ -147,9 +148,7 @@ python -B -m unittest discover -s tests
 python -B -c "import ast, pathlib; [ast.parse(p.read_text(encoding='utf-8'), filename=str(p)) for p in pathlib.Path('.').rglob('*.py')]; print('syntax ok')"
 ```
 
-## Codex MCP 設定範例
-
-參考 [examples/codex-config.toml](examples/codex-config.toml)：
+## Codex MCP 設定
 
 ```toml
 [mcp_servers.omi_search]
@@ -161,41 +160,40 @@ tool_timeout_sec = 90
 startup_timeout_sec = 10
 ```
 
-## ChatGPT 網頁用法
+## ChatGPT Web
 
-ChatGPT 網頁不能直接啟動上面的 stdio MCP，也不能直接連你的 `127.0.0.1`。給 ChatGPT 使用時，啟動 HTTP MCP endpoint：
+ChatGPT Web 無法直接存取本機 stdio 或 `127.0.0.1`。本專案提供 HTTP MCP transport：
 
 ```powershell
 cd C:\GPT_MCPtool\OMI_search
-$env:OMI_SEARCH_API_BASE_URL = "http://127.0.0.1:8400"
 python .\http_server.py
 ```
 
-本機 endpoint：
+本機 endpoint 為 `http://127.0.0.1:8797/mcp`，公開連線與 Secure MCP Tunnel 設定見 [docs/ChatGPT-Setup.md](docs/ChatGPT-Setup.md)。
 
-```text
-http://127.0.0.1:8797/mcp
-```
+`GET http://127.0.0.1:8797/health` 只表示 adapter core 正常；
+`GET http://127.0.0.1:8797/upstream-health` 由 adapter 以啟動時已解析的 OMI backend URL
+執行 bounded probe，只回傳 `ready`／`unavailable` 與安全 error code。它不公開實際 backend
+URL、原始 response、exception、credential 或市場資料，供 Control Center 區分 owned runtime
+故障與 OMI upstream 暫時不可用。
 
-再用 OpenAI Secure MCP Tunnel 把 ChatGPT 連回這個本機 endpoint。完整步驟見 [docs/ChatGPT-Setup.md](docs/ChatGPT-Setup.md)。
+## Windows 托盤
 
-也可以直接雙擊隱藏啟動托盤常駐：
+一般啟動使用 `scripts\Start-Tray.cmd`；它不會破壞性取代已存在的 tray。修改 adapter
+source 或 public contract snapshot 後，使用 `scripts\Restart-Tray.cmd`。Restart 會先
+確認舊的 8797 listener 已釋放，再要求 `/health` 的 `buildId` 與目前
+`http_server.py`、`server.py`、`public_contract_snapshot.json` 完全一致。
 
-```text
-C:\GPT_MCPtool\OMI_search\scripts\start-tray.vbs
-```
+托盤使用 `unified-always-on-v2` 契約。正式啟動會一起準備 MCP server 與 Secure MCP
+Tunnel；選單不提供 Start／Stop 或 tunnel restart。OMI backend 仍由正式 OMI launcher
+管理，adapter 的 `Restart MCP server` 不會越界重啟 backend。外部市場 refresh 仍只在
+caller 明確傳入 `refresh_if_missing=true` 時啟用，不因 tray 啟動而自動抓取資料。
+Tray 會從正式 OMI launcher 的 bounded runtime evidence 解析實際 backend loopback URL，
+因此 Control Center 不硬編碼或猜測 launcher 動態選用的 port。
 
-若托盤提示缺少 `CONTROL_PLANE_API_KEY`，右鍵托盤圖示選 `Save CONTROL_PLANE_API_KEY...`，貼上 key 後會以 Windows DPAPI 保存到目前 Windows 使用者。
+本機 build 驗證成功不會自動刷新 ChatGPT 已快取的 action/schema。若 ChatGPT 仍顯示
+舊欄位，請另外執行 Refresh Actions／重新連線或開新對話。
 
-建立新 tunnel profile 時，請使用自己的 tunnel ID：
+## 未來擴充規則
 
-```text
-tunnel_<your-id>
-```
-
-ID 可透過 `OMI_SEARCH_TUNNEL_ID` 或 `scripts\tunnel.ps1 -TunnelId` 傳入。
-已建立的 profile 會保存在 ignored 的 `.tunnel-client` 目錄。
-
-## 邊界
-
-這個 adapter 的目的只是隔離外部 MCP tool surface，不污染 OMI 本體。v1 只能使用 OMI 既有 `/api/ai/ask` 支援的查詢能力。若未來需要 dataset-level query DSL、日期區間、欄位選擇、排序或分頁，應在 OMI backend 正式新增 `/api/ai/search`，再讓這個 adapter 改打新 endpoint。
+若需要新的 query DSL、日期範圍、欄位選擇、排序、分頁、refresh policy 或 answer contract，先在 OMI backend 建立正式公開契約，再由 adapter 同步 schema 與做機械映射。不要把功能先偷寫在 `OMI_search`。
