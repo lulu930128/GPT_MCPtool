@@ -20,6 +20,14 @@
 
 請先閱讀各目錄的 `README.md` 與 `AGENTS.md`；它們才是該元件的正式操作與安全規則。
 
+## Repository 文件
+
+- [Security Policy](SECURITY.md)：漏洞回報、敏感資訊處理、元件 trust boundary 與事件原則。
+- [Contributing](CONTRIBUTING.md)：元件邊界、文件／驗證標準、Git 與公開安全流程。
+- [Changelog](CHANGELOG.md)：尚未發布與未來 tagged release 的變更紀錄。
+
+本 repository 目前未加入 `LICENSE`；公開可見不等於授予軟體使用或再散布權利。
+
 ## 元件邊界
 
 六個元件可分開維護與測試，但目前的 Windows 本機 runtime 有兩類明確相依：

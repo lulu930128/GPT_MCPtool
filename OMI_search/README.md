@@ -11,6 +11,14 @@ MCP client
   -> unchanged omi.decision.v4 envelope
 ```
 
+## 文件導覽
+
+- [公開 MCP 契約](docs/PublicContract.md)：責任邊界、六個公開 tools、schema owner、
+  refresh 與錯誤語意。
+- [故障排除](docs/Troubleshooting.md)：adapter／backend／tunnel／ChatGPT action cache 的
+  分層診斷。
+- [ChatGPT 掛載](docs/ChatGPT-Setup.md)：本機 HTTP MCP 與 Secure MCP Tunnel 設定。
+
 ## 嚴格責任邊界
 
 Adapter 只負責：

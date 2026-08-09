@@ -19,6 +19,16 @@ Personal Asset OS 是本機優先的個人資產與帳務系統。目前提供�
 
 目前不包含手機同步、一般雲端 relay、銀行／券商自動匯入、完整多幣別、稅務引擎或 AI 寫入。dashboard 與 REST API 永遠只綁定 loopback；唯一遠端路徑是 OpenAI Secure MCP Tunnel 對 `/mcp` 的私有 outbound-only 轉送。
 
+## 文件導覽
+
+- [帳本模型](docs/LedgerModel.md)：`transactions + postings`、debit-positive、immutability、
+  idempotency、投資與對帳語意。
+- [安全與隱私](docs/SecurityAndPrivacy.md)：本機資料、loopback、read-only MCP、手機與備份邊界。
+- [MCP 工具參考](docs/McpToolReference.md)：七個唯讀工具及 freshness／quality／warning 語意。
+- [備份與還原](docs/BackupRecovery.md)：online backup、integrity、new-path restore 與 recovery acceptance。
+- [產品方向](docs/product/ProductVision.md)、[Operating Model](docs/product/OperatingModel.md)、
+  [Quality Bar](docs/product/QualityBar.md)、[Roadmap](docs/product/Roadmap.md)。
+
 ## 資料位置
 
 預設資料目錄：

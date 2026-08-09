@@ -4,6 +4,16 @@ Private, tool-only MCP adapter for the authoritative Japanese Study Hub at
 `C:\project\japanese-study-hub`. ChatGPT and Kuro can use the same bounded tool
 contract without reading source files or legacy progress data directly.
 
+## Documentation
+
+- [Architecture](docs/Architecture.md): adapter/Hub ownership, runtime identity, network and data
+  boundaries.
+- [Tool contract](docs/ToolContract.md): all public tools, annotations, retry rules and errors.
+- [Practice lifecycle](docs/PracticeLifecycle.md): preview, record, target repair, supersede and
+  idempotent retry.
+- [Troubleshooting](docs/Troubleshooting.md): Hub, build, MCP, tunnel and ChatGPT cache diagnosis.
+- [ChatGPT setup](docs/ChatGPT-Setup.md): Developer Mode and private tunnel setup.
+
 ## Current tools
 
 | Tool | Effect |

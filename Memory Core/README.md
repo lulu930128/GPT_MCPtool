@@ -7,6 +7,20 @@ Schema v1、相容舊流程的 ChangeSet、Batch／Item／Collection v3 架構�
 Tkinter 管理控制中心；尚不包含 Kuro adapter。Batch v3 的第一個可用 profile 是
 `media.experience.v1`。
 
+## 文件導覽
+
+- [安全與隱私](docs/SecurityAndPrivacy.md)：資料、scope、restricted content、network、
+  external projection 與 backup 邊界。
+- [Candidate 審核流程](docs/CandidateReview.md)：review digest、prepare challenge、
+  approve/reject、idempotency、ChangeSet 與 Batch 語意。
+- [維運手冊](docs/Operations.md)：安裝、migration、stack readiness、exact-path recovery、
+  backup 與還原原則。
+- [MCP 工具參考](docs/McpToolReference.md)：read、proposal、typed、Batch 與 conditional
+  reviewer tools。
+- [資料模型 V1](docs/design/memory-model-v1.md)、[V2](docs/design/memory-model-v2.md)、
+  [V3](docs/design/memory-model-v3.md)：Record／Entity、ChangeSet／Link 與
+  Batch／Item／Collection 的正式設計。
+
 ## 已具備的能力
 
 - FastAPI `/api/v1` contract，以及公開的 `/health`、`/version`。
@@ -78,7 +92,12 @@ MCP / Kuro / Admin UI
 - Public website 未來只讀獨立 public snapshot，不連私人資料庫。
 - Password、API key、token、cookie、private key 與原始公司機密不得寫入 Memory Core。
 
-詳細施工範圍與決策另見 [`docs/agent-runs/memory-core-batch-v2/`](docs/agent-runs/memory-core-batch-v2/)；既有 Record／Entity 與資料治理 contract 在 [`docs/design/memory-model-v1.md`](docs/design/memory-model-v1.md)，legacy ChangeSet 與 Record Link contract 在 [`docs/design/memory-model-v2.md`](docs/design/memory-model-v2.md)，Batch／Item／Collection 的 primary contract 在 [`docs/design/memory-model-v3.md`](docs/design/memory-model-v3.md)。
+既有 Record／Entity 與資料治理 contract 在
+[`docs/design/memory-model-v1.md`](docs/design/memory-model-v1.md)，legacy ChangeSet 與
+Record Link contract 在 [`docs/design/memory-model-v2.md`](docs/design/memory-model-v2.md)，
+Batch／Item／Collection 的 primary contract 在
+[`docs/design/memory-model-v3.md`](docs/design/memory-model-v3.md)。本機
+`docs/agent-runs/` 只保存施工紀錄且不進 Git；可長期引用的決策必須整理到上述正式文件。
 
 ## 安裝
 

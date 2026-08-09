@@ -7,6 +7,14 @@ Codex Handoff Bridge 是私人、allowlist-first 的 MCP Apps 對話工作區。
 它不是公司資料政策或封鎖措施的繞過工具。只有個人、公開，或已明確獲准離開公司環境的內容
 可以進入這條通道。
 
+## 文件導覽
+
+- [Threat Model](docs/ThreatModel.md)：受保護資產、trust zones、資料分類、攻擊面與剩餘風險。
+- [Approval Model](docs/ApprovalModel.md)：preview／dispatch、`plan`／`workspace_write`、
+  exact approval 與 restart expiry。
+- [Job Recovery](docs/JobRecovery.md)：持久化狀態、interrupted job、artifact、重啟與保留原則。
+- [Architecture v1](docs/design/architecture-v1.md)：第一版產品決策、state model 與 non-goals。
+
 ## 第一版能力
 
 - MCP Apps 內嵌對話工作區，使用標準 `ui/initialize`、`tools/call` 與 tool-result bridge。

@@ -3,6 +3,15 @@
 圖片與 Office 檔案的公開讀取設計、限制與設定方式請見
 [docs/Asset-Readers.md](docs/Asset-Readers.md)。
 
+## 文件導覽
+
+- [安全模型](docs/SecurityModel.md)：root／asset scope allowlist、realpath containment、
+  deny policy、工具權限與輸出限制。
+- [故障排除](docs/Troubleshooting.md)：build、root/path、local MCP、tunnel、ChatGPT action
+  cache 與 exact-path lifecycle 診斷。
+- [ChatGPT 掛載](docs/ChatGPT-Setup.md)：Secure MCP Tunnel 與 Developer Mode 設定。
+- [圖片與 Office 讀取](docs/Asset-Readers.md)：格式、container safety 與 bounded output。
+
 這是一個 read-only 的 MCP server，目標是讓 ChatGPT 以受限方式讀取明確 allowlist 內的多個本機 workspace root。
 
 預設範例提供三個 root id：

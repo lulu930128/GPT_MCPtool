@@ -1,0 +1,103 @@
+# Codex Handoff Bridge Approval Model
+
+## Principle
+
+The model may request work and Codex App Server may request permission, but only the user may decide
+an approval through the interactive MCP Apps UI. There is no session-wide accept.
+
+## Tool separation
+
+Read/model-visible tools inspect status, preview work, render the console, and read bounded job
+artifacts. Actions that can start, alter, interrupt, or authorize work are app-only:
+
+- `codex_job_dispatch`
+- `codex_conversation_send`
+- `codex_job_steer`
+- `codex_job_cancel`
+- `codex_approval_decide`
+- text-bundle begin/append/finalize and artifact chunk reads used by the widget
+
+The host integration must not expose app-only actions as autonomous model tools. A textual request
+from the model is not an approval decision.
+
+## Dispatch approval
+
+Before dispatch, `codex_job_preview` normalizes the work package and produces a digest without
+creating a job. The widget shows the project, objective, context, constraints, acceptance criteria,
+execution mode, model/effort, and attached bundle metadata.
+
+Dispatch requires the reviewed preview and a retry-stable idempotency key. If the form changes,
+preview again. Do not dispatch a digest produced for earlier content.
+
+## Execution modes
+
+| Mode | Codex permission profile | Approval behavior |
+| --- | --- | --- |
+| `plan` | Read-only | File-change approval cannot be accepted |
+| `workspace_write` | Workspace-scoped | Exact command/file-change requests may be accepted individually |
+
+Both modes use the allowlisted project path. Network access remains disabled by default. The Bridge
+never selects a full-access profile.
+
+## Per-request approval lifecycle
+
+```text
+Codex App Server requests permission
+  -> Bridge stores pending approval under one job
+  -> job status becomes awaiting_approval
+  -> widget displays kind and exact request details
+  -> user selects accept / decline / cancel
+  -> codex_approval_decide(jobId, approvalId, decision)
+  -> controller replies to that exact App Server request
+```
+
+The decision is bound to one `jobId` and one UUID `approvalId`. Unknown, already resolved, expired,
+or wrong-job ids are rejected.
+
+## Decision meanings
+
+- `accept` — authorize this exact pending request only.
+- `decline` — deny this exact request and let the active turn handle the denial.
+- `cancel` — cancel this exact approval request; it is not permission to run a substitute command.
+
+None of these decisions authorizes future requests, another command, another file change, another
+turn, or another job.
+
+## Restart and stale approval behavior
+
+On Bridge restart:
+
+- every pending approval is marked `expired`;
+- active jobs are marked `interrupted`;
+- unfinished turns are not automatically replayed;
+- an old UI decision cannot approve the restarted process's future request.
+
+The user must inspect current job state and explicitly start or resume appropriate work. Do not
+convert expired approvals into new pending approvals without a new App Server request.
+
+## Steering and cancellation
+
+Steering adds user direction to a running turn. It does not grant permission for an approval
+request. Cancellation interrupts the running turn; it does not roll back file changes already made
+inside the workspace.
+
+After cancellation or failure, inspect the aggregated diff and Git status before starting another
+turn.
+
+## Review checklist
+
+Before accepting a command or file-change request:
+
+1. Confirm the selected project and job.
+2. Read the exact command or change summary and affected path.
+3. Check that the action matches the objective and execution mode.
+4. Reject broad process termination, destructive Git, secret access, publishing, or unrelated
+   paths unless those actions were separately and explicitly authorized.
+5. Prefer `plan` when the intended diff is not yet understood.
+6. After completion, inspect the reported diff and verification evidence.
+
+## Known limitation
+
+In `workspace_write`, Codex's workspace permission profile determines which file operations require
+App Server approval. The Bridge displays requests that App Server actually emits; it cannot promise
+that every file edit receives a separate prompt. Strict staged-patch review is not implemented.
