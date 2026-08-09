@@ -12,6 +12,7 @@
 **/.secrets/
 **/.tunnel-client/
 **/.tmp/
+/.tmp-*/
 **/logs/
 
 # Private data, exports, and databases
