@@ -22,6 +22,8 @@ from memory_core.errors import (
     ReviewChallengeError,
     ReviewChallengeExpiredError,
     VersionConflictError,
+    operation_error_from_temporal,
+    operation_error_from_validation,
 )
 from memory_core.models import Entity, MemoryCandidate, Record
 from memory_core.schemas import (
@@ -39,8 +41,14 @@ from memory_core.schemas import (
     RecordUpdate,
 )
 from memory_core.security import ClientPrincipal
-from memory_core.services import entities, records
+from memory_core.services import batch_candidates, change_sets, entities, records
 from memory_core.services.audit import add_audit_event
+from memory_core.services.record_schema_validation import (
+    normalize_record_schema_create,
+    normalize_record_schema_update,
+    update_uses_registered_schema,
+)
+from memory_core.temporal import TemporalValidationIssue, validate_record_temporal_state
 
 CANDIDATE_TTL = timedelta(days=7)
 REVIEW_CHALLENGE_TTL = timedelta(minutes=10)
@@ -109,6 +117,10 @@ def _candidate_review_digest(payload: CandidateCreate) -> str:
 
 
 def _stored_candidate_review_digest(candidate: MemoryCandidate) -> str:
+    if candidate.candidate_kind == "change_set":
+        return change_sets.stored_review_digest(candidate)
+    if candidate.candidate_kind == "batch":
+        return batch_candidates.stored_review_digest(candidate)
     return _digest_envelope(_stored_approval_envelope(candidate))
 
 
@@ -152,7 +164,10 @@ def _validate_candidate_content(
         elif operation == "update" and target_type == "entity":
             CandidateEntityUpdatePatch.model_validate(proposed_content)
     except ValidationError as exc:
-        raise OperationError(f"Candidate payload failed validation: {exc}") from exc
+        raise operation_error_from_validation(
+            exc.errors(include_url=False),
+            fallback_message=f"Candidate payload failed validation: {exc}",
+        ) from exc
 
 
 def _validate_proposed_content(payload: CandidateCreate) -> None:
@@ -163,6 +178,130 @@ def _validate_proposed_content(payload: CandidateCreate) -> None:
     )
 
 
+def _normalize_candidate_record_schema(
+    session: Session,
+    principal: ClientPrincipal,
+    payload: CandidateCreate,
+    *,
+    validate_references: bool,
+) -> CandidateCreate:
+    if payload.target_type != "record" or payload.operation == "archive":
+        return payload
+    allow_restricted = principal.has_scope("restricted:read")
+    if payload.operation == "create":
+        content = CandidateRecordCreate.model_validate(payload.proposed_content)
+        formal = RecordCreate.model_validate(
+            content.model_dump(mode="python", exclude={"entity_links"})
+        )
+        normalized = normalize_record_schema_create(
+            session,
+            formal,
+            allow_restricted=allow_restricted,
+            validate_references=validate_references,
+        )
+        normalized_content = content.model_copy(update={"payload": normalized.payload})
+        return payload.model_copy(
+            update={
+                "proposed_content": normalized_content.model_dump(mode="json"),
+            }
+        )
+
+    current_record = records.get_record(
+        session,
+        payload.target_id or "",
+        include_deleted=not validate_references,
+        allow_restricted=allow_restricted,
+    )
+    patch = CandidateRecordUpdatePatch.model_validate(payload.proposed_content)
+    if not update_uses_registered_schema(current_record, patch):
+        return payload
+    normalized_patch, _resolved = normalize_record_schema_update(
+        session,
+        current_record,
+        patch,
+        allow_restricted=allow_restricted,
+        validate_references=validate_references,
+    )
+    return payload.model_copy(
+        update={
+            "proposed_content": normalized_patch.model_dump(
+                mode="json",
+                exclude_unset=True,
+            )
+        }
+    )
+
+
+def _validate_candidate_target_state(
+    session: Session,
+    principal: ClientPrincipal,
+    payload: CandidateCreate,
+) -> None:
+    if payload.operation == "create":
+        _normalize_candidate_record_schema(
+            session,
+            principal,
+            payload,
+            validate_references=True,
+        )
+        return
+    if payload.operation not in {"update", "archive"}:
+        return
+    if payload.target_type == "record":
+        current_record = records.get_record(
+            session,
+            payload.target_id or "",
+            allow_restricted=principal.has_scope("restricted:read"),
+        )
+        _ensure_result_version(current_record.version, payload.base_version)
+        if payload.operation != "update":
+            return
+        patch = CandidateRecordUpdatePatch.model_validate(payload.proposed_content)
+        if update_uses_registered_schema(current_record, patch):
+            normalize_record_schema_update(
+                session,
+                current_record,
+                patch,
+                allow_restricted=principal.has_scope("restricted:read"),
+                validate_references=True,
+            )
+        fields = patch.model_fields_set
+        if not fields & {
+            "occurred_start",
+            "occurred_end",
+            "date_precision",
+            "timezone_name",
+        }:
+            return
+        occurred_start = (
+            patch.occurred_start if "occurred_start" in fields else current_record.occurred_start
+        )
+        occurred_end = (
+            patch.occurred_end if "occurred_end" in fields else current_record.occurred_end
+        )
+        date_precision = (
+            patch.date_precision.value
+            if "date_precision" in fields
+            else current_record.date_precision
+        )
+        try:
+            validate_record_temporal_state(
+                occurred_start=occurred_start,
+                occurred_end=occurred_end,
+                date_precision=date_precision,
+            )
+        except TemporalValidationIssue as issue:
+            raise operation_error_from_temporal(issue) from issue
+        return
+
+    current_entity = entities.get_entity(
+        session,
+        payload.target_id or "",
+        allow_restricted=principal.has_scope("restricted:read"),
+    )
+    _ensure_result_version(current_entity.version, payload.base_version)
+
+
 def create_candidate(
     session: Session,
     principal: ClientPrincipal,
@@ -171,6 +310,12 @@ def create_candidate(
     request_id: str | None,
 ) -> MemoryCandidate:
     _validate_proposed_content(payload)
+    payload = _normalize_candidate_record_schema(
+        session,
+        principal,
+        payload,
+        validate_references=False,
+    )
     content_hash = _candidate_hash(payload)
     existing = session.scalar(
         select(MemoryCandidate).where(
@@ -185,8 +330,10 @@ def create_candidate(
             )
         return existing
 
+    _validate_candidate_target_state(session, principal, payload)
     candidate = MemoryCandidate(
         **payload.model_dump(mode="python"),
+        candidate_kind="single",
         source_client_id=principal.id,
         content_hash=content_hash,
         review_digest=_candidate_review_digest(payload),
@@ -244,6 +391,8 @@ def _mark_expired(
     candidate.review_action = "expire"
     candidate.review_challenge_hash = None
     candidate.review_challenge_expires_at = None
+    if candidate.candidate_kind == "batch" and candidate.batch is not None:
+        candidate.batch.review_state = "expired"
     add_audit_event(
         session,
         principal,
@@ -307,6 +456,7 @@ def prepare_candidate_review(
     candidate = get_candidate(session, candidate_id)
     _ensure_pending_and_current(session, candidate, principal, request_id=request_id)
     _validate_review_digest(candidate, expected_review_digest)
+    batch_candidates.prepare_batch_for_review(candidate)
 
     challenge = secrets.token_urlsafe(32)
     challenge_expires_at = utc_now() + REVIEW_CHALLENGE_TTL
@@ -381,6 +531,73 @@ def _finish_review(
     candidate.review_challenge_expires_at = None
 
 
+def authorize_batch_candidate(
+    session: Session,
+    principal: ClientPrincipal,
+    candidate_id: str,
+    *,
+    expected_review_digest: str,
+    approval_challenge: str,
+    idempotency_key: str,
+    review_note: str | None,
+    request_id: str | None,
+) -> MemoryCandidate:
+    request_hash = _review_request_hash(
+        action="approve",
+        candidate_id=candidate_id,
+        review_digest=expected_review_digest,
+        note=review_note,
+    )
+    existing = _existing_review_result(
+        session,
+        principal,
+        candidate_id=candidate_id,
+        action="approve",
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+    )
+    if existing is not None:
+        if existing.candidate_kind != "batch":
+            raise CandidateConflictError(
+                "The approval idempotency key belongs to a non-batch candidate."
+            )
+        return existing
+
+    candidate = get_candidate(session, candidate_id)
+    if candidate.candidate_kind != "batch" or candidate.batch is None:
+        raise CandidateConflictError("Candidate is not a batch.")
+    _ensure_pending_and_current(session, candidate, principal, request_id=request_id)
+    _validate_review_digest(candidate, expected_review_digest)
+    _validate_review_challenge(candidate, principal, approval_challenge)
+    if candidate.batch.plan_state != "sealed" or candidate.batch.review_state != "prepared":
+        raise CandidateConflictError("Batch was not prepared for this approval.")
+    candidate.batch.review_state = "approved"
+    _finish_review(
+        candidate,
+        principal,
+        action="approve",
+        note=review_note,
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+    )
+    add_audit_event(
+        session,
+        principal,
+        action="candidate.batch_approve",
+        outcome="success",
+        request_id=request_id,
+        target_type="candidate",
+        target_id=candidate.id,
+        details={
+            "batch_id": candidate.batch.id,
+            "revision_no": candidate.batch.current_revision_no,
+            "review_digest": candidate.review_digest,
+        },
+    )
+    session.flush()
+    return candidate
+
+
 def apply_candidate(
     session: Session,
     principal: ClientPrincipal,
@@ -410,14 +627,97 @@ def apply_candidate(
         return existing
 
     candidate = get_candidate(session, candidate_id)
+    if candidate.candidate_kind == "batch":
+        raise CandidateConflictError(
+            "Batch candidates must use the item-atomic batch apply workflow."
+        )
     _ensure_pending_and_current(session, candidate, principal, request_id=request_id)
     _validate_review_digest(candidate, expected_review_digest)
-    _validate_candidate_content(
-        candidate.operation,
-        candidate.target_type,
-        candidate.proposed_content,
-    )
+    if candidate.candidate_kind == "single":
+        if candidate.operation is None or candidate.target_type is None:
+            raise OperationError("Single candidate is missing its operation target")
+        _validate_candidate_content(
+            candidate.operation,
+            candidate.target_type,
+            candidate.proposed_content,
+        )
     _validate_review_challenge(candidate, principal, approval_challenge)
+    if candidate.candidate_kind == "change_set":
+        try:
+            with session.begin_nested():
+                operation_results = change_sets.execute_change_set(
+                    session,
+                    principal,
+                    candidate,
+                    request_id=request_id,
+                )
+        except VersionConflictError as exc:
+            session.expire(candidate, ["results"])
+            candidate.status = "conflict"
+            candidate.validation_result = {
+                "valid": False,
+                "atomic": True,
+                "transaction_committed": False,
+                "error": str(exc),
+                "error_code": "version_conflict",
+            }
+            _finish_review(
+                candidate,
+                principal,
+                action="approve",
+                note=review_note,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+            )
+            add_audit_event(
+                session,
+                principal,
+                action="candidate.change_set_apply",
+                outcome="conflict",
+                request_id=request_id,
+                target_type="candidate",
+                target_id=candidate.id,
+                details={
+                    "error_code": "version_conflict",
+                    "review_digest": candidate.review_digest,
+                    "transaction_committed": False,
+                },
+            )
+            session.flush()
+            return candidate
+
+        candidate.status = "applied"
+        candidate.validation_result = {
+            "valid": True,
+            "atomic": True,
+            "transaction_committed": True,
+            "operation_count": len(operation_results),
+        }
+        _finish_review(
+            candidate,
+            principal,
+            action="approve",
+            note=review_note,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+        )
+        add_audit_event(
+            session,
+            principal,
+            action="candidate.change_set_apply",
+            outcome="success",
+            request_id=request_id,
+            target_type="candidate",
+            target_id=candidate.id,
+            details={
+                "operation_count": len(operation_results),
+                "review_digest": candidate.review_digest,
+                "transaction_committed": True,
+            },
+        )
+        session.flush()
+        return candidate
+
     change_reason = f"candidate:{candidate.id}"
     result: Record | Entity
     result_id: str
@@ -746,6 +1046,8 @@ def reject_candidate(
     _validate_review_challenge(candidate, principal, approval_challenge)
     candidate.status = "rejected"
     candidate.validation_result = {"valid": True, "review_reason": reason}
+    if candidate.candidate_kind == "batch" and candidate.batch is not None:
+        candidate.batch.review_state = "rejected"
     _finish_review(
         candidate,
         principal,

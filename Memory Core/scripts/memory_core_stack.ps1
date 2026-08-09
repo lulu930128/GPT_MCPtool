@@ -1,8 +1,10 @@
 param(
-    [ValidateSet("SelfTest", "Setup", "SetupReviewCredential", "SaveRuntimeKey", "KeyStatus", "Doctor", "Start", "Restart", "Status", "Stop")]
+    [ValidateSet("SelfTest", "Setup", "SetupReviewCredential", "SetupViewerCredential", "SetupControlCenterCredential", "SaveRuntimeKey", "KeyStatus", "Doctor", "Start", "Restart", "Status", "Stop", "StartCore", "RestartCore", "StopCore", "StartTunnel", "StopTunnel")]
     [string]$Action = "Status",
     [string]$TunnelId,
-    [string]$TunnelClientPath = "C:\GPT_MCPtool\project_reading\vendor\tunnel-client\tunnel-client.exe"
+    [string]$TunnelClientPath = "C:\GPT_MCPtool\project_reading\vendor\tunnel-client\tunnel-client.exe",
+    [ValidateRange(1, 65535)]
+    [int]$BackendPort = 18765
 )
 
 Set-StrictMode -Version 3.0
@@ -20,11 +22,14 @@ $profileName = "memory-core"
 $profilePath = Join-Path $profileDir "$profileName.yaml"
 $mcpClientSecretPath = Join-Path $secretDir "memory-mcp-client-token.dpapi"
 $mcpReviewSecretPath = Join-Path $secretDir "memory-mcp-review-token.dpapi"
+$viewerSecretPath = Join-Path $secretDir "memory-core-viewer-token.dpapi"
+$controlCenterSecretPath = Join-Path $secretDir "memory-core-control-center-token.dpapi"
 $runtimeKeySecretPath = Join-Path $secretDir "tunnel-runtime-api-key.dpapi"
 $backendPidPath = Join-Path $runtimeDir "backend.pid"
 $mcpPidPath = Join-Path $runtimeDir "mcp.pid"
 $tunnelPidPath = Join-Path $runtimeDir "tunnel-client.pid"
-$backendHealthUrl = "http://127.0.0.1:8765/health"
+$backendBaseUrl = "http://127.0.0.1:$BackendPort"
+$backendHealthUrl = "$backendBaseUrl/health"
 $mcpHealthUrl = "http://127.0.0.1:8818/health"
 $mcpUrl = "http://127.0.0.1:8818/mcp"
 $tunnelAdminUrl = "http://127.0.0.1:8800"
@@ -107,15 +112,43 @@ function Test-HttpEndpoint([string]$Url) {
     }
 }
 
-function Wait-HttpEndpoint([string]$Url, [int]$TimeoutSeconds, [string]$Name) {
+function Wait-StableEndpoints(
+    [string[]]$Urls,
+    [int]$TimeoutSeconds,
+    [string]$Name,
+    [int]$RequiredConsecutiveSuccesses = 3,
+    [int]$ProbeIntervalMilliseconds = 500
+) {
+    if ($Urls.Count -eq 0) {
+        throw "$Name readiness check requires at least one endpoint."
+    }
+    if ($RequiredConsecutiveSuccesses -lt 1) {
+        throw "$Name readiness check requires at least one successful probe."
+    }
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $consecutiveSuccesses = 0
     do {
-        if (Test-HttpEndpoint $Url) {
-            return
+        $allReady = $true
+        foreach ($url in $Urls) {
+            if (-not (Test-HttpEndpoint $url)) {
+                $allReady = $false
+                break
+            }
         }
-        Start-Sleep -Milliseconds 250
+        if ($allReady) {
+            $consecutiveSuccesses += 1
+            if ($consecutiveSuccesses -ge $RequiredConsecutiveSuccesses) {
+                return
+            }
+        }
+        else {
+            $consecutiveSuccesses = 0
+        }
+        if ((Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds $ProbeIntervalMilliseconds
+        }
     } while ((Get-Date) -lt $deadline)
-    throw "$Name did not become ready within $TimeoutSeconds seconds."
+    throw "$Name did not remain ready for $RequiredConsecutiveSuccesses consecutive probes within $TimeoutSeconds seconds."
 }
 
 function Get-LoopbackListenerOwnerIds([int]$Port) {
@@ -127,6 +160,101 @@ function Get-LoopbackListenerOwnerIds([int]$Port) {
         }
     }
     return @($owners | Select-Object -Unique)
+}
+
+function Get-ExcludedTcpPortSnapshot {
+    $netshPath = Join-Path $env:SystemRoot "System32\netsh.exe"
+    if (-not (Test-Path -LiteralPath $netshPath)) {
+        return [pscustomobject]@{ available = $false; ranges = @() }
+    }
+    try {
+        $lines = @(& $netshPath interface ipv4 show excludedportrange protocol=tcp 2>$null)
+        if ($LASTEXITCODE -ne 0) {
+            return [pscustomobject]@{ available = $false; ranges = @() }
+        }
+    }
+    catch {
+        return [pscustomobject]@{ available = $false; ranges = @() }
+    }
+
+    $ranges = @()
+    foreach ($line in $lines) {
+        if ($line -match '^\s*(\d+)\s+(\d+)(?:\s+\*)?\s*$') {
+            $startPort = [int]$Matches[1]
+            $endPort = [int]$Matches[2]
+            if ($startPort -ge 1 -and $endPort -ge $startPort -and $endPort -le 65535) {
+                $ranges += [pscustomobject]@{ start = $startPort; end = $endPort }
+            }
+        }
+    }
+    return [pscustomobject]@{ available = $true; ranges = $ranges }
+}
+
+function Get-BackendPortPreflight([int]$Port) {
+    $existing = @(Get-LoopbackListenerOwnerIds $Port)
+    if ($existing.Count -gt 0) {
+        return [pscustomobject][ordered]@{
+            port = $Port
+            status = "Occupied"
+            errorCode = "MEMORY_CORE_BACKEND_PORT_OCCUPIED"
+            excludedRangeCheckAvailable = $null
+            socketError = $null
+        }
+    }
+
+    $excludedSnapshot = Get-ExcludedTcpPortSnapshot
+    $excluded = @($excludedSnapshot.ranges | Where-Object { $Port -ge $_.start -and $Port -le $_.end }).Count -gt 0
+    if ($excluded) {
+        return [pscustomobject][ordered]@{
+            port = $Port
+            status = "Excluded"
+            errorCode = "MEMORY_CORE_BACKEND_PORT_EXCLUDED"
+            excludedRangeCheckAvailable = [bool]$excludedSnapshot.available
+            socketError = $null
+        }
+    }
+
+    $listener = $null
+    try {
+        $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $Port)
+        $listener.Start()
+        return [pscustomobject][ordered]@{
+            port = $Port
+            status = "Available"
+            errorCode = $null
+            excludedRangeCheckAvailable = [bool]$excludedSnapshot.available
+            socketError = $null
+        }
+    }
+    catch [Net.Sockets.SocketException] {
+        return [pscustomobject][ordered]@{
+            port = $Port
+            status = "Unavailable"
+            errorCode = "MEMORY_CORE_BACKEND_PORT_UNAVAILABLE"
+            excludedRangeCheckAvailable = [bool]$excludedSnapshot.available
+            socketError = [string]$_.Exception.SocketErrorCode
+        }
+    }
+    finally {
+        if ($null -ne $listener) {
+            $listener.Stop()
+        }
+    }
+}
+
+function Assert-BackendPortAvailable {
+    $preflight = Get-BackendPortPreflight -Port $BackendPort
+    if ($preflight.status -eq "Available") {
+        return
+    }
+    $message = switch ($preflight.status) {
+        "Excluded" { "$($preflight.errorCode): loopback port $BackendPort is reserved by Windows." }
+        "Occupied" { "$($preflight.errorCode): loopback port $BackendPort already has a listener." }
+        default { "$($preflight.errorCode): loopback port $BackendPort cannot be bound (socketError=$($preflight.socketError))." }
+    }
+    $exception = [InvalidOperationException]::new($message)
+    $exception.Data["MemoryCoreRetryable"] = $false
+    throw $exception
 }
 
 function Read-ManagedPid([string]$Path) {
@@ -158,9 +286,119 @@ function Get-ManagedProcess([string]$PidPath) {
     }
     return [pscustomobject]@{
         ProcessId = $nativeProcess.Id
+        ProcessName = $nativeProcess.ProcessName
         ExecutablePath = $executablePath
         CommandLine = if ($null -eq $cimProcess) { $null } else { $cimProcess.CommandLine }
         StartTime = $nativeProcess.StartTime
+    }
+}
+
+function Get-ManagedProcessOwnership(
+    [string]$PidPath,
+    [string[]]$ExpectedExecutables,
+    [string]$ExpectedCommandFragment,
+    [int]$ExpectedListenPort
+) {
+    $pidFileExists = Test-Path -LiteralPath $PidPath
+    $recordedProcessId = Read-ManagedPid $PidPath
+    $process = Get-ManagedProcess $PidPath
+    if ($null -eq $process) {
+        $state = if ($pidFileExists) { "stale_missing_process" } else { "missing" }
+        return [pscustomobject]@{
+            State = $state
+            Owned = $false
+            Stale = $pidFileExists
+            RecordedProcessId = $recordedProcessId
+            Process = $null
+        }
+    }
+
+    $expectedProcessNames = @(
+        foreach ($expectedExecutable in $ExpectedExecutables) {
+            if (-not [string]::IsNullOrWhiteSpace($expectedExecutable)) {
+                [IO.Path]::GetFileNameWithoutExtension($expectedExecutable)
+            }
+        }
+    )
+    $processNameMatches = $expectedProcessNames -contains $process.ProcessName
+
+    $resolvedActual = if ([string]::IsNullOrWhiteSpace($process.ExecutablePath)) {
+        ""
+    }
+    else {
+        [IO.Path]::GetFullPath($process.ExecutablePath)
+    }
+    $executableMatches = $false
+    foreach ($expectedExecutable in $ExpectedExecutables) {
+        if ([string]::IsNullOrWhiteSpace($expectedExecutable)) {
+            continue
+        }
+        $resolvedExpected = [IO.Path]::GetFullPath($expectedExecutable)
+        if ($resolvedActual.Equals($resolvedExpected, [StringComparison]::OrdinalIgnoreCase)) {
+            $executableMatches = $true
+            break
+        }
+    }
+
+    $commandMatches = (
+        -not [string]::IsNullOrWhiteSpace($process.CommandLine) -and
+        $process.CommandLine.Contains($ExpectedCommandFragment)
+    )
+    $listenerMatches = $false
+    if (-not $commandMatches) {
+        $listenerOwnerIds = @(Get-LoopbackListenerOwnerIds $ExpectedListenPort)
+        foreach ($listenerOwnerId in $listenerOwnerIds) {
+            if ($listenerOwnerId -eq $process.ProcessId) {
+                $listenerMatches = $true
+                break
+            }
+            $listenerProcess = Get-Process -Id $listenerOwnerId -ErrorAction SilentlyContinue
+            if ($null -eq $listenerProcess -or [string]::IsNullOrWhiteSpace($listenerProcess.Path)) {
+                continue
+            }
+            $resolvedListenerExecutable = [IO.Path]::GetFullPath($listenerProcess.Path)
+            $listenerExecutableMatches = $false
+            foreach ($expectedExecutable in $ExpectedExecutables) {
+                if ([string]::IsNullOrWhiteSpace($expectedExecutable)) {
+                    continue
+                }
+                $resolvedExpected = [IO.Path]::GetFullPath($expectedExecutable)
+                if ($resolvedListenerExecutable.Equals($resolvedExpected, [StringComparison]::OrdinalIgnoreCase)) {
+                    $listenerExecutableMatches = $true
+                    break
+                }
+            }
+            if (-not $listenerExecutableMatches) {
+                continue
+            }
+            $startDeltaSeconds = [Math]::Abs(($listenerProcess.StartTime - $process.StartTime).TotalSeconds)
+            if ($startDeltaSeconds -le 2) {
+                $listenerMatches = $true
+                break
+            }
+        }
+    }
+
+    $owned = $executableMatches -and ($commandMatches -or $listenerMatches)
+    if ($owned) {
+        $state = "owned"
+    }
+    elseif (-not $processNameMatches) {
+        $state = "stale_process_name"
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($resolvedActual) -and -not $executableMatches) {
+        $state = "stale_executable"
+    }
+    else {
+        $state = "ownership_unverified"
+    }
+
+    return [pscustomobject]@{
+        State = $state
+        Owned = $owned
+        Stale = $state.StartsWith("stale_", [StringComparison]::Ordinal)
+        RecordedProcessId = $recordedProcessId
+        Process = $process
     }
 }
 
@@ -269,6 +507,63 @@ function Ensure-McpReviewSecret {
     $secureToken = ConvertTo-SecureString $plainToken -AsPlainText -Force
     try {
         Save-CurrentUserSecret -Secret $secureToken -Path $mcpReviewSecretPath
+    }
+    finally {
+        $plainToken = $null
+        $secureToken.Dispose()
+        $result = $null
+    }
+}
+
+function Ensure-ViewerSecret {
+    if (Test-CurrentUserSecret $viewerSecretPath) {
+        return
+    }
+    $arguments = '-B "' + $adminScript + '" create-client --name memory-core-viewer --scope records:read --scope entities:read'
+    $result = Invoke-CapturedProcess -FilePath $pythonPath -Arguments $arguments
+    if ($result.exitCode -ne 0) {
+        $safeError = ([string]$result.stderr) -replace 'mcore_[A-Za-z0-9_-]+', '<redacted>'
+        throw "Could not create the read-only Memory Core viewer client. $safeError"
+    }
+    $match = [regex]::Match([string]$result.stdout, '(?m)^Token:\s*(mcore_[A-Za-z0-9_-]+)\s*$')
+    if (-not $match.Success) {
+        throw "The Memory Core admin command did not return the expected one-time viewer token."
+    }
+    $plainToken = $match.Groups[1].Value
+    $secureToken = ConvertTo-SecureString $plainToken -AsPlainText -Force
+    try {
+        Save-CurrentUserSecret -Secret $secureToken -Path $viewerSecretPath
+    }
+    finally {
+        $plainToken = $null
+        $secureToken.Dispose()
+        $result = $null
+    }
+}
+
+function Ensure-ControlCenterSecret {
+    if (Test-CurrentUserSecret $controlCenterSecretPath) {
+        return
+    }
+    $arguments = '-B "' + $adminScript + '" create-client --name memory-core-control-center' +
+        ' --scope records:read --scope records:write' +
+        ' --scope entities:read --scope entities:write' +
+        ' --scope restricted:read --scope restricted:write' +
+        ' --scope candidates:create --scope candidates:review' +
+        ' --scope admin:export --scope admin:backup'
+    $result = Invoke-CapturedProcess -FilePath $pythonPath -Arguments $arguments
+    if ($result.exitCode -ne 0) {
+        $safeError = ([string]$result.stderr) -replace 'mcore_[A-Za-z0-9_-]+', '<redacted>'
+        throw "Could not create the Memory Core control-center client. $safeError"
+    }
+    $match = [regex]::Match([string]$result.stdout, '(?m)^Token:\s*(mcore_[A-Za-z0-9_-]+)\s*$')
+    if (-not $match.Success) {
+        throw "The Memory Core admin command did not return the expected control-center token."
+    }
+    $plainToken = $match.Groups[1].Value
+    $secureToken = ConvertTo-SecureString $plainToken -AsPlainText -Force
+    try {
+        Save-CurrentUserSecret -Secret $secureToken -Path $controlCenterSecretPath
     }
     finally {
         $plainToken = $null
@@ -433,25 +728,37 @@ function Invoke-TunnelDoctor {
 
 function Start-Backend {
     if (Test-HttpEndpoint $backendHealthUrl) {
+        Wait-StableEndpoints -Urls @($backendHealthUrl) -TimeoutSeconds 20 -Name "Memory Core backend"
         return
     }
-    $existing = @(Get-LoopbackListenerOwnerIds 8765)
-    if ($existing.Count -gt 0) {
-        throw "Port 8765 is occupied by a process that is not a healthy Memory Core backend."
-    }
+    Stop-ManagedProcess `
+        -PidPath $backendPidPath `
+        -ExpectedExecutables @($pythonPath, $pythonBasePath) `
+        -ExpectedCommandFragment "memory_core.main:app" `
+        -ExpectedListenPort $BackendPort
+    Assert-BackendPortAvailable
     Start-ProjectPythonProcess `
-        -Arguments "-m uvicorn memory_core.main:app --host 127.0.0.1 --port 8765" `
+        -Arguments "-m uvicorn memory_core.main:app --host 127.0.0.1 --port $BackendPort" `
         -PidPath $backendPidPath `
         -StdoutPath (Join-Path $runtimeDir "backend.stdout.log") `
         -StderrPath (Join-Path $runtimeDir "backend.stderr.log") `
-        -EnvironmentValues @{ PYTHONUNBUFFERED = "1" } | Out-Null
-    Wait-HttpEndpoint -Url $backendHealthUrl -TimeoutSeconds 15 -Name "Memory Core backend"
+        -EnvironmentValues @{
+            PYTHONUNBUFFERED = "1"
+            MEMORY_CORE_PORT = [string]$BackendPort
+        } | Out-Null
+    Wait-StableEndpoints -Urls @($backendHealthUrl) -TimeoutSeconds 20 -Name "Memory Core backend"
 }
 
 function Start-Mcp {
     if (Test-HttpEndpoint $mcpHealthUrl) {
+        Wait-StableEndpoints -Urls @($mcpHealthUrl) -TimeoutSeconds 20 -Name "Memory Core MCP"
         return
     }
+    Stop-ManagedProcess `
+        -PidPath $mcpPidPath `
+        -ExpectedExecutables @($pythonPath, $pythonBasePath) `
+        -ExpectedCommandFragment "memory_core.mcp.main" `
+        -ExpectedListenPort 8818
     $existing = @(Get-LoopbackListenerOwnerIds 8818)
     if ($existing.Count -gt 0) {
         throw "Port 8818 is occupied by a process that is not a healthy Memory Core MCP server."
@@ -466,7 +773,7 @@ function Start-Mcp {
             -StderrPath (Join-Path $runtimeDir "mcp.stderr.log") `
             -EnvironmentValues @{
                 PYTHONUNBUFFERED = "1"
-                MEMORY_CORE_MCP_API_BASE_URL = "http://127.0.0.1:8765"
+                MEMORY_CORE_MCP_API_BASE_URL = $backendBaseUrl
                 MEMORY_CORE_MCP_HOST = "127.0.0.1"
                 MEMORY_CORE_MCP_PORT = "8818"
                 MEMORY_CORE_MCP_CLIENT_TOKEN = $mcpToken
@@ -477,13 +784,20 @@ function Start-Mcp {
         $mcpToken = $null
         $mcpReviewToken = $null
     }
-    Wait-HttpEndpoint -Url $mcpHealthUrl -TimeoutSeconds 15 -Name "Memory Core MCP"
+    Wait-StableEndpoints -Urls @($mcpHealthUrl) -TimeoutSeconds 20 -Name "Memory Core MCP"
 }
 
 function Start-Tunnel {
     if (Test-HttpEndpoint $tunnelReadyUrl) {
+        Wait-StableEndpoints -Urls @($tunnelReadyUrl) -TimeoutSeconds 30 -Name "Memory Core secure tunnel"
         return
     }
+    Invoke-TunnelDoctor
+    Stop-ManagedProcess `
+        -PidPath $tunnelPidPath `
+        -ExpectedExecutables @($TunnelClientPath) `
+        -ExpectedCommandFragment $profileName `
+        -ExpectedListenPort 8800
     $existing = @(Get-LoopbackListenerOwnerIds 8800)
     if ($existing.Count -gt 0) {
         throw "Port 8800 is occupied by a process that is not a ready Memory Core tunnel."
@@ -504,32 +818,64 @@ function Start-Tunnel {
         $env:CONTROL_PLANE_API_KEY = $originalKey
         $runtimeKey = $null
     }
-    Wait-HttpEndpoint -Url $tunnelReadyUrl -TimeoutSeconds 30 -Name "Memory Core secure tunnel"
+    Wait-StableEndpoints -Urls @($tunnelReadyUrl) -TimeoutSeconds 30 -Name "Memory Core secure tunnel"
 }
 
 function Get-StatusDocument {
-    $backendProcess = Get-ManagedProcess $backendPidPath
-    $mcpProcess = Get-ManagedProcess $mcpPidPath
-    $tunnelProcess = Get-ManagedProcess $tunnelPidPath
-    $backendListenerPids = @(Get-LoopbackListenerOwnerIds 8765)
+    $backendHealthy = Test-HttpEndpoint $backendHealthUrl
+    $backendOwnership = Get-ManagedProcessOwnership `
+        -PidPath $backendPidPath `
+        -ExpectedExecutables @($pythonPath, $pythonBasePath) `
+        -ExpectedCommandFragment "memory_core.main:app" `
+        -ExpectedListenPort $BackendPort
+    $mcpOwnership = Get-ManagedProcessOwnership `
+        -PidPath $mcpPidPath `
+        -ExpectedExecutables @($pythonPath, $pythonBasePath) `
+        -ExpectedCommandFragment "memory_core.mcp.main" `
+        -ExpectedListenPort 8818
+    $tunnelOwnership = Get-ManagedProcessOwnership `
+        -PidPath $tunnelPidPath `
+        -ExpectedExecutables @($TunnelClientPath) `
+        -ExpectedCommandFragment $profileName `
+        -ExpectedListenPort 8800
+    $backendListenerPids = @(Get-LoopbackListenerOwnerIds $BackendPort)
     $mcpListenerPids = @(Get-LoopbackListenerOwnerIds 8818)
     $tunnelListenerPids = @(Get-LoopbackListenerOwnerIds 8800)
+    $backendPortPreflight = if ($backendHealthy) {
+        [pscustomobject][ordered]@{
+            port = $BackendPort
+            status = "InUseHealthy"
+            errorCode = $null
+            excludedRangeCheckAvailable = $null
+            socketError = $null
+        }
+    }
+    else {
+        Get-BackendPortPreflight -Port $BackendPort
+    }
     return [ordered]@{
         backend = [ordered]@{
-            healthy = Test-HttpEndpoint $backendHealthUrl
-            pid = if ($null -eq $backendProcess) { $null } else { $backendProcess.ProcessId }
+            healthy = $backendHealthy
+            pid = if ($backendOwnership.Owned) { $backendOwnership.Process.ProcessId } else { $null }
+            pidState = $backendOwnership.State
+            recordedPid = $backendOwnership.RecordedProcessId
             listenerPids = $backendListenerPids
             url = $backendHealthUrl
+            portPreflight = $backendPortPreflight
         }
         mcp = [ordered]@{
             healthy = Test-HttpEndpoint $mcpHealthUrl
-            pid = if ($null -eq $mcpProcess) { $null } else { $mcpProcess.ProcessId }
+            pid = if ($mcpOwnership.Owned) { $mcpOwnership.Process.ProcessId } else { $null }
+            pidState = $mcpOwnership.State
+            recordedPid = $mcpOwnership.RecordedProcessId
             listenerPids = $mcpListenerPids
             url = $mcpUrl
         }
         tunnel = [ordered]@{
             ready = Test-HttpEndpoint $tunnelReadyUrl
-            pid = if ($null -eq $tunnelProcess) { $null } else { $tunnelProcess.ProcessId }
+            pid = if ($tunnelOwnership.Owned) { $tunnelOwnership.Process.ProcessId } else { $null }
+            pidState = $tunnelOwnership.State
+            recordedPid = $tunnelOwnership.RecordedProcessId
             listenerPids = $tunnelListenerPids
             adminUrl = $tunnelAdminUrl
             profileConfigured = Test-Path -LiteralPath $profilePath
@@ -537,6 +883,8 @@ function Get-StatusDocument {
         secrets = [ordered]@{
             mcpClientTokenConfigured = Test-CurrentUserSecret $mcpClientSecretPath
             mcpReviewTokenConfigured = Test-CurrentUserSecret $mcpReviewSecretPath
+            viewerTokenConfigured = Test-CurrentUserSecret $viewerSecretPath
+            controlCenterTokenConfigured = Test-CurrentUserSecret $controlCenterSecretPath
             tunnelRuntimeKeyConfigured = Test-CurrentUserSecret $runtimeKeySecretPath
             storage = "Windows DPAPI current-user"
         }
@@ -549,67 +897,26 @@ function Stop-ManagedProcess(
     [string]$ExpectedCommandFragment,
     [int]$ExpectedListenPort
 ) {
-    $process = Get-ManagedProcess $PidPath
-    if ($null -eq $process) {
+    $ownership = Get-ManagedProcessOwnership `
+        -PidPath $PidPath `
+        -ExpectedExecutables $ExpectedExecutables `
+        -ExpectedCommandFragment $ExpectedCommandFragment `
+        -ExpectedListenPort $ExpectedListenPort
+    if ($null -eq $ownership.Process) {
         Remove-Item -LiteralPath $PidPath -ErrorAction SilentlyContinue
         return
     }
-    $resolvedActual = if ([string]::IsNullOrWhiteSpace($process.ExecutablePath)) { "" } else { [IO.Path]::GetFullPath($process.ExecutablePath) }
-    $executableMatches = $false
-    foreach ($expectedExecutable in $ExpectedExecutables) {
-        if ([string]::IsNullOrWhiteSpace($expectedExecutable)) {
-            continue
-        }
-        $resolvedExpected = [IO.Path]::GetFullPath($expectedExecutable)
-        if ($resolvedActual.Equals($resolvedExpected, [StringComparison]::OrdinalIgnoreCase)) {
-            $executableMatches = $true
-            break
-        }
+    if ($ownership.Stale) {
+        Write-Warning "Ignoring stale managed PID $($ownership.Process.ProcessId) ($($ownership.State)); the foreign process will not be stopped."
+        Remove-Item -LiteralPath $PidPath -ErrorAction Stop
+        return
     }
-    if (-not $executableMatches) {
-        throw "Refusing to stop PID $($process.ProcessId): executable ownership check failed."
+    if (-not $ownership.Owned) {
+        throw "Refusing to stop PID $($ownership.Process.ProcessId): process ownership could not be verified."
     }
-    $commandMatches = -not [string]::IsNullOrWhiteSpace($process.CommandLine) -and $process.CommandLine.Contains($ExpectedCommandFragment)
-    $listenerMatches = $false
-    if (-not $commandMatches) {
-        $listenerOwnerIds = @(Get-LoopbackListenerOwnerIds $ExpectedListenPort)
-        foreach ($listenerOwnerId in $listenerOwnerIds) {
-            if ($listenerOwnerId -eq $process.ProcessId) {
-                $listenerMatches = $true
-                break
-            }
-            $listenerProcess = Get-Process -Id $listenerOwnerId -ErrorAction SilentlyContinue
-            if ($null -eq $listenerProcess -or [string]::IsNullOrWhiteSpace($listenerProcess.Path)) {
-                continue
-            }
-            $resolvedListenerExecutable = [IO.Path]::GetFullPath($listenerProcess.Path)
-            $listenerExecutableMatches = $false
-            foreach ($expectedExecutable in $ExpectedExecutables) {
-                if ([string]::IsNullOrWhiteSpace($expectedExecutable)) {
-                    continue
-                }
-                $resolvedExpected = [IO.Path]::GetFullPath($expectedExecutable)
-                if ($resolvedListenerExecutable.Equals($resolvedExpected, [StringComparison]::OrdinalIgnoreCase)) {
-                    $listenerExecutableMatches = $true
-                    break
-                }
-            }
-            if (-not $listenerExecutableMatches) {
-                continue
-            }
-            $startDeltaSeconds = [Math]::Abs(($listenerProcess.StartTime - $process.StartTime).TotalSeconds)
-            if ($startDeltaSeconds -le 2) {
-                $listenerMatches = $true
-                break
-            }
-        }
-    }
-    if (-not $commandMatches -and -not $listenerMatches) {
-        throw "Refusing to stop PID $($process.ProcessId): command/listener ownership checks failed."
-    }
-    & "$env:SystemRoot\System32\taskkill.exe" /PID $process.ProcessId /T /F | Out-Null
+    & "$env:SystemRoot\System32\taskkill.exe" /PID $ownership.Process.ProcessId /T /F | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        throw "Could not stop the verified process tree for PID $($process.ProcessId)."
+        throw "Could not stop the verified process tree for PID $($ownership.Process.ProcessId)."
     }
     Remove-Item -LiteralPath $PidPath -ErrorAction SilentlyContinue
 }
@@ -617,7 +924,107 @@ function Stop-ManagedProcess(
 function Stop-Stack {
     Stop-ManagedProcess -PidPath $tunnelPidPath -ExpectedExecutables @($TunnelClientPath) -ExpectedCommandFragment $profileName -ExpectedListenPort 8800
     Stop-ManagedProcess -PidPath $mcpPidPath -ExpectedExecutables @($pythonPath, $pythonBasePath) -ExpectedCommandFragment "memory_core.mcp.main" -ExpectedListenPort 8818
-    Stop-ManagedProcess -PidPath $backendPidPath -ExpectedExecutables @($pythonPath, $pythonBasePath) -ExpectedCommandFragment "memory_core.main:app" -ExpectedListenPort 8765
+    Stop-ManagedProcess -PidPath $backendPidPath -ExpectedExecutables @($pythonPath, $pythonBasePath) -ExpectedCommandFragment "memory_core.main:app" -ExpectedListenPort $BackendPort
+}
+
+function Stop-Core {
+    Stop-ManagedProcess -PidPath $mcpPidPath -ExpectedExecutables @($pythonPath, $pythonBasePath) -ExpectedCommandFragment "memory_core.mcp.main" -ExpectedListenPort 8818
+    Stop-ManagedProcess -PidPath $backendPidPath -ExpectedExecutables @($pythonPath, $pythonBasePath) -ExpectedCommandFragment "memory_core.main:app" -ExpectedListenPort $BackendPort
+}
+
+function Stop-Tunnel {
+    Stop-ManagedProcess -PidPath $tunnelPidPath -ExpectedExecutables @($TunnelClientPath) -ExpectedCommandFragment $profileName -ExpectedListenPort 8800
+}
+
+function Assert-CoreStable {
+    Wait-StableEndpoints `
+        -Urls @($backendHealthUrl, $mcpHealthUrl) `
+        -TimeoutSeconds 15 `
+        -Name "Memory Core backend and MCP"
+}
+
+function Assert-StackStable {
+    Wait-StableEndpoints `
+        -Urls @($backendHealthUrl, $mcpHealthUrl, $tunnelReadyUrl) `
+        -TimeoutSeconds 20 `
+        -Name "Memory Core stack"
+}
+
+function Invoke-BoundedStartup(
+    [string]$Name,
+    [scriptblock]$Operation,
+    [scriptblock]$Cleanup,
+    [int[]]$BackoffSeconds
+) {
+    if ($BackoffSeconds.Count -eq 0) {
+        throw "$Name startup requires at least one attempt."
+    }
+
+    $attemptCount = $BackoffSeconds.Count
+    for ($attemptIndex = 0; $attemptIndex -lt $attemptCount; $attemptIndex++) {
+        $delaySeconds = $BackoffSeconds[$attemptIndex]
+        if ($delaySeconds -gt 0) {
+            Write-Warning "$Name retry $($attemptIndex + 1)/$attemptCount will start in $delaySeconds seconds."
+            Start-Sleep -Seconds $delaySeconds
+        }
+
+        try {
+            & $Operation
+            return
+        }
+        catch {
+            $failureMessage = $_.Exception.Message
+            $retryable = -not (
+                $_.Exception.Data.Contains("MemoryCoreRetryable") -and
+                $_.Exception.Data["MemoryCoreRetryable"] -eq $false
+            )
+            Write-Warning "$Name start attempt $($attemptIndex + 1)/$attemptCount failed: $failureMessage"
+            try {
+                & $Cleanup
+            }
+            catch {
+                $cleanupMessage = $_.Exception.Message
+                throw "$Name cleanup failed after a startup error. Startup error: $failureMessage Cleanup error: $cleanupMessage"
+            }
+
+            if (-not $retryable) {
+                throw "$Name stopped without retry. $failureMessage"
+            }
+
+            if ($attemptIndex -eq ($attemptCount - 1)) {
+                throw "$Name failed after $attemptCount attempts. Last error: $failureMessage"
+            }
+        }
+    }
+}
+
+function Start-CoreWithRetry {
+    Invoke-BoundedStartup `
+        -Name "Memory Core core services" `
+        -BackoffSeconds @(0, 5, 15, 30) `
+        -Operation {
+            Start-Backend
+            Start-Mcp
+            Assert-CoreStable
+        } `
+        -Cleanup {
+            Stop-Core
+        }
+}
+
+function Start-StackWithRetry {
+    Invoke-BoundedStartup `
+        -Name "Memory Core stack" `
+        -BackoffSeconds @(0, 5, 15, 30) `
+        -Operation {
+            Start-Backend
+            Start-Mcp
+            Start-Tunnel
+            Assert-StackStable
+        } `
+        -Cleanup {
+            Stop-Stack
+        }
 }
 
 Assert-LocalRuntimeFiles
@@ -634,10 +1041,20 @@ switch ($Action) {
         Initialize-TunnelProfile
         Ensure-McpClientSecret
         Ensure-McpReviewSecret
+        Ensure-ViewerSecret
+        Ensure-ControlCenterSecret
         Get-StatusDocument | ConvertTo-Json -Depth 5
     }
     "SetupReviewCredential" {
         Ensure-McpReviewSecret
+        Get-StatusDocument | ConvertTo-Json -Depth 5
+    }
+    "SetupViewerCredential" {
+        Ensure-ViewerSecret
+        Get-StatusDocument | ConvertTo-Json -Depth 5
+    }
+    "SetupControlCenterCredential" {
+        Ensure-ControlCenterSecret
         Get-StatusDocument | ConvertTo-Json -Depth 5
     }
     "SaveRuntimeKey" {
@@ -647,6 +1064,8 @@ switch ($Action) {
         [ordered]@{
             mcpClientTokenConfigured = Test-CurrentUserSecret $mcpClientSecretPath
             mcpReviewTokenConfigured = Test-CurrentUserSecret $mcpReviewSecretPath
+            viewerTokenConfigured = Test-CurrentUserSecret $viewerSecretPath
+            controlCenterTokenConfigured = Test-CurrentUserSecret $controlCenterSecretPath
             tunnelRuntimeKeyConfigured = Test-CurrentUserSecret $runtimeKeySecretPath
             storage = "Windows DPAPI current-user"
         } | ConvertTo-Json -Depth 3
@@ -667,10 +1086,7 @@ switch ($Action) {
         if (-not (Test-CurrentUserSecret $runtimeKeySecretPath)) {
             throw "Tunnel runtime API key is missing. Run SaveRuntimeKey first."
         }
-        Start-Backend
-        Start-Mcp
-        Invoke-TunnelDoctor
-        Start-Tunnel
+        Start-StackWithRetry
         Get-StatusDocument | ConvertTo-Json -Depth 5
     }
     "Restart" {
@@ -687,10 +1103,52 @@ switch ($Action) {
             throw "Tunnel runtime API key is missing. Run SaveRuntimeKey first."
         }
         Stop-Stack
-        Start-Backend
-        Start-Mcp
-        Invoke-TunnelDoctor
-        Start-Tunnel
+        Start-StackWithRetry
+        Get-StatusDocument | ConvertTo-Json -Depth 5
+    }
+    "StartCore" {
+        if (-not (Test-CurrentUserSecret $mcpClientSecretPath)) {
+            throw "Memory Core MCP client credential is missing. Run Setup first."
+        }
+        if (-not (Test-CurrentUserSecret $mcpReviewSecretPath)) {
+            throw "Memory Core MCP review credential is missing. Run SetupReviewCredential first."
+        }
+        Start-CoreWithRetry
+        Get-StatusDocument | ConvertTo-Json -Depth 5
+    }
+    "RestartCore" {
+        if (-not (Test-CurrentUserSecret $mcpClientSecretPath)) {
+            throw "Memory Core MCP client credential is missing. Run Setup first."
+        }
+        if (-not (Test-CurrentUserSecret $mcpReviewSecretPath)) {
+            throw "Memory Core MCP review credential is missing. Run SetupReviewCredential first."
+        }
+        Stop-Core
+        Start-CoreWithRetry
+        Get-StatusDocument | ConvertTo-Json -Depth 5
+    }
+    "StopCore" {
+        Stop-Core
+        Get-StatusDocument | ConvertTo-Json -Depth 5
+    }
+    "StartTunnel" {
+        if (-not (Test-Path -LiteralPath $profilePath)) {
+            throw "Tunnel profile is missing. Run Setup first."
+        }
+        if (-not (Test-CurrentUserSecret $mcpClientSecretPath)) {
+            throw "Memory Core MCP client credential is missing. Run Setup first."
+        }
+        if (-not (Test-CurrentUserSecret $mcpReviewSecretPath)) {
+            throw "Memory Core MCP review credential is missing. Run SetupReviewCredential first."
+        }
+        if (-not (Test-CurrentUserSecret $runtimeKeySecretPath)) {
+            throw "Tunnel runtime API key is missing. Run SaveRuntimeKey first."
+        }
+        Start-StackWithRetry
+        Get-StatusDocument | ConvertTo-Json -Depth 5
+    }
+    "StopTunnel" {
+        Stop-Tunnel
         Get-StatusDocument | ConvertTo-Json -Depth 5
     }
     "Status" {

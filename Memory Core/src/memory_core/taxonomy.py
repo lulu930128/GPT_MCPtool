@@ -18,6 +18,7 @@ CANONICAL_DOMAINS = frozenset(
         "language.japanese",
         "finance.investment",
         "health",
+        "lifestyle.cocktail",
         "preference",
     }
 )

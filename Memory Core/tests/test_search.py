@@ -107,7 +107,7 @@ def test_search_falls_back_when_query_tokens_are_alternative_aliases(
     assert "title" in results[0]["matched_fields"]
 
 
-def test_search_supports_result_domain_kind_sensitivity_and_time_filters(
+def test_search_supports_record_schema_domain_kind_sensitivity_and_time_filters(
     client: TestClient,
     admin_headers: dict[str, str],
     reader_headers: dict[str, str],
@@ -120,6 +120,8 @@ def test_search_supports_result_domain_kind_sensitivity_and_time_filters(
             "domain": "media.galgame",
             "title": "Summer Pockets",
             "sensitivity": "personal",
+            "schema_name": "search_test",
+            "schema_version": 1,
         },
     )
     restricted = client.post(
@@ -151,6 +153,7 @@ def test_search_supports_result_domain_kind_sensitivity_and_time_filters(
             "q": "Summer",
             "result_type": "record",
             "domain": "media.galgame",
+            "schema_name": "search_test",
             "kind": "fact",
             "sensitivity": "personal",
             "updated_before": "2100-01-01T00:00:00+00:00",
@@ -158,6 +161,14 @@ def test_search_supports_result_domain_kind_sensitivity_and_time_filters(
     )
     assert record_only.status_code == 200
     assert [item["id"] for item in record_only.json()] == [record.json()["id"]]
+
+    schema_filter_excludes_entities = client.get(
+        "/api/v1/search",
+        headers=admin_headers,
+        params={"q": "Summer", "schema_name": "search_test"},
+    )
+    assert schema_filter_excludes_entities.status_code == 200
+    assert [item["id"] for item in schema_filter_excludes_entities.json()] == [record.json()["id"]]
 
     entity_only = client.get(
         "/api/v1/search",

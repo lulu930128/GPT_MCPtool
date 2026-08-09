@@ -26,7 +26,7 @@ class McpSettings(BaseSettings):
         extra="ignore",
     )
 
-    api_base_url: str = "http://127.0.0.1:8765"
+    api_base_url: str = "http://127.0.0.1:18765"
     client_token: SecretStr
     review_client_token: SecretStr | None = None
     api_timeout_seconds: float = Field(default=15.0, gt=0, le=120)

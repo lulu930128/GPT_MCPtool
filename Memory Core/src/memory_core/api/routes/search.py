@@ -22,6 +22,7 @@ def search(
     limit: Annotated[int, Query(ge=1, le=100)] = 30,
     result_type: Literal["record", "entity"] | None = None,
     domain: Annotated[str | None, Query(min_length=1, max_length=80)] = None,
+    schema_name: Annotated[str | None, Query(min_length=1, max_length=100)] = None,
     kind: Annotated[str | None, Query(min_length=1, max_length=60)] = None,
     sensitivity: Literal["public", "personal", "sensitive", "restricted"] | None = None,
     updated_after: datetime | None = None,
@@ -49,6 +50,7 @@ def search(
         filters=SearchFilters(
             result_type=result_type,
             domain=domain,
+            schema_name=schema_name,
             kind=kind,
             sensitivity=sensitivity,
             updated_after=updated_after,

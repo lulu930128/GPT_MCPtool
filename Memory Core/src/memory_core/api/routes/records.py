@@ -1,18 +1,20 @@
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Query, Response, status
+from fastapi import APIRouter, Depends, Path, Query, Response, status
 
 from memory_core.api.deps import ClientDep, RequestIdDep, SessionDep, require_scopes
 from memory_core.schemas import (
     RecordCreate,
     RecordEntityLinkCreate,
+    RecordLinkRead,
     RecordRead,
     RecordTagLinkCreate,
     RecordUpdate,
 )
 from memory_core.services import records
+from memory_core.services.revisions import get_record_revision_snapshot
 
 router = APIRouter(prefix="/records", tags=["records"])
 
@@ -61,6 +63,24 @@ def list_records(
     return [RecordRead.model_validate(item) for item in items]
 
 
+@router.get("/{record_id}/links", response_model=list[RecordLinkRead])
+def list_record_links(
+    record_id: str,
+    session: SessionDep,
+    principal: RecordReader,
+    direction: Literal["outbound", "inbound"] = "outbound",
+    include_removed: bool = False,
+) -> list[RecordLinkRead]:
+    links = records.list_links(
+        session,
+        principal,
+        record_id,
+        direction=direction,
+        include_removed=include_removed,
+    )
+    return [RecordLinkRead.model_validate(link) for link in links]
+
+
 @router.get("/{record_id}", response_model=RecordRead)
 def get_record(
     record_id: str,
@@ -75,6 +95,21 @@ def get_record(
         allow_restricted=principal.has_scope("restricted:read"),
     )
     return RecordRead.model_validate(record)
+
+
+@router.get("/{record_id}/revisions/{revision_no}", response_model=RecordRead)
+def get_record_revision(
+    record_id: str,
+    revision_no: Annotated[int, Path(ge=1)],
+    session: SessionDep,
+    principal: RecordReader,
+) -> RecordRead:
+    return get_record_revision_snapshot(
+        session,
+        record_id,
+        revision_no,
+        allow_restricted=principal.has_scope("restricted:read"),
+    )
 
 
 @router.patch("/{record_id}", response_model=RecordRead)

@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     app_name: str = "Memory Core"
     environment: str = "development"
     host: str = "127.0.0.1"
-    port: int = Field(default=8765, ge=1, le=65535)
+    port: int = Field(default=18765, ge=1, le=65535)
     data_dir: Path = Path("data")
     database_url: str | None = None
     log_level: str = "INFO"

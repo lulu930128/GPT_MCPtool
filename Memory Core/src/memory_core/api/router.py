@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from memory_core.api.routes import (
     admin,
     candidates,
+    collections,
     duplicates,
     entities,
     overview,
@@ -16,6 +17,7 @@ api_router.include_router(records.router)
 api_router.include_router(entities.router)
 api_router.include_router(tags.router)
 api_router.include_router(candidates.router)
+api_router.include_router(collections.router)
 api_router.include_router(overview.router)
 api_router.include_router(duplicates.router)
 api_router.include_router(search.router)

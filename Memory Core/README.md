@@ -2,7 +2,10 @@
 
 Memory Core 是 local-first、single-user、可審計的個人資料後端。它是網站、Kuro、MCP 與桌面工具共同使用的 system of record；所有 client 都只能透過 API 存取資料。
 
-目前版本為 `0.1.0`，已完成通用後端核心與第一版 tool-only MCP adapter；尚不包含 Kuro adapter、管理 UI 或 domain-specific 模組。
+目前版本為 `0.2.0`，已完成通用後端核心、tool-only MCP adapter、Cocktail Record
+Schema v1、相容舊流程的 ChangeSet、Batch／Item／Collection v3 架構，以及本機
+Tkinter 管理控制中心；尚不包含 Kuro adapter。Batch v3 的第一個可用 profile 是
+`media.experience.v1`。
 
 ## 已具備的能力
 
@@ -14,24 +17,40 @@ Memory Core 是 local-first、single-user、可審計的個人資料後端。它
 - Optimistic concurrency、soft archive、revision 與 audit event。
 - Candidate create/prepare-review/apply/reject、不可變 review digest、短效 challenge、
   7 天期限、獨立審核 idempotency 與 result id/version。
+- ChangeSet Candidate 可在同一 transaction 建立或更新多筆 Record；支援受 schema
+  registry 限制的 `op:<op_id>` local reference、依賴循環檢查、完整 rollback 與逐筆
+  results。
+- Batch Candidate 是新的主要批次入口：一次接收 1～50 個 typed Item，先以固定版本與
+  hash 的 normalization profile 產生可審查 plan；同一 Batch 內每個 Item 有獨立
+  decision、operation/result、claim、transaction、post-commit readback 與 retry 狀態。
+  單筆只是含一個 Item 的 Batch；Batch 本身不是正式記憶。
+- `Collection` 只保存群組 metadata 與 canonical Record membership，不複製 Item
+  payload。正式資料仍是一筆一個 Record，可從 Collection 看整群，也可逐筆 fetch。
+- Record schema 中的 reference field 會同步成 revision-aware Record Link current
+  projection；更新時採 soft remove，歷史仍由 Revision 與 Audit Event 保存。
 - Record 的 `occurred_start`／`occurred_end` 與 Entity Relation 的
   `valid_from`／`valid_to` 必須使用含 `Z` 或明確 UTC offset 的 ISO 8601 datetime；
-  API 會正規化為 UTC。`timezone_name` 只保存原始時區語意，不會替 naive datetime
-  自動補上 offset。
+  API 會正規化為 UTC。`timezone_name` 可省略；提供時必須是 IANA timezone，例如
+  `Asia/Taipei`，且不會替 naive datetime 自動補上 offset。Record 有
+  `occurred_start` 時 `date_precision` 不得為 `unknown`；沒有開始時間時必須使用
+  `unknown`，`occurred_end` 也不能單獨存在。
 - FTS5 trigram 搜尋；多詞查詢會跨 title／summary／body／payload 或 entity 欄位計算
   coverage 與權重，先正規化自然語句與標點，優先 exact/title matches；嚴格 coverage
   查無結果時才做 bounded token fallback。
-- Search 可用 result type、domain、kind/entity type、sensitivity 與 timezone-aware
-  updated-at 範圍篩選，並回傳 score、matched fields/terms、normalized query 與實際
-  strategy。
+- Search 可用 result type、domain、`schema_name`、kind/entity type、sensitivity 與
+  timezone-aware updated-at 範圍篩選，並回傳 score、matched fields/terms、
+  normalized query 與實際 strategy。`schema_name` 只適用於 Record，指定時不會混入
+  Entity。
 - `memory_overview` 可查看目前 scope 可見的 Record／Entity、domain taxonomy、
   schema version、FTS parity 與 Candidate status counts，不回傳記憶內容。
 - `memory_detect_duplicates` 以 bounded read-only scan 回報可能重複的 refs、理由與
   confidence，不會自動合併或封存。
 - 不含 credential 的 JSON export。
 - SQLite online backup、sidecar manifest 與 integrity verification。
-- Tool-only MCP adapter：標準 `search`／`fetch`、六個單一動作的 candidate proposal
-  tools，以及啟用獨立 reviewer credential 後才出現的遠端審核工具。
+- Tool-only MCP adapter：標準 `search`／`fetch`、安全的 Record revision/link、
+  Collection 群組讀取、typed media-experience Batch、通用與 typed Cocktail
+  ChangeSet、既有 candidate proposal tools，以及啟用獨立 reviewer credential 後才
+  出現的遠端審核工具。
 - MCP `fetch` 與 Candidate outward detail 使用獨立 external projection；正式資料與
   audit digest 不變，但輸出會遮蔽 Windows 絕對路徑、使用者 home path 與
   path-shaped payload fields。含 machine-local path 的新 MCP proposal 會在送入
@@ -59,7 +78,7 @@ MCP / Kuro / Admin UI
 - Public website 未來只讀獨立 public snapshot，不連私人資料庫。
 - Password、API key、token、cookie、private key 與原始公司機密不得寫入 Memory Core。
 
-詳細施工範圍與決策在 [`docs/agent-runs/memory-core-v1/`](docs/agent-runs/memory-core-v1/)、[`docs/agent-runs/memory-core-mcp/`](docs/agent-runs/memory-core-mcp/)、[`docs/agent-runs/memory-core-tunnel/`](docs/agent-runs/memory-core-tunnel/)、[`docs/agent-runs/memory-core-tray/`](docs/agent-runs/memory-core-tray/)、[`docs/agent-runs/memory-core-external-contract-v2/`](docs/agent-runs/memory-core-external-contract-v2/) 與 [`docs/agent-runs/memory-core-production-hardening-v1/`](docs/agent-runs/memory-core-production-hardening-v1/)；Record／Entity 與資料治理 contract 在 [`docs/design/memory-model-v1.md`](docs/design/memory-model-v1.md)。
+詳細施工範圍與決策另見 [`docs/agent-runs/memory-core-batch-v2/`](docs/agent-runs/memory-core-batch-v2/)；既有 Record／Entity 與資料治理 contract 在 [`docs/design/memory-model-v1.md`](docs/design/memory-model-v1.md)，legacy ChangeSet 與 Record Link contract 在 [`docs/design/memory-model-v2.md`](docs/design/memory-model-v2.md)，Batch／Item／Collection 的 primary contract 在 [`docs/design/memory-model-v3.md`](docs/design/memory-model-v3.md)。
 
 ## 安裝
 
@@ -108,14 +127,20 @@ Reviewer token 只授權 candidate 審核入口，不授權直接 records/entiti
 ## 啟動
 
 ```powershell
-uv run uvicorn memory_core.main:app --host 127.0.0.1 --port 8765
+uv run uvicorn memory_core.main:app --host 127.0.0.1 --port 18765
 ```
 
-- OpenAPI：`http://127.0.0.1:8765/docs`
-- Health：`http://127.0.0.1:8765/health`
-- API：`http://127.0.0.1:8765/api/v1`
+- OpenAPI：`http://127.0.0.1:18765/docs`
+- Health：`http://127.0.0.1:18765/health`
+- API：`http://127.0.0.1:18765/api/v1`
 
 除非已建立完整反向代理、TLS 與獨立驗證，請勿改成 `0.0.0.0` 或直接暴露至網際網路。
+
+2026-08-09 起，Windows lifecycle 的 internal backend 預設由舊 `8765` 移到 `18765`，
+避免 Windows／Hyper-V／Docker 動態 excluded range 擋住 bind。Stack 會以同一個
+`BackendPort` 產生 uvicorn argument、`MEMORY_CORE_PORT` 與 MCP API URL；不會讀取或
+改寫私人 `.env`。若使用自訂手動 launcher，必須同步更新 backend、MCP 與 viewer URL。
+對外 MCP `8818` 與 tunnel admin `8800` 沒有變更。
 
 ## 啟動 MCP adapter
 
@@ -140,28 +165,73 @@ MCP tools：
 
 - `search(query, limit=20, ...)`：搜尋可見的 records/entities；自然語句會先做
   Unicode／標點／常見意圖詞正規化，多詞查詢先要求至少 60% token coverage（且至少
-  兩詞），查無結果才做 bounded fallback。可選擇 result type、domain、kind、
-  sensitivity 與 updated-at filters；結果包含可交給 `fetch` 的 stable id 與 bounded
-  diagnostics。
+  兩詞），查無結果才做 bounded fallback。可選擇 result type、domain、
+  `schema_name`、kind、sensitivity 與 updated-at filters；結果包含可交給 `fetch` 的
+  stable id 與 bounded diagnostics。
 - `fetch(id)`：以 `record:<id>` 或 `entity:<id>` 讀取單一項目，預設最多 30,000
   字元並明確標註是否截斷；輸出 projection 會遮蔽 machine-local path，且不改寫 DB。
   已封存項目的既有 stable ref 仍可讀回，metadata 會明確標示 `state=archived`。
+  Record 同時具有 UTC occurrence 與有效 `timezone_name` 時，metadata 會動態加入
+  `occurred_start_local`／`occurred_end_local`，資料庫仍只保存 UTC。
+- `fetch` 讀取 `cocktail_tasting@1` 時會以 `recipe_ref + recipe_version` 查詢不可變
+  revision snapshot，並加入 `recipe_title`、`recipe_version_available` 與
+  `recipe_resolution_status`。Recipe 或 revision 缺失時只回報
+  `missing`／`version_missing`，不讓整筆 Tasting 讀取失敗。
+- `memory_fetch_record_revision(record_ref, revision_no)`：讀取指定的不可變 Record
+  snapshot，回傳 requested/current version 與 `is_current`。它沿用 `fetch` 的 bounded
+  external projection；current 或 historical snapshot 任一方為 restricted 時，都不會
+  對缺少 `restricted:read` 的 client 洩漏內容。
 - `memory_overview()`：回傳目前 credential scope 可見的 active/superseded/archived
   counts、domain/taxonomy、schema version、Record FTS parity；MCP 有 reviewer
   credential 時再合併 Candidate status counts。
 - `memory_detect_duplicates(limit=50)`：回傳 entity identity、record canonical ref、
   normalized title，或 Experience `work_title` 與 Catalog `categories` 項目的重疊
   finding；只提供 refs 與診斷，不讀出內容、不自動修改。
-- 下列六個 proposal tools 都只建立 `pending` candidate，不會直接寫正式資料：
+- `memory_list_record_links(record_ref, direction="outbound", include_removed=false)`：
+  讀取 Record Link current projection，可選 outbound／inbound；revision pin 與已移除
+  狀態都會明確回傳。
+- `memory_propose_media_experience_batch(items, idempotency_key, ...)`：一次提出 1～50
+  筆 `galgame`／`anime`／`manga` experience。輸入 schema 直接顯示
+  `work_title`、`progress`、`rating`、`tags` 與明確 resolution 欄位；只建立 pending
+  Batch，不直接寫正式資料。identity 不唯一或同批重複時會標成 blocked，不自行猜測。
+- `memory_list_collections(domain?, limit=50)`：列出可見 Collection 與 member count。
+- `memory_get_collection(collection_key, limit=100)`：以 bounded summary 回傳整群
+  `record_ref`；完整內容仍使用 `fetch(record_ref)` 逐筆讀取。
+- `memory_propose_change_set(summary, operations, idempotency_key, ...)`：在一個 pending
+  Candidate 中提出多筆 `record_create`／`record_update`。只有 schema registry 註冊的
+  reference field 可使用 `op:<op_id>`；核准時全部成功或全部回滾，並回傳每筆
+  `results[]`。它不會從 tasting 或一般事實自動推論 preference。
+- `memory_propose_cocktail_change_set(summary, operations, idempotency_key, ...)`：使用
+  `recipe_payload`、`tasting_payload`、`preference_payload` 顯示完整 Cocktail v1
+  欄位，再轉換成相同的 generic ChangeSet executor。其 schema 不含 `oneOf` 或 unknown
+  `content`；Tasting 引用同組 Recipe 時可用 `op:<op_id>` 並省略 `recipe_version`，
+  backend 會固定實際 result version。
+- 下列六個通用 proposal tools 都只建立 `pending` candidate，不會直接寫正式資料：
   - `memory_propose_record_create(content, idempotency_key, ...)`
   - `memory_propose_record_update(target_ref, base_version, content, idempotency_key, ...)`
   - `memory_propose_record_archive(target_ref, base_version, idempotency_key, ...)`
   - `memory_propose_entity_create(content, idempotency_key, ...)`
   - `memory_propose_entity_update(target_ref, base_version, content, idempotency_key, ...)`
   - `memory_propose_entity_archive(target_ref, base_version, idempotency_key, ...)`
+- Cocktail v1 另提供六個固定 envelope、typed payload 的 proposal tools：
+  - `memory_propose_cocktail_recipe_create(payload, idempotency_key, ...)`
+  - `memory_propose_cocktail_recipe_update(target_ref, base_version, payload, idempotency_key, ...)`
+  - `memory_propose_cocktail_tasting_create(payload, occurred_start, timezone_name, idempotency_key, ...)`
+  - `memory_propose_cocktail_tasting_update(target_ref, base_version, payload, idempotency_key, ...)`
+  - `memory_propose_cocktail_preference_create(payload, idempotency_key, ...)`
+  - `memory_propose_cocktail_preference_update(target_ref, base_version, payload, idempotency_key, ...)`
+- Cocktail tools 與通用工具共用 backend validator；錯誤會在 propose 階段拒絕，不建立
+  Candidate。Recipe 使用 `fact`、Tasting 使用 `event`、Preference 使用 `state`，三者
+  固定為 `domain=lifestyle.cocktail` 與 schema version 1。
 - Update/archive 的 `target_ref` 必須使用 `record:<id>` 或 `entity:<id>`，並搭配
   `fetch` 回傳的 exact `version`。每個工具各有 operation-specific schema，不使用
   ChatGPT 容易展開成 `any` 的六合一 outward union。
+- Record proposal 的 raw MCP schema 與 tool description 都明示 datetime 規則。
+  可預期的 temporal input error 會回傳欄位化 `code`、`field`、`message`，並在安全時
+  附上 `received_value`／`example`；不會用 HTTP 500 表示使用者輸入錯誤。
+- Record update proposal 會先讀取 exact target/version，將 patch 與目前 occurrence
+  狀態合併驗證，再建立 pending Candidate；無效 range 或 precision 不會留下一筆
+  無法套用的 Candidate。
 - Record create/update 可在 `content.entity_links` 受審地建立 Entity links；Entity
   create/update 可在 `content.relations` 建立 edition 等關係。Archive 可選填同類型
   `merged_into_ref`，核准後會在單一 transaction 建立 `merged_into` 關係並封存來源。
@@ -178,11 +248,17 @@ MCP tools：
   - `memory_get_candidate(candidate_id)`：讀取單筆不可變內容的安全投影與 review
     digest；必須檢查 `display_mode`、`redacted_fields` 與
     `remote_approval_allowed`。
+  - `memory_get_batch_candidate(candidate_id)`：讀取目前 Batch revision 的逐筆
+    normalized input、decision、operation plan、execution 與 verify 狀態；支援
+    `limit/offset`，partial page 會禁止遠端核准。
   - `memory_prepare_candidate_review(candidate_id, expected_review_digest)`：產生 10 分鐘
     短效、綁定 reviewer 的 challenge；這一步不是核准。
   - `memory_approve_candidate(...)`：只套用已顯示且 digest 相符的原 candidate，不接受
     replacement content；成功時回傳可直接交給 `fetch` 的 `result_ref`，同時保留
-    `result_id`、`result_type` 與 `result_version`。
+    `result_id`、`result_type` 與 `result_version`。ChangeSet 回傳完整 `results[]`；
+    Batch 則以每個 Item 的 `results[]` 與 `verified_at` 為準，並明確回傳
+    `batch_execution_state`、逐狀態計數、`any_item_committed` 與
+    `failed_items[].retry_policy`；部分失敗不會回滾其他已成功 Item。
   - `memory_reject_candidate(...)`：拒絕同一個已準備的 candidate，不寫正式資料。
 
 若 Candidate detail 為 `display_mode=redacted`，顯示內容不是 digest 的 exact input，
@@ -199,8 +275,8 @@ explicit save request
   -> memory_prepare_candidate_review
   -> separate explicit approval of that exact candidate
   -> memory_approve_candidate
-  -> fetch(result_ref)
-  -> verify result_id + result_type + result_version
+  -> fetch each result_ref
+  -> verify every result_id + result_type + result_version
 ```
 
 建立、查看、摘要、編輯或 prepare candidate 都不是核准。若內容要改，必須建立新的
@@ -236,12 +312,15 @@ cd "C:\GPT_MCPtool\Memory Core"
 
 本專案刻意使用 tunnel-client 的 `sample_mcp_remote_no_auth` profile：MCP authentication 由本機低權限 Memory Core client token 負責，外部連線由 tunnel control plane 驗證。此模式下 OAuth protected-resource metadata 回傳 `404` 是預期行為；lifecycle script 只在它是 doctor 唯一失敗項時降級為 warning，其他失敗仍會中止啟動。
 
-`Setup` 會建立兩個彼此獨立的 client：
+`Setup` 會建立四個彼此獨立的 client：
 
 - `memory-mcp-tunnel`：`records:read`、`entities:read`、`candidates:create`。
 - `memory-mcp-review`：只有 `candidates:review`。
+- `memory-core-viewer`：只有 `records:read`、`entities:read`。
+- `memory-core-control-center`：目前完整且明確列出的 read/write/review/admin scopes，
+  只供本機 Tkinter 控制中心使用。
 
-兩把一次性 token 與 tunnel runtime key 都以 Windows DPAPI current-user encryption
+四把一次性 token 與 tunnel runtime key 都以 Windows DPAPI current-user encryption
 保存在 ignored `data/secrets/`，不寫入 `.env`、YAML 或 git。已完成舊版 Setup 的機器
 可在 migration 後執行下列命令只補 reviewer credential，再用 `Restart` 讓 MCP 載入：
 
@@ -262,13 +341,106 @@ cd "C:\GPT_MCPtool\Memory Core"
 
 設定完成後，建議雙擊 `scripts\start-memory-core-tray.vbs`。它會在 Windows 系統托盤常駐，並在需要時隱藏啟動整組服務；若只需要無托盤的背景啟動，仍可使用 `scripts\start-memory-core-stack.vbs`。兩個 script 本身都不會建立 Windows login 自動啟動或排程；目前這台機器另在使用者 Startup 資料夾設定了 `Memory Core MCP.lnk`，由正式根目錄自動啟動 tray。
 
+一般啟動不會取代已存在的 tray；更新托盤程式後使用 `scripts\Restart-Tray.cmd`。
+這個 replacement 只換 tray，本身不重啟健康中的 backend／MCP／tunnel。
+
+`Start`／`Restart` 會要求 backend、MCP 與 tunnel 各自連續通過三次 readiness probe，
+避免把冷開機時短暫可連線的程序誤判為穩定。啟動失敗時只會清理通過 ownership check
+的 managed process tree，並依 5／15／30 秒間隔做三次 bounded retry；四次仍失敗就停止
+重試並保留明確錯誤，不會無限循環或廣泛終止同名程序。
+
+Backend 啟動前另會檢查 Windows IPv4 excluded TCP range、既有 loopback listener 與實際
+bind 能力。Excluded、foreign occupied 或無法 bind 屬 non-retryable configuration failure，
+會在第一次嘗試後安全停止，不浪費後續 retry；`SelfTest`／`Status` 只回傳 port 狀態與安全
+error code，不包含原始系統錯誤、secret 或資料內容。
+
 托盤圖示狀態：
 
 - 藍色資訊圖示：backend、MCP、tunnel 全部 ready。
 - 黃色警告圖示：正在執行啟停動作，或只有部分服務 ready。
 - 紅色錯誤圖示：整組服務已停止或無法連線。
 
-右鍵選單可啟動、停止、重新啟動整組服務，開啟 backend docs／tunnel UI、複製本機 MCP URL、查看 DPAPI key 狀態，或叫出遮罩輸入的 runtime key 更換視窗。`Exit tray (keep services running)` 只關閉圖示；只有 `Stop all and exit` 會一併停止服務。重開托盤只會取代舊圖示，不會重啟健康中的服務。
+右鍵選單使用 `unified-always-on-v2` 契約。正式啟動會一起準備 backend、MCP adapter
+與 Secure MCP Tunnel；選單不提供 Start／Stop 或 tunnel restart。`Restart MCP server`
+只管理 backend 與 MCP；control center、backend docs 與 tunnel key/status 位於 `Exit`
+上方的元件特有區。
+
+雙擊托盤會直接開啟 control center。`Exit` 是唯一完整關閉入口，會在確認後停止
+backend、MCP adapter、tunnel 與 tray，並驗證三個 runtime endpoint 都已停止。
+
+## Tkinter 本機控制中心
+
+Memory Core Control Center 是本機、單一使用者的最高權限管理介面。它仍只透過
+loopback FastAPI 操作資料，不會直接開啟 SQLite；所有新增、更新、封存、Candidate
+審核、export 與 backup 都會保留 backend validation、optimistic concurrency、Revision
+與 Audit。
+
+控制中心使用獨立的 `memory-core-control-center` credential，具備目前明確定義的完整
+管理 scopes：
+
+- `records:read`、`records:write`
+- `entities:read`、`entities:write`
+- `restricted:read`、`restricted:write`
+- `candidates:create`、`candidates:review`
+- `admin:export`、`admin:backup`
+
+它不使用 wildcard `*`，避免未來新增 purge 或其他高風險能力時自動擴權。這把 token
+只以 Windows DPAPI current-user encryption 保存在 ignored `data/secrets/`，不與
+MCP、tunnel 或舊版 read-only viewer credential 共用。
+
+日常使用可雙擊托盤圖示，或選擇 `Open control center`。也可直接雙擊：
+
+```text
+scripts\start-memory-core-viewer.vbs
+```
+
+控制中心預設使用內容優先的 v2 介面：左側整合「記憶庫／實體／待審核／系統資訊」
+與分類，中間顯示標題、摘要及日期，右側先顯示摘要與正文。Record ID、Schema、
+結構化資料與原始 JSON 收在「技術資訊」；JSON 匯出與 SQLite 備份收在「系統資訊」；
+「刪除（移至封存）」則位於已選取資料的「更多」選單。刪除採 soft archive：一般
+清單不再顯示該資料，但 Revision 與 Audit 會保留，不會執行永久 purge。
+
+若新版介面在特定 Windows／Tk 環境無法正常啟動，可在啟動前設定下列 process
+environment variable，暫時回到既有版面；這只切換 UI，不會修改 API 或資料：
+
+```powershell
+$env:MEMORY_CORE_VIEWER_LAYOUT = "legacy"
+.\scripts\start_memory_core_viewer.ps1
+```
+
+第一次開啟時，launcher 會建立 control-center credential 並以 Windows DPAPI current-user
+encryption 保存於 ignored `data/secrets/`。若要預先建立，可執行：
+
+```powershell
+.\scripts\memory_core_stack.ps1 -Action SetupControlCenterCredential
+```
+
+控制中心可查看 Overview、Records、Collection 清單、Entities、Candidates、全文搜尋、
+Record 的 inbound/outbound Links 與指定歷史 Revision；也可執行：
+
+- 新增、編輯與 soft archive Record／Entity。
+- 新增 `media.experience.v1` Batch；可一次貼入 1～50 個 Item，先在待審核區逐筆查看
+  normalized input、decision、plan、execution error 與 retry policy，再
+  prepare／approve。主閱讀區只顯示批次摘要，完整 JSON 保留在技術資訊。
+- Collection 依 domain 分類顯示；清單成員維持一列一筆 Record，可雙擊或按 Enter
+  開啟正式記憶，不把 Collection 變成第二份內容來源。
+- 未 prepare 的 Batch 可修訂成新 immutable revision；blocked Item 可用明確 target、
+  `force_create` 或 `exclude` resolution 處理。prepare 後內容封存，若正式資料在核准前
+  發生 version race，該 Item 會獨立失敗，其他 Item 照常提交並讀回驗證。
+- 以完整 JSON 文件編輯 backend 允許變更的欄位與 schema-specific payload。
+- Candidate detail 檢查、prepare-review、核准寫入或拒絕；核准後逐筆讀回正式結果。
+- 明確確認後建立含 manifest/hash 的 JSON export 或 SQLite online backup。
+
+Record 的 `kind`、`domain`、`source_type` 與 Entity 的 `entity_type` 建立後維持身份
+穩定，不在 update 文件中開放；需要更換身份時，建立新資料並 soft archive 舊資料。
+永久 purge、restore、credential 管理與直接 SQLite 寫入仍不屬於控制中心能力。
+
+Records 左側分類導覽預設依 `domain` 分組，Entities 依
+`entity_type` 分組，搜尋結果則依 Record／Entity 類型分組；每種模式都固定保留
+「全部」並顯示各分類筆數。列表目前依 API contract 顯示單頁最多 100 筆；
+「包含已封存」只影響 Records／Entities 清單與詳細讀取，不改變搜尋結果。
+中間清單刻意只保留資料標題；Kind、Domain、Schema、版本、時間與來源等完整欄位統一
+在右側詳細內容呈現，避免重複資訊與水平捲動；選取中間項目即載入右側內容。
 
 - Tunnel local admin UI：`http://127.0.0.1:8800/ui`
 - Tunnel readiness：`http://127.0.0.1:8800/readyz`
@@ -292,7 +464,7 @@ $body = @{
 
 Invoke-RestMethod `
   -Method Post `
-  -Uri 'http://127.0.0.1:8765/api/v1/records' `
+  -Uri 'http://127.0.0.1:18765/api/v1/records' `
   -Headers $headers `
   -ContentType 'application/json; charset=utf-8' `
   -Body $body
@@ -341,7 +513,9 @@ Migration round-trip 與 FTS5 由 `tests/test_migrations.py` 驗證；API、scop
 
 - Kuro adapter。
 - Candidate review 管理 UI。
-- Media、tasting、project、career domain schemas。
+- Media、project、career domain schemas。
+- Cocktail bar inventory、由多次 tasting 自動建議 preference，以及 generic Cocktail
+  Record 的人工 migration workflow。
 - Public snapshot 與 publication preview。
 - 附件 upload/download API 與附件備份一致性。
 - 永久 purge workflow。

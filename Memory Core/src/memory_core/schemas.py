@@ -1,32 +1,26 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
-from pydantic import (
-    AfterValidator,
-    AwareDatetime,
-    BaseModel,
-    ConfigDict,
-    Field,
-    model_validator,
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic_core import PydanticCustomError
+
+from memory_core.normalization.models import MediaExperienceBatchProposal
+from memory_core.temporal import (
+    IanaTimezoneName,
+    TemporalValidationIssue,
+    TimezoneAwareDatetime,
+    validate_record_temporal_state,
 )
 
-TIMEZONE_AWARE_DATETIME_DESCRIPTION = (
-    "Timezone-aware ISO 8601 datetime. Include Z or an explicit UTC offset."
-)
 
-
-def _normalize_datetime_to_utc(value: datetime) -> datetime:
-    return value.astimezone(UTC)
-
-
-TimezoneAwareDatetime = Annotated[
-    AwareDatetime,
-    AfterValidator(_normalize_datetime_to_utc),
-    Field(description=TIMEZONE_AWARE_DATETIME_DESCRIPTION),
-]
+def _raise_temporal_validation_error(issue: TemporalValidationIssue) -> None:
+    context: dict[str, object] = {"field": issue.field}
+    if issue.example is not None:
+        context["example"] = issue.example
+    raise PydanticCustomError(issue.code, issue.message, context)
 
 
 class ApiModel(BaseModel):
@@ -78,7 +72,7 @@ class RecordCreate(ApiModel):
     occurred_start: TimezoneAwareDatetime | None = None
     occurred_end: TimezoneAwareDatetime | None = None
     date_precision: DatePrecision = DatePrecision.UNKNOWN
-    timezone_name: str | None = Field(default=None, max_length=80)
+    timezone_name: IanaTimezoneName | None = None
     importance: int = Field(default=50, ge=0, le=100)
     verification_status: Literal["confirmed", "disputed"] = "confirmed"
     sensitivity: Sensitivity = Sensitivity.PERSONAL
@@ -92,9 +86,14 @@ class RecordCreate(ApiModel):
 
     @model_validator(mode="after")
     def validate_occurrence_range(self) -> RecordCreate:
-        if self.occurred_start and self.occurred_end:
-            if self.occurred_end < self.occurred_start:
-                raise ValueError("occurred_end must not be earlier than occurred_start")
+        try:
+            validate_record_temporal_state(
+                occurred_start=self.occurred_start,
+                occurred_end=self.occurred_end,
+                date_precision=self.date_precision.value,
+            )
+        except TemporalValidationIssue as issue:
+            _raise_temporal_validation_error(issue)
         if (
             self.handling_policy == HandlingPolicy.COMPANY_RESTRICTED
             and self.sensitivity != Sensitivity.RESTRICTED
@@ -109,8 +108,8 @@ class RecordUpdatePatch(ApiModel):
     body_markdown: str | None = None
     occurred_start: TimezoneAwareDatetime | None = None
     occurred_end: TimezoneAwareDatetime | None = None
-    date_precision: DatePrecision | None = None
-    timezone_name: str | None = Field(default=None, max_length=80)
+    date_precision: DatePrecision = DatePrecision.UNKNOWN
+    timezone_name: IanaTimezoneName | None = None
     importance: int | None = Field(default=None, ge=0, le=100)
     lifecycle_status: Literal["active", "superseded"] | None = None
     verification_status: Literal["confirmed", "disputed"] | None = None
@@ -223,6 +222,19 @@ class RecordEntityLinkCreate(ApiModel):
 
 class RecordTagLinkCreate(ApiModel):
     tag_id: str
+
+
+class RecordLinkRead(ApiModel):
+    id: str
+    link_ref: str
+    source_ref: str
+    role: str
+    target_ref: str
+    target_revision_no: int | None
+    status: Literal["active", "removed"]
+    created_at: datetime
+    updated_at: datetime
+    removed_at: datetime | None
 
 
 class EntityRelationCreate(ApiModel):
@@ -505,10 +517,67 @@ class CandidateProposal(StrictApiModel):
         )
 
 
+class ChangeSetRecordCreateChange(StrictApiModel):
+    change_type: Literal["record_create"]
+    content: dict[str, Any]
+
+
+class ChangeSetRecordUpdateChange(StrictApiModel):
+    change_type: Literal["record_update"]
+    target_id: str = Field(min_length=1, max_length=36)
+    base_version: int = Field(ge=1)
+    content: dict[str, Any]
+
+
+ChangeSetChange = Annotated[
+    ChangeSetRecordCreateChange | ChangeSetRecordUpdateChange,
+    Field(discriminator="change_type"),
+]
+
+
+class ChangeSetOperationProposal(StrictApiModel):
+    op_id: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-z][a-z0-9_-]{0,63}$",
+    )
+    change: ChangeSetChange
+
+
+class ChangeSetProposal(StrictApiModel):
+    summary: str = Field(min_length=1, max_length=500)
+    atomic: Literal[True] = True
+    operations: list[ChangeSetOperationProposal] = Field(min_length=1, max_length=20)
+    source_type: str = Field(min_length=1, max_length=40)
+    source_reference: str | None = Field(default=None, max_length=1000)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    risk_flags: list[str] = Field(default_factory=list, max_length=20)
+
+
+class CandidateOperationRead(ApiModel):
+    op_id: str
+    position: int
+    change_type: str
+    change_data: dict[str, Any]
+
+
+class CandidateResultRead(ApiModel):
+    op_id: str
+    position: int
+    change_type: str
+    result_type: Literal["record", "entity"]
+    result_id: str
+    result_ref: str
+    result_version: int
+
+
 class CandidateRead(ApiModel):
     id: str
-    operation: str
-    target_type: str
+    candidate_kind: Literal["single", "change_set", "batch"] = "single"
+    summary: str | None = None
+    operation: str | None
+    target_type: str | None
     target_id: str | None
     base_version: int | None
     proposed_content: dict[str, Any]
@@ -534,6 +603,119 @@ class CandidateRead(ApiModel):
     review_idempotency_key: str | None
     result_id: str | None
     result_version: int | None
+    operations: list[CandidateOperationRead] = Field(default_factory=list)
+    results: list[CandidateResultRead] = Field(default_factory=list)
+
+
+class MediaExperienceBatchCandidateProposal(MediaExperienceBatchProposal):
+    source_type: str = Field(min_length=1, max_length=40)
+    source_reference: str | None = Field(default=None, max_length=1000)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    risk_flags: list[str] = Field(default_factory=list, max_length=20)
+
+    def to_normalization_proposal(self) -> MediaExperienceBatchProposal:
+        return MediaExperienceBatchProposal.model_validate(
+            self.model_dump(
+                mode="python",
+                include={"profile_id", "profile_version", "summary", "items"},
+            )
+        )
+
+
+class MediaExperienceBatchRevisionProposal(MediaExperienceBatchProposal):
+    expected_revision_no: int = Field(ge=1)
+
+    def to_normalization_proposal(self) -> MediaExperienceBatchProposal:
+        return MediaExperienceBatchProposal(
+            profile_id=self.profile_id,
+            profile_version=self.profile_version,
+            summary=self.summary,
+            items=self.items,
+        )
+
+
+class BatchItemOperationRead(ApiModel):
+    op_id: str
+    position: int
+    change_type: str
+    change_data: dict[str, Any]
+
+
+class BatchItemResultRead(ApiModel):
+    op_id: str
+    position: int
+    operation_outcome: str
+    result_kind: str
+    result_ref: str | None
+    result_locator: dict[str, Any]
+    result_version: int | None
+    verify_status: str
+    verify_error_code: str | None
+    verified_at: datetime | None
+
+
+class CandidateItemRead(ApiModel):
+    id: str
+    unit_key: str
+    position: int
+    source_index: int
+    input_snapshot: dict[str, Any]
+    normalized_snapshot: dict[str, Any]
+    input_hash: str
+    plan_hash: str
+    decision: str
+    execution_state: str
+    warnings: list[dict[str, Any]]
+    error_code: str | None
+    error_message: str | None
+    execution_error_code: str | None
+    execution_error_message: str | None
+    retry_policy: str
+    attempt_count: int
+    applied_at: datetime | None
+    verified_at: datetime | None
+    operations: list[BatchItemOperationRead]
+    results: list[BatchItemResultRead]
+
+
+class BatchExecutionSummaryRead(ApiModel):
+    item_count: int = Field(ge=0)
+    applied: int = Field(ge=0)
+    skipped: int = Field(ge=0)
+    failed: int = Field(ge=0)
+    unverified: int = Field(ge=0)
+    pending: int = Field(ge=0)
+
+
+class CandidateItemPageRead(ApiModel):
+    candidate_id: str
+    batch_id: str
+    revision_no: int = Field(ge=1)
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+    truncated: bool
+    items: list[CandidateItemRead]
+
+
+class CandidateBatchRead(ApiModel):
+    candidate: CandidateRead
+    batch_id: str
+    profile_id: str
+    profile_version: int
+    profile_hash: str
+    normalizer_version: str
+    current_revision_no: int
+    plan_state: str
+    review_state: str
+    execution_state: str
+    item_count: int
+    input_hash: str
+    plan_hash: str
+    sealed_at: datetime | None
+    execution_summary: BatchExecutionSummaryRead
+    items: list[CandidateItemRead]
 
 
 class CandidatePrepareReview(StrictApiModel):
@@ -558,6 +740,30 @@ class CandidateReject(StrictApiModel):
     expected_review_digest: str = Field(min_length=1, max_length=100)
     approval_challenge: str = Field(min_length=32, max_length=200)
     idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class CollectionRead(ApiModel):
+    id: str
+    key: str
+    name: str
+    description: str | None
+    domain: str | None
+    lifecycle_status: str
+    version: int
+    member_count: int = Field(ge=0)
+    created_at: datetime
+    updated_at: datetime
+
+
+class CollectionMemberRead(ApiModel):
+    record: RecordRead
+    position: int | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CollectionDetailRead(CollectionRead):
+    members: list[CollectionMemberRead]
 
 
 class SearchResult(ApiModel):

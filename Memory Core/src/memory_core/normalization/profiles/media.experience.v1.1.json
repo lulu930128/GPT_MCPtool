@@ -1,0 +1,10 @@
+{
+  "profile_id": "media.experience.v1",
+  "profile_version": 1,
+  "handler": "media_experience_v1",
+  "normalizer_version": "1.0.0",
+  "min_items": 1,
+  "max_items": 50,
+  "identity_strategy": "media_type_and_normalized_title",
+  "profile_hash": "sha256:5825212422247b7decc4b972d3745c715b25e339935a1896f553797515379daf"
+}

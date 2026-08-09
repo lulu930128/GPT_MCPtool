@@ -14,17 +14,31 @@ from starlette.testclient import TestClient
 
 from memory_core.mcp.client import MemoryCoreApiClient, MemoryCoreApiError
 from memory_core.mcp.runtime import build_runtime, create_http_app
+from memory_core.mcp.schemas import CocktailChangeSetOperationToolInput
 from memory_core.mcp.settings import McpSettings
 
 TEST_MCP_TOKEN = "test-memory-core-mcp-token"
 TEST_MCP_REVIEW_TOKEN = "test-memory-core-mcp-review-token"
 PROPOSAL_TOOL_NAMES = {
+    "memory_propose_media_experience_batch",
+    "memory_propose_change_set",
+    "memory_propose_cocktail_change_set",
     "memory_propose_record_create",
     "memory_propose_record_update",
     "memory_propose_record_archive",
     "memory_propose_entity_create",
     "memory_propose_entity_update",
     "memory_propose_entity_archive",
+    "memory_propose_cocktail_recipe_create",
+    "memory_propose_cocktail_recipe_update",
+    "memory_propose_cocktail_tasting_create",
+    "memory_propose_cocktail_tasting_update",
+    "memory_propose_cocktail_preference_create",
+    "memory_propose_cocktail_preference_update",
+}
+COLLECTION_TOOL_NAMES = {
+    "memory_list_collections",
+    "memory_get_collection",
 }
 
 
@@ -105,6 +119,33 @@ def test_mcp_settings_reject_non_loopback_and_mask_token() -> None:
         mcp_settings(host="0.0.0.0")
     with pytest.raises(ValidationError, match="must not contain credentials"):
         mcp_settings(api_base_url="http://user:password@127.0.0.1:8765")
+
+
+def test_typed_cocktail_change_set_operation_requires_matching_shape() -> None:
+    with pytest.raises(ValidationError, match="recipe_payload"):
+        CocktailChangeSetOperationToolInput.model_validate(
+            {
+                "op_id": "recipe",
+                "action": "recipe_create",
+                "tasting_payload": {"cocktail_name": "Wrong payload"},
+            }
+        )
+    with pytest.raises(ValidationError, match="target_ref and base_version"):
+        CocktailChangeSetOperationToolInput.model_validate(
+            {
+                "op_id": "recipe",
+                "action": "recipe_update",
+                "recipe_payload": {"recipe_name": "Missing target"},
+            }
+        )
+    with pytest.raises(ValidationError, match="occurred_start and timezone_name"):
+        CocktailChangeSetOperationToolInput.model_validate(
+            {
+                "op_id": "tasting",
+                "action": "tasting_create",
+                "tasting_payload": {"cocktail_name": "Missing occurrence"},
+            }
+        )
 
 
 def test_api_error_does_not_expose_token() -> None:
@@ -203,8 +244,11 @@ def test_tools_are_scoped_and_use_backend_http_only() -> None:
     assert set(tools) == {
         "search",
         "fetch",
+        "memory_fetch_record_revision",
+        "memory_list_record_links",
         "memory_overview",
         "memory_detect_duplicates",
+        *COLLECTION_TOOL_NAMES,
         *PROPOSAL_TOOL_NAMES,
     }
     assert tools["search"].annotations is not None
@@ -240,12 +284,28 @@ def test_tools_are_scoped_and_use_backend_http_only() -> None:
         tools["memory_propose_record_create"].inputSchema,
         ensure_ascii=False,
     )
+    record_update_schema = json.dumps(
+        tools["memory_propose_record_update"].inputSchema,
+        ensure_ascii=False,
+    )
     entity_create_schema = json.dumps(
         tools["memory_propose_entity_create"].inputSchema,
         ensure_ascii=False,
     )
     assert "entity_links" in record_create_schema
     assert "entity_ref" in record_create_schema
+    for record_schema in (record_create_schema, record_update_schema):
+        assert '"format": "date-time"' in record_schema
+        assert "Naive timestamps are invalid" in record_schema
+        assert "IANA timezone" in record_schema
+    for tool_name in ("memory_propose_record_create", "memory_propose_record_update"):
+        assert tools[tool_name].description is not None
+        assert "Naive timestamps are invalid" in tools[tool_name].description
+        assert "IANA timezone" in tools[tool_name].description
+    update_precision_schema = tools["memory_propose_record_update"].inputSchema["properties"][
+        "content"
+    ]["properties"]["date_precision"]
+    assert '"type": "null"' not in json.dumps(update_precision_schema)
     assert "relations" in entity_create_schema
     assert "object_entity_ref" in entity_create_schema
     assert "merged_into_ref" in tools["memory_propose_record_archive"].inputSchema["properties"]
@@ -448,6 +508,82 @@ def test_all_proposal_tools_map_to_strict_backend_changes() -> None:
     asyncio.run(runtime.api_client.close())
 
 
+def test_candidate_backend_validation_error_preserves_field_details() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/candidates"
+        return httpx.Response(
+            422,
+            headers={"X-Request-ID": "temporal-request"},
+            json={
+                "ok": False,
+                "error": {
+                    "code": "invalid_time_range",
+                    "field": "occurred_end",
+                    "message": "occurred_end must not be earlier than occurred_start.",
+                    "received_value": "2025-07-16T01:00:00Z",
+                    "example": "Use an end timestamp at or after occurred_start.",
+                },
+                "request_id": "temporal-request",
+            },
+        )
+
+    runtime = build_runtime(mcp_settings(), transport=httpx.MockTransport(handler))
+    result = call_tool(
+        runtime,
+        "memory_propose_record_update",
+        {
+            "target_ref": "record:record-1",
+            "base_version": 1,
+            "content": {"occurred_end": "2025-07-16T09:00:00+08:00"},
+            "idempotency_key": "invalid-range",
+        },
+    )
+    assert result.isError is True
+    assert parse_result(result)["error"] == {
+        "code": "invalid_time_range",
+        "message": (
+            "Memory Core request failed (invalid_time_range, HTTP 422, request "
+            "temporal-request): occurred_end must not be earlier than occurred_start. "
+            "[field: occurred_end]"
+        ),
+        "field": "occurred_end",
+        "received_value": "2025-07-16T01:00:00Z",
+        "example": "Use an end timestamp at or after occurred_start.",
+    }
+    asyncio.run(runtime.api_client.close())
+
+
+def test_record_proposal_input_validation_returns_structured_temporal_error() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("Invalid candidate content must not reach the backend")
+
+    runtime = build_runtime(mcp_settings(), transport=httpx.MockTransport(handler))
+    result = call_tool(
+        runtime,
+        "memory_propose_record_create",
+        {
+            "content": {
+                "kind": "fact",
+                "title": "Invalid naive timestamp",
+                "occurred_start": "2025-07-16T00:00:00",
+                "date_precision": "day",
+                "timezone_name": "Asia/Taipei",
+            },
+            "idempotency_key": "invalid-naive-timestamp",
+        },
+    )
+
+    assert result.isError is True
+    assert parse_result(result)["error"] == {
+        "code": "timezone_offset_required",
+        "message": ("Timestamp must include Z or an explicit numeric UTC offset such as +08:00."),
+        "field": "occurred_start",
+        "received_value": "2025-07-16T00:00:00",
+        "example": "2025-07-16T00:00:00+08:00",
+    }
+    asyncio.run(runtime.api_client.close())
+
+
 def test_legacy_candidate_tool_requires_explicit_compatibility_switch() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         raise AssertionError("No backend call expected")
@@ -498,6 +634,9 @@ def test_fetch_redacts_machine_local_paths_from_record_projection() -> None:
                 },
                 "kind": "state",
                 "domain": "media",
+                "occurred_start": "2025-07-15T16:00:00Z",
+                "date_precision": "day",
+                "timezone_name": "Asia/Taipei",
                 "source_type": "local_scan",
                 "source_reference": local_path,
                 "sensitivity": "personal",
@@ -515,6 +654,8 @@ def test_fetch_redacts_machine_local_paths_from_record_projection() -> None:
     assert "thoma" not in serialized
     assert "[local path hidden]" in serialized
     assert fetched["metadata"]["source_reference"] == "local source (path hidden)"
+    assert fetched["metadata"]["occurred_start"] == "2025-07-15T16:00:00Z"
+    assert fetched["metadata"]["occurred_start_local"] == "2025-07-16T00:00:00+08:00"
     asyncio.run(runtime.api_client.close())
 
 
@@ -530,7 +671,7 @@ def test_fetch_redacts_machine_local_paths_from_entity_projection() -> None:
                 "description": r"工作目錄位於 C:\GPT_MCPtool\Memory Core",
                 "payload": {
                     "root_path": r"C:\GPT_MCPtool\Memory Core",
-                    "documentation": r"請查看 C:/Users/thoma/Documents/notes.md",
+                    "documentation": r"請查看 C:/Users/ExampleUser/Documents/notes.md",
                 },
                 "sensitivity": "personal",
                 "handling_policy": "normal",
@@ -839,6 +980,167 @@ def test_approve_exposes_entity_result_reference() -> None:
     asyncio.run(runtime.review_api_client.close())
 
 
+def test_get_batch_candidate_pages_items_and_blocks_approval_for_partial_page() -> None:
+    batch_candidate = {
+        **candidate_response(candidate_id="batch-1", target_type="record"),
+        "candidate_kind": "batch",
+        "operation": None,
+        "target_type": None,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["X-Memory-Core-Token"] == TEST_MCP_REVIEW_TOKEN
+        if request.url.path == "/api/v1/candidates/batch-1/batch":
+            return httpx.Response(
+                200,
+                json={
+                    "candidate": batch_candidate,
+                    "batch_id": "sealed-batch-1",
+                    "execution_state": "not_started",
+                    "execution_summary": {
+                        "item_count": 2,
+                        "applied": 0,
+                        "failed": 0,
+                        "unverified": 0,
+                        "skipped": 0,
+                        "pending": 2,
+                    },
+                    "items": [],
+                },
+            )
+        if request.url.path == "/api/v1/candidates/batch-1/items":
+            assert request.url.params["limit"] == "1"
+            return httpx.Response(
+                200,
+                json={
+                    "candidate_id": "batch-1",
+                    "batch_id": "sealed-batch-1",
+                    "revision_no": 1,
+                    "total": 2,
+                    "limit": 1,
+                    "offset": 0,
+                    "truncated": True,
+                    "items": [
+                        {
+                            "id": "item-1",
+                            "unit_key": "media:galgame:summer-pockets",
+                            "decision": "create",
+                            "execution_state": "not_started",
+                        }
+                    ],
+                },
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    runtime = build_runtime(
+        mcp_settings(review_client_token=SecretStr(TEST_MCP_REVIEW_TOKEN)),
+        transport=httpx.MockTransport(handler),
+    )
+    result = parse_result(
+        call_tool(
+            runtime,
+            "memory_get_batch_candidate",
+            {"candidate_id": "batch-1", "limit": 1},
+        )
+    )
+
+    assert result["batch"]["items_page"]["truncated"] is True
+    assert len(result["batch"]["items"]) == 1
+    assert result["candidate"]["remote_approval_allowed"] is False
+    assert "partial Batch page" in result["candidate"]["remote_approval_block_reason"]
+    asyncio.run(runtime.api_client.close())
+    assert runtime.review_api_client is not None
+    asyncio.run(runtime.review_api_client.close())
+
+
+def test_approve_batch_reports_partial_commit_and_failed_item_policy() -> None:
+    batch_candidate = {
+        **candidate_response(candidate_id="batch-1", target_type="record"),
+        "candidate_kind": "batch",
+        "operation": None,
+        "target_type": None,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["X-Memory-Core-Token"] == TEST_MCP_REVIEW_TOKEN
+        if request.method == "GET" and request.url.path == "/api/v1/candidates/batch-1":
+            return httpx.Response(200, json=batch_candidate)
+        if request.method == "POST" and request.url.path.endswith("/apply"):
+            return httpx.Response(200, json={**batch_candidate, "status": "pending"})
+        if request.method == "GET" and request.url.path.endswith("/batch"):
+            return httpx.Response(
+                200,
+                json={
+                    "candidate": {**batch_candidate, "status": "pending"},
+                    "execution_state": "partially_applied",
+                    "execution_summary": {
+                        "item_count": 2,
+                        "applied": 1,
+                        "failed": 1,
+                        "unverified": 0,
+                        "skipped": 0,
+                        "pending": 0,
+                    },
+                    "items": [
+                        {
+                            "id": "item-applied",
+                            "unit_key": "media:anime:frieren",
+                            "execution_state": "applied",
+                            "results": [
+                                {
+                                    "result_kind": "record",
+                                    "result_ref": "record:record-1",
+                                    "result_version": 1,
+                                    "verify_status": "verified",
+                                }
+                            ],
+                        },
+                        {
+                            "id": "item-failed",
+                            "unit_key": "media:galgame:summer-pockets",
+                            "execution_state": "failed",
+                            "execution_error_code": "version_conflict",
+                            "execution_error_message": "Expected version 1, current version is 2",
+                            "retry_policy": "new_batch_required",
+                            "results": [],
+                        },
+                    ],
+                },
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    runtime = build_runtime(
+        mcp_settings(review_client_token=SecretStr(TEST_MCP_REVIEW_TOKEN)),
+        transport=httpx.MockTransport(handler),
+    )
+    approved = parse_result(
+        call_tool(
+            runtime,
+            "memory_approve_candidate",
+            {
+                "candidate_id": "batch-1",
+                "expected_review_digest": "sha256:v1:" + ("a" * 64),
+                "approval_challenge": "challenge-" + ("a" * 32),
+                "idempotency_key": "approve-partial-batch-1",
+            },
+        )
+    )
+
+    assert approved["batch_execution_state"] == "partially_applied"
+    assert approved["transaction_committed"] is True
+    assert approved["any_item_committed"] is True
+    assert approved["all_items_completed"] is False
+    assert approved["applied_count"] == 1
+    assert approved["failed_count"] == 1
+    assert approved["results"][0]["result_ref"] == "record:record-1"
+    assert approved["failed_items"][0]["error_code"] == "version_conflict"
+    assert approved["failed_items"][0]["retry_policy"] == "new_batch_required"
+    assert "not rolled back" in approved["message"]
+    asyncio.run(runtime.api_client.close())
+    assert runtime.review_api_client is not None
+    asyncio.run(runtime.review_api_client.close())
+
+
 def test_candidate_validation_fails_before_backend_call() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         raise AssertionError("Backend must not be called for an invalid candidate")
@@ -852,20 +1154,6 @@ def test_candidate_validation_fails_before_backend_call() -> None:
                 "base_version": 1,
                 "content": {"title": "missing target"},
                 "idempotency_key": "invalid-proposal",
-            },
-        )
-    with pytest.raises(ToolError, match="timezone"):
-        call_tool(
-            runtime,
-            "memory_propose_record_create",
-            {
-                "content": {
-                    "kind": "fact",
-                    "title": "缺少時區的候選",
-                    "occurred_start": "2025-07-16T00:00:00",
-                    "timezone_name": "Asia/Taipei",
-                },
-                "idempotency_key": "naive-datetime-proposal",
             },
         )
     asyncio.run(runtime.api_client.close())
@@ -916,8 +1204,11 @@ def test_http_transport_initializes_lists_and_calls_tools() -> None:
         assert {tool["name"] for tool in listed.json()["result"]["tools"]} == {
             "search",
             "fetch",
+            "memory_fetch_record_revision",
+            "memory_list_record_links",
             "memory_overview",
             "memory_detect_duplicates",
+            *COLLECTION_TOOL_NAMES,
             *PROPOSAL_TOOL_NAMES,
         }
 
@@ -970,11 +1261,15 @@ def test_mcp_tools_integrate_with_memory_core_api(
     assert set(tools) == {
         "search",
         "fetch",
+        "memory_fetch_record_revision",
+        "memory_list_record_links",
         "memory_overview",
         "memory_detect_duplicates",
+        *COLLECTION_TOOL_NAMES,
         *PROPOSAL_TOOL_NAMES,
         "memory_list_candidates",
         "memory_get_candidate",
+        "memory_get_batch_candidate",
         "memory_prepare_candidate_review",
         "memory_approve_candidate",
         "memory_reject_candidate",

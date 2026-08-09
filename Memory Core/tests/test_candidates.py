@@ -38,6 +38,7 @@ def test_candidate_rejects_naive_occurrence_before_creating_pending_row(
     content = change["content"]
     assert isinstance(content, dict)
     content["occurred_start"] = "2025-07-16T00:00:00"
+    content["date_precision"] = "day"
     content["timezone_name"] = "Asia/Taipei"
 
     response = client.post(
@@ -46,7 +47,8 @@ def test_candidate_rejects_naive_occurrence_before_creating_pending_row(
         json=payload,
     )
     assert response.status_code == 422
-    assert "timezone" in response.text.lower()
+    assert response.json()["error"]["code"] == "timezone_offset_required"
+    assert response.json()["error"]["field"] == "occurred_start"
 
     with database.session_factory() as session:
         candidate_count = session.scalar(select(func.count()).select_from(MemoryCandidate))
@@ -66,6 +68,7 @@ def test_legacy_candidate_with_naive_occurrence_returns_422_on_apply(
     content = change["content"]
     assert isinstance(content, dict)
     content["occurred_start"] = "2025-07-16T00:00:00+08:00"
+    content["date_precision"] = "day"
 
     created = client.post(
         "/api/v1/candidates",
@@ -103,8 +106,8 @@ def test_legacy_candidate_with_naive_occurrence_returns_422_on_apply(
         },
     )
     assert applied.status_code == 422
-    assert applied.json()["error"]["code"] == "invalid_operation"
-    assert "timezone" in applied.json()["error"]["message"].lower()
+    assert applied.json()["error"]["code"] == "timezone_offset_required"
+    assert applied.json()["error"]["field"] == "occurred_start"
 
     current = client.get(
         f"/api/v1/candidates/{candidate_id}",
@@ -158,6 +161,7 @@ def test_candidate_with_aware_occurrence_applies_and_reads_back_as_utc(
     content = change["content"]
     assert isinstance(content, dict)
     content["occurred_start"] = "2025-07-16T00:00:00+08:00"
+    content["date_precision"] = "day"
     content["timezone_name"] = "Asia/Taipei"
 
     proposed = client.post(
@@ -180,6 +184,90 @@ def test_candidate_with_aware_occurrence_applies_and_reads_back_as_utc(
     )
     assert record.status_code == 200
     assert record.json()["occurred_start"] == "2025-07-15T16:00:00Z"
+
+
+def test_candidate_rejects_invalid_timezone_and_resolved_update_range(
+    client: TestClient,
+    database: Database,
+    admin_headers: dict[str, str],
+    candidate_headers: dict[str, str],
+) -> None:
+    invalid_timezone = candidate_payload("invalid-timezone")
+    invalid_change = invalid_timezone["change"]
+    assert isinstance(invalid_change, dict)
+    invalid_content = invalid_change["content"]
+    assert isinstance(invalid_content, dict)
+    invalid_content["timezone_name"] = "Taipei"
+
+    timezone_response = client.post(
+        "/api/v1/candidates",
+        headers=candidate_headers,
+        json=invalid_timezone,
+    )
+    assert timezone_response.status_code == 422
+    assert timezone_response.json()["error"]["code"] == "invalid_timezone_name"
+    assert timezone_response.json()["error"]["field"] == "timezone_name"
+
+    record = client.post(
+        "/api/v1/records",
+        headers=admin_headers,
+        json={
+            "kind": "fact",
+            "title": "時間範圍基準",
+            "occurred_start": "2025-07-16T10:00:00+08:00",
+            "occurred_end": "2025-07-16T12:00:00+08:00",
+            "date_precision": "exact",
+            "timezone_name": "Asia/Taipei",
+        },
+    ).json()
+    invalid_update = client.post(
+        "/api/v1/candidates",
+        headers=candidate_headers,
+        json={
+            "change": {
+                "change_type": "record_update",
+                "target_id": record["id"],
+                "base_version": record["version"],
+                "content": {
+                    "occurred_end": "2025-07-16T09:00:00+08:00",
+                },
+            },
+            "source_type": "test",
+            "idempotency_key": "invalid-resolved-range",
+        },
+    )
+    assert invalid_update.status_code == 422
+    assert invalid_update.json()["error"]["code"] == "invalid_time_range"
+    assert invalid_update.json()["error"]["field"] == "occurred_end"
+
+    undated_record = client.post(
+        "/api/v1/records",
+        headers=admin_headers,
+        json={"kind": "fact", "title": "尚未設定發生時間"},
+    ).json()
+    missing_precision = client.post(
+        "/api/v1/candidates",
+        headers=candidate_headers,
+        json={
+            "change": {
+                "change_type": "record_update",
+                "target_id": undated_record["id"],
+                "base_version": undated_record["version"],
+                "content": {
+                    "occurred_start": "2025-07-16T10:00:00+08:00",
+                },
+            },
+            "source_type": "test",
+            "idempotency_key": "missing-resolved-precision",
+        },
+    )
+    assert missing_precision.status_code == 422
+    assert missing_precision.json()["error"]["code"] == "date_precision_required"
+    assert missing_precision.json()["error"]["field"] == "date_precision"
+
+    with database.session_factory() as session:
+        candidate_count = session.scalar(select(func.count()).select_from(MemoryCandidate))
+    assert candidate_count == 0
 
 
 def test_candidate_record_create_can_atomically_link_existing_entities(

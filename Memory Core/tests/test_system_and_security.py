@@ -9,7 +9,7 @@ def test_health_and_version_are_public(client: TestClient) -> None:
 
     version = client.get("/version")
     assert version.status_code == 200
-    assert version.json() == {"name": "Memory Core", "version": "0.1.0"}
+    assert version.json() == {"name": "Memory Core", "version": "0.2.0"}
 
 
 def test_private_api_requires_valid_token(client: TestClient) -> None:

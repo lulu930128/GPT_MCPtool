@@ -16,14 +16,27 @@ from memory_core.mcp.settings import McpSettings
 from memory_core.mcp.tools import register_tools
 
 SERVER_INSTRUCTIONS = (
-    "Use search before fetch when an item id is unknown. Read tools never change data. "
+    "Use search before fetch when an item id is unknown. Use "
+    "memory_fetch_record_revision when a Record Link pins target_revision_no or an exact "
+    "historical snapshot is required. Read tools never change data. "
     "Call the matching memory_propose_* tool only after the user explicitly asks to save, "
     "update, or archive something in Memory Core; proposal tools create pending candidates "
-    "and cannot approve them. Before approval, "
+    "and cannot approve them. New domain data should use its matching typed Batch tool, even "
+    "for one item; use memory_propose_media_experience_batch for one or more Galgame, Anime, "
+    "or Manga experiences. Batch Items commit independently, so a partially_applied Batch can "
+    "contain both verified formal writes and failed Items. Use memory_propose_change_set only "
+    "when the user explicitly needs all operations to commit or roll back as one transaction; "
+    "prefer memory_propose_cocktail_change_set for typed Cocktail Recipe, Tasting, and "
+    "user-confirmed Preference operations until a Cocktail Batch profile exists. Use only "
+    "registered op:<op_id> references and do not infer preference records from unrelated "
+    "facts. Before approval, "
     "show the exact candidate and review digest, prepare a short-lived review challenge, "
     "then call memory_approve_candidate only after a separate explicit user instruction "
     "to apply that exact candidate. Viewing, editing, summarizing, or creating a candidate "
-    "is not approval. Never place secrets in Memory Core."
+    "is not approval. After approval, inspect Batch execution counts and verify every returned "
+    "formal result_ref; partially_applied never means that successful Items were rolled back. "
+    "A permanent failed Item such as version_conflict requires a new Batch. "
+    "Never place secrets in Memory Core."
 )
 
 

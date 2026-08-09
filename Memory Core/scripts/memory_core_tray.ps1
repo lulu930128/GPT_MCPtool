@@ -1,7 +1,9 @@
 param(
     [switch]$NoAutoStart,
     [switch]$ReplaceExisting,
-    [switch]$SelfTest
+    [switch]$SelfTest,
+    [ValidateRange(1, 65535)]
+    [int]$BackendPort = 18765
 )
 
 Set-StrictMode -Version 3.0
@@ -10,19 +12,29 @@ $TrayDisplayName = "Memory Core MCP"
 
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $stackScript = Join-Path $PSScriptRoot "memory_core_stack.ps1"
+$viewerScript = Join-Path $PSScriptRoot "start_memory_core_viewer.ps1"
 $runtimeDir = Join-Path $projectRoot "data\runtime"
 $trayPidPath = Join-Path $runtimeDir "memory-core-tray.pid"
 $trayLogPath = Join-Path $runtimeDir "memory-core-tray.log"
 $actionStdoutPath = Join-Path $runtimeDir "memory-core-tray-action.stdout.log"
 $actionStderrPath = Join-Path $runtimeDir "memory-core-tray-action.stderr.log"
 $powershellPath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
-$backendHealthUrl = "http://127.0.0.1:8765/health"
-$backendDocsUrl = "http://127.0.0.1:8765/docs"
+$backendBaseUrl = "http://127.0.0.1:$BackendPort"
+$backendHealthUrl = "$backendBaseUrl/health"
+$backendDocsUrl = "$backendBaseUrl/docs"
 $mcpHealthUrl = "http://127.0.0.1:8818/health"
 $mcpUrl = "http://127.0.0.1:8818/mcp"
 $tunnelAdminUrl = "http://127.0.0.1:8800"
 $tunnelReadyUrl = "$tunnelAdminUrl/readyz"
 $tunnelUiUrl = "$tunnelAdminUrl/ui"
+$tunnelProfilePath = Join-Path $projectRoot "data\tunnel-client\memory-core.yaml"
+$tunnelId = ""
+if (Test-Path -LiteralPath $tunnelProfilePath) {
+    $tunnelIdMatch = Select-String -LiteralPath $tunnelProfilePath -Pattern 'tunnel_[A-Za-z0-9]+' | Select-Object -First 1
+    if ($null -ne $tunnelIdMatch) {
+        $tunnelId = $tunnelIdMatch.Matches[0].Value
+    }
+}
 
 [IO.Directory]::CreateDirectory($runtimeDir) | Out-Null
 
@@ -71,15 +83,23 @@ if ($SelfTest) {
         projectRoot = $projectRoot
         stackScript = $stackScript
         stackScriptExists = Test-Path -LiteralPath $stackScript
+        viewerScript = $viewerScript
+        viewerScriptExists = Test-Path -LiteralPath $viewerScript
         powershellPath = $powershellPath
         powershellExists = Test-Path -LiteralPath $powershellPath
         trayPidPath = $trayPidPath
         trayPid = Read-PidFile $trayPidPath
         backendHealthy = Test-HttpEndpoint $backendHealthUrl
+        backendPort = $BackendPort
         mcpHealthy = Test-HttpEndpoint $mcpHealthUrl
         tunnelReady = Test-HttpEndpoint $tunnelReadyUrl
         mcpUrl = $mcpUrl
+        mcpHealthUrl = $mcpHealthUrl
+        tunnelIdConfigured = -not [string]::IsNullOrWhiteSpace($tunnelId)
         tunnelUiUrl = $tunnelUiUrl
+        trayMenuContract = "unified-always-on-v2"
+        autoStartServer = $true
+        autoStartTunnel = $true
     } | ConvertTo-Json -Depth 4
     exit 0
 }
@@ -177,7 +197,7 @@ function Test-ActionRunning {
     return $null -ne $script:ActionProcess -and -not $script:ActionProcess.HasExited
 }
 
-function Start-StackAction([ValidateSet("Start", "Stop", "Restart")][string]$Action) {
+function Start-StackAction([ValidateSet("Start", "Stop", "Restart", "StartCore", "StopCore", "RestartCore", "StartTunnel", "StopTunnel")][string]$Action) {
     if (Test-ActionRunning) {
         Show-Warning "Memory Core is already running the $($script:ActionName) action."
         return $false
@@ -185,7 +205,7 @@ function Start-StackAction([ValidateSet("Start", "Stop", "Restart")][string]$Act
 
     Remove-Item -LiteralPath $actionStdoutPath -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $actionStderrPath -ErrorAction SilentlyContinue
-    $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$stackScript`" -Action $Action"
+    $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$stackScript`" -Action $Action -BackendPort $BackendPort"
     try {
         $script:ActionProcess = Start-Process `
             -FilePath $powershellPath `
@@ -267,17 +287,37 @@ function Open-LocalUrl([string]$Url) {
     }
 }
 
+function Open-MemoryViewer {
+    try {
+        if (-not (Test-HttpEndpoint $backendHealthUrl)) {
+            Show-Warning "Memory Core backend is not ready. Start the stack first."
+            return
+        }
+        $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$viewerScript`" -BackendPort $BackendPort"
+        Start-Process `
+            -FilePath $powershellPath `
+            -ArgumentList $arguments `
+            -WorkingDirectory $projectRoot `
+            -WindowStyle Hidden | Out-Null
+    }
+    catch {
+        Show-Error "Could not open Memory Core Control Center.`n$($_.Exception.Message)"
+    }
+}
+
 function Show-KeyStatus {
     try {
-        $rawStatus = & $powershellPath -NoProfile -ExecutionPolicy Bypass -File $stackScript -Action KeyStatus 2>$null | Out-String
+        $rawStatus = & $powershellPath -NoProfile -ExecutionPolicy Bypass -File $stackScript -Action KeyStatus -BackendPort $BackendPort 2>$null | Out-String
         if ($LASTEXITCODE -ne 0) {
             throw "KeyStatus exited with code $LASTEXITCODE."
         }
         $status = $rawStatus | ConvertFrom-Json
         $mcpStatus = if ($status.mcpClientTokenConfigured) { "Configured" } else { "Missing" }
         $reviewStatus = if ($status.mcpReviewTokenConfigured) { "Configured" } else { "Missing" }
+        $viewerStatus = if ($status.viewerTokenConfigured) { "Configured" } else { "Missing" }
+        $controlCenterStatus = if ($status.controlCenterTokenConfigured) { "Configured" } else { "Missing" }
         $tunnelStatus = if ($status.tunnelRuntimeKeyConfigured) { "Configured" } else { "Missing" }
-        Show-Info "MCP client token: $mcpStatus`nMCP review token: $reviewStatus`nTunnel runtime key: $tunnelStatus`nStorage: $($status.storage)"
+        Show-Info "MCP client token: $mcpStatus`nMCP review token: $reviewStatus`nLegacy viewer token: $viewerStatus`nControl center token: $controlCenterStatus`nTunnel runtime key: $tunnelStatus`nStorage: $($status.storage)"
     }
     catch {
         Show-Error "Could not read key status.`n$($_.Exception.Message)"
@@ -290,7 +330,7 @@ function Open-RuntimeKeyPrompt {
         return
     }
     try {
-        $arguments = "-NoProfile -ExecutionPolicy Bypass -Sta -File `"$stackScript`" -Action SaveRuntimeKey"
+        $arguments = "-NoProfile -ExecutionPolicy Bypass -Sta -File `"$stackScript`" -Action SaveRuntimeKey -BackendPort $BackendPort"
         Start-Process `
             -FilePath $powershellPath `
             -ArgumentList $arguments `
@@ -313,13 +353,22 @@ function Update-TrayStatus {
     $backendStatus = if ($backendHealthy) { "Ready" } else { "Stopped" }
     $mcpStatus = if ($mcpHealthy) { "Ready" } else { "Stopped" }
     $tunnelStatus = if ($tunnelReady) { "Ready" } else { "Stopped" }
+    $serverStatus = if ($backendHealthy -and $mcpHealthy) {
+        "Running"
+    }
+    elseif ($backendHealthy -or $mcpHealthy) {
+        "Partial"
+    }
+    else {
+        "Stopped"
+    }
 
     if ($actionRunning) {
-        $statusItem.Text = "$TrayDisplayName | Action: $($script:ActionName) | API: $backendStatus | MCP: $mcpStatus | Tunnel: $tunnelStatus"
+        $statusItem.Text = "$TrayDisplayName | Server: Working ($($script:ActionName)) | Tunnel: $tunnelStatus"
         $notifyIcon.Icon = [System.Drawing.SystemIcons]::Warning
     }
     else {
-        $statusItem.Text = "$TrayDisplayName | API: $backendStatus | MCP: $mcpStatus | Tunnel: $tunnelStatus"
+        $statusItem.Text = "$TrayDisplayName | Server: $serverStatus | Tunnel: $tunnelStatus"
         if ($backendHealthy -and $mcpHealthy -and $tunnelReady) {
             $notifyIcon.Icon = [System.Drawing.SystemIcons]::Information
         }
@@ -331,77 +380,106 @@ function Update-TrayStatus {
         }
     }
 
-    $allReady = $backendHealthy -and $mcpHealthy -and $tunnelReady
-    $anyManaged = (Test-PidRunning (Join-Path $runtimeDir "backend.pid")) -or
-        (Test-PidRunning (Join-Path $runtimeDir "mcp.pid")) -or
-        (Test-PidRunning (Join-Path $runtimeDir "tunnel-client.pid"))
-    $startItem.Enabled = -not $actionRunning -and -not $allReady
-    $stopItem.Enabled = -not $actionRunning -and ($backendHealthy -or $mcpHealthy -or $tunnelReady -or $anyManaged)
     $restartItem.Enabled = -not $actionRunning
     $saveKeyItem.Enabled = -not $actionRunning
-    $stopAndExitItem.Enabled = -not $actionRunning
+    $exitItem.Enabled = -not $actionRunning
     $openBackendItem.Enabled = $backendHealthy
     $openTunnelUiItem.Enabled = $tunnelReady
 
-    Set-NotifyText "$TrayDisplayName | API:$backendStatus MCP:$mcpStatus Tunnel:$tunnelStatus"
+    Set-NotifyText "$TrayDisplayName | $serverStatus / $tunnelStatus"
 }
 
 function Exit-Tray([bool]$StopStack) {
     if ($script:Closing) {
         return
     }
-    $script:Closing = $true
     if ($StopStack) {
-        Start-StackAction "Stop" | Out-Null
+        $choice = [System.Windows.Forms.MessageBox]::Show(
+            "Exit will stop the MCP server, tunnel, and tray. Continue?",
+            $TrayDisplayName,
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        )
+        if ($choice -ne [System.Windows.Forms.DialogResult]::Yes) {
+            return
+        }
     }
+    $script:Closing = $true
     $timer.Stop()
+    if ($StopStack) {
+        if (-not (Start-StackAction "Stop")) {
+            $script:Closing = $false
+            $timer.Start()
+            return
+        }
+        while (Test-ActionRunning) {
+            Start-Sleep -Milliseconds 100
+            [System.Windows.Forms.Application]::DoEvents()
+        }
+        Complete-StackAction
+        if (
+            (Test-HttpEndpoint $backendHealthUrl) -or
+            (Test-HttpEndpoint $mcpHealthUrl) -or
+            (Test-HttpEndpoint $tunnelReadyUrl)
+        ) {
+            $script:Closing = $false
+            $timer.Start()
+            Show-Error "Exit could not verify that the full Memory Core runtime stopped. See runtime logs for details."
+            return
+        }
+    }
     $notifyIcon.Visible = $false
     [System.Windows.Forms.Application]::Exit()
 }
 
 $contextMenu = New-Object System.Windows.Forms.ContextMenu
-$statusItem = New-Object System.Windows.Forms.MenuItem "$TrayDisplayName | API: Checking | MCP: Checking | Tunnel: Checking"
+$statusItem = New-Object System.Windows.Forms.MenuItem "$TrayDisplayName | Server: Checking | Tunnel: Checking"
 $statusItem.Enabled = $false
-$startItem = New-Object System.Windows.Forms.MenuItem "Start all"
-$stopItem = New-Object System.Windows.Forms.MenuItem "Stop all"
-$restartItem = New-Object System.Windows.Forms.MenuItem "Restart all"
+$restartItem = New-Object System.Windows.Forms.MenuItem "Restart MCP server"
+$openViewerItem = New-Object System.Windows.Forms.MenuItem "Open control center"
 $openBackendItem = New-Object System.Windows.Forms.MenuItem "Open backend API docs"
 $openTunnelUiItem = New-Object System.Windows.Forms.MenuItem "Open tunnel UI"
-$copyMcpItem = New-Object System.Windows.Forms.MenuItem "Copy local MCP URL"
+$copyMcpItem = New-Object System.Windows.Forms.MenuItem "Copy MCP URL"
+$copyTunnelIdItem = New-Object System.Windows.Forms.MenuItem "Copy tunnel ID"
+$copyTunnelIdItem.Enabled = -not [string]::IsNullOrWhiteSpace($tunnelId)
+$copyHealthItem = New-Object System.Windows.Forms.MenuItem "Copy health URL"
+$openHealthItem = New-Object System.Windows.Forms.MenuItem "Open MCP health"
 $saveKeyItem = New-Object System.Windows.Forms.MenuItem "Replace tunnel runtime key..."
 $keyStatusItem = New-Object System.Windows.Forms.MenuItem "Show key status"
 $openRuntimeItem = New-Object System.Windows.Forms.MenuItem "Open runtime logs"
-$exitItem = New-Object System.Windows.Forms.MenuItem "Exit tray (keep services running)"
-$stopAndExitItem = New-Object System.Windows.Forms.MenuItem "Stop all and exit"
+$exitItem = New-Object System.Windows.Forms.MenuItem "Exit"
 
-$startItem.add_Click({ Start-StackAction "Start" | Out-Null; Update-TrayStatus })
-$stopItem.add_Click({ Start-StackAction "Stop" | Out-Null; Update-TrayStatus })
-$restartItem.add_Click({ Start-StackAction "Restart" | Out-Null; Update-TrayStatus })
+$restartItem.add_Click({ Start-StackAction "RestartCore" | Out-Null; Update-TrayStatus })
+$openViewerItem.add_Click({ Open-MemoryViewer })
 $openBackendItem.add_Click({ Open-LocalUrl $backendDocsUrl })
 $openTunnelUiItem.add_Click({ Open-LocalUrl $tunnelUiUrl })
 $copyMcpItem.add_Click({ Copy-TextToClipboard -Text $mcpUrl -Label "Local MCP URL" })
+$copyTunnelIdItem.add_Click({ Copy-TextToClipboard -Text $tunnelId -Label "Tunnel ID" })
+$copyHealthItem.add_Click({ Copy-TextToClipboard -Text $mcpHealthUrl -Label "Health URL" })
+$openHealthItem.add_Click({ Open-LocalUrl $mcpHealthUrl })
 $saveKeyItem.add_Click({ Open-RuntimeKeyPrompt })
 $keyStatusItem.add_Click({ Show-KeyStatus })
 $openRuntimeItem.add_Click({ Start-Process explorer.exe -ArgumentList "`"$runtimeDir`"" })
-$exitItem.add_Click({ Exit-Tray -StopStack $false })
-$stopAndExitItem.add_Click({ Exit-Tray -StopStack $true })
+$exitItem.add_Click({ Exit-Tray -StopStack $true })
 
 $contextMenu.MenuItems.Add($statusItem) | Out-Null
 $contextMenu.MenuItems.Add("-") | Out-Null
-$contextMenu.MenuItems.Add($startItem) | Out-Null
-$contextMenu.MenuItems.Add($stopItem) | Out-Null
 $contextMenu.MenuItems.Add($restartItem) | Out-Null
 $contextMenu.MenuItems.Add("-") | Out-Null
-$contextMenu.MenuItems.Add($openBackendItem) | Out-Null
-$contextMenu.MenuItems.Add($openTunnelUiItem) | Out-Null
 $contextMenu.MenuItems.Add($copyMcpItem) | Out-Null
+$contextMenu.MenuItems.Add($copyHealthItem) | Out-Null
+$contextMenu.MenuItems.Add($copyTunnelIdItem) | Out-Null
 $contextMenu.MenuItems.Add("-") | Out-Null
-$contextMenu.MenuItems.Add($saveKeyItem) | Out-Null
-$contextMenu.MenuItems.Add($keyStatusItem) | Out-Null
+$contextMenu.MenuItems.Add($openHealthItem) | Out-Null
+$contextMenu.MenuItems.Add($openTunnelUiItem) | Out-Null
 $contextMenu.MenuItems.Add($openRuntimeItem) | Out-Null
 $contextMenu.MenuItems.Add("-") | Out-Null
+$contextMenu.MenuItems.Add($openViewerItem) | Out-Null
+$contextMenu.MenuItems.Add($openBackendItem) | Out-Null
+$contextMenu.MenuItems.Add($saveKeyItem) | Out-Null
+$contextMenu.MenuItems.Add($keyStatusItem) | Out-Null
+$contextMenu.MenuItems.Add("-") | Out-Null
 $contextMenu.MenuItems.Add($exitItem) | Out-Null
-$contextMenu.MenuItems.Add($stopAndExitItem) | Out-Null
 
 $notifyIcon = New-Object System.Windows.Forms.NotifyIcon
 $notifyIcon.ContextMenu = $contextMenu
@@ -409,11 +487,11 @@ $notifyIcon.Icon = [System.Drawing.SystemIcons]::Warning
 $notifyIcon.Text = "$TrayDisplayName | Checking services"
 $notifyIcon.Visible = $true
 $notifyIcon.add_DoubleClick({
-    if (Test-HttpEndpoint $tunnelReadyUrl) {
-        Open-LocalUrl $tunnelUiUrl
+    if (Test-HttpEndpoint $backendHealthUrl) {
+        Open-MemoryViewer
     }
-    elseif (Test-HttpEndpoint $backendHealthUrl) {
-        Open-LocalUrl $backendDocsUrl
+    else {
+        Show-Warning "Memory Core backend is not ready. Start the stack first."
     }
 })
 

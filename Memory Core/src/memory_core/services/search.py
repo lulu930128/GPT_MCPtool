@@ -59,6 +59,7 @@ _STOP_TOKENS = {
 class SearchFilters:
     result_type: Literal["record", "entity"] | None = None
     domain: str | None = None
+    schema_name: str | None = None
     kind: str | None = None
     sensitivity: str | None = None
     updated_after: datetime | None = None
@@ -105,7 +106,11 @@ def search_memory(
                 minimum_matches=_minimum_token_matches(tokens),
                 filters=filters,
             )
-            if filters.result_type != "record" and filters.domain is None
+            if (
+                filters.result_type != "record"
+                and filters.domain is None
+                and filters.schema_name is None
+            )
             else []
         )
         strategy = "token_coverage"
@@ -135,7 +140,11 @@ def search_memory(
                         minimum_matches=1,
                         filters=filters,
                     )
-                    if filters.result_type != "record" and filters.domain is None
+                    if (
+                        filters.result_type != "record"
+                        and filters.domain is None
+                        and filters.schema_name is None
+                    )
                     else []
                 )
                 tokens = fallback_tokens
@@ -184,7 +193,12 @@ def search_memory(
 
     remaining = max(limit - len(records), 0)
     entities: list[Entity] = []
-    if remaining and filters.result_type != "record" and filters.domain is None:
+    if (
+        remaining
+        and filters.result_type != "record"
+        and filters.domain is None
+        and filters.schema_name is None
+    ):
         pattern = _like_pattern(normalized)
         entity_statement = select(Entity).where(
             Entity.deleted_at.is_(None),
@@ -507,6 +521,9 @@ def _search_records_fts(
     if filters.domain is not None:
         filter_clauses.append("AND r.domain = :domain")
         parameters["domain"] = filters.domain
+    if filters.schema_name is not None:
+        filter_clauses.append("AND r.schema_name = :schema_name")
+        parameters["schema_name"] = filters.schema_name
     if filters.kind is not None:
         filter_clauses.append("AND r.kind = :kind")
         parameters["kind"] = filters.kind
@@ -551,6 +568,8 @@ def _record_filter_clauses(filters: SearchFilters) -> tuple[ColumnElement[bool],
     clauses: list[ColumnElement[bool]] = []
     if filters.domain is not None:
         clauses.append(Record.domain == filters.domain)
+    if filters.schema_name is not None:
+        clauses.append(Record.schema_name == filters.schema_name)
     if filters.kind is not None:
         clauses.append(Record.kind == filters.kind)
     if filters.sensitivity is not None:
