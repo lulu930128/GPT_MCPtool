@@ -21,20 +21,24 @@ npm run smoke:http
 C:\GPT_MCPtool\project_reading\scripts\start-tray.vbs
 ```
 
-托盤程式會自動啟動本機 MCP server。
+legacy rollback tray 會透過 component-owned lifecycle controller 準備本機 MCP server 與
+Secure MCP Tunnel。正式單一托盤架構則由 MCP Control Center 呼叫同一個 controller。
 
 右鍵點托盤圖示可以看到：
 
-- `MCP: Running / Starting / Stopped`
-- `Tunnel: Ready / Starting / Stopped`
-- `Start MCP server`
-- `Stop MCP server`
+- `{MCP Name} | Server: Running | Tunnel: Ready`（狀態值依實際 health 動態更新）
+- `Ensure runtime running`
+- `Repair connectivity`
 - `Restart MCP server`
-- `Start tunnel`
-- `Stop tunnel`
+- `Reload full runtime`
+- `Stop full runtime`
 - `Copy MCP URL`
+- `Copy health URL`
 - `Copy tunnel ID`
-- `Open health check`
+- `Open MCP health`
+- `Open tunnel UI`
+- `Open runtime logs`
+- `Exit diagnostic tray only` 或 legacy 模式的 `Exit and stop full runtime`
 
 本機 MCP URL：
 
@@ -105,7 +109,8 @@ C:\GPT_MCPtool\project_reading\.secrets\control-plane-api-key.dpapi
 
 這是 Windows DPAPI current-user encrypted 檔案，只給目前 Windows 使用者解密；`.secrets/` 已被 git ignore。
 
-`npm run tunnel:run` 會長駐。若你想用托盤啟動 tunnel，先保存 key，再右鍵托盤圖示按 `Start tunnel`。
+`npm run tunnel:run` 會長駐。日常使用先保存 key，再由 MCP Control Center 或 legacy
+tray 執行 `EnsureRunning`；連線修復、core restart 與完整停止會維持不同 action semantics。
 
 開機自動啟動：
 

@@ -16,6 +16,8 @@
     "smoke:live:assets": "node scripts/smoke-live-assets.mjs",
     "smoke:roots": "npm run build && node scripts/smoke-roots.mjs",
     "tray:selftest": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tray.ps1 -SelfTest",
+    "runtime:selftest": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/runtime-control.ps1 -Action SelfTest",
+    "runtime:test": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-runtime-control.ps1",
     "tunnel:selftest": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action SelfTest",
     "tunnel:version": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action Version",
     "tunnel:init": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action Init",

@@ -57,10 +57,35 @@ npm run smoke:roots
 C:\GPT_MCPtool\project_reading\scripts\start-tray.vbs
 ```
 
+目前正在遷移到 `unified-lifecycle-v3`：`scripts\runtime-control.ps1` 是唯一 lifecycle
+owner，以 mutex、listener PID、exact executable、PID file 與 process start-time metadata
+管理 detached MCP server／tunnel。它提供固定動作：
+
+- `EnsureRunning`
+- `RepairConnectivity`
+- `RestartCore`
+- `ReloadRuntime`
+- `ShutdownRuntime`
+
+`RepairConnectivity` 不會重啟健康 MCP；`RestartCore` 不會替換 tunnel；完整停止前會先
+確認兩個 process 都屬於本元件。foreign listener 或 PID reuse 會安全失敗，不會用程序名稱
+批次終止。
+
+controller 會先等待 MCP health 通過才啟動 tunnel，避免 OAuth discovery 在
+`127.0.0.1:8787` 尚未監聽時永久停在 `/healthz=200`、`/readyz=503`。若自有 tunnel
+程序仍未 ready，會依 15／30／60 秒做最多三次 bounded replacement，不會無限重試。
+
+`scripts\show-diagnostic-tray.vbs` 只開啟 optional diagnostic UI；關閉它不會停止 runtime。
+既有 `start-tray.vbs` 與 `Restart-Tray.cmd` 暫時保留為 legacy rollback 入口，但 tray 本身
+也只委派 controller，不再保存 server／tunnel handles。MCP Control Center 的 live manifest
+在 Gate C 確認前仍維持 `legacy-tray`，因此 source 變更本身不會切換正式 runtime。
+
 或從終端測試 tray 設定：
 
 ```powershell
 npm run tray:selftest
+npm run runtime:selftest
+npm run runtime:test
 ```
 
 這個資料夾也已內建 OpenAI `tunnel-client`：
