@@ -29,10 +29,13 @@ runtime，完成 action 後退出。中樞不持有 child process handle，也�
   process command line，以及 listener 到 managed PID 的父子程序鏈。
 - 區分 `Ready`、`Degraded`、`BlockedUpstream`、`Stopped`、`Unhealthy`、
   `OwnershipMismatch`、`Misconfigured`、`NotInstalled`。
+- 狀態優先序為 ownership、owned core、connectivity、dependency；因此
+  `BlockedUpstream` 僅表示 owned core 與 tunnel 都已就緒，外部 dependency 仍不可用，
+  不會遮蔽 server 或 tunnel failure。
 - 將目前狀態寫入 atomic `state.json`，只在狀態變化或 action 發生時追加每日 JSONL event。
 - 開機 reconciliation 只對真正 `Stopped` 的元件呼叫既有非破壞性 Start；不自動 Restart
   `Unhealthy`、上游阻塞或 ownership 不明的程序。
-- 人工 Start／Reload 會委派給 manifest 中已驗證、位於 component root 內的 entrypoint。
+- 人工 Start／Repair connectivity／Restart core／Reload／Stop 會委派給 manifest 中已驗證、位於 component root 內的固定 entrypoint；Stop 必須逐元件確認，不提供 Stop All。
 - Startup adoption 會先驗證六個 shortcut target，再移到 private backup；不直接刪除，並可依 receipt 回復。
 
 ## Runtime 資料
@@ -135,12 +138,12 @@ endpoint、port、expected health fields 與 ownership fragment。它不保存 t
 - 不是 workspace 直接子目錄的 component root。
 - 不符合 `unified-always-on-v2` 的 tray `SelfTest`。
 - 不符合 `unified-lifecycle-v3` 的 stateless controller `SelfTest`。
-- controller 缺少 `ensure_running`、`restart_core`、`reload_runtime`、
-  `show_diagnostic_tray` 任一固定 capability。
+- controller 缺少 `ensure_running`、`repair_connectivity`、`restart_core`、
+  `reload_runtime`、`shutdown_runtime`、`show_diagnostic_tray` 任一固定 capability。
 - controller action 使用錯誤 launcher kind，或由 manifest 自訂 PowerShell arguments。
 - 重複 component／probe id 或無效 port。
 
-v3 lifecycle action 的 `-Action EnsureRunning|RestartCore|ReloadRuntime` 參數由 manager
+v3 lifecycle action 的 `-Action EnsureRunning|RepairConnectivity|RestartCore|ReloadRuntime|ShutdownRuntime` 參數由 manager
 依 semantic action 固定產生；manifest 只能選擇 component root 內的相對 entrypoint，不能
 注入 command string 或 arguments。`show_diagnostic_tray` 只能使用 component 內的 VBS launcher。
 PowerShell controller 執行會以 component-specific manager mutex 防止重疊，沿用
@@ -153,6 +156,11 @@ listener module 名稱判定 ownership，而會要求 listener 等於該 managed
 子程序鏈；`ownerManagedCommandContains` 則用來確認 managed process 仍來自預期的
 exact-path lifecycle。PID 檔不存在、內容無效、程序無關或 command 不符都會得到
 `OwnershipMismatch`，CIM 權限不足則維持 ownership unknown，不冒充已驗證。
+
+OMI Search 的 dependency probe 指向 adapter 自己的固定 loopback `/upstream-health`；實際
+OMI backend URL 仍由 OMI launcher 與 adapter 擁有。中樞不讀 OMI launcher log、不接管 backend，
+也不保存 resolved URL 或 upstream response。Memory Core internal backend 預設使用 `18765`；
+MCP `8818` 與 tunnel `8800` 保持不變。
 
 ## 驗證界線
 

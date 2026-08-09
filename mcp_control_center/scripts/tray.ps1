@@ -131,7 +131,7 @@ function Show-Warning([string]$Message) {
 
 function Start-ControllerAction {
     param(
-        [ValidateSet("Status", "Reconcile", "Start", "Restart", "RestartCore", "ShowDiagnosticTray", "Doctor")][string]$Action,
+        [ValidateSet("Status", "Reconcile", "Start", "Restart", "RepairConnectivity", "RestartCore", "ShutdownRuntime", "ShowDiagnosticTray", "Doctor")][string]$Action,
         [string]$Component
     )
     if ($null -ne $script:ControllerProcess -and -not $script:ControllerProcess.HasExited) {
@@ -182,7 +182,9 @@ function Update-UiFromState {
         $ui.parent.Text = "$($component.displayName) - $label"
         $ui.start.Enabled = ([string]$component.status -eq "Stopped")
         $ui.restart.Enabled = ([string]$component.status -notin @("NotInstalled", "Misconfigured", "OwnershipMismatch"))
+        $ui.repair.Enabled = ($ui.isController -and [string]$component.status -notin @("Stopped", "NotInstalled", "Misconfigured", "OwnershipMismatch"))
         $ui.restartCore.Enabled = ($ui.isController -and [string]$component.status -notin @("Stopped", "NotInstalled", "Misconfigured", "OwnershipMismatch"))
+        $ui.shutdown.Enabled = ($ui.isController -and [string]$component.status -notin @("Stopped", "NotInstalled", "Misconfigured", "OwnershipMismatch"))
         $ui.diagnostic.Enabled = $ui.isController
         $ui.health.Enabled = -not [string]::IsNullOrWhiteSpace([string]$component.healthUrl)
     }
@@ -209,14 +211,27 @@ foreach ($component in @($manifest.components | Sort-Object startupOrder)) {
     $statusItem = New-Object Windows.Forms.MenuItem "Status: Not checked"
     $statusItem.Enabled = $false
     $startItem = New-Object Windows.Forms.MenuItem "Start component"
+    $repairItem = New-Object Windows.Forms.MenuItem "Repair connectivity"
     $restartCoreItem = New-Object Windows.Forms.MenuItem "Restart MCP server"
     $restartItem = New-Object Windows.Forms.MenuItem "Reload component"
+    $shutdownItem = New-Object Windows.Forms.MenuItem "Stop component"
     $diagnosticItem = New-Object Windows.Forms.MenuItem "Show diagnostic tray"
     $healthItem = New-Object Windows.Forms.MenuItem "Open health"
     $healthItem.Enabled = $false
     $folderItem = New-Object Windows.Forms.MenuItem "Open component folder"
     $definition = $component
     $startItem.add_Click(({ Start-ControllerAction -Action Start -Component $componentId }).GetNewClosure())
+    $repairItem.add_Click(({
+        $choice = [Windows.Forms.MessageBox]::Show(
+            "Repair only the connectivity runtime for $componentName? A healthy core must not be restarted.",
+            $trayDisplayName,
+            [Windows.Forms.MessageBoxButtons]::YesNo,
+            [Windows.Forms.MessageBoxIcon]::Warning
+        )
+        if ($choice -eq [Windows.Forms.DialogResult]::Yes) {
+            Start-ControllerAction -Action RepairConnectivity -Component $componentId
+        }
+    }).GetNewClosure())
     $restartCoreItem.add_Click(({
         $choice = [Windows.Forms.MessageBox]::Show(
             "Restart only the core runtime for $componentName?",
@@ -239,6 +254,17 @@ foreach ($component in @($manifest.components | Sort-Object startupOrder)) {
             Start-ControllerAction -Action Restart -Component $componentId
         }
     }).GetNewClosure())
+    $shutdownItem.add_Click(({
+        $choice = [Windows.Forms.MessageBox]::Show(
+            "Stop the complete runtime for $componentName? This stops its core and connectivity processes only.",
+            $trayDisplayName,
+            [Windows.Forms.MessageBoxButtons]::YesNo,
+            [Windows.Forms.MessageBoxIcon]::Warning
+        )
+        if ($choice -eq [Windows.Forms.DialogResult]::Yes) {
+            Start-ControllerAction -Action ShutdownRuntime -Component $componentId
+        }
+    }).GetNewClosure())
     $diagnosticItem.add_Click(({ Start-ControllerAction -Action ShowDiagnosticTray -Component $componentId }).GetNewClosure())
     $healthItem.add_Click(({
         $state = Read-McpCcState -RuntimeRoot $RuntimeRoot
@@ -251,8 +277,10 @@ foreach ($component in @($manifest.components | Sort-Object startupOrder)) {
     $parent.MenuItems.Add($statusItem) | Out-Null
     $parent.MenuItems.Add("-") | Out-Null
     $parent.MenuItems.Add($startItem) | Out-Null
+    if ($isController) { $parent.MenuItems.Add($repairItem) | Out-Null }
     if ($isController) { $parent.MenuItems.Add($restartCoreItem) | Out-Null }
     $parent.MenuItems.Add($restartItem) | Out-Null
+    if ($isController) { $parent.MenuItems.Add($shutdownItem) | Out-Null }
     if ($isController) { $parent.MenuItems.Add($diagnosticItem) | Out-Null }
     $parent.MenuItems.Add("-") | Out-Null
     $parent.MenuItems.Add($healthItem) | Out-Null
@@ -262,8 +290,10 @@ foreach ($component in @($manifest.components | Sort-Object startupOrder)) {
         parent = $parent
         status = $statusItem
         start = $startItem
+        repair = $repairItem
         restartCore = $restartCoreItem
         restart = $restartItem
+        shutdown = $shutdownItem
         diagnostic = $diagnosticItem
         isController = $isController
         health = $healthItem

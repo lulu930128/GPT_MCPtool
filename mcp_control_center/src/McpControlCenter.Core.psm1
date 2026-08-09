@@ -5,8 +5,10 @@ $script:ExpectedTrayContract = "unified-always-on-v2"
 $script:ExpectedLifecycleContract = "unified-lifecycle-v3"
 $script:ControllerCapabilities = @(
     "ensure_running",
+    "repair_connectivity",
     "restart_core",
     "reload_runtime",
+    "shutdown_runtime",
     "show_diagnostic_tray"
 )
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
@@ -157,8 +159,10 @@ function Get-McpCcComponentActionBinding {
             "start",
             "restart",
             "ensure_running",
+            "repair_connectivity",
             "restart_core",
             "reload_runtime",
+            "shutdown_runtime",
             "show_diagnostic_tray"
         )][string]$Action
     )
@@ -183,8 +187,10 @@ function Get-McpCcComponentActionBinding {
         $manifestAction = $semanticAction
         $standardArguments = switch ($semanticAction) {
             "ensure_running" { @("-Action", "EnsureRunning") }
+            "repair_connectivity" { @("-Action", "RepairConnectivity") }
             "restart_core" { @("-Action", "RestartCore") }
             "reload_runtime" { @("-Action", "ReloadRuntime") }
+            "shutdown_runtime" { @("-Action", "ShutdownRuntime") }
             "show_diagnostic_tray" { @() }
         }
     }
@@ -232,6 +238,15 @@ function Read-McpCcManifest {
         if (-not $valueResult.found -or [int]$valueResult.value -lt $setting.Min -or [int]$valueResult.value -gt $setting.Max) {
             throw "Manifest setting '$($setting.Name)' must be between $($setting.Min) and $($setting.Max)."
         }
+    }
+    $controllerTimeoutResult = Get-McpCcObjectProperty -Object $manifest.settings -Name "controllerActionTimeoutSeconds"
+    if ($controllerTimeoutResult.found) {
+        if ([int]$controllerTimeoutResult.value -lt 5 -or [int]$controllerTimeoutResult.value -gt 300) {
+            throw "Manifest setting 'controllerActionTimeoutSeconds' must be between 5 and 300."
+        }
+    }
+    else {
+        $manifest.settings | Add-Member -NotePropertyName controllerActionTimeoutSeconds -NotePropertyValue ([int]$manifest.settings.postStartTimeoutSeconds) -Force
     }
 
     $manifestDirectory = Split-Path -Parent $manifestPath
@@ -680,9 +695,6 @@ function Resolve-McpCcComponentState {
     if (@($ProbeResults | Where-Object { $_.owner.known -and $_.owner.matchesExpected -eq $false }).Count -gt 0) {
         return "OwnershipMismatch"
     }
-    if (@($ProbeResults | Where-Object { $_.role -eq "dependency" -and -not $_.success }).Count -gt 0) {
-        return "BlockedUpstream"
-    }
     $coreFailures = @($ProbeResults | Where-Object { $_.role -eq "core" -and -not $_.success })
     if ($coreFailures.Count -gt 0) {
         if (@($coreFailures | Where-Object { $_.tcpOpen }).Count -gt 0) { return "Unhealthy" }
@@ -691,7 +703,19 @@ function Resolve-McpCcComponentState {
     if (@($ProbeResults | Where-Object { $_.role -eq "connectivity" -and -not $_.success }).Count -gt 0) {
         return "Degraded"
     }
+    if (@($ProbeResults | Where-Object { $_.role -eq "dependency" -and -not $_.success }).Count -gt 0) {
+        return "BlockedUpstream"
+    }
     return "Ready"
+}
+
+function Get-McpCcRunningAcceptanceStates {
+    param([Parameter(Mandatory = $true)]$Component)
+    $states = @("Ready")
+    if (@($Component.probes | Where-Object { $_.required -and $_.role -eq "dependency" }).Count -gt 0) {
+        $states += "BlockedUpstream"
+    }
+    return [string[]]$states
 }
 
 function Get-McpCcComponentStatus {
@@ -1126,6 +1150,11 @@ function Assert-McpCcControllerActionResult {
     if (-not [long]::TryParse([string]$Document.elapsedMs, [ref]$elapsed) -or $elapsed -lt 0) {
         throw "Component controller result field 'elapsedMs' must be a non-negative integer."
     }
+    if (-not [bool]$Document.ok) {
+        $errorCode = [string]$Document.errorCode
+        if ([string]::IsNullOrWhiteSpace($errorCode)) { $errorCode = "CONTROLLER_REPORTED_FAILURE" }
+        throw "Component controller reported failure '$errorCode'; inspect the component-owned runtime log."
+    }
 }
 
 function Invoke-McpCcComponentAction {
@@ -1136,8 +1165,10 @@ function Invoke-McpCcComponentAction {
             "start",
             "restart",
             "ensure_running",
+            "repair_connectivity",
             "restart_core",
             "reload_runtime",
+            "shutdown_runtime",
             "show_diagnostic_tray"
         )][string]$Action,
         [switch]$PlanOnly,
@@ -1189,7 +1220,7 @@ function Invoke-McpCcComponentAction {
                 $specArguments = Get-McpCcObjectProperty -Object $actionSpec -Name "arguments"
                 if ($specArguments.found) { $arguments += @($specArguments.value | ForEach-Object { [string]$_ }) }
             }
-            $timeoutSeconds = if ($ActionTimeoutSeconds -gt 0) { $ActionTimeoutSeconds } else { [int]$Manifest.settings.postStartTimeoutSeconds }
+            $timeoutSeconds = if ($ActionTimeoutSeconds -gt 0) { $ActionTimeoutSeconds } else { [int]$Manifest.settings.controllerActionTimeoutSeconds }
             $execution = Invoke-McpCcBoundedPowerShell -ScriptPath $actionPath -Arguments $arguments -WorkingDirectory $component.resolvedRoot -RuntimeRoot $RuntimeRoot -TimeoutSeconds $timeoutSeconds -MaxCapturedOutputBytes $MaxCapturedOutputBytes
             $pid = $execution.processId
             $exitCode = $execution.exitCode
@@ -1325,6 +1356,7 @@ Export-ModuleMember -Function @(
     "Get-McpCcComponent",
     "Get-McpCcProbeResult",
     "Resolve-McpCcComponentState",
+    "Get-McpCcRunningAcceptanceStates",
     "Get-McpCcComponentStatus",
     "Get-McpCcSystemState",
     "ConvertTo-McpCcSafeObject",

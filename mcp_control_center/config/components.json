@@ -1,10 +1,11 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "settings": {
     "initialDelaySeconds": 12,
     "betweenComponentsSeconds": 3,
     "probeTimeoutSeconds": 2,
     "postStartTimeoutSeconds": 45,
+    "controllerActionTimeoutSeconds": 180,
     "refreshIntervalSeconds": 30,
     "eventRetentionDays": 30
   },
@@ -13,7 +14,8 @@
       "id": "project_reading",
       "displayName": "Project Reading",
       "root": "..\\..\\project_reading",
-      "contractScript": "scripts\\tray.ps1",
+      "runtimeMode": "component-controller",
+      "contractScript": "scripts\\runtime-control.ps1",
       "autoStart": true,
       "startupOrder": 10,
       "legacyStartup": {
@@ -21,8 +23,12 @@
         "launcher": "scripts\\start-tray.vbs"
       },
       "actions": {
-        "start": { "kind": "vbs", "path": "scripts\\start-tray.vbs" },
-        "restart": { "kind": "vbs", "path": "scripts\\restart-tray.vbs" }
+        "ensure_running": { "kind": "powershell", "path": "scripts\\runtime-control.ps1" },
+        "repair_connectivity": { "kind": "powershell", "path": "scripts\\runtime-control.ps1" },
+        "restart_core": { "kind": "powershell", "path": "scripts\\runtime-control.ps1" },
+        "reload_runtime": { "kind": "powershell", "path": "scripts\\runtime-control.ps1" },
+        "shutdown_runtime": { "kind": "powershell", "path": "scripts\\runtime-control.ps1" },
+        "show_diagnostic_tray": { "kind": "vbs", "path": "scripts\\show-diagnostic-tray.vbs" }
       },
       "probes": [
         {
@@ -54,6 +60,7 @@
       "id": "omi_search",
       "displayName": "OMI Search",
       "root": "..\\..\\OMI_search",
+      "runtimeMode": "legacy-tray",
       "contractScript": "scripts\\tray.ps1",
       "autoStart": true,
       "startupOrder": 20,
@@ -71,11 +78,11 @@
           "label": "OMI backend",
           "role": "dependency",
           "kind": "json",
-          "url": "http://127.0.0.1:8400/api/system/health",
-          "port": 8400,
+          "url": "http://127.0.0.1:8797/upstream-health",
+          "port": 8797,
           "required": true,
-          "expected": { "status": "ok", "app_name": "Open Market Intelligence" },
-          "summaryFields": ["status", "app_name"]
+          "expected": { "ok": true, "status": "ready" },
+          "summaryFields": ["service", "status", "errorCode"]
         },
         {
           "id": "mcp",
@@ -106,6 +113,7 @@
       "id": "japanese_study",
       "displayName": "Japanese Study",
       "root": "..\\..\\japanese_study",
+      "runtimeMode": "legacy-tray",
       "contractScript": "scripts\\tray.ps1",
       "autoStart": true,
       "startupOrder": 30,
@@ -159,6 +167,7 @@
       "id": "memory_core",
       "displayName": "Memory Core",
       "root": "..\\..\\Memory Core",
+      "runtimeMode": "legacy-tray",
       "contractScript": "scripts\\memory_core_tray.ps1",
       "autoStart": true,
       "startupOrder": 40,
@@ -181,8 +190,8 @@
           "label": "Memory Core backend",
           "role": "core",
           "kind": "json",
-          "url": "http://127.0.0.1:8765/health",
-          "port": 8765,
+          "url": "http://127.0.0.1:18765/health",
+          "port": 18765,
           "required": true,
           "expected": { "status": "ok", "database": "ok" },
           "summaryFields": ["status", "database", "version"],
@@ -221,6 +230,7 @@
       "id": "codex_bridge",
       "displayName": "Codex Bridge",
       "root": "..\\..\\codex_bridge",
+      "runtimeMode": "legacy-tray",
       "contractScript": "scripts\\tray.ps1",
       "autoStart": true,
       "startupOrder": 50,
@@ -262,6 +272,7 @@
       "id": "personal_asset_os",
       "displayName": "Personal Asset OS",
       "root": "..\\..\\personal-asset-os",
+      "runtimeMode": "legacy-tray",
       "contractScript": "scripts\\tray.ps1",
       "autoStart": true,
       "startupOrder": 60,
