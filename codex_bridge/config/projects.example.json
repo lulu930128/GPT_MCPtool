@@ -1,0 +1,9 @@
+{
+  "projects": [
+    {
+      "id": "example",
+      "name": "Example project",
+      "path": "C:\\project\\example"
+    }
+  ]
+}

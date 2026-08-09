@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Codex Bridge Widget Fixture</title>
+    <style>
+      html, body, iframe { width: 100%; height: 100%; margin: 0; border: 0; background: #0d0d0d; }
+    </style>
+  </head>
+  <body>
+    <iframe id="widget" src="../web/codex-console.html"></iframe>
+    <script>
+      (() => {
+        const now = new Date().toISOString();
+        const job = {
+          id: "08936c39-710e-4c58-8acb-5309f03e996f",
+          projectId: "omi",
+          projectName: "Open Market Intelligence",
+          title: "修正市場廣度異常值",
+          objective: "檢查今天早上的負值是否正常。",
+          executionMode: "plan",
+          dataClassification: "personal",
+          model: "gpt-5.6-sol",
+          effort: "high",
+          status: "awaiting_approval",
+          stateVersion: 12,
+          createdAt: now,
+          updatedAt: now,
+          threadId: "thread-fixture",
+          turnId: "turn-fixture",
+          pendingApprovalCount: 1,
+          messages: [
+            {
+              id: "message-user-1",
+              role: "user",
+              content: "幫我檢查今天早上「-」值是否正常，先找出來源與影響範圍。",
+              context: "provider_router.py 顯示來源切換；請一併檢查 market_breadth.py。",
+              inputArtifacts: [{ id: "38936c39-710e-4c58-8acb-5309f03e996f", fileName: "engineering_spec.txt", mimeType: "text/plain", chars: 1280, bytes: 1660, sha256: "1".repeat(64) }],
+              at: now,
+              executionMode: "plan",
+              dataClassification: "personal",
+              model: "gpt-5.6-sol",
+              effort: "high"
+            },
+            {
+              id: "message-assistant-1",
+              role: "assistant",
+              content: "我已確認負值來自開盤前資料的 session 語意，不是一般交易時段的實際成交。下一步會補上分類條件並執行相關測試。",
+              at: now,
+              resultStatus: "completed",
+              model: "gpt-5.6-sol",
+              effort: "high"
+            },
+            {
+              id: "message-user-2",
+              role: "user",
+              content: "可以，先準備最小修改。",
+              at: now,
+              executionMode: "plan",
+              dataClassification: "personal",
+              model: "gpt-5.6-sol",
+              effort: "high"
+            }
+          ],
+          events: [],
+          nextEventSeq: 12,
+          approvals: [{
+            id: "78936c39-710e-4c58-8acb-5309f03e996f",
+            kind: "command",
+            state: "pending",
+            method: "item/commandExecution/requestApproval",
+            createdAt: now,
+            summary: { command: "npm test", cwd: "C:\\project\\Open Market Intelligence", reason: "驗證修正沒有造成 regression" }
+          }],
+          hasDiff: true,
+          hasResult: true,
+          inputArtifacts: [],
+          artifacts: [
+            { id: "request", name: "request.md", mimeType: "text/markdown", chars: 1200, bytes: 1600, sha256: "2".repeat(64) },
+            { id: "response", name: "response.md", mimeType: "text/markdown", chars: 880, bytes: 1100, sha256: "3".repeat(64) },
+            { id: "diff", name: "diff.patch", mimeType: "text/x-patch", chars: 240, bytes: 260, sha256: "4".repeat(64) }
+          ]
+        };
+        const status = {
+          ok: true,
+          service: "codex-handoff-bridge",
+          version: "0.1.0",
+          buildId: "fixture",
+          controller: "ready",
+          projects: [
+            { id: "omi", name: "Open Market Intelligence" },
+            { id: "mcp", name: "GPT MCP Tool" }
+          ],
+          models: [
+            {
+              id: "gpt-5.6-sol",
+              displayName: "GPT-5.6 Sol",
+              isDefault: true,
+              defaultReasoningEffort: "low",
+              supportedReasoningEfforts: [
+                { reasoningEffort: "low", description: "快速" },
+                { reasoningEffort: "high", description: "深入" },
+                { reasoningEffort: "xhigh", description: "極高" },
+                { reasoningEffort: "max", description: "最大" },
+                { reasoningEffort: "ultra", description: "自動代理分工" }
+              ]
+            },
+            {
+              id: "gpt-5.6-terra",
+              displayName: "GPT-5.6 Terra",
+              isDefault: false,
+              defaultReasoningEffort: "medium",
+              supportedReasoningEfforts: [
+                { reasoningEffort: "medium", description: "平衡" },
+                { reasoningEffort: "high", description: "深入" }
+              ]
+            }
+          ],
+          recentJobs: [
+            job,
+            {
+              id: "18936c39-710e-4c58-8acb-5309f03e996f",
+              projectId: "omi",
+              projectName: "Open Market Intelligence",
+              title: "確認盤前資料新鮮度",
+              status: "completed",
+              stateVersion: 5,
+              createdAt: now,
+              updatedAt: now,
+              pendingApprovalCount: 0,
+              executionMode: "plan",
+              dataClassification: "personal"
+            },
+            {
+              id: "28936c39-710e-4c58-8acb-5309f03e996f",
+              projectId: "mcp",
+              projectName: "GPT MCP Tool",
+              title: "整理工具啟動入口",
+              status: "completed",
+              stateVersion: 4,
+              createdAt: now,
+              updatedAt: now,
+              pendingApprovalCount: 0,
+              executionMode: "workspace_write",
+              dataClassification: "personal"
+            }
+          ],
+          stateVersion: 12
+        };
+
+        window.addEventListener("message", (event) => {
+          if (!event.data || event.data.jsonrpc !== "2.0" || !event.data.method || event.source !== document.querySelector("#widget").contentWindow) return;
+          const request = event.data;
+          if (request.method === "ui/notifications/initialized") return;
+          let structuredContent = {};
+          let meta = undefined;
+          if (request.method === "ui/initialize") {
+            event.source.postMessage({ jsonrpc: "2.0", id: request.id, result: { hostCapabilities: { downloadFile: {} } } }, "*");
+            return;
+          } else if (request.method === "tools/call") {
+            const name = request.params && request.params.name;
+            if (name === "codex_bridge_status") structuredContent = Object.assign({ job: job }, status);
+            else if (name === "codex_job_get") structuredContent = job;
+            else if (name === "codex_artifact_read_chunk") {
+              const artifact = request.params.arguments.artifact;
+              const sample = artifact === "response" ? "Codex 完成了工程稿審核，並提出三項可執行修改。" : artifact === "diff" ? "diff --git a/market_breadth.py b/market_breadth.py\n+ # fixture" : "# 修正市場廣度異常值";
+              structuredContent = { artifact: { id: artifact, name: artifact + ".md", mimeType: "text/markdown", chars: sample.length, bytes: sample.length, sha256: "5".repeat(64), cursor: 0, done: true } };
+              meta = { artifactContent: sample };
+            }
+            else if (name === "codex_approval_decide") {
+              job.approvals = [];
+              job.pendingApprovalCount = 0;
+              job.status = "running";
+              job.stateVersion += 1;
+              structuredContent = { job: job };
+            } else if (name === "codex_job_preview") {
+              structuredContent = { workPackage: request.params.arguments, previewDigest: "0".repeat(64), warnings: [] };
+            } else {
+              structuredContent = { job: job };
+            }
+          }
+          event.source.postMessage({
+            jsonrpc: "2.0",
+            id: request.id,
+            result: { content: [], structuredContent: structuredContent, _meta: meta }
+          }, "*");
+        });
+      })();
+    </script>
+  </body>
+</html>

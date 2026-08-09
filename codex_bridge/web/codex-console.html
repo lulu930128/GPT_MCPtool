@@ -1,0 +1,1655 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Codex Bridge</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --workspace-height: 720px;
+        --bg: #0d0d0d;
+        --panel: #151515;
+        --panel-raised: #1d1d1d;
+        --panel-soft: #242424;
+        --line: #303030;
+        --line-strong: #454545;
+        --text: #f3f3f3;
+        --muted: #a2a2a2;
+        --quiet: #727272;
+        --accent: #e8e8e8;
+        --accent-text: #101010;
+        --success: #78d7aa;
+        --warning: #e7be6a;
+        --danger: #ef8f8f;
+        --radius: 14px;
+        font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      * { box-sizing: border-box; }
+      html, body {
+        width: 100%;
+        min-height: 0;
+        margin: 0;
+        overflow: hidden;
+        background: var(--bg);
+        color: var(--text);
+      }
+      body { padding: 14px; }
+      button, textarea, select { font: inherit; }
+      button, select { color: inherit; }
+      button { cursor: pointer; }
+      button:disabled, select:disabled, textarea:disabled { cursor: not-allowed; opacity: .48; }
+      :focus-visible { outline: 2px solid #9fc3ff; outline-offset: 2px; }
+
+      .workspace {
+        width: min(1180px, 100%);
+        height: var(--workspace-height);
+        min-height: 0;
+        margin: 0 auto;
+        display: grid;
+        grid-template-columns: 248px minmax(0, 1fr);
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: var(--panel);
+      }
+
+      .sidebar {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        background: #111;
+        border-right: 1px solid var(--line);
+      }
+
+      .sidebar-head { padding: 15px 14px 10px; }
+      .brand-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        min-width: 0;
+        font-weight: 650;
+        letter-spacing: -.01em;
+      }
+      .brand-mark {
+        width: 24px;
+        height: 24px;
+        display: grid;
+        place-items: center;
+        border: 1px solid var(--line-strong);
+        border-radius: 8px;
+        color: #d7d7d7;
+        font-size: 12px;
+      }
+      .new-chat {
+        width: 30px;
+        height: 30px;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 20px;
+        line-height: 1;
+      }
+      .new-chat:hover { background: var(--panel-soft); color: var(--text); }
+
+      .project-tree {
+        flex: 1;
+        min-height: 0;
+        overflow: auto;
+        padding: 4px 8px 14px;
+        scrollbar-width: thin;
+      }
+      .project-group + .project-group { margin-top: 6px; }
+      .project-row {
+        display: grid;
+        grid-template-columns: 1fr 28px;
+        align-items: center;
+        gap: 2px;
+      }
+      .project-toggle, .project-add, .conversation-item {
+        border: 0;
+        background: transparent;
+        text-align: left;
+      }
+      .project-toggle {
+        min-width: 0;
+        padding: 8px 7px;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        border-radius: 8px;
+        color: #c9c9c9;
+        font-size: 12px;
+        font-weight: 650;
+        letter-spacing: .01em;
+      }
+      .project-toggle:hover, .project-add:hover { background: var(--panel-soft); color: var(--text); }
+      .chevron { width: 12px; color: var(--quiet); transition: transform .15s ease; }
+      .project-group.collapsed .chevron { transform: rotate(-90deg); }
+      .project-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .project-count { margin-left: auto; color: var(--quiet); font-weight: 500; }
+      .project-add {
+        width: 28px;
+        height: 28px;
+        display: grid;
+        place-items: center;
+        border-radius: 8px;
+        color: var(--quiet);
+        font-size: 17px;
+      }
+      .conversation-list { padding: 1px 0 4px 19px; }
+      .project-group.collapsed .conversation-list { display: none; }
+      .conversation-item {
+        width: 100%;
+        min-width: 0;
+        padding: 8px 9px;
+        display: grid;
+        grid-template-columns: 8px minmax(0, 1fr);
+        align-items: center;
+        gap: 8px;
+        border-radius: 8px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .conversation-item:hover { background: #1a1a1a; color: var(--text); }
+      .conversation-item[aria-current="true"] { background: var(--panel-soft); color: var(--text); }
+      .conversation-dot { width: 6px; height: 6px; border-radius: 50%; background: #656565; }
+      .conversation-dot.active { background: var(--success); box-shadow: 0 0 0 3px rgba(120, 215, 170, .08); }
+      .conversation-dot.approval { background: var(--warning); }
+      .conversation-dot.failed { background: var(--danger); }
+      .conversation-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .empty-project { padding: 7px 9px; color: #5f5f5f; font-size: 12px; }
+
+      .sidebar-foot {
+        padding: 11px 14px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .presence { width: 7px; height: 7px; border-radius: 50%; background: var(--quiet); }
+      .presence.online { background: var(--success); box-shadow: 0 0 0 3px rgba(120, 215, 170, .08); }
+      .refresh-status {
+        margin-left: auto;
+        border: 0;
+        background: transparent;
+        color: var(--quiet);
+        padding: 4px;
+        border-radius: 6px;
+      }
+      .refresh-status:hover { color: var(--text); background: var(--panel-soft); }
+
+      .chat {
+        min-width: 0;
+        min-height: 0;
+        height: 100%;
+        overflow: hidden;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr) auto;
+        background: var(--bg);
+      }
+      .chat-head {
+        min-height: 58px;
+        padding: 10px 18px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        border-bottom: 1px solid var(--line);
+      }
+      .chat-heading { min-width: 0; }
+      .chat-title {
+        margin: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 14px;
+        font-weight: 650;
+      }
+      .chat-subtitle {
+        margin-top: 3px;
+        color: var(--quiet);
+        font-size: 11px;
+      }
+      .chat-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+      .head-button {
+        min-height: 32px;
+        padding: 0 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .head-button:hover { border-color: var(--line-strong); color: var(--text); }
+      .head-button.danger { color: var(--danger); }
+      .more { position: relative; }
+      .more > summary {
+        width: 32px;
+        height: 32px;
+        display: grid;
+        place-items: center;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        color: var(--muted);
+        cursor: pointer;
+        list-style: none;
+      }
+      .more > summary::-webkit-details-marker { display: none; }
+      .more[open] > summary, .more > summary:hover { color: var(--text); border-color: var(--line-strong); }
+      .more-menu {
+        position: absolute;
+        top: 38px;
+        right: 0;
+        z-index: 20;
+        width: 150px;
+        padding: 5px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--panel-raised);
+        box-shadow: 0 12px 32px rgba(0, 0, 0, .36);
+      }
+      .more-menu button {
+        width: 100%;
+        padding: 8px 9px;
+        border: 0;
+        border-radius: 7px;
+        background: transparent;
+        text-align: left;
+        font-size: 12px;
+      }
+      .more-menu button:hover { background: var(--panel-soft); }
+
+      .transcript {
+        min-height: 0;
+        overflow: auto;
+        padding: 28px 22px 22px;
+        scrollbar-width: thin;
+      }
+      .thread {
+        width: min(780px, 100%);
+        margin: 0 auto;
+        display: flex;
+        flex-direction: column;
+        gap: 22px;
+      }
+      .empty-chat {
+        min-height: 390px;
+        display: grid;
+        place-items: center;
+        text-align: center;
+        color: var(--muted);
+      }
+      .empty-chat strong {
+        display: block;
+        margin-bottom: 8px;
+        color: var(--text);
+        font-size: clamp(21px, 3vw, 30px);
+        letter-spacing: -.035em;
+      }
+      .empty-chat span { font-size: 13px; }
+      .message { display: flex; flex-direction: column; gap: 7px; }
+      .message.user { align-items: flex-end; }
+      .message.assistant { align-items: flex-start; }
+      .message-meta {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--quiet);
+        font-size: 10px;
+      }
+      .message-body {
+        max-width: min(680px, 92%);
+        padding: 12px 14px;
+        border-radius: 15px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        line-height: 1.62;
+        font-size: 14px;
+      }
+      .message.user .message-body { background: var(--panel-soft); border-bottom-right-radius: 5px; }
+      .message.assistant .message-body {
+        max-width: 100%;
+        padding: 2px 0;
+        background: transparent;
+        border-radius: 0;
+      }
+      .message.failed .message-body { color: #f0b0b0; }
+      .message-context {
+        max-width: min(680px, 92%);
+        color: var(--quiet);
+        font-size: 11px;
+      }
+      .message-context summary { cursor: pointer; }
+      .message-context pre {
+        margin: 8px 0 0;
+        padding: 10px 12px;
+        max-height: 220px;
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: #111;
+        color: var(--muted);
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      .typing {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .typing i {
+        width: 5px;
+        height: 5px;
+        border-radius: 50%;
+        background: var(--muted);
+        animation: pulse 1.1s infinite ease-in-out;
+      }
+      .typing i:nth-child(2) { animation-delay: .15s; }
+      .typing i:nth-child(3) { animation-delay: .3s; }
+      @keyframes pulse { 0%, 70%, 100% { opacity: .25; transform: translateY(0); } 35% { opacity: 1; transform: translateY(-2px); } }
+
+      .approval-card {
+        padding: 14px;
+        border: 1px solid #5c4c2f;
+        border-radius: 13px;
+        background: #1d1912;
+      }
+      .approval-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+      .approval-title { font-size: 13px; font-weight: 650; }
+      .approval-card pre {
+        margin: 10px 0;
+        padding: 10px;
+        max-height: 180px;
+        overflow: auto;
+        border-radius: 8px;
+        background: #13110e;
+        color: #d7c9ad;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        font-size: 11px;
+      }
+      .approval-actions { display: flex; justify-content: flex-end; gap: 7px; }
+      .approval-actions button {
+        padding: 7px 11px;
+        border: 1px solid #5c4c2f;
+        border-radius: 8px;
+        background: transparent;
+        font-size: 12px;
+      }
+      .approval-actions .accept { background: #e6e0d5; color: #17130d; border-color: #e6e0d5; }
+
+      .composer-wrap {
+        min-height: 0;
+        padding: 0 18px 18px;
+      }
+      .composer {
+        width: min(820px, 100%);
+        margin: 0 auto;
+        border: 1px solid var(--line-strong);
+        border-radius: 17px;
+        background: var(--panel-raised);
+        box-shadow: 0 10px 32px rgba(0, 0, 0, .24);
+      }
+      .composer textarea {
+        width: 100%;
+        min-height: 74px;
+        max-height: 220px;
+        resize: none;
+        padding: 15px 16px 8px;
+        border: 0;
+        outline: 0;
+        background: transparent;
+        color: var(--text);
+        line-height: 1.5;
+        font-size: 14px;
+      }
+      .composer textarea::placeholder { color: #6f6f6f; }
+      .context-panel {
+        margin: 0 10px;
+        border-top: 1px solid var(--line);
+      }
+      .context-panel > summary {
+        padding: 9px 5px 7px;
+        color: var(--muted);
+        cursor: pointer;
+        list-style: none;
+        font-size: 11px;
+      }
+      .context-panel > summary::-webkit-details-marker { display: none; }
+      .context-panel > summary::before { content: "＋"; margin-right: 6px; color: var(--quiet); }
+      .context-panel[open] > summary::before { content: "－"; }
+      .context-fields { padding: 0 4px 10px; }
+      .context-fields textarea {
+        min-height: 84px;
+        max-height: 180px;
+        padding: 10px 11px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: #141414;
+        font-size: 12px;
+      }
+      .text-artifact-tools {
+        margin-top: 8px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .add-text-artifact {
+        min-height: 31px;
+        padding: 0 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .add-text-artifact:hover { border-color: var(--line-strong); color: var(--text); }
+      .text-artifact-limit { color: var(--quiet); font-size: 10px; }
+      .draft-artifacts, .message-artifacts {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .draft-artifacts { margin-top: 8px; }
+      .draft-artifact, .message-artifact {
+        min-width: 0;
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        padding: 7px 9px;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: #171717;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .draft-artifact strong, .message-artifact strong {
+        max-width: 240px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: #d8d8d8;
+        font-weight: 550;
+      }
+      .draft-artifact button {
+        width: 20px;
+        height: 20px;
+        padding: 0;
+        border: 0;
+        border-radius: 5px;
+        background: transparent;
+        color: var(--quiet);
+      }
+      .draft-artifact button:hover { background: var(--panel-soft); color: var(--text); }
+      .classification-row { margin-top: 8px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+      .classification-row label { color: var(--quiet); font-size: 10px; }
+      .company-confirm {
+        display: none;
+        align-items: flex-start;
+        gap: 7px;
+        margin-top: 9px;
+        color: var(--warning);
+        font-size: 11px;
+        line-height: 1.45;
+      }
+      .company-confirm.visible { display: flex; }
+      .company-confirm input { margin-top: 2px; }
+      .policy-note { margin-top: 7px; color: var(--quiet); font-size: 10px; }
+
+      .composer-bar {
+        padding: 8px 10px 10px;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+      }
+      .composer-select {
+        min-width: 0;
+        height: 32px;
+        padding: 0 26px 0 9px;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .composer-select:hover { background: var(--panel-soft); color: var(--text); }
+      #model { max-width: 170px; }
+      .send {
+        width: 34px;
+        height: 34px;
+        margin-left: auto;
+        display: grid;
+        place-items: center;
+        border: 0;
+        border-radius: 50%;
+        background: var(--accent);
+        color: var(--accent-text);
+        font-size: 18px;
+        line-height: 1;
+      }
+      .send:hover { background: #fff; }
+      .send.busy { animation: sendPulse .9s infinite alternate ease-in-out; }
+      @keyframes sendPulse { to { opacity: .55; } }
+
+      .error-bar {
+        position: fixed;
+        left: 50%;
+        bottom: 16px;
+        z-index: 50;
+        width: min(680px, calc(100% - 28px));
+        padding: 10px 13px;
+        transform: translate(-50%, 18px);
+        border: 1px solid #744444;
+        border-radius: 10px;
+        background: #2a1717;
+        color: #ffc4c4;
+        opacity: 0;
+        pointer-events: none;
+        transition: .18s ease;
+        font-size: 12px;
+      }
+      .error-bar.visible { transform: translate(-50%, 0); opacity: 1; pointer-events: auto; }
+      .error-bar.notice { border-color: #355d49; background: #14231b; color: #b8e8cc; }
+
+      .artifact {
+        position: fixed;
+        inset: 0;
+        z-index: 40;
+        display: grid;
+        place-items: center;
+        padding: 22px;
+        background: rgba(0, 0, 0, .72);
+      }
+      .artifact[hidden] { display: none; }
+      .artifact-dialog {
+        width: min(900px, 100%);
+        max-height: calc(var(--workspace-height) - 44px);
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        overflow: hidden;
+        border: 1px solid var(--line-strong);
+        border-radius: 15px;
+        background: var(--panel);
+      }
+      .artifact-head { padding: 11px 13px; display: flex; align-items: center; border-bottom: 1px solid var(--line); }
+      .artifact-head strong { font-size: 13px; }
+      .artifact-actions { margin-left: auto; display: flex; align-items: center; gap: 5px; }
+      .artifact-head button {
+        min-height: 28px;
+        padding: 0 8px;
+        border: 1px solid transparent;
+        border-radius: 7px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .artifact-head button:hover { border-color: var(--line); color: var(--text); }
+      .artifact pre {
+        margin: 0;
+        padding: 16px;
+        overflow: auto;
+        color: #d7d7d7;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
+      }
+      .artifact-results {
+        padding: 13px;
+        border: 1px solid var(--line);
+        border-radius: 13px;
+        background: #121212;
+      }
+      .artifact-results-title { margin-bottom: 9px; color: var(--quiet); font-size: 10px; }
+      .artifact-result-list { display: flex; flex-wrap: wrap; gap: 7px; }
+      .artifact-result {
+        min-width: 170px;
+        flex: 1 1 190px;
+        padding: 10px 11px;
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--panel);
+        text-align: left;
+      }
+      .artifact-result:hover { border-color: var(--line-strong); background: var(--panel-raised); }
+      .artifact-result-icon { color: var(--quiet); font-size: 14px; }
+      .artifact-result-copy { min-width: 0; }
+      .artifact-result-copy strong { display: block; overflow: hidden; text-overflow: ellipsis; color: var(--text); font-size: 12px; white-space: nowrap; }
+      .artifact-result-copy span { display: block; margin-top: 2px; color: var(--quiet); font-size: 10px; }
+
+      .text-entry-fields { padding: 14px; overflow: auto; }
+      .text-entry-fields label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 11px; }
+      .text-entry-fields input, .text-entry-fields textarea {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: #111;
+        color: var(--text);
+        outline: 0;
+      }
+      .text-entry-fields input { height: 38px; padding: 0 11px; }
+      .text-entry-fields textarea { min-height: 280px; margin-top: 12px; padding: 11px; resize: vertical; line-height: 1.5; }
+      .text-entry-foot { margin-top: 11px; display: flex; align-items: center; gap: 8px; }
+      .text-entry-foot span { color: var(--quiet); font-size: 10px; }
+      .text-entry-foot button { margin-left: auto; min-height: 34px; padding: 0 12px; border: 0; border-radius: 8px; background: var(--accent); color: var(--accent-text); }
+
+      @media (max-width: 760px) {
+        body { padding: 0; }
+        .workspace {
+          height: var(--workspace-height);
+          min-height: 0;
+          grid-template-columns: 1fr;
+          grid-template-rows: auto minmax(0, 1fr);
+          border: 0;
+          border-radius: 0;
+        }
+        .sidebar { max-height: 230px; border-right: 0; border-bottom: 1px solid var(--line); }
+        .project-tree { display: flex; gap: 8px; padding: 4px 10px 10px; overflow-x: auto; overflow-y: hidden; }
+        .project-group { min-width: 210px; max-width: 250px; }
+        .sidebar-foot { display: none; }
+        .chat { min-height: 0; }
+        .transcript { padding: 22px 15px 18px; }
+        .composer-wrap { padding: 0 10px 10px; }
+        .composer-bar { flex-wrap: wrap; }
+        .send { margin-left: auto; }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="workspace" id="console">
+      <aside class="sidebar" aria-label="專案與對話">
+        <div class="sidebar-head">
+          <div class="brand-row">
+            <div class="brand"><span class="brand-mark">C</span><span>家用 Codex</span></div>
+            <button class="new-chat" id="new-chat" type="button" aria-label="新增對話" title="新增對話">＋</button>
+          </div>
+        </div>
+        <nav class="project-tree" id="project-tree"></nav>
+        <div class="sidebar-foot">
+          <span class="presence" id="presence"></span>
+          <span id="host-label">連線中</span>
+          <button class="refresh-status" id="refresh-status" type="button" aria-label="重新整理">↻</button>
+        </div>
+      </aside>
+
+      <main class="chat">
+        <header class="chat-head">
+          <div class="chat-heading">
+            <h1 class="chat-title" id="chat-title">新對話</h1>
+            <div class="chat-subtitle" id="chat-subtitle">選擇專案後開始</div>
+          </div>
+          <div class="chat-actions" id="chat-actions"></div>
+        </header>
+
+        <section class="transcript" id="transcript" aria-live="polite">
+          <div class="thread" id="thread"></div>
+        </section>
+
+        <div class="composer-wrap">
+          <form class="composer" id="composer">
+            <textarea id="message" maxlength="4000" required placeholder="傳訊息給 Codex" aria-label="對話訊息"></textarea>
+            <details class="context-panel" id="context-panel">
+              <summary>背景與文字文件</summary>
+              <div class="context-fields">
+                <textarea id="context" maxlength="60000" placeholder="簡短背景、錯誤摘要或補充說明"></textarea>
+                <div class="text-artifact-tools">
+                  <button class="add-text-artifact" id="add-text-artifact" type="button">＋ 貼上文字文件</button>
+                  <span class="text-artifact-limit">TXT / MD / LOG / JSON / YAML / DIFF，最多 8 份</span>
+                </div>
+                <div class="draft-artifacts" id="draft-artifacts"></div>
+                <div class="classification-row">
+                  <label for="classification">資料分類</label>
+                  <select class="composer-select" id="classification">
+                    <option value="personal">個人資料</option>
+                    <option value="public">公開資料</option>
+                    <option value="company_approved">公司已核准資料</option>
+                  </select>
+                </div>
+                <label class="company-confirm" id="company-confirm">
+                  <input id="company-confirm-checkbox" type="checkbox" />
+                  <span>我確認這份公司內容已獲准傳送到家中主機處理。</span>
+                </label>
+                <div class="policy-note">只傳送你有權交給家中主機處理的內容；此工具不會繞過公司政策。</div>
+              </div>
+            </details>
+            <div class="composer-bar">
+              <select class="composer-select" id="mode" aria-label="執行模式">
+                <option value="plan">Plan · 唯讀</option>
+                <option value="workspace_write">Agent · 可修改</option>
+              </select>
+              <select class="composer-select" id="model" aria-label="模型">
+                <option value="">Codex 預設模型</option>
+              </select>
+              <select class="composer-select" id="effort" aria-label="推理強度">
+                <option value="">預設推理</option>
+              </select>
+              <button class="send" id="send" type="submit" aria-label="送出">↑</button>
+            </div>
+          </form>
+        </div>
+      </main>
+    </div>
+
+    <section class="artifact" id="artifact" hidden>
+      <div class="artifact-dialog" role="dialog" aria-modal="true" aria-labelledby="artifact-title">
+        <div class="artifact-head">
+          <strong id="artifact-title">內容</strong>
+          <div class="artifact-actions">
+            <button id="ask-artifact" type="button">交給 ChatGPT</button>
+            <button id="copy-artifact" type="button">複製</button>
+            <button id="download-artifact" type="button">下載</button>
+            <button id="close-artifact" type="button">關閉</button>
+          </div>
+        </div>
+        <pre id="artifact-content"></pre>
+      </div>
+    </section>
+    <section class="artifact" id="text-entry" hidden>
+      <form class="artifact-dialog" id="text-entry-form" aria-modal="true" aria-labelledby="text-entry-title">
+        <div class="artifact-head"><strong id="text-entry-title">貼上文字文件</strong><div class="artifact-actions"><button id="close-text-entry" type="button">關閉</button></div></div>
+        <div class="text-entry-fields">
+          <label for="text-entry-name">檔名</label>
+          <input id="text-entry-name" maxlength="120" value="engineering_spec.txt" placeholder="例如 engineering_spec.txt" />
+          <label for="text-entry-content" style="margin-top:12px">文件內容</label>
+          <textarea id="text-entry-content" maxlength="500000" placeholder="在這裡貼上白天整理的工程稿；內容會在送出時分段驗證。"></textarea>
+          <div class="text-entry-foot"><span>單份上限 500,000 字元／2 MB UTF-8；不接受二進位附件或本機路徑。</span><button type="submit">加入對話</button></div>
+        </div>
+      </form>
+    </section>
+    <div class="error-bar" id="error-bar" role="alert"></div>
+
+    <script>
+      (() => {
+        "use strict";
+        const $ = (selector) => document.querySelector(selector);
+        const terminal = new Set(["completed", "failed", "interrupted", "cancelled"]);
+        const state = {
+          status: null,
+          selectedJob: null,
+          selectedProjectId: "",
+          draft: {},
+          busy: false,
+          pollInFlight: false,
+          pollTimer: null,
+          cancelArmedUntil: 0,
+          expandedProjects: new Set(),
+          treeSignature: "",
+          messageSignature: "",
+          headerSignature: "",
+          modelSignature: "",
+          draftArtifacts: [],
+          hostCapabilities: {},
+          openedArtifact: null,
+        };
+        let rpcId = 0;
+        const pendingRequests = new Map();
+
+        const rpcNotify = (method, params) => window.parent.postMessage({ jsonrpc: "2.0", method, params }, "*");
+        const rpcRequest = (method, params) => new Promise((resolve, reject) => {
+          const id = ++rpcId;
+          const timer = setTimeout(() => {
+            pendingRequests.delete(id);
+            reject(new Error("主控台要求逾時，請重新整理後再試。"));
+          }, 30000);
+          pendingRequests.set(id, { resolve, reject, timer });
+          window.parent.postMessage({ jsonrpc: "2.0", id, method, params }, "*");
+        });
+
+        window.addEventListener("message", (event) => {
+          if (event.source !== window.parent) return;
+          const message = event.data;
+          if (!message || message.jsonrpc !== "2.0") return;
+          if (typeof message.id === "number") {
+            const pending = pendingRequests.get(message.id);
+            if (!pending) return;
+            clearTimeout(pending.timer);
+            pendingRequests.delete(message.id);
+            message.error ? pending.reject(message.error) : pending.resolve(message.result);
+            return;
+          }
+          if (message.method === "ui/notifications/tool-result") updateFromResponse(message.params);
+        }, { passive: true });
+
+        const bridgeReady = rpcRequest("ui/initialize", {
+          appInfo: { name: "codex-chat-workspace", version: "0.1.0" },
+          appCapabilities: {},
+          protocolVersion: "2026-01-26",
+        }).then((response) => {
+          state.hostCapabilities = response && response.hostCapabilities || {};
+          rpcNotify("ui/notifications/initialized", {});
+          return response || {};
+        });
+
+        async function callTool(name, args, options) {
+          await bridgeReady;
+          const response = await rpcRequest("tools/call", { name: name, arguments: args });
+          if (response && response.isError) {
+            throw new Error(response.content && response.content[0] && response.content[0].text || "工具執行失敗。");
+          }
+          if (!options || options.update !== false) updateFromResponse(response);
+          return options && options.envelope ? response : response && response.structuredContent;
+        }
+
+        function updateFromResponse(response) {
+          const data = response && response.structuredContent;
+          if (!data) return;
+          if (data.status && data.status.service === "codex-handoff-bridge") {
+            applyStatus(data.status);
+            state.draft = Object.assign({}, state.draft, data.draft || {});
+            if (data.selectedJob) mergeJob(data.selectedJob);
+          } else if (data.service === "codex-handoff-bridge") {
+            applyStatus(data);
+          }
+          if (data.job) mergeJob(data.job);
+          if (data.id && data.status && Array.isArray(data.messages)) mergeJob(data);
+          render();
+        }
+
+        function applyStatus(status) {
+          state.status = status;
+          (status.projects || []).forEach((project) => state.expandedProjects.add(project.id));
+          if (!state.selectedProjectId) {
+            state.selectedProjectId = state.draft.projectId || status.projects && status.projects[0] && status.projects[0].id || "";
+          }
+        }
+
+        function mergeJob(job) {
+          const changed = !state.selectedJob || state.selectedJob.id !== job.id;
+          state.selectedJob = job;
+          state.selectedProjectId = job.projectId;
+          upsertRecentJob(job);
+          if (changed) {
+            state.messageSignature = "";
+            state.headerSignature = "";
+            syncSettingsFromJob(job);
+          }
+          schedulePoll();
+        }
+
+        function upsertRecentJob(job) {
+          if (!state.status) return;
+          const jobs = (state.status.recentJobs || []).filter((item) => item.id !== job.id);
+          jobs.unshift(job);
+          state.status.recentJobs = jobs;
+          state.treeSignature = "";
+        }
+
+        function syncSettingsFromJob(job) {
+          $("#mode").value = job.executionMode || "plan";
+          $("#classification").value = job.dataClassification || "personal";
+          renderModelOptions(job.model || "", job.effort || "");
+          renderCompanyConfirmation();
+        }
+
+        function withBusy(operation) {
+          if (state.busy) return Promise.resolve();
+          state.busy = true;
+          clearError();
+          renderComposerState();
+          return Promise.resolve()
+            .then(operation)
+            .catch((error) => showError(error && error.message || String(error)))
+            .finally(() => {
+              state.busy = false;
+              render();
+            });
+        }
+
+        function startNewConversation(projectId) {
+          state.selectedJob = null;
+          state.selectedProjectId = projectId || state.selectedProjectId || firstProjectId();
+          state.messageSignature = "";
+          state.headerSignature = "";
+          state.cancelArmedUntil = 0;
+          state.draftArtifacts = [];
+          $("#message").value = state.draft.objective || "";
+          $("#context").value = state.draft.context || "";
+          $("#mode").value = state.draft.executionMode || "plan";
+          $("#classification").value = "personal";
+          renderModelOptions(state.draft.model || "", state.draft.effort || "");
+          state.draft = {};
+          render();
+          $("#message").focus();
+        }
+
+        $("#new-chat").addEventListener("click", () => startNewConversation());
+        $("#refresh-status").addEventListener("click", () => withBusy(refreshStatus));
+        $("#classification").addEventListener("change", () => {
+          state.draftArtifacts.forEach((artifact) => {
+            artifact.bundleId = "";
+            artifact.stagedKey = "";
+            artifact.clientTransferId = makeId();
+          });
+          renderCompanyConfirmation();
+          renderDraftArtifacts();
+        });
+        $("#model").addEventListener("change", () => renderEffortOptions("", true));
+        $("#add-text-artifact").addEventListener("click", openTextEntry);
+        $("#close-text-entry").addEventListener("click", closeTextEntry);
+        $("#text-entry").addEventListener("click", (event) => { if (event.target === $("#text-entry")) closeTextEntry(); });
+        $("#text-entry-form").addEventListener("submit", (event) => {
+          event.preventDefault();
+          withBusy(addDraftArtifact);
+        });
+        $("#close-artifact").addEventListener("click", closeArtifact);
+        $("#copy-artifact").addEventListener("click", () => withBusy(copyOpenedArtifact));
+        $("#download-artifact").addEventListener("click", () => withBusy(downloadOpenedArtifact));
+        $("#ask-artifact").addEventListener("click", () => withBusy(askChatGptAboutArtifact));
+        $("#artifact").addEventListener("click", (event) => { if (event.target === $("#artifact")) closeArtifact(); });
+        $("#composer").addEventListener("submit", (event) => {
+          event.preventDefault();
+          withBusy(sendMessage);
+        });
+        $("#message").addEventListener("keydown", (event) => {
+          if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+            event.preventDefault();
+            $("#composer").requestSubmit();
+          }
+        });
+
+        async function sendMessage() {
+          const message = $("#message").value.trim();
+          const context = $("#context").value.trim();
+          if (!message) throw new Error("請先輸入要交給 Codex 的內容。");
+          if (!state.selectedProjectId) throw new Error("目前沒有可用專案。");
+          const classification = $("#classification").value;
+          const companyAuthorizationConfirmed = classification === "company_approved"
+            ? $("#company-confirm-checkbox").checked
+            : undefined;
+          if (classification === "company_approved" && !companyAuthorizationConfirmed) {
+            throw new Error("請先確認公司內容已獲准傳送。");
+          }
+          const inputBundleIds = await stageDraftArtifacts(
+            state.selectedProjectId,
+            classification,
+            companyAuthorizationConfirmed,
+          );
+          const common = {
+            context: context,
+            executionMode: $("#mode").value,
+            dataClassification: classification,
+            model: $("#model").value || undefined,
+            effort: $("#effort").value || undefined,
+            inputBundleIds: inputBundleIds,
+          };
+          if (!state.selectedJob) {
+            const workPackage = Object.assign({
+              projectId: state.selectedProjectId,
+              title: deriveTitle(message),
+              objective: message,
+              acceptanceCriteria: [],
+              constraints: [],
+            }, common);
+            const preview = await callTool("codex_job_preview", workPackage);
+            await callTool("codex_job_dispatch", Object.assign({}, preview.workPackage, {
+              previewDigest: preview.previewDigest,
+              idempotencyKey: makeId(),
+              companyAuthorizationConfirmed: companyAuthorizationConfirmed,
+            }));
+          } else {
+            await callTool("codex_conversation_send", Object.assign({}, common, {
+              jobId: state.selectedJob.id,
+              clientMessageId: makeId(),
+              message: message,
+              companyAuthorizationConfirmed: companyAuthorizationConfirmed,
+            }));
+          }
+          $("#message").value = "";
+          $("#context").value = "";
+          $("#company-confirm-checkbox").checked = false;
+          $("#context-panel").open = false;
+          state.draftArtifacts = [];
+          renderDraftArtifacts();
+        }
+
+        async function refreshStatus() {
+          await callTool("codex_bridge_status", {});
+        }
+
+        function schedulePoll() {
+          clearTimeout(state.pollTimer);
+          if (!state.selectedJob || terminal.has(state.selectedJob.status) || document.hidden) return;
+          state.pollTimer = setTimeout(pollSelectedJob, 2500);
+        }
+
+        async function pollSelectedJob() {
+          const job = state.selectedJob;
+          if (!job || terminal.has(job.status) || state.pollInFlight || document.hidden) {
+            schedulePoll();
+            return;
+          }
+          state.pollInFlight = true;
+          try {
+            await callTool("codex_job_get", {
+              jobId: job.id,
+              afterSeq: Number(job.nextEventSeq || 0),
+              maxEvents: 20,
+            });
+          } catch (error) {
+            showError(error && error.message || String(error));
+          } finally {
+            state.pollInFlight = false;
+            schedulePoll();
+          }
+        }
+
+        document.addEventListener("visibilitychange", schedulePoll, { passive: true });
+
+        function render() {
+          renderPresence();
+          renderProjectTree();
+          renderHeader();
+          renderMessages();
+          renderModelOptions();
+          renderCompanyConfirmation();
+          renderDraftArtifacts();
+          renderComposerState();
+        }
+
+        function renderPresence() {
+          const ready = state.status && state.status.ok;
+          $("#presence").classList.toggle("online", Boolean(ready));
+          $("#host-label").textContent = ready
+            ? "主機在線 · " + controllerLabel(state.status.controller)
+            : "主機離線";
+        }
+
+        function renderProjectTree() {
+          const projects = state.status && state.status.projects || [];
+          const jobs = state.status && state.status.recentJobs || [];
+          const signature = JSON.stringify([
+            projects,
+            jobs.map((job) => [job.id, job.projectId, job.title, job.status, job.stateVersion]),
+            state.selectedJob && state.selectedJob.id,
+            Array.from(state.expandedProjects),
+          ]);
+          if (signature === state.treeSignature) return;
+          state.treeSignature = signature;
+          $("#project-tree").innerHTML = projects.map((project) => {
+            const projectJobs = jobs.filter((job) => job.projectId === project.id);
+            const expanded = state.expandedProjects.has(project.id);
+            const conversations = projectJobs.length
+              ? projectJobs.map((job) => {
+                  const selected = state.selectedJob && state.selectedJob.id === job.id;
+                  return '<button class="conversation-item" type="button" data-job-id="' + escapeAttr(job.id) + '" aria-current="' + String(Boolean(selected)) + '">' +
+                    '<span class="conversation-dot ' + conversationDotClass(job.status) + '"></span>' +
+                    '<span class="conversation-title">' + escapeHtml(job.title) + '</span></button>';
+                }).join("")
+              : '<div class="empty-project">尚無對話</div>';
+            return '<section class="project-group ' + (expanded ? "" : "collapsed") + '" data-project-group="' + escapeAttr(project.id) + '">' +
+              '<div class="project-row">' +
+                '<button class="project-toggle" type="button" data-project-toggle="' + escapeAttr(project.id) + '">' +
+                  '<span class="chevron">⌄</span><span class="project-name">' + escapeHtml(project.name) + '</span>' +
+                  '<span class="project-count">' + projectJobs.length + '</span>' +
+                '</button>' +
+                '<button class="project-add" type="button" data-project-new="' + escapeAttr(project.id) + '" aria-label="在此專案新增對話">＋</button>' +
+              '</div><div class="conversation-list">' + conversations + '</div></section>';
+          }).join("") || '<div class="empty-project">沒有 allowlisted 專案</div>';
+
+          document.querySelectorAll("[data-project-toggle]").forEach((button) => button.addEventListener("click", () => {
+            const id = button.dataset.projectToggle;
+            if (state.expandedProjects.has(id)) state.expandedProjects.delete(id);
+            else state.expandedProjects.add(id);
+            state.treeSignature = "";
+            renderProjectTree();
+          }));
+          document.querySelectorAll("[data-project-new]").forEach((button) => button.addEventListener("click", () => startNewConversation(button.dataset.projectNew)));
+          document.querySelectorAll("[data-job-id]").forEach((button) => button.addEventListener("click", () => withBusy(async () => {
+            await callTool("codex_job_get", { jobId: button.dataset.jobId, afterSeq: 0, maxEvents: 20 });
+          })));
+        }
+
+        function renderHeader() {
+          const job = state.selectedJob;
+          const project = currentProject();
+          const signature = JSON.stringify(job
+            ? [job.id, job.title, job.status, job.hasDiff, job.hasResult, (job.artifacts || []).map((item) => [item.id, item.sha256]), state.cancelArmedUntil > Date.now()]
+            : ["new", state.selectedProjectId]);
+          if (signature === state.headerSignature) return;
+          state.headerSignature = signature;
+          $("#chat-title").textContent = job ? job.title : "新對話";
+          $("#chat-subtitle").textContent = job
+            ? (project && project.name || job.projectName) + " · " + statusLabel(job.status)
+            : (project ? project.name + " · 新對話" : "選擇專案後開始");
+          const active = job && !terminal.has(job.status);
+          const actions = [];
+          if (active) {
+            actions.push('<button class="head-button danger" id="cancel-chat" type="button">' +
+              (state.cancelArmedUntil > Date.now() ? "再按一次取消" : "停止") + '</button>');
+          }
+          if (job) {
+            actions.push('<details class="more"><summary aria-label="更多">•••</summary><div class="more-menu">' +
+              '<button type="button" data-artifact="request">查看工作包</button>' +
+              '<button type="button" data-artifact="response" ' + (job.artifacts && job.artifacts.some((item) => item.id === "response") ? "" : "disabled") + '>查看回覆</button>' +
+              '<button type="button" data-artifact="diff" ' + (job.hasDiff ? "" : "disabled") + '>查看 Diff</button>' +
+              '</div></details>');
+          }
+          $("#chat-actions").innerHTML = actions.join("");
+          const cancel = $("#cancel-chat");
+          if (cancel) cancel.addEventListener("click", cancelConversation);
+          document.querySelectorAll("[data-artifact]").forEach((button) => button.addEventListener("click", () => loadArtifact(button.dataset.artifact)));
+        }
+
+        function renderMessages() {
+          const job = state.selectedJob;
+          const project = currentProject();
+          if (!job) {
+            const signature = "empty:" + state.selectedProjectId;
+            if (signature === state.messageSignature) return;
+            state.messageSignature = signature;
+            $("#thread").innerHTML = '<div class="empty-chat"><div><strong>' +
+              escapeHtml(project ? "在 " + project.name + " 開始" : "開始一個 Codex 對話") +
+              '</strong><span>輸入任務、問題或要續作的背景；選項都在輸入框下方。</span></div></div>';
+            return;
+          }
+          const messages = Array.isArray(job.messages) ? job.messages : [];
+          const approvals = Array.isArray(job.approvals) ? job.approvals.filter((approval) => approval.state === "pending") : [];
+          const active = !terminal.has(job.status);
+          const signature = JSON.stringify([
+            messages.map((message) => [message.id, message.content, message.context, message.resultStatus, message.inputArtifacts]),
+            approvals.map((approval) => [approval.id, approval.state]),
+            job.status,
+            (job.artifacts || []).map((artifact) => [artifact.id, artifact.sha256]),
+          ]);
+          if (signature === state.messageSignature) return;
+          const transcript = $("#transcript");
+          const nearBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 120;
+          state.messageSignature = signature;
+          const content = messages.map(renderMessage).join("") +
+            approvals.map(renderApproval).join("") +
+            renderArtifactResults(job.artifacts || []) +
+            (active ? '<article class="message assistant"><div class="message-meta">Codex · ' + escapeHtml(statusLabel(job.status)) + '</div><div class="typing"><i></i><i></i><i></i><span>Codex 正在處理</span></div></article>' : "");
+          $("#thread").innerHTML = content || '<div class="empty-chat"><div><strong>對話尚未留下訊息</strong></div></div>';
+          document.querySelectorAll("[data-approval]").forEach((button) => button.addEventListener("click", () => {
+            decideApproval(button.dataset.approval, button.dataset.decision);
+          }));
+          document.querySelectorAll("[data-result-artifact]").forEach((button) => button.addEventListener("click", () => {
+            loadArtifact(button.dataset.resultArtifact);
+          }));
+          if (nearBottom || !messages.length) requestAnimationFrame(() => { transcript.scrollTop = transcript.scrollHeight; });
+        }
+
+        function renderMessage(message) {
+          const failed = message.resultStatus && message.resultStatus !== "completed";
+          const meta = message.role === "user"
+            ? "你 · " + formatTime(message.at)
+            : "Codex · " + formatTime(message.at);
+          const context = message.context
+            ? '<details class="message-context"><summary>附加背景與檔案內容</summary><pre>' + escapeHtml(message.context) + '</pre></details>'
+            : "";
+          const inputArtifacts = Array.isArray(message.inputArtifacts) && message.inputArtifacts.length
+            ? '<div class="message-artifacts">' + message.inputArtifacts.map((artifact) =>
+                '<span class="message-artifact"><span>▧</span><strong>' + escapeHtml(artifact.fileName) + '</strong><span>' +
+                escapeHtml(formatBytes(artifact.bytes)) + '</span></span>'
+              ).join("") + '</div>'
+            : "";
+          return '<article class="message ' + escapeAttr(message.role) + (failed ? " failed" : "") + '">' +
+            '<div class="message-meta">' + escapeHtml(meta) + '</div>' +
+            '<div class="message-body">' + escapeHtml(message.content) + '</div>' + inputArtifacts + context + '</article>';
+        }
+
+        function renderArtifactResults(artifacts) {
+          if (!artifacts.length) return "";
+          return '<article class="artifact-results"><div class="artifact-results-title">工作成品 · 點選預覽、複製或下載</div><div class="artifact-result-list">' +
+            artifacts.map((artifact) => '<button class="artifact-result" type="button" data-result-artifact="' + escapeAttr(artifact.id) + '">' +
+              '<span class="artifact-result-icon">▧</span><span class="artifact-result-copy"><strong>' + escapeHtml(artifact.name) +
+              '</strong><span>' + escapeHtml(formatBytes(artifact.bytes)) + ' · SHA ' + escapeHtml(artifact.sha256.slice(0, 8)) + '</span></span></button>').join("") +
+            '</div></article>';
+        }
+
+        function renderApproval(approval) {
+          const title = approval.kind === "command" ? "Codex 要求執行命令" : "Codex 要求套用檔案變更";
+          return '<article class="approval-card"><div class="approval-top"><div class="approval-title">' +
+            escapeHtml(title) + '</div><span class="chat-subtitle">只核准這一次</span></div>' +
+            '<pre>' + escapeHtml(JSON.stringify(approval.summary || {}, null, 2)) + '</pre>' +
+            '<div class="approval-actions"><button type="button" data-approval="' + escapeAttr(approval.id) +
+            '" data-decision="decline">拒絕</button><button class="accept" type="button" data-approval="' +
+            escapeAttr(approval.id) + '" data-decision="accept">核准</button></div></article>';
+        }
+
+        function renderModelOptions(preferredModel, preferredEffort) {
+          const models = state.status && state.status.models || [];
+          const signature = JSON.stringify(models.map((model) => [
+            model.id,
+            model.displayName,
+            model.isDefault,
+            model.defaultReasoningEffort,
+            model.supportedReasoningEfforts,
+          ]));
+          const modelSelect = $("#model");
+          const currentModel = preferredModel !== undefined ? preferredModel : modelSelect.value;
+          if (signature !== state.modelSignature) {
+            state.modelSignature = signature;
+            const defaultModel = models.find((model) => model.isDefault);
+            modelSelect.innerHTML = '<option value="">自動' +
+              (defaultModel ? " · " + escapeHtml(defaultModel.displayName) : " · Codex 預設") + '</option>' +
+              models.map((model) => '<option value="' + escapeAttr(model.id) + '">' +
+                escapeHtml(model.displayName) + (model.isDefault ? " · 預設" : "") + '</option>').join("");
+          }
+          if (Array.from(modelSelect.options).some((option) => option.value === (currentModel || ""))) {
+            modelSelect.value = currentModel || "";
+          }
+          renderEffortOptions(preferredEffort, false);
+        }
+
+        function renderEffortOptions(preferredEffort, preserveCurrent) {
+          const models = state.status && state.status.models || [];
+          const selectedModel = models.find((model) => model.id === $("#model").value)
+            || models.find((model) => model.isDefault)
+            || models[0];
+          const effortSelect = $("#effort");
+          const current = preserveCurrent ? effortSelect.value : (preferredEffort !== undefined ? preferredEffort : effortSelect.value);
+          const efforts = selectedModel && selectedModel.supportedReasoningEfforts || [];
+          effortSelect.innerHTML = '<option value="">預設推理' +
+            (selectedModel && selectedModel.defaultReasoningEffort ? " · " + effortLabel(selectedModel.defaultReasoningEffort) : "") +
+            '</option>' + efforts.map((option) => '<option value="' + escapeAttr(option.reasoningEffort) + '">' +
+              escapeHtml(effortLabel(option.reasoningEffort)) + '</option>').join("");
+          effortSelect.value = Array.from(effortSelect.options).some((option) => option.value === (current || "")) ? (current || "") : "";
+        }
+
+        function renderCompanyConfirmation() {
+          const visible = $("#classification").value === "company_approved";
+          $("#company-confirm").classList.toggle("visible", visible);
+          if (!visible) $("#company-confirm-checkbox").checked = false;
+        }
+
+        function openTextEntry() {
+          if (state.draftArtifacts.length >= 8) {
+            showError("每次最多加入 8 份文字文件。");
+            return;
+          }
+          $("#text-entry-name").value = "engineering_spec.txt";
+          $("#text-entry-content").value = "";
+          $("#text-entry").hidden = false;
+          requestAnimationFrame(() => $("#text-entry-content").focus());
+        }
+
+        function closeTextEntry() {
+          $("#text-entry").hidden = true;
+        }
+
+        async function addDraftArtifact() {
+          const fileName = $("#text-entry-name").value.trim().normalize("NFC");
+          const content = $("#text-entry-content").value;
+          if (!fileName || fileName.length > 120 || fileName.includes("/") || fileName.includes("\\") || fileName.includes("..")) {
+            throw new Error("請輸入安全的文字檔名，不可包含路徑或 ..。");
+          }
+          const mimeType = mimeForFilename(fileName);
+          if (!mimeType) throw new Error("僅支援 TXT、MD、LOG、JSON、YAML、YML、DIFF、PATCH。");
+          if (!content) throw new Error("文字文件內容不可為空白。");
+          const bytes = new TextEncoder().encode(content).byteLength;
+          if (content.length > 500000 || bytes > 2000000) throw new Error("單份文字文件不可超過 500,000 字元或 2 MB UTF-8。");
+          if (state.draftArtifacts.reduce((sum, artifact) => sum + artifact.bytes, 0) + bytes > 2000000) {
+            throw new Error("本次所有文字文件合計不可超過 2 MB UTF-8。");
+          }
+          state.draftArtifacts.push({
+            clientTransferId: makeId(),
+            fileName: fileName,
+            mimeType: mimeType,
+            content: content,
+            chars: content.length,
+            bytes: bytes,
+            sha256: await sha256Text(content),
+            status: "等待送出",
+            bundleId: "",
+            stagedKey: "",
+          });
+          closeTextEntry();
+          $("#context-panel").open = true;
+          renderDraftArtifacts();
+        }
+
+        function renderDraftArtifacts() {
+          $("#draft-artifacts").innerHTML = state.draftArtifacts.map((artifact, index) =>
+            '<span class="draft-artifact"><span>▧</span><strong title="' + escapeAttr(artifact.fileName) + '">' +
+            escapeHtml(artifact.fileName) + '</strong><span>' + escapeHtml(formatBytes(artifact.bytes)) +
+            ' · ' + escapeHtml(artifact.status) + '</span><button type="button" data-remove-draft="' + index + '" aria-label="移除">×</button></span>'
+          ).join("");
+          document.querySelectorAll("[data-remove-draft]").forEach((button) => button.addEventListener("click", () => {
+            if (state.busy) return;
+            state.draftArtifacts.splice(Number(button.dataset.removeDraft), 1);
+            renderDraftArtifacts();
+          }));
+        }
+
+        async function stageDraftArtifacts(projectId, classification, companyAuthorizationConfirmed) {
+          if (!state.draftArtifacts.length) return [];
+          const bundleIds = [];
+          for (const artifact of state.draftArtifacts) {
+            const stagedKey = [projectId, classification, artifact.sha256].join(":");
+            if (artifact.bundleId && artifact.stagedKey === stagedKey) {
+              bundleIds.push(artifact.bundleId);
+              continue;
+            }
+            artifact.status = "準備中";
+            renderDraftArtifacts();
+            const chunks = splitText(artifact.content, 10000);
+            const begun = await callTool("codex_text_bundle_begin", {
+              clientTransferId: artifact.clientTransferId,
+              projectId: projectId,
+              fileName: artifact.fileName,
+              mimeType: artifact.mimeType,
+              dataClassification: classification,
+              totalChars: artifact.chars,
+              totalBytes: artifact.bytes,
+              sha256: artifact.sha256,
+              chunkCount: chunks.length,
+              companyAuthorizationConfirmed: companyAuthorizationConfirmed,
+            }, { update: false });
+            artifact.bundleId = begun.bundleId;
+            for (let index = 0; index < chunks.length; index += 1) {
+              artifact.status = "傳送 " + (index + 1) + "/" + chunks.length;
+              renderDraftArtifacts();
+              await callTool("codex_text_bundle_append", {
+                bundleId: artifact.bundleId,
+                index: index,
+                content: chunks[index],
+                sha256: await sha256Text(chunks[index]),
+              }, { update: false });
+            }
+            await callTool("codex_text_bundle_finalize", { bundleId: artifact.bundleId }, { update: false });
+            artifact.status = "已驗證";
+            artifact.stagedKey = stagedKey;
+            renderDraftArtifacts();
+            bundleIds.push(artifact.bundleId);
+          }
+          return bundleIds;
+        }
+
+        function splitText(content, maxChars) {
+          const chunks = [];
+          let start = 0;
+          while (start < content.length) {
+            let end = Math.min(content.length, start + maxChars);
+            if (end < content.length && /[\uD800-\uDBFF]/.test(content.charAt(end - 1)) && /[\uDC00-\uDFFF]/.test(content.charAt(end))) end -= 1;
+            chunks.push(content.slice(start, end));
+            start = end;
+          }
+          return chunks;
+        }
+
+        async function sha256Text(content) {
+          if (!globalThis.crypto || !globalThis.crypto.subtle) throw new Error("目前 host 不支援 SHA-256，無法安全傳送文字文件。");
+          const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(content));
+          return Array.from(new Uint8Array(digest)).map((value) => value.toString(16).padStart(2, "0")).join("");
+        }
+
+        function mimeForFilename(fileName) {
+          const extension = (fileName.toLowerCase().match(/\.[^.]+$/) || [""])[0];
+          return ({
+            ".txt": "text/plain",
+            ".log": "text/plain",
+            ".md": "text/markdown",
+            ".json": "application/json",
+            ".yaml": "application/yaml",
+            ".yml": "application/yaml",
+            ".diff": "text/x-diff",
+            ".patch": "text/x-patch",
+          })[extension] || "";
+        }
+
+        function renderComposerState() {
+          const job = state.selectedJob;
+          const active = job && !terminal.has(job.status);
+          const hasProject = Boolean(state.selectedProjectId);
+          $("#send").disabled = state.busy || !hasProject;
+          $("#send").classList.toggle("busy", state.busy);
+          $("#send").textContent = state.busy ? "…" : "↑";
+          $("#mode").disabled = state.busy || Boolean(active);
+          $("#model").disabled = state.busy || Boolean(active);
+          $("#effort").disabled = state.busy || Boolean(active);
+          $("#classification").disabled = state.busy;
+          $("#message").disabled = state.busy || !hasProject;
+          $("#context").disabled = state.busy || !hasProject;
+          $("#add-text-artifact").disabled = state.busy || !hasProject || state.draftArtifacts.length >= 8;
+          $("#message").placeholder = active ? "補充方向給正在執行的 Codex" : "傳訊息給 Codex";
+        }
+
+        function decideApproval(approvalId, decision) {
+          withBusy(async () => {
+            await callTool("codex_approval_decide", {
+              jobId: state.selectedJob.id,
+              approvalId: approvalId,
+              decision: decision,
+            });
+          });
+        }
+
+        function cancelConversation() {
+          const now = Date.now();
+          if (state.cancelArmedUntil < now) {
+            state.cancelArmedUntil = now + 4000;
+            state.headerSignature = "";
+            renderHeader();
+            setTimeout(() => {
+              if (state.cancelArmedUntil <= Date.now()) {
+                state.cancelArmedUntil = 0;
+                state.headerSignature = "";
+                renderHeader();
+              }
+            }, 4100);
+            return;
+          }
+          state.cancelArmedUntil = 0;
+          withBusy(async () => {
+            await callTool("codex_job_cancel", { jobId: state.selectedJob.id });
+          });
+        }
+
+        function loadArtifact(artifact) {
+          withBusy(async () => {
+            let cursor = 0;
+            let content = "";
+            let metadata = null;
+            do {
+              const response = await callTool("codex_artifact_read_chunk", {
+                jobId: state.selectedJob.id,
+                artifact: artifact,
+                cursor: cursor,
+                maxChars: 20000,
+              }, { update: false, envelope: true });
+              metadata = response && response.structuredContent && response.structuredContent.artifact;
+              const chunk = response && response._meta && response._meta.artifactContent;
+              if (!metadata || typeof chunk !== "string") throw new Error("Host 沒有回傳可供 Widget 讀取的成品內容。");
+              content += chunk;
+              cursor = metadata.nextCursor;
+            } while (cursor !== undefined && cursor !== null);
+            state.openedArtifact = {
+              id: artifact,
+              jobId: state.selectedJob.id,
+              name: metadata.name,
+              mimeType: metadata.mimeType,
+              content: content,
+            };
+            $("#artifact-title").textContent = artifactLabel(artifact) + " · " + metadata.name;
+            $("#artifact-content").textContent = content;
+            $("#artifact").hidden = false;
+          });
+        }
+
+        function closeArtifact() {
+          $("#artifact").hidden = true;
+          $("#artifact-content").textContent = "";
+          state.openedArtifact = null;
+        }
+
+        async function copyOpenedArtifact() {
+          const opened = state.openedArtifact;
+          if (!opened) throw new Error("目前沒有開啟的成品。");
+          await copyText(opened.content);
+          showNotice("已複製 " + opened.name + "。你可以直接貼回公司端的工程稿或 ChatGPT 對話。");
+        }
+
+        async function downloadOpenedArtifact() {
+          const opened = state.openedArtifact;
+          if (!opened) throw new Error("目前沒有開啟的成品。");
+          if (state.hostCapabilities && state.hostCapabilities.downloadFile) {
+            await rpcRequest("ui/download-file", {
+              contents: [{
+                type: "resource",
+                resource: {
+                  uri: "ui://codex-bridge/artifacts/" + encodeURIComponent(opened.jobId) + "/" + encodeURIComponent(opened.id),
+                  mimeType: opened.mimeType,
+                  text: opened.content,
+                },
+              }],
+            });
+            showNotice("已交給 ChatGPT 下載 " + opened.name + "。");
+            return;
+          }
+          await copyText(opened.content);
+          showNotice("這個 ChatGPT host 尚未提供下載能力，內容已改為複製到剪貼簿。");
+        }
+
+        async function askChatGptAboutArtifact() {
+          const opened = state.openedArtifact;
+          if (!opened) throw new Error("目前沒有開啟的成品。");
+          await rpcRequest("ui/message", {
+            role: "user",
+            content: [{
+              type: "text",
+              text: "請讀取 Codex Bridge 工作 " + opened.jobId + " 的 " + opened.id + " 成品，幫我審核與整理重點。必要時呼叫 codex_artifact_get。",
+            }],
+          });
+          closeArtifact();
+        }
+
+        async function copyText(content) {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(content);
+            return;
+          }
+          const textarea = document.createElement("textarea");
+          textarea.value = content;
+          textarea.style.position = "fixed";
+          textarea.style.opacity = "0";
+          document.body.appendChild(textarea);
+          textarea.select();
+          const copied = document.execCommand("copy");
+          textarea.remove();
+          if (!copied) throw new Error("無法存取剪貼簿，請在預覽框內手動全選複製。");
+        }
+
+        function artifactLabel(value) {
+          return ({ request: "工作包", response: "Codex 回覆", diff: "Diff" })[value] || "成品";
+        }
+
+        function currentProject() {
+          const projects = state.status && state.status.projects || [];
+          return projects.find((project) => project.id === state.selectedProjectId);
+        }
+
+        function firstProjectId() {
+          return state.status && state.status.projects && state.status.projects[0] && state.status.projects[0].id || "";
+        }
+
+        function controllerLabel(value) {
+          return ({ idle: "待命", starting: "啟動中", ready: "可用", unavailable: "無法使用" })[value] || "尚未啟動";
+        }
+
+        function statusLabel(value) {
+          return ({
+            queued: "排隊中",
+            preparing: "準備中",
+            running: "執行中",
+            awaiting_approval: "等待核准",
+            completed: "已完成",
+            failed: "失敗",
+            interrupted: "已中斷",
+            cancelled: "已取消",
+          })[value] || value || "待命";
+        }
+
+        function conversationDotClass(status) {
+          if (status === "awaiting_approval") return "approval";
+          if (["queued", "preparing", "running"].includes(status)) return "active";
+          if (["failed", "interrupted", "cancelled"].includes(status)) return "failed";
+          return "";
+        }
+
+        function effortLabel(value) {
+          return ({ minimal: "極低", low: "低", medium: "中", high: "高", xhigh: "極高", max: "最大", ultra: "Ultra" })[value] || value;
+        }
+
+        function deriveTitle(message) {
+          const firstLine = message.split(/\r?\n/).find((line) => line.trim()) || "新對話";
+          return firstLine.trim().slice(0, 60);
+        }
+
+        function formatTime(value) {
+          if (!value) return "";
+          try {
+            return new Date(value).toLocaleString("zh-TW", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+          } catch {
+            return "";
+          }
+        }
+
+        function makeId() {
+          return globalThis.crypto && globalThis.crypto.randomUUID
+            ? globalThis.crypto.randomUUID()
+            : "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (char) => {
+                const value = Math.random() * 16 | 0;
+                return (char === "x" ? value : (value & 3 | 8)).toString(16);
+              });
+        }
+
+        function formatBytes(value) {
+          const bytes = Number(value || 0);
+          if (bytes < 1024) return bytes + " B";
+          if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(bytes < 10240 ? 1 : 0) + " KB";
+          return (bytes / 1024 / 1024).toFixed(1) + " MB";
+        }
+
+        function showError(message) {
+          $("#error-bar").textContent = message;
+          $("#error-bar").classList.remove("notice");
+          $("#error-bar").classList.add("visible");
+          setTimeout(() => $("#error-bar").classList.remove("visible"), 8000);
+        }
+
+        function showNotice(message) {
+          $("#error-bar").textContent = message;
+          $("#error-bar").classList.add("notice", "visible");
+          setTimeout(() => $("#error-bar").classList.remove("visible", "notice"), 5000);
+        }
+
+        function clearError() {
+          $("#error-bar").textContent = "";
+          $("#error-bar").classList.remove("visible", "notice");
+        }
+
+        function escapeHtml(value) {
+          return String(value == null ? "" : value).replace(/[&<>"']/g, (char) => ({
+            "&": "&amp;",
+            "<": "&lt;",
+            ">": "&gt;",
+            '"': "&quot;",
+            "'": "&#039;",
+          })[char]);
+        }
+
+        function escapeAttr(value) { return escapeHtml(value); }
+
+        bridgeReady.then(async () => {
+          updateFromResponse({ structuredContent: window.openai && window.openai.toolOutput });
+          await refreshStatus();
+          if (!state.selectedJob) startNewConversation(state.draft.projectId || state.selectedProjectId);
+        }).catch((error) => showError("無法連接 MCP Apps host：" + (error && error.message || String(error))));
+      })();
+    </script>
+  </body>
+</html>

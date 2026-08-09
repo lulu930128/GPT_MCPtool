@@ -1,0 +1,49 @@
+{
+  "name": "codex-handoff-bridge",
+  "version": "0.1.0",
+  "description": "Private MCP Apps control plane for handing ChatGPT work packages to a local Codex App Server.",
+  "type": "module",
+  "bin": {
+    "codex-handoff-bridge": "./dist/src/http-main.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test --test-isolation=none dist/tests/*.test.js",
+    "smoke:http": "npm run build && node scripts/smoke-http.mjs",
+    "smoke:mcp": "node scripts/smoke-live-mcp.mjs",
+    "smoke:codex": "node scripts/smoke-live-codex.mjs",
+    "doctor:app-server": "npm run build && node scripts/doctor-app-server.mjs",
+    "widget:check": "node scripts/check-widget.mjs",
+    "tray:selftest": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tray.ps1 -SelfTest",
+    "tunnel:selftest": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action SelfTest",
+    "tunnel:init": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action Init",
+    "tunnel:key:save": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action SaveKey",
+    "tunnel:key:save-from-env": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action SaveKeyFromEnv",
+    "tunnel:key:status": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action KeyStatus",
+    "tunnel:doctor": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action Doctor -Explain",
+    "tunnel:run": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action Run",
+    "startup:install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-startup.ps1",
+    "start": "node dist/src/http-main.js"
+  },
+  "keywords": [
+    "codex",
+    "mcp",
+    "mcp-apps",
+    "chatgpt"
+  ],
+  "license": "UNLICENSED",
+  "private": true,
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "^1.0.1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@openai/codex": "0.146.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
