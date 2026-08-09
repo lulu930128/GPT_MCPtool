@@ -17,6 +17,7 @@ Canonical endpoint：
 
 ```text
 POST /api/ai/ask
+GET  /api/ai/refresh-status/{job_id}
 ```
 
 Adapter 固定：
@@ -43,6 +44,7 @@ Adapter 只能投影自己的安全 surface：隱藏固定 trust flags、限制�
 `tools/list` 只暴露：
 
 - `omi.ask`
+- `omi.read_refresh_status`
 - `omi.read_market_overview`
 - `omi.read_stock_context`
 - `omi.read_data_freshness`
@@ -50,6 +52,8 @@ Adapter 只能投影自己的安全 surface：隱藏固定 trust flags、限制�
 - `omi.read_capability_status`
 
 Shortcuts 只能把 tool 名稱與明確 arguments 映射成 canonical target/parameters，固定 `mode=data_only`。不得分析自然語言後改變 target 或 refresh。
+
+`omi.read_refresh_status` 只能把正整數 `job_id` 機械映射到專用的 redacted backend endpoint；不得改讀 generic job route、重建 evidence 或宣稱 operation 完成等於資料已更新。
 
 `omi.search` 只保留為不公開的 legacy callable alias。只有 legacy alias 可把 `query`、`stock_id`、`symbol` 轉成 canonical fields；`omi.ask` 不得使用這些欄位推斷 target。
 

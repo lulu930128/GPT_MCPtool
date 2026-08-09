@@ -164,6 +164,7 @@ class OmiSearchHttpServerTests(unittest.TestCase):
                 [tool["name"] for tool in tools_body["result"]["tools"]],
                 [
                     "omi.ask",
+                    "omi.read_refresh_status",
                     "omi.read_market_overview",
                     "omi.read_stock_context",
                     "omi.read_data_freshness",
@@ -185,6 +186,47 @@ class OmiSearchHttpServerTests(unittest.TestCase):
 
             self.assertEqual(status, 400)
             self.assertEqual(body["error"]["code"], -32000)
+        finally:
+            handle.close()
+
+    def test_refresh_status_tool_call_uses_session_and_redacted_route(self) -> None:
+        handle = HttpServerHandle()
+        try:
+            _status, _body, headers = request_json(
+                f"{handle.base_url}/mcp",
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+                method="POST",
+            )
+            session_id = headers.get("Mcp-Session-Id") or ""
+            backend_response = {
+                "job_id": 52,
+                "operation": {"status": "completed"},
+                "evidence": {"status": "rebuild_required"},
+            }
+
+            with patch(
+                "http_server.omi_search_stdio._api_request",
+                return_value=backend_response,
+            ) as upstream:
+                status, body, _headers = request_json(
+                    f"{handle.base_url}/mcp",
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "omi.read_refresh_status",
+                            "arguments": {"job_id": 52},
+                        },
+                    },
+                    method="POST",
+                    headers={"Mcp-Session-Id": session_id},
+                )
+
+            self.assertEqual(status, 200)
+            self.assertFalse(body["result"]["isError"])
+            self.assertEqual(body["result"]["structuredContent"], backend_response)
+            upstream.assert_called_once_with("GET", "/api/ai/refresh-status/52")
         finally:
             handle.close()
 

@@ -182,7 +182,20 @@ class OmiSearchMappingTests(unittest.TestCase):
                     "title": "Backend Ask OMI",
                     "description": "backend-owned",
                     "input_schema": source_schema,
-                }
+                },
+                {
+                    "name": "omi.read_refresh_status",
+                    "title": "Backend Refresh Status",
+                    "description": "backend-owned status schema",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "job_id": {"type": "integer", "minimum": 1}
+                        },
+                        "required": ["job_id"],
+                        "additionalProperties": False,
+                    },
+                },
             ]
         }
 
@@ -196,7 +209,7 @@ class OmiSearchMappingTests(unittest.TestCase):
             "/api/ai/tools",
             timeout_seconds=self.server.SCHEMA_TIMEOUT_SECONDS,
         )
-        self.assertEqual(len(tools), 6)
+        self.assertEqual(len(tools), 7)
         ask = tools[0]
         self.assertEqual(ask["title"], "Backend Ask OMI")
         properties = ask["inputSchema"]["properties"]
@@ -211,6 +224,10 @@ class OmiSearchMappingTests(unittest.TestCase):
             ask["inputSchema"]["x-omi-public-contract-digest"],
             source_schema["x-omi-public-contract-digest"],
         )
+        status = tools[1]
+        self.assertEqual(status["name"], "omi.read_refresh_status")
+        self.assertEqual(status["title"], "Backend Refresh Status")
+        self.assertEqual(status["inputSchema"]["required"], ["job_id"])
 
     def test_tools_list_falls_back_to_generated_snapshot(self) -> None:
         with patch.object(
@@ -220,6 +237,7 @@ class OmiSearchMappingTests(unittest.TestCase):
 
         self.assertIs(tools, self.server.PUBLIC_TOOLS)
         self.assertEqual(tools[0]["name"], "omi.ask")
+        self.assertEqual(tools[1]["name"], "omi.read_refresh_status")
 
     def test_snapshot_contract_metadata_survives_adapter_projection(self) -> None:
         snapshot = self.server.PUBLIC_CONTRACT_SNAPSHOT
@@ -253,6 +271,7 @@ class OmiSearchMappingTests(unittest.TestCase):
             names,
             [
                 "omi.ask",
+                "omi.read_refresh_status",
                 "omi.read_market_overview",
                 "omi.read_stock_context",
                 "omi.read_data_freshness",
@@ -261,6 +280,29 @@ class OmiSearchMappingTests(unittest.TestCase):
             ],
         )
         self.assertNotIn("omi.search", names)
+
+    def test_refresh_status_maps_to_dedicated_redacted_endpoint(self) -> None:
+        backend_response = {
+            "job_id": 41,
+            "operation": {"status": "completed"},
+            "evidence": {"status": "rebuild_required"},
+        }
+        with patch.object(
+            self.server, "_api_request", return_value=backend_response
+        ) as request:
+            result = self.server._call_tool(
+                "omi.read_refresh_status", {"job_id": 41}
+            )
+
+        self.assertIs(result, backend_response)
+        request.assert_called_once_with("GET", "/api/ai/refresh-status/41")
+
+        for invalid in (None, True, 0, -1, "41"):
+            with self.subTest(job_id=invalid):
+                with self.assertRaisesRegex(ValueError, "positive integer"):
+                    self.server._call_tool(
+                        "omi.read_refresh_status", {"job_id": invalid}
+                    )
 
     def test_legacy_omi_search_remains_callable(self) -> None:
         response = {"contract_version": "omi.decision.v4", "answer": "ok"}

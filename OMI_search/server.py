@@ -32,7 +32,7 @@ _configure_stdio()
 
 PROTOCOL_VERSION = "2025-06-18"
 SERVER_NAME = "omi-search-mcp"
-SERVER_VERSION = "0.3.0"
+SERVER_VERSION = "0.4.0"
 API_BASE_URL = (
     os.environ.get("OMI_SEARCH_API_BASE_URL")
     or os.environ.get("OMI_API_BASE_URL")
@@ -125,6 +125,29 @@ def _fallback_ask_source() -> dict[str, Any]:
         "title": "Ask OMI",
         "description": "Read the canonical OMI decision envelope.",
         "input_schema": schema,
+    }
+
+
+def _fallback_refresh_status_source() -> dict[str, Any]:
+    return {
+        "name": "omi.read_refresh_status",
+        "title": "Read OMI Refresh Status",
+        "description": (
+            "Read one redacted ai.tool_refresh background job. Operation "
+            "completion never implies fresh evidence; completed jobs return a "
+            "cache-only omi.ask resume template."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "job_id": {
+                    "type": "integer",
+                    "minimum": 1,
+                }
+            },
+            "required": ["job_id"],
+            "additionalProperties": False,
+        },
     }
 
 
@@ -246,7 +269,10 @@ def _shortcut_input_schema(
     return schema
 
 
-def _build_public_tools(ask_source: dict[str, Any]) -> list[dict[str, Any]]:
+def _build_public_tools(
+    ask_source: dict[str, Any],
+    refresh_status_source: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     source_schema = ask_source.get("input_schema")
     if not isinstance(source_schema, dict):
         source_schema = ask_source.get("inputSchema")
@@ -261,6 +287,21 @@ def _build_public_tools(ask_source: dict[str, Any]) -> list[dict[str, Any]]:
         ),
         "inputSchema": ask_schema,
     }
+    status_source = refresh_status_source or _fallback_refresh_status_source()
+    status_schema = status_source.get("input_schema")
+    if not isinstance(status_schema, dict):
+        status_schema = status_source.get("inputSchema")
+    if not isinstance(status_schema, dict):
+        status_schema = _fallback_refresh_status_source()["input_schema"]
+    refresh_status_tool = {
+        "name": "omi.read_refresh_status",
+        "title": str(status_source.get("title") or "Read OMI Refresh Status"),
+        "description": str(
+            status_source.get("description")
+            or _fallback_refresh_status_source()["description"]
+        ),
+        "inputSchema": deepcopy(status_schema),
+    }
 
     market_schema = {
         "type": "string",
@@ -268,6 +309,7 @@ def _build_public_tools(ask_source: dict[str, Any]) -> list[dict[str, Any]]:
     }
     tools = [
         ask_tool,
+        refresh_status_tool,
         {
             "name": "omi.read_market_overview",
             "title": "Read OMI Market Overview",
@@ -372,7 +414,10 @@ def _build_public_tools(ask_source: dict[str, Any]) -> list[dict[str, Any]]:
     return tools
 
 
-PUBLIC_TOOLS = _build_public_tools(_fallback_ask_source())
+PUBLIC_TOOLS = _build_public_tools(
+    _fallback_ask_source(),
+    _fallback_refresh_status_source(),
+)
 TOOLS = PUBLIC_TOOLS
 ASK_TOOL = PUBLIC_TOOLS[0]
 LEGACY_TOOL_ALIASES = {"omi.search": "omi.ask"}
@@ -519,7 +564,16 @@ def _backend_public_tools() -> list[dict[str, Any]]:
     )
     if ask_source is None:
         raise RuntimeError("OMI backend tool catalog did not expose omi.ask.")
-    return _build_public_tools(ask_source)
+    refresh_status_source = next(
+        (
+            item
+            for item in backend_tools
+            if isinstance(item, dict)
+            and item.get("name") == "omi.read_refresh_status"
+        ),
+        None,
+    )
+    return _build_public_tools(ask_source, refresh_status_source)
 
 
 def _tools_for_client() -> list[dict[str, Any]]:
@@ -618,6 +672,16 @@ def _search(
         or response.get("contract_version") != "omi.decision.v4"
     ):
         raise RuntimeError("OMI backend returned a non-v4 public ask response.")
+    return response
+
+
+def _read_refresh_status(arguments: dict[str, Any]) -> dict[str, Any]:
+    job_id = arguments.get("job_id")
+    if isinstance(job_id, bool) or not isinstance(job_id, int) or job_id < 1:
+        raise ValueError("job_id must be a positive integer")
+    response = _api_request("GET", f"/api/ai/refresh-status/{job_id}")
+    if not isinstance(response, dict):
+        raise RuntimeError("OMI backend returned a malformed refresh-status response.")
     return response
 
 
@@ -753,6 +817,8 @@ def _capability_status_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
 def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
     if name == "omi.ask":
         return _search(arguments)
+    if name == "omi.read_refresh_status":
+        return _read_refresh_status(arguments)
     if name in LEGACY_TOOL_ALIASES:
         return _search(arguments, allow_legacy_aliases=True)
     if name == "omi.read_market_overview":
@@ -789,6 +855,7 @@ def _handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
                 },
                 "instructions": (
                     "Use omi.ask as the canonical read-only OMI entry point. "
+                    "Use omi.read_refresh_status for a returned background refresh job. "
                     "The adapter maps MCP fields to POST /api/ai/ask, fixes "
                     "allow_llm=false and allow_write=false, and returns the unchanged "
                     "omi.decision.v4 envelope. OMI backend owns all market and answer "

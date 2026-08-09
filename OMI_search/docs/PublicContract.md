@@ -11,6 +11,7 @@ MCP client
   -> OMI_search
   -> GET  /api/ai/tools      (schema owner)
   -> POST /api/ai/ask        (decision owner)
+  -> GET  /api/ai/refresh-status/{job_id} (redacted job status)
   -> unchanged omi.decision.v4 response
 ```
 
@@ -20,11 +21,12 @@ budget enforcement, and response shaping. The adapter must not duplicate or rein
 
 ## Public tools
 
-`tools/list` exposes exactly these six tools:
+`tools/list` exposes exactly these seven tools:
 
 | Tool | Mechanical mapping |
 | --- | --- |
 | `omi.ask` | Canonical caller-supplied question and target |
+| `omi.read_refresh_status` | Positive `job_id` to the dedicated redacted refresh-status endpoint |
 | `omi.read_market_overview` | `target.type=market` and `mode=data_only` |
 | `omi.read_stock_context` | Market-specific stock target and `mode=data_only` |
 | `omi.read_data_freshness` | `target.type=data_freshness` and optional market |
@@ -57,7 +59,7 @@ for live data do not enable refresh.
 
 ## Schema ownership and fallback
 
-At runtime, the adapter reads the canonical `omi.ask` schema from OMI backend
+At runtime, the adapter reads the canonical `omi.ask` and `omi.read_refresh_status` schemas from OMI backend
 `GET /api/ai/tools`. It removes caller-selectable trust flags and adds only adapter-owned
 compatibility fields.
 
@@ -83,6 +85,8 @@ validate backend-owned parameters.
 - Freshness, `status`, `limitations`, `warnings`, `missing`, and
   `execution.refresh_reconciliation` must remain visible. The adapter must not turn an attempted
   refresh into a claim that data became current.
+- Refresh operation completion and rebuilt evidence are separate states. Consumers must use the
+  returned cache-only resume template to rebuild evidence before claiming that data is current.
 
 ## HTTP transport
 
