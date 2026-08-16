@@ -7,8 +7,8 @@ param(
   [string]$SecretPath,
   [string]$Profile = "omi-search",
   [string]$TunnelId = $env:OMI_SEARCH_TUNNEL_ID,
-  [string]$McpUrl = "http://127.0.0.1:8797/mcp",
-  [string]$HealthListenAddr = "127.0.0.1:8799",
+  [string]$McpUrl = "http://127.0.0.1:18797/mcp",
+  [string]$HealthListenAddr = "127.0.0.1:18799",
   [string]$ControlPlaneApiKeyRef = "env:CONTROL_PLANE_API_KEY",
   [switch]$Explain
 )

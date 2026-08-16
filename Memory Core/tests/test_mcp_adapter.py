@@ -1173,7 +1173,7 @@ def test_http_transport_initializes_lists_and_calls_tools() -> None:
         "Accept": "application/json, text/event-stream",
         "Content-Type": "application/json",
     }
-    with TestClient(app, base_url="http://127.0.0.1:8818") as client:
+    with TestClient(app, base_url="http://127.0.0.1:18818") as client:
         health = client.get("/health")
         assert health.status_code == 200
         assert health.json()["backend"] == "ok"
@@ -1188,7 +1188,7 @@ def test_http_transport_initializes_lists_and_calls_tools() -> None:
                 "params": {
                     "protocolVersion": "2025-11-25",
                     "capabilities": {},
-                    "clientInfo": {"name": "memory-core-test", "version": "1.0"},
+                    "clientInfo": {"name": "memory-core-test", "version": "1.1.0"},
                 },
             },
         )

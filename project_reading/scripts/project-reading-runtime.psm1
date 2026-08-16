@@ -356,6 +356,25 @@ function Wait-PrCondition {
   return [bool](& $Condition)
 }
 
+function Start-PrChildProcess {
+  param([Parameter(Mandatory = $true)]$StartInfo, [hashtable]$Environment = @{})
+  $overrides = @{}
+  foreach ($name in @('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy')) { $overrides[$name] = $null }
+  $overrides['NO_PROXY'] = '127.0.0.1,localhost'; $overrides['no_proxy'] = '127.0.0.1,localhost'
+  foreach ($name in $Environment.Keys) { $overrides[[string]$name] = $Environment[$name] }
+  $saved = @{}
+  try {
+    foreach ($name in $overrides.Keys) {
+      $saved[$name] = [Environment]::GetEnvironmentVariable([string]$name, [EnvironmentVariableTarget]::Process)
+      [Environment]::SetEnvironmentVariable([string]$name, $overrides[$name], [EnvironmentVariableTarget]::Process)
+    }
+    return [Diagnostics.Process]::Start($StartInfo)
+  }
+  finally {
+    foreach ($name in $overrides.Keys) { [Environment]::SetEnvironmentVariable([string]$name, $saved[$name], [EnvironmentVariableTarget]::Process) }
+  }
+}
+
 function Set-PrServerEnvironment {
   param([Parameter(Mandatory = $true)]$Context)
   if ([string]::IsNullOrWhiteSpace($Context.workspaceRoots)) {
@@ -374,6 +393,10 @@ function Set-PrServerEnvironment {
     Remove-Item Env:\WORKSPACE_MCP_ASSET_SCOPES -ErrorAction SilentlyContinue
   }
   else { $env:WORKSPACE_MCP_ASSET_SCOPES = $Context.assetScopes }
+  if ([string]::IsNullOrWhiteSpace($Context.fileReturnScopes)) {
+    Remove-Item Env:\WORKSPACE_MCP_FILE_RETURN_SCOPES -ErrorAction SilentlyContinue
+  }
+  else { $env:WORKSPACE_MCP_FILE_RETURN_SCOPES = $Context.fileReturnScopes }
   $env:WORKSPACE_MCP_HTTP_HOST = $Context.hostName
   $env:WORKSPACE_MCP_HTTP_PORT = [string]$Context.port
   if ([string]::IsNullOrWhiteSpace($Context.token)) {
@@ -426,7 +449,7 @@ function Start-PrServer {
   $startInfo.WorkingDirectory = $Context.projectRoot
   $startInfo.UseShellExecute = $true
   $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
-  $process = [Diagnostics.Process]::Start($startInfo)
+  $process = Start-PrChildProcess -StartInfo $startInfo
   if ($null -eq $process) { throw "SERVER_START_FAILED: Node process did not start." }
   Write-PrAtomicText -Path $Context.serverPidFile -Value ([string]$process.Id)
   $startedProcess = Get-PrProcess -ProcessId $process.Id
@@ -459,16 +482,21 @@ function Start-PrTunnelOnce {
   if (-not (Test-Path -LiteralPath $Context.tunnelClientPath -PathType Leaf)) { throw "TUNNEL_CLIENT_MISSING: tunnel-client.exe is missing." }
   if (-not (Test-Path -LiteralPath $Context.tunnelProfilePath -PathType Leaf)) { throw "TUNNEL_PROFILE_MISSING: Tunnel profile is missing." }
   . $Context.keyStorePath
-  Set-ControlPlaneApiKeyEnvFromSecret -ProjectRoot $Context.projectRoot -SecretPath $Context.secretPath | Out-Null
-  if ([string]::IsNullOrWhiteSpace($env:CONTROL_PLANE_API_KEY)) { throw "TUNNEL_KEY_MISSING: Save the control-plane API key before starting the tunnel." }
-  New-Item -ItemType Directory -Force -Path $Context.runtimeDir | Out-Null
-  $startInfo = New-Object Diagnostics.ProcessStartInfo
-  $startInfo.FileName = $Context.tunnelClientPath
-  $startInfo.Arguments = "run --profile-dir `"$($Context.tunnelProfileDir)`" --profile `"$($Context.tunnelProfile)`" --log.file `"$($Context.tunnelLogFile)`" --pid.file `"$($Context.tunnelPidFile)`""
-  $startInfo.WorkingDirectory = $Context.projectRoot
-  $startInfo.UseShellExecute = $true
-  $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
-  $process = [Diagnostics.Process]::Start($startInfo)
+  $savedKey = [Environment]::GetEnvironmentVariable('CONTROL_PLANE_API_KEY', [EnvironmentVariableTarget]::Process)
+  $process = $null
+  try {
+    Set-ControlPlaneApiKeyEnvFromSecret -ProjectRoot $Context.projectRoot -SecretPath $Context.secretPath | Out-Null
+    if ([string]::IsNullOrWhiteSpace($env:CONTROL_PLANE_API_KEY)) { throw "TUNNEL_KEY_MISSING: Save the control-plane API key before starting the tunnel." }
+    New-Item -ItemType Directory -Force -Path $Context.runtimeDir | Out-Null
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $Context.tunnelClientPath
+    $startInfo.Arguments = "run --profile-dir `"$($Context.tunnelProfileDir)`" --profile `"$($Context.tunnelProfile)`" --log.file `"$($Context.tunnelLogFile)`" --pid.file `"$($Context.tunnelPidFile)`""
+    $startInfo.WorkingDirectory = $Context.projectRoot
+    $startInfo.UseShellExecute = $true
+    $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+    $process = Start-PrChildProcess -StartInfo $startInfo -Environment @{ CONTROL_PLANE_API_KEY = $env:CONTROL_PLANE_API_KEY }
+  }
+  finally { [Environment]::SetEnvironmentVariable('CONTROL_PLANE_API_KEY', $savedKey, [EnvironmentVariableTarget]::Process) }
   if ($null -eq $process) { throw "TUNNEL_START_FAILED: Tunnel process did not start." }
   Write-PrAtomicText -Path $Context.tunnelPidFile -Value ([string]$process.Id)
   $startedProcess = Get-PrProcess -ProcessId $process.Id
@@ -552,14 +580,15 @@ function New-PrRuntimeContext {
     [string]$DefaultWorkspaceRoot = "projects",
     [string]$WorkspaceRootDenyDirs,
     [string]$AssetScopes,
+    [string]$FileReturnScopes,
     [string]$HostName = "127.0.0.1",
-    [int]$Port = 8787,
+    [int]$Port = 18787,
     [string]$Token,
     [string]$NodePath,
     [string]$TunnelClientPath,
     [string]$TunnelProfileDir,
     [string]$TunnelProfile = "project-workspace",
-    [string]$TunnelHealthUrl = "http://127.0.0.1:8788",
+    [string]$TunnelHealthUrl = "http://127.0.0.1:18788",
     [string]$SecretPath,
     [int]$ServerReadyTimeoutSeconds = 20,
     [int[]]$TunnelRecoveryDelaysSeconds = @(15, 30, 60)
@@ -582,6 +611,7 @@ function New-PrRuntimeContext {
     defaultWorkspaceRoot = $DefaultWorkspaceRoot
     workspaceRootDenyDirs = $WorkspaceRootDenyDirs
     assetScopes = $AssetScopes
+    fileReturnScopes = $FileReturnScopes
     hostName = $HostName
     port = $Port
     token = $Token

@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("SelfTest", "Status", "Reconcile", "Start", "Restart", "RepairConnectivity", "RestartCore", "ShutdownRuntime", "ShowDiagnosticTray", "ComponentMenuAction", "Doctor")]
+    [ValidateSet("SelfTest", "Status", "Reconcile", "Start", "Restart", "RestartMcp", "RepairConnectivity", "RestartCore", "ShutdownRuntime", "ShowDiagnosticTray", "ComponentMenuAction", "Doctor")]
     [string]$Action = "Status",
     [string]$Component,
     [ValidatePattern('^[a-z][a-z0-9_]{0,63}$')]
@@ -63,6 +63,7 @@ function Invoke-StatusAndPublish {
 }
 
 $bootId = $null
+$lastActionRoutedAction = $null
 try {
     $manifest = Read-McpCcManifest -Path $ManifestPath
     if (Test-McpCcPathWithinRoot -Path $RuntimeRoot -Root $manifest.workspaceRoot) {
@@ -145,6 +146,59 @@ try {
             [pscustomobject]@{ delegation = $delegation; postStatus = $postStatus; state = $state } | ConvertTo-Json -Depth 12
             if ($postStatus.status -notin $acceptedStates) { exit 2 }
         }
+        "RestartMcp" {
+            if ([string]::IsNullOrWhiteSpace($Component)) { throw "RestartMcp requires -Component." }
+            $definition = Get-McpCcComponent -Manifest $manifest -Id $Component
+            try {
+                $current = Get-McpCcComponentStatus -Component $definition -TimeoutSeconds ([int]$manifest.settings.probeTimeoutSeconds)
+            }
+            catch {
+                throw "Restart MCP refused 'MONITOR_EXCEPTION'."
+            }
+            $decision = Get-McpCcRestartMcpDecision -ComponentStatus $current
+            if (-not [bool]$decision.allowed) {
+                throw "Restart MCP refused '$([string]$decision.errorCode)'."
+            }
+            $lastActionRoutedAction = [string]$decision.action
+            Write-McpCcEvent -RuntimeRoot $RuntimeRoot -BootId $bootId -Type "action_requested" -Component $Component -Details @{
+                action = "restart_mcp"
+                routedAction = $lastActionRoutedAction
+                before = [string]$current.status
+            }
+            $delegation = Invoke-McpCcComponentAction `
+                -Manifest $manifest `
+                -ComponentId $Component `
+                -Action $lastActionRoutedAction `
+                -PlanOnly:$PlanOnly `
+                -RuntimeRoot $RuntimeRoot
+            if ($PlanOnly) {
+                [pscustomobject]@{ decision = $decision; delegation = $delegation; current = $current } | ConvertTo-Json -Depth 8
+                break
+            }
+            if ($lastActionRoutedAction -eq "reload_runtime") { Start-Sleep -Seconds 3 }
+            else { Start-Sleep -Seconds 2 }
+            $acceptedStates = @(Get-McpCcRunningAcceptanceStates -Component $definition)
+            $postStatus = Wait-ForComponentRunningState `
+                -Manifest $manifest `
+                -ComponentDefinition $definition `
+                -TimeoutSeconds (Get-McpCcComponentTimingSeconds -Manifest $manifest -Component $definition -Name "postStartTimeoutSeconds")
+            $state = Invoke-StatusAndPublish -Manifest $manifest -BootId $bootId
+            Write-McpCcEvent -RuntimeRoot $RuntimeRoot -BootId $bootId -Type "action_completed" -Component $Component -Details @{
+                action = "restart_mcp"
+                routedAction = $lastActionRoutedAction
+                result = [string]$postStatus.status
+            }
+            if ($postStatus.status -notin $acceptedStates) {
+                throw "POST_ACTION_NOT_READY: Restart MCP did not restore required readiness."
+            }
+            Write-McpCcLastActionResult `
+                -RuntimeRoot $RuntimeRoot `
+                -Component $Component `
+                -Action "RestartMcp" `
+                -RoutedAction $lastActionRoutedAction `
+                -Ok $true | Out-Null
+            [pscustomobject]@{ decision = $decision; delegation = $delegation; postStatus = $postStatus; state = $state } | ConvertTo-Json -Depth 12
+        }
         "RestartCore" {
             if ([string]::IsNullOrWhiteSpace($Component)) { throw "RestartCore requires -Component." }
             Write-McpCcEvent -RuntimeRoot $RuntimeRoot -BootId $bootId -Type "action_requested" -Component $Component -Details @{ action = "restart_core" }
@@ -225,6 +279,7 @@ try {
                 -RuntimeRoot $RuntimeRoot
             if (-not $PlanOnly) {
                 Write-McpCcEvent -RuntimeRoot $RuntimeRoot -BootId $bootId -Type "ui_action_completed" -Component $Component -Details @{ action = $UiAction; result = "delegated" }
+                Write-McpCcLastActionResult -RuntimeRoot $RuntimeRoot -Component $Component -Action "ComponentMenuAction" -UiAction $UiAction -Ok $true | Out-Null
             }
             $delegation | ConvertTo-Json -Depth 8
         }
@@ -243,31 +298,92 @@ try {
                 initialOverall = $initial.overall
                 componentCount = @($manifest.components).Count
             }
-            $actions = @()
-            foreach ($item in @($plan)) {
+            $actions = @(Invoke-McpCcReconcileItems -Plan $plan -ItemExecutor {
+                param($item)
                 $definition = Get-McpCcComponent -Manifest $manifest -Id $item.component
-                $current = Get-McpCcComponentStatus -Component $definition -TimeoutSeconds ([int]$manifest.settings.probeTimeoutSeconds)
-                if ($current.status -eq "BlockedUpstream") {
-                    $current = Wait-ForComponentState -Manifest $manifest -ComponentDefinition $definition -TimeoutSeconds (Get-McpCcComponentTimingSeconds -Manifest $manifest -Component $definition -Name "postStartTimeoutSeconds") -AcceptedStates @("Ready", "Stopped")
+                try {
+                    $current = Get-McpCcComponentStatus -Component $definition -TimeoutSeconds ([int]$manifest.settings.probeTimeoutSeconds)
                 }
-                if ($current.status -eq "Stopped") {
-                    $delegation = Invoke-McpCcComponentAction -Manifest $manifest -ComponentId $definition.id -Action ensure_running -RuntimeRoot $RuntimeRoot
-                    Start-Sleep -Seconds 2
-                    $post = Wait-ForComponentRunningState -Manifest $manifest -ComponentDefinition $definition -TimeoutSeconds (Get-McpCcComponentTimingSeconds -Manifest $manifest -Component $definition -Name "postStartTimeoutSeconds")
-                    $actions += [pscustomobject]@{ component = $definition.id; action = "Start"; before = $current.status; after = $post.status; delegation = $delegation }
-                    Write-McpCcEvent -RuntimeRoot $RuntimeRoot -BootId $bootId -Type "reconcile_component" -Component $definition.id -Details @{ decision = "Start"; before = $current.status; after = $post.status }
+                catch {
+                    throw "MONITOR_EXCEPTION: Component monitoring failed during reconciliation."
                 }
-                elseif ($current.status -eq "Ready") {
-                    $actions += [pscustomobject]@{ component = $definition.id; action = "NoAction"; before = $current.status; after = $current.status }
+                $item.currentStatus = [string]$current.status
+                try {
+                    if ($current.status -eq "BlockedUpstream") {
+                        $current = Wait-ForComponentState -Manifest $manifest -ComponentDefinition $definition -TimeoutSeconds (Get-McpCcComponentTimingSeconds -Manifest $manifest -Component $definition -Name "postStartTimeoutSeconds") -AcceptedStates @("Ready", "Stopped")
+                        $item.currentStatus = [string]$current.status
+                    }
+                    $repairDecision = Get-McpCcAutomaticRepairDecision -Manifest $manifest -Component $definition -ComponentStatus $current
+                    if ($current.status -eq "Stopped") {
+                        $delegation = Invoke-McpCcComponentAction -Manifest $manifest -ComponentId $definition.id -Action ensure_running -RuntimeRoot $RuntimeRoot
+                        Start-Sleep -Seconds 2
+                        $post = Wait-ForComponentRunningState -Manifest $manifest -ComponentDefinition $definition -TimeoutSeconds (Get-McpCcComponentTimingSeconds -Manifest $manifest -Component $definition -Name "postStartTimeoutSeconds")
+                        $acceptedStates = @(Get-McpCcRunningAcceptanceStates -Component $definition)
+                        if ($null -eq $post -or $post.status -notin $acceptedStates) {
+                            throw "POST_ACTION_NOT_READY: Component did not restore required readiness after EnsureRunning."
+                        }
+                        Write-McpCcEvent -RuntimeRoot $RuntimeRoot -BootId $bootId -Type "reconcile_component" -Component $definition.id -Details @{ decision = "Start"; before = $current.status; after = $post.status; ok = $true } | Out-Null
+                        return [pscustomobject]@{
+                            component = $definition.id; action = "Start"; before = $current.status; after = $post.status
+                            ok = $true; errorCode = $null; message = "Component-owned runtime reached required readiness."
+                            delegation = $delegation
+                        }
+                    }
+                    elseif ($repairDecision.allowed) {
+                        $delegation = Invoke-McpCcComponentAction -Manifest $manifest -ComponentId $definition.id -Action repair_connectivity -RuntimeRoot $RuntimeRoot
+                        Start-Sleep -Seconds 2
+                        $post = Wait-ForComponentRunningState -Manifest $manifest -ComponentDefinition $definition -TimeoutSeconds (Get-McpCcComponentTimingSeconds -Manifest $manifest -Component $definition -Name "postStartTimeoutSeconds")
+                        $acceptedStates = @(Get-McpCcRunningAcceptanceStates -Component $definition)
+                        if ($null -eq $post -or $post.status -notin $acceptedStates) {
+                            throw "POST_ACTION_NOT_READY: Component did not restore required readiness after RepairConnectivity."
+                        }
+                        Write-McpCcEvent -RuntimeRoot $RuntimeRoot -BootId $bootId -Type "reconcile_component" -Component $definition.id -Details @{
+                            decision = "RepairConnectivity"; classification = [string]$repairDecision.classification
+                            before = $current.status; after = $post.status; ok = $true
+                            managerAttempts = 1; managerAttemptLimit = [int]$repairDecision.managerAttemptLimit
+                            retryOwner = [string]$repairDecision.retryOwner
+                        } | Out-Null
+                        return [pscustomobject]@{
+                            component = $definition.id; action = "RepairConnectivity"; before = $current.status; after = $post.status
+                            ok = $true; errorCode = $null; message = "Component-owned local connectivity repair reached required readiness."
+                            classification = [string]$repairDecision.classification; managerAttempts = 1
+                            managerAttemptLimit = [int]$repairDecision.managerAttemptLimit; retryOwner = [string]$repairDecision.retryOwner
+                            delegation = $delegation
+                        }
+                    }
+                    elseif ($current.status -eq "Ready") {
+                        return [pscustomobject]@{
+                            component = $definition.id; action = "NoAction"; before = $current.status; after = $current.status
+                            ok = $true; errorCode = $null; message = "Component was already ready."
+                        }
+                    }
+                    else {
+                        Write-McpCcEvent -RuntimeRoot $RuntimeRoot -BootId $bootId -Type "manual_attention_required" -Component $definition.id -Details @{
+                            status = $current.status; issues = $current.issues
+                            classification = [string]$repairDecision.classification; reasonCode = [string]$repairDecision.errorCode
+                        } | Out-Null
+                        return [pscustomobject]@{
+                            component = $definition.id; action = "ManualAttention"; before = $current.status; after = $current.status
+                            ok = $true; errorCode = $null; message = "No automatic lifecycle mutation was allowed for this state."
+                            classification = [string]$repairDecision.classification; reasonCode = [string]$repairDecision.errorCode
+                        }
+                    }
                 }
-                else {
-                    $actions += [pscustomobject]@{ component = $definition.id; action = "ManualAttention"; before = $current.status; after = $current.status }
-                    Write-McpCcEvent -RuntimeRoot $RuntimeRoot -BootId $bootId -Type "manual_attention_required" -Component $definition.id -Details @{ status = $current.status; issues = $current.issues }
+                finally {
+                    if ([int]$manifest.settings.betweenComponentsSeconds -gt 0) {
+                        Start-Sleep -Seconds ([int]$manifest.settings.betweenComponentsSeconds)
+                    }
                 }
-                if ([int]$manifest.settings.betweenComponentsSeconds -gt 0) {
-                    Start-Sleep -Seconds ([int]$manifest.settings.betweenComponentsSeconds)
-                }
-            }
+            } -FailureObserver {
+                param($item, $failure)
+                Write-McpCcEvent -RuntimeRoot $RuntimeRoot -BootId $bootId -Type "reconcile_component_failed" -Component ([string]$item.component) -Details @{
+                    decision = "Failed"
+                    before = [string]$failure.before
+                    after = [string]$failure.after
+                    ok = $false
+                    errorCode = [string]$failure.errorCode
+                } | Out-Null
+            })
             $final = Invoke-StatusAndPublish -Manifest $manifest -BootId $bootId
             Write-McpCcEvent -RuntimeRoot $RuntimeRoot -BootId $bootId -Type "reconcile_completed" -Details @{ finalOverall = $final.overall }
             [pscustomobject]@{ schemaVersion = [int]$manifest.schemaVersion; planOnly = $false; initialState = $initial; actions = $actions; finalState = $final } | ConvertTo-Json -Depth 12
@@ -277,6 +393,20 @@ try {
 }
 catch {
     $message = ([string]$_.Exception.Message -replace '[\r\n]+', ' ').Trim()
+    if ($Action -in @("RestartMcp", "ComponentMenuAction") -and -not [string]::IsNullOrWhiteSpace($Component)) {
+        try {
+            $actionErrorCode = Get-McpCcActionErrorCode -Message $message
+            Write-McpCcLastActionResult `
+                -RuntimeRoot $RuntimeRoot `
+                -Component $Component `
+                -Action $Action `
+                -RoutedAction $lastActionRoutedAction `
+                -UiAction $UiAction `
+                -Ok $false `
+                -ErrorCode $actionErrorCode | Out-Null
+        }
+        catch { }
+    }
     try {
         if (-not [string]::IsNullOrWhiteSpace($RuntimeRoot)) {
             Write-McpCcEvent -RuntimeRoot $RuntimeRoot -BootId $(if ($null -ne $bootId) { $bootId } else { Get-McpCcBootId }) -Type "controller_error" -Component $Component -Details @{ action = $Action; uiAction = $UiAction; error = $message }

@@ -6,6 +6,10 @@ function Assert-True([bool]$Condition, [string]$Message) { if (-not $Condition) 
 function Assert-Equal($Actual, $Expected, [string]$Message) { if ([string]$Actual -ne [string]$Expected) { throw "Assertion failed: $Message. Expected '$Expected', got '$Actual'." }; $script:Passed++ }
 
 $sourceRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+$stackSource = [IO.File]::ReadAllText((Join-Path $sourceRoot 'scripts\memory_core_stack.ps1'))
+Assert-True ($stackSource -match '(?s)Start-MemoryCoreChildProcess\s+`\s*\r?\n\s*-FilePath \$TunnelClientPath.+?-RedirectStandardOutput.+?-RedirectStandardError') 'tunnel child detaches stdout and stderr from the lifecycle controller capture'
+$runtimeSource = [IO.File]::ReadAllText((Join-Path $sourceRoot 'scripts\memory-core-runtime.psm1'))
+Assert-True ($runtimeSource -match '(?s)stack-captures.+?RedirectStandardOutput \$stdoutPath.+?RedirectStandardError \$stderrPath') 'stack actions use file capture instead of anonymous controller pipes'
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ("memory-core-controller-" + [Guid]::NewGuid().ToString('N'))
 $utf8 = New-Object Text.UTF8Encoding($false)
 $context = $null
@@ -35,6 +39,15 @@ switch($Action){
 }
 [IO.File]::WriteAllText($statePath,($state|ConvertTo-Json -Depth 6),(New-Object Text.UTF8Encoding($false)))
 Add-Content -LiteralPath $logPath -Value $Action -Encoding UTF8
+if($Action -eq "Start" -and (Test-Path (Join-Path $PSScriptRoot "..\inherit-stack-handles.flag"))){
+  $startInfo=New-Object Diagnostics.ProcessStartInfo
+  $startInfo.FileName=Join-Path $PSHOME "powershell.exe"
+  $startInfo.Arguments='-NoProfile -Command "Start-Sleep -Seconds 15"'
+  $startInfo.UseShellExecute=$false
+  $startInfo.CreateNoWindow=$true
+  $child=[Diagnostics.Process]::Start($startInfo)
+  [IO.File]::WriteAllText((Join-Path $PSScriptRoot "..\inherited-child.pid"),[string]$child.Id,(New-Object Text.UTF8Encoding($false)))
+}
 [ordered]@{backend=$state.backend;mcp=$state.mcp;tunnel=$state.tunnel;secrets=[ordered]@{mcpClientToken="isolated-secret-placeholder";storage="Windows DPAPI current-user"};privatePath="C:\private\memory-core.db";payload="record body"}|ConvertTo-Json -Depth 7
 '@
     $fakeStackPath = Join-Path $testRoot 'scripts\fake-stack.ps1'
@@ -53,11 +66,12 @@ Add-Content -LiteralPath $logPath -Value $Action -Encoding UTF8
         }
         $clock = [Diagnostics.Stopwatch]::StartNew()
         $before = Get-MemoryCoreRuntimeStatus -Context $context
-        $errorCode = $null; $message = 'Lifecycle action completed.'
+        $errorCode = $null; $message = 'Lifecycle action completed.'; $diagnostic = $null
         try { if ($Action -ne 'Status') { Invoke-MemoryCoreLifecycleAction -Context $context -Action $Action }; $exitCode = 0 }
         catch {
             $exitCode = 1
             $raw = ([string]$_.Exception.Message -replace '[\r\n]+', ' ').Trim()
+            $diagnostic = $raw
             if ($raw -match '^([A-Z][A-Z0-9_]+):\s*(.*)$') { $errorCode = $matches[1]; $message = $matches[2] }
             else { $errorCode = 'ACTION_FAILED'; $message = 'Lifecycle action failed.' }
         }
@@ -65,7 +79,7 @@ Add-Content -LiteralPath $logPath -Value $Action -Encoding UTF8
         $clock.Stop()
         $document = [pscustomobject]@{ ok = ($exitCode -eq 0); action = $Action; before = $before; after = $after; ownedPids = @($after.ownedPids); elapsedMs = [int]$clock.ElapsedMilliseconds; errorCode = $errorCode; message = $message }
         Write-MemoryCoreLifecycleEvent -Context $context -Action $Action -Ok ($exitCode -eq 0) -BeforeStatus $before.status -AfterStatus $after.status -OwnedPids @($after.ownedPids) -ElapsedMs $document.elapsedMs -ErrorCode $errorCode -Message $message
-        if ($ExpectSuccess) { Assert-Equal $exitCode 0 "$Action exits successfully" } else { Assert-True ($exitCode -ne 0) "$Action fails safely" }
+        if ($ExpectSuccess) { Assert-Equal $exitCode 0 "$Action exits successfully (errorCode=$errorCode diagnostic=$diagnostic)" } else { Assert-True ($exitCode -ne 0) "$Action fails safely" }
         return [pscustomobject]@{ document = $document; exitCode = $exitCode }
     }
 
@@ -113,6 +127,18 @@ Add-Content -LiteralPath $logPath -Value $Action -Encoding UTF8
     Assert-Equal $shutdown.document.after.status 'Stopped' 'shutdown stops all roles'
     $shutdownAgain = Invoke-TestController ShutdownRuntime
     Assert-Equal $shutdownAgain.document.after.status 'Stopped' 'shutdown is idempotent'
+
+    New-Item -ItemType File -Path (Join-Path $testRoot 'inherit-stack-handles.flag') -Force | Out-Null
+    $detachedClock = [Diagnostics.Stopwatch]::StartNew()
+    $detachedEnsure = Invoke-TestController EnsureRunning
+    $detachedClock.Stop()
+    Assert-Equal $detachedEnsure.document.after.status 'Ready' 'ensure succeeds while a descendant retains inherited stack handles'
+    Assert-True ($detachedClock.ElapsedMilliseconds -lt 10000) 'file capture prevents inherited handles from blocking controller completion'
+    $inheritedChildPidPath = Join-Path $testRoot 'inherited-child.pid'
+    Assert-True (Test-Path -LiteralPath $inheritedChildPidPath) 'inherited-handle fixture records its exact child PID'
+    $inheritedChildPid = [int]([IO.File]::ReadAllText($inheritedChildPidPath).Trim())
+    Stop-Process -Id $inheritedChildPid -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $testRoot 'inherit-stack-handles.flag') -Force -ErrorAction SilentlyContinue
 
     $statePath = Join-Path $testRoot 'fake-state.json'
     $state = [IO.File]::ReadAllText($statePath) | ConvertFrom-Json

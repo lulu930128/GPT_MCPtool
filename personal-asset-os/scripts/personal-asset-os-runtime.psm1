@@ -296,16 +296,20 @@ function Stop-PaosOwnedRole {
 
 function Start-PaosChildProcess {
   param([Parameter(Mandatory = $true)]$StartInfo, [hashtable]$Environment = @{})
+  $overrides = @{}
+  foreach ($name in @('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy')) { $overrides[$name] = $null }
+  $overrides['NO_PROXY'] = '127.0.0.1,localhost'; $overrides['no_proxy'] = '127.0.0.1,localhost'
+  foreach ($name in $Environment.Keys) { $overrides[[string]$name] = $Environment[$name] }
   $saved = @{}
   try {
-    foreach ($name in $Environment.Keys) {
-      $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
-      [Environment]::SetEnvironmentVariable($name, [string]$Environment[$name], 'Process')
+    foreach ($name in $overrides.Keys) {
+      $saved[$name] = [Environment]::GetEnvironmentVariable([string]$name, 'Process')
+      [Environment]::SetEnvironmentVariable([string]$name, $overrides[$name], 'Process')
     }
     return [Diagnostics.Process]::Start($StartInfo)
   }
   finally {
-    foreach ($name in $Environment.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
+    foreach ($name in $overrides.Keys) { [Environment]::SetEnvironmentVariable([string]$name, $saved[$name], 'Process') }
   }
 }
 
@@ -324,7 +328,7 @@ function Start-PaosServer {
   if ([string]::IsNullOrWhiteSpace((Get-PaosExpectedBuildId -Context $Context))) { throw 'BUILD_ID_UNAVAILABLE: Personal Asset OS build identity is unavailable.' }
   $startInfo = New-Object Diagnostics.ProcessStartInfo
   $startInfo.FileName = $Context.pythonPath; $startInfo.Arguments = $Context.serverArguments
-  $startInfo.WorkingDirectory = $Context.projectRoot; $startInfo.UseShellExecute = $false; $startInfo.CreateNoWindow = $true
+  $startInfo.WorkingDirectory = $Context.projectRoot; $startInfo.UseShellExecute = $true; $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
   $process = Start-PaosChildProcess -StartInfo $startInfo -Environment @{ PYTHONUTF8 = '1' }
   if ($null -eq $process) { throw 'SERVER_START_FAILED: Personal Asset OS server did not start.' }
   $started = Get-PaosProcess -ProcessId $process.Id
@@ -360,8 +364,11 @@ function Start-PaosTunnelOnce {
     New-Item -ItemType Directory -Force -Path $Context.runtimeDir | Out-Null
     $startInfo = New-Object Diagnostics.ProcessStartInfo
     $startInfo.FileName = $Context.tunnelClientPath; $startInfo.Arguments = $Context.tunnelArguments
-    $startInfo.WorkingDirectory = $Context.projectRoot; $startInfo.UseShellExecute = $false; $startInfo.CreateNoWindow = $true
-    $process = [Diagnostics.Process]::Start($startInfo)
+    $startInfo.WorkingDirectory = $Context.projectRoot; $startInfo.UseShellExecute = $true; $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+    $process = Start-PaosChildProcess -StartInfo $startInfo -Environment @{
+      CONTROL_PLANE_API_KEY = $env:CONTROL_PLANE_API_KEY
+      CONTROL_PLANE_ORGANIZATION_ID = $env:CONTROL_PLANE_ORGANIZATION_ID
+    }
   }
   finally {
     [Environment]::SetEnvironmentVariable('CONTROL_PLANE_API_KEY', $savedKey, 'Process')
@@ -453,10 +460,10 @@ function Get-PersonalAssetOsRuntimeStatus {
 function New-PersonalAssetOsRuntimeContext {
   param(
     [Parameter(Mandatory = $true)][string]$ProjectRoot,
-    [string]$HostName = '127.0.0.1', [int]$Port = 8876, [string]$DataDir,
+    [string]$HostName = '127.0.0.1', [int]$Port = 18876, [string]$DataDir,
     [string]$PythonPath, [string]$ServerArguments, [string]$ServerIdentity = 'personal_asset_os.cli serve',
     [string]$TunnelClientPath, [string]$TunnelProfileDir, [string]$TunnelProfile = 'personal-asset-os',
-    [string]$TunnelHealthUrl = 'http://127.0.0.1:8877', [string]$TunnelArguments, [string]$TunnelIdentity,
+    [string]$TunnelHealthUrl = 'http://127.0.0.1:18877', [string]$TunnelArguments, [string]$TunnelIdentity,
     [string]$LocalEnvScript, [string]$ExpectedBuildId,
     [int]$CoreReadyTimeoutSeconds = 30, [int[]]$TunnelRecoveryDelaysSeconds = @(15, 30, 60)
   )

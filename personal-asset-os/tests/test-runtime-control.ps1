@@ -9,6 +9,9 @@ function Wait-TcpPort([int]$Port, [bool]$Open, [int]$Seconds = 10) { $deadline =
 function Stop-TestProcess($Process) { if ($null -ne $Process -and -not $Process.HasExited) { Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue; try { $Process.WaitForExit(3000) | Out-Null } catch { } } }
 
 $sourceRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+$runtimeSource = [IO.File]::ReadAllText((Join-Path $sourceRoot 'scripts\personal-asset-os-runtime.psm1'))
+Assert-Equal ([regex]::Matches($runtimeSource, 'UseShellExecute\s*=\s*\$true').Count) 2 'server and tunnel children detach from redirected controller stdio'
+Assert-True ($runtimeSource -notmatch 'UseShellExecute\s*=\s*\$false') 'long-lived runtime children never inherit redirected controller stdio'
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ("paos-controller-" + [Guid]::NewGuid().ToString('N'))
 $dataRoot = Join-Path $testRoot 'formal-data-isolated'
 $nodePath = (Get-Command node -ErrorAction Stop).Source

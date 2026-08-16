@@ -1,6 +1,8 @@
 # GPT Project Workspace MCP
 
-圖片與 Office 檔案的公開讀取設計、限制與設定方式請見
+目前 application release 為 `1.5.0`，tool contract 為 `2026-08-14.3`。Workspace root、asset scope 與 tool contract 仍依各自的安全契約演進。
+
+圖片、Office 與 PDF 檔案的公開讀取設計、限制與設定方式請見
 [docs/Asset-Readers.md](docs/Asset-Readers.md)。
 
 ## 文件導覽
@@ -10,7 +12,7 @@
 - [故障排除](docs/Troubleshooting.md)：build、root/path、local MCP、tunnel、ChatGPT action
   cache 與 exact-path lifecycle 診斷。
 - [ChatGPT 掛載](docs/ChatGPT-Setup.md)：Secure MCP Tunnel 與 Developer Mode 設定。
-- [圖片與 Office 讀取](docs/Asset-Readers.md)：格式、container safety 與 bounded output。
+- [圖片、Office 與 PDF 讀取](docs/Asset-Readers.md)：格式、container safety、隔離解析與 bounded output。
 
 這是一個 read-only 的 MCP server，目標是讓 ChatGPT 以受限方式讀取明確 allowlist 內的多個本機 workspace root。
 
@@ -26,7 +28,7 @@
 `examples/tray-settings.example.json` 複製成 ignored 的
 `.local/tray-settings.json`，再加入實際核准的路徑；不要把個人路徑提交到 Git。
 
-第一版刻意不提供寫檔、刪檔、任意 shell、commit、push 或 database mutation。它只提供可審計的 workspace browsing、文字搜尋、檔案讀取與 git status summary。
+本服務刻意不提供寫檔、刪檔、任意 shell、commit、push 或 database mutation。它只提供可審計的 workspace browsing、文字搜尋、靜態 code intelligence、Git review 與受限 asset 讀取。
 
 ## 工具
 
@@ -35,8 +37,26 @@
 - `project_context`：讀取某個專案的 README、AGENTS、package scripts、pyproject 等入口資訊摘要。
 - `list_dir`：受限目錄瀏覽，有深度與筆數上限。
 - `read_file`：讀取 root 內允許的文字檔，有大小與行數上限。
-- `search_text`：在允許範圍內搜尋文字；優先使用 `rg`，沒有時使用內建 fallback。
-- `git_status_summary`：固定執行 read-only 的 `git status --short --branch`。
+- `read_files`：一次讀取最多十個已預先通過相同 path guard 的文字視窗。
+- `find_files`：以 relative glob 與副檔名尋找檔案，不回傳絕對路徑。
+- `search_text`：在允許範圍內搜尋文字並可回傳前後文；優先使用 npm platform package 內不進 Git 的 `rg`，沒有時使用 bounded JavaScript fallback。
+- `git_status_summary`、`git_diff`、`git_diff_file`：只讀且 project-scoped 的 Git status／patch；denied、binary、symlink、submodule 內容不會外流。
+- `find_symbol`、`find_references`、`import_graph`、`project_map`：TypeScript、JavaScript、Python 的 deterministic lexical 分析；不是 compiler／LSP 語意解析。
+- `inspect_asset`、`read_image`、`read_spreadsheet`、`read_document`、`read_presentation`：受限圖片與 Office reader。
+- `fetch_asset`：為明確開啟 original-file return 的 asset scope 建立 content-bound MCP `resource_link`；host 再以 `resources/read` 取得通過既有 path guard、deny policy、大小與 SHA-256 驗證的原始 bytes，不修改本機檔案。
+- `inspect_pdf`、`read_pdf_text`、`read_pdf_page`：隔離 worker 內的 PDF metadata、文字與單頁 PNG reader。
+
+`workspace_info` 另回傳 application／contract／build fingerprint、runtime start time 與 active search backend，方便確認目前實際載入的 build。
+
+### `project_map` 輸出限制
+
+`project_map` 將檔案數、總 symbol 數與單檔 symbol 數拆成獨立限制，預設分別為
+`maxFiles=30`、`maxTotalSymbols=300`、`maxSymbolsPerFile=50`。呼叫端設定仍受
+`WORKSPACE_MCP_MAX_CODE_RESULTS`、`WORKSPACE_MCP_MAX_CODE_FILES` 與
+`WORKSPACE_MCP_MAX_CODE_SYMBOLS` 的 operator hard caps 約束。
+
+舊的 `maxResults` 暫時保留為 deprecated `maxFiles` alias；新呼叫應改用 `maxFiles`，且不可同時傳入不同值。輸出會回傳 `appliedLimits`、`deprecatedInputs`、`truncated` 與
+`truncationReasons`，每個檔案也會標示自己的 symbol 截斷原因。
 
 ## 安全邊界
 
@@ -81,7 +101,7 @@ owner，以 mutex、listener PID、exact executable、PID file 與 process start
 批次終止。
 
 controller 會先等待 MCP health 通過才啟動 tunnel，避免 OAuth discovery 在
-`127.0.0.1:8787` 尚未監聽時永久停在 `/healthz=200`、`/readyz=503`。若自有 tunnel
+`127.0.0.1:18787` 尚未監聽時永久停在 `/healthz=200`、`/readyz=503`。若自有 tunnel
 程序仍未 ready，會依 15／30／60 秒做最多三次 bounded replacement，不會無限重試。
 
 `scripts\show-diagnostic-tray.vbs` 只開啟 optional diagnostic UI；關閉它不會停止 runtime。
@@ -111,6 +131,11 @@ npm run component:test
 ```text
 C:\GPT_MCPtool\project_reading\vendor\tunnel-client\tunnel-client.exe
 ```
+
+這是目前的 legacy local runtime，不代表所有元件已統一版本。Control Center inventory 只讀取
+path／version／SHA-256；不會自動升級或切換。Controller 建立 MCP／tunnel child 時會清除 ambient
+HTTP(S) proxy、明確 bypass loopback，並在 spawn 後還原 parent environment；企業 outbound proxy
+必須以明確的 component-owned 設定導入。
 
 目前 tunnel profile 已寫在：
 
@@ -159,14 +184,14 @@ npm run tunnel:key:save-from-env
 $env:WORKSPACE_MCP_ROOTS = 'projects=C:\project;mcp_tools=C:\GPT_MCPtool;work=C:\work'
 $env:WORKSPACE_MCP_DEFAULT_ROOT = 'projects'
 $env:WORKSPACE_MCP_HTTP_HOST = '127.0.0.1'
-$env:WORKSPACE_MCP_HTTP_PORT = '8787'
+$env:WORKSPACE_MCP_HTTP_PORT = '18787'
 node C:\GPT_MCPtool\project_reading\dist\src\http-main.js
 ```
 
 HTTP MCP endpoint:
 
 ```text
-http://127.0.0.1:8787/mcp
+http://127.0.0.1:18787/mcp
 ```
 
 ChatGPT / OpenAI 遠端產品不能直接連你的 `127.0.0.1`。要給 ChatGPT 使用，安全預設是用 OpenAI Secure MCP Tunnel，把 OpenAI-hosted tunnel endpoint 連回這個本機 `/mcp`，而不是把本機 port 開到 public internet。
@@ -190,7 +215,7 @@ ChatGPT / OpenAI 遠端產品不能直接連你的 `127.0.0.1`。要給 ChatGPT 
 ## 本機健康檢查
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8787/health
+Invoke-RestMethod http://127.0.0.1:18787/health
 ```
 
 自動啟停 smoke test：

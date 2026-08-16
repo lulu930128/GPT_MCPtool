@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,7 @@ import sys
 import traceback
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 
@@ -32,7 +34,7 @@ _configure_stdio()
 
 PROTOCOL_VERSION = "2025-06-18"
 SERVER_NAME = "omi-search-mcp"
-SERVER_VERSION = "0.4.0"
+SERVER_VERSION = "1.1.0"
 API_BASE_URL = (
     os.environ.get("OMI_SEARCH_API_BASE_URL")
     or os.environ.get("OMI_API_BASE_URL")
@@ -45,6 +47,18 @@ AI_TRUST_TOKEN = (
     or ""
 ).strip()
 AI_TRUST_TOKEN_HEADER = "X-OMI-AI-Trust-Token"
+TW_DASHBOARD_RESOURCE_URI = "ui://omi/tw-market-dashboard/v2.html"
+TW_DASHBOARD_RESOURCE_MIME_TYPE = "text/html;profile=mcp-app"
+TW_DASHBOARD_SNAPSHOT_PATH = Path(__file__).with_name(
+    "tw_market_dashboard_contract_snapshot.json"
+)
+TW_DASHBOARD_WIDGET_PATH = (
+    Path(__file__).resolve().parent
+    / "ui"
+    / "tw-market-dashboard"
+    / "dist"
+    / "index.html"
+)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -99,6 +113,42 @@ def _load_public_contract_snapshot() -> dict[str, Any]:
 
 
 PUBLIC_CONTRACT_SNAPSHOT = _load_public_contract_snapshot()
+
+
+def _load_tw_dashboard_contract_snapshot() -> dict[str, Any]:
+    try:
+        payload = json.loads(
+            TW_DASHBOARD_SNAPSHOT_PATH.read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version")
+        != "omi.mcp.tw_market_dashboard_snapshot.v1"
+        or not isinstance(payload.get("digest"), str)
+    ):
+        return {}
+    unsigned = {key: value for key, value in payload.items() if key != "digest"}
+    encoded = json.dumps(
+        unsigned,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if sha256(encoded).hexdigest() != payload["digest"]:
+        return {}
+    for key in (
+        "dashboard_output_schema",
+        "symbol_search_output_schema",
+        "stock_detail_output_schema",
+    ):
+        if not isinstance(payload.get(key), dict):
+            return {}
+    return payload
+
+
+TW_DASHBOARD_CONTRACT_SNAPSHOT = _load_tw_dashboard_contract_snapshot()
 
 
 def _fallback_ask_source() -> dict[str, Any]:
@@ -269,6 +319,146 @@ def _shortcut_input_schema(
     return schema
 
 
+def _read_only_annotations() -> dict[str, bool]:
+    return {
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
+
+
+def _build_tw_dashboard_tools() -> list[dict[str, Any]]:
+    snapshot = TW_DASHBOARD_CONTRACT_SNAPSHOT
+    if not snapshot:
+        return []
+    dashboard_schema = deepcopy(snapshot["dashboard_output_schema"])
+    symbol_schema = deepcopy(snapshot["symbol_search_output_schema"])
+    detail_schema = deepcopy(snapshot["stock_detail_output_schema"])
+    annotations = _read_only_annotations()
+    return [
+        {
+            "name": "omi.read_tw_market_dashboard",
+            "title": "Read OMI Taiwan Market Dashboard",
+            "description": (
+                "Read the cache-only backend-owned Taiwan market dashboard. "
+                "Returns session, freshness, breadth, groups, watchlist, and "
+                "truthfully provisional index estimates without rendering UI."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "watchlist_group_id": {
+                        "type": "integer",
+                        "minimum": 1,
+                    },
+                    "include_watchlist_children": {
+                        "type": "boolean",
+                        "default": True,
+                    },
+                    "watchlist_limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100,
+                        "default": 40,
+                    },
+                    "group_limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 30,
+                        "default": 8,
+                    },
+                },
+                "additionalProperties": False,
+            },
+            "outputSchema": dashboard_schema,
+            "annotations": deepcopy(annotations),
+        },
+        {
+            "name": "omi.open_tw_market_dashboard",
+            "title": "Open OMI Taiwan Market Dashboard",
+            "description": (
+                "Render a dashboard returned by omi.read_tw_market_dashboard. "
+                "Call the data tool first, then pass its complete structured "
+                "content unchanged as this tool's arguments."
+            ),
+            "inputSchema": deepcopy(dashboard_schema),
+            "outputSchema": deepcopy(dashboard_schema),
+            "annotations": deepcopy(annotations),
+            "_meta": {
+                "ui": {"resourceUri": TW_DASHBOARD_RESOURCE_URI},
+                "openai/outputTemplate": TW_DASHBOARD_RESOURCE_URI,
+                "openai/toolInvocation/invoking": "Opening Taiwan dashboard…",
+                "openai/toolInvocation/invoked": "Taiwan dashboard opened.",
+            },
+        },
+        {
+            "name": "omi.search_tw_symbols",
+            "title": "Search OMI Taiwan Symbols",
+            "description": (
+                "Search active Taiwan stock symbols in the OMI local stock "
+                "master. This bounded read never refreshes providers."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "keyword": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 80,
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 50,
+                        "default": 20,
+                    },
+                },
+                "required": ["keyword"],
+                "additionalProperties": False,
+            },
+            "outputSchema": symbol_schema,
+            "annotations": deepcopy(annotations),
+        },
+        {
+            "name": "omi.read_tw_stock_dashboard_detail",
+            "title": "Read OMI Taiwan Stock Dashboard Detail",
+            "description": (
+                "Read cache-only OHLC, backend-computed MA5/20/60, and the "
+                "canonical OMI technical report for one active Taiwan stock."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "stock_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 20,
+                    },
+                    "timeframe": {
+                        "type": "string",
+                        "enum": ["today", "daily", "weekly", "monthly"],
+                        "default": "daily",
+                    },
+                    "bars": {
+                        "type": "integer",
+                        "minimum": 20,
+                        "maximum": 500,
+                        "default": 90,
+                    },
+                },
+                "required": ["stock_id"],
+                "additionalProperties": False,
+            },
+            "outputSchema": detail_schema,
+            "annotations": deepcopy(annotations),
+        },
+    ]
+
+
+TW_DASHBOARD_TOOLS = _build_tw_dashboard_tools()
+
+
 def _build_public_tools(
     ask_source: dict[str, Any],
     refresh_status_source: dict[str, Any] | None = None,
@@ -411,7 +601,7 @@ def _build_public_tools(
             ),
         },
     ]
-    return tools
+    return [*tools, *deepcopy(TW_DASHBOARD_TOOLS)]
 
 
 PUBLIC_TOOLS = _build_public_tools(
@@ -581,6 +771,194 @@ def _tools_for_client() -> list[dict[str, Any]]:
         return _backend_public_tools()
     except Exception:
         return PUBLIC_TOOLS
+
+
+def _tw_dashboard_resources_for_client() -> list[dict[str, Any]]:
+    return [
+        {
+            "uri": TW_DASHBOARD_RESOURCE_URI,
+            "name": "omi-tw-market-dashboard",
+            "title": "OMI Taiwan Market Dashboard",
+            "description": (
+                "Interactive Taiwan preopen and regular-session market dashboard."
+            ),
+            "mimeType": TW_DASHBOARD_RESOURCE_MIME_TYPE,
+        }
+    ]
+
+
+def _read_tw_dashboard_resource(uri: str) -> dict[str, Any]:
+    if uri != TW_DASHBOARD_RESOURCE_URI:
+        raise KeyError(f"Unknown resource: {uri}")
+    try:
+        widget_html = TW_DASHBOARD_WIDGET_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(
+            "Taiwan dashboard widget bundle is unavailable. Run its production build."
+        ) from exc
+    return {
+        "contents": [
+            {
+                "uri": TW_DASHBOARD_RESOURCE_URI,
+                "mimeType": TW_DASHBOARD_RESOURCE_MIME_TYPE,
+                "text": widget_html,
+                "_meta": {
+                    "ui": {
+                        "prefersBorder": True,
+                        "csp": {
+                            "connectDomains": [],
+                            "resourceDomains": [],
+                        },
+                    },
+                    "openai/widgetDescription": (
+                        "OMI Taiwan market dashboard with truthful freshness, "
+                        "coverage, watchlist, and provisional index limitations."
+                    ),
+                    "openai/widgetPrefersBorder": True,
+                    "openai/widgetCSP": {
+                        "connect_domains": [],
+                        "resource_domains": [],
+                    },
+                },
+            }
+        ]
+    }
+
+
+def _bounded_integer(
+    arguments: dict[str, Any],
+    key: str,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    value = arguments.get(key, default)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < minimum
+        or value > maximum
+    ):
+        raise ValueError(f"{key} must be an integer from {minimum} to {maximum}")
+    return value
+
+
+def _read_tw_market_dashboard(arguments: dict[str, Any]) -> dict[str, Any]:
+    group_id = arguments.get("watchlist_group_id")
+    if group_id is not None and (
+        isinstance(group_id, bool)
+        or not isinstance(group_id, int)
+        or group_id < 1
+    ):
+        raise ValueError("watchlist_group_id must be a positive integer")
+    include_children = arguments.get("include_watchlist_children", True)
+    if not isinstance(include_children, bool):
+        raise ValueError("include_watchlist_children must be a boolean")
+    query: dict[str, Any] = {
+        "include_watchlist_children": str(include_children).lower(),
+        "watchlist_limit": _bounded_integer(
+            arguments,
+            "watchlist_limit",
+            default=40,
+            minimum=1,
+            maximum=100,
+        ),
+        "group_limit": _bounded_integer(
+            arguments,
+            "group_limit",
+            default=8,
+            minimum=1,
+            maximum=30,
+        ),
+    }
+    if group_id is not None:
+        query["watchlist_group_id"] = group_id
+    response = _api_request(
+        "GET",
+        f"/api/market/tw-dashboard/snapshot?{urlencode(query)}",
+    )
+    if (
+        not isinstance(response, dict)
+        or response.get("kind") != "omi.tw_market_dashboard"
+        or response.get("version") != "omi.tw_market_dashboard.v1"
+    ):
+        raise RuntimeError(
+            "OMI backend returned a malformed Taiwan dashboard response."
+        )
+    return response
+
+
+def _search_tw_symbols(arguments: dict[str, Any]) -> dict[str, Any]:
+    keyword = _required_text(arguments, "keyword")
+    if len(keyword) > 80:
+        raise ValueError("keyword must be at most 80 characters")
+    limit = _bounded_integer(
+        arguments,
+        "limit",
+        default=20,
+        minimum=1,
+        maximum=50,
+    )
+    response = _api_request(
+        "GET",
+        "/api/market/tw-dashboard/symbols/search?"
+        + urlencode({"keyword": keyword, "limit": limit}),
+    )
+    if (
+        not isinstance(response, dict)
+        or response.get("kind") != "omi.tw_symbol_search"
+        or response.get("version") != "omi.tw_symbol_search.v1"
+    ):
+        raise RuntimeError(
+            "OMI backend returned a malformed Taiwan symbol-search response."
+        )
+    return response
+
+
+def _read_tw_stock_dashboard_detail(
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    stock_id = _required_text(arguments, "stock_id")
+    if len(stock_id) > 20:
+        raise ValueError("stock_id must be at most 20 characters")
+    timeframe = str(arguments.get("timeframe") or "daily").strip().lower()
+    if timeframe not in {"today", "daily", "weekly", "monthly"}:
+        raise ValueError(
+            "timeframe must be one of: today, daily, weekly, monthly"
+        )
+    bars = _bounded_integer(
+        arguments,
+        "bars",
+        default=90,
+        minimum=20,
+        maximum=500,
+    )
+    response = _api_request(
+        "GET",
+        f"/api/market/tw-dashboard/stocks/{quote(stock_id, safe='')}?"
+        + urlencode({"timeframe": timeframe, "bars": bars}),
+    )
+    if (
+        not isinstance(response, dict)
+        or response.get("kind") != "omi.tw_stock_dashboard_detail"
+        or response.get("version") != "omi.tw_stock_dashboard_detail.v2"
+    ):
+        raise RuntimeError(
+            "OMI backend returned a malformed Taiwan stock-detail response."
+        )
+    return response
+
+
+def _open_tw_market_dashboard(arguments: dict[str, Any]) -> dict[str, Any]:
+    if (
+        arguments.get("kind") != "omi.tw_market_dashboard"
+        or arguments.get("version") != "omi.tw_market_dashboard.v1"
+    ):
+        raise ValueError(
+            "Pass the complete omi.read_tw_market_dashboard structuredContent unchanged."
+        )
+    return deepcopy(arguments)
 
 
 def _required_question(
@@ -815,6 +1193,14 @@ def _capability_status_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
+    if name == "omi.read_tw_market_dashboard":
+        return _read_tw_market_dashboard(arguments)
+    if name == "omi.open_tw_market_dashboard":
+        return _open_tw_market_dashboard(arguments)
+    if name == "omi.search_tw_symbols":
+        return _search_tw_symbols(arguments)
+    if name == "omi.read_tw_stock_dashboard_detail":
+        return _read_tw_stock_dashboard_detail(arguments)
     if name == "omi.ask":
         return _search(arguments)
     if name == "omi.read_refresh_status":
@@ -847,7 +1233,13 @@ def _handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
             request_id,
             {
                 "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {"tools": {"listChanged": False}},
+                "capabilities": {
+                    "tools": {"listChanged": False},
+                    "resources": {
+                        "subscribe": False,
+                        "listChanged": False,
+                    },
+                },
                 "serverInfo": {
                     "name": SERVER_NAME,
                     "title": "OMI_search MCP Adapter",
@@ -859,7 +1251,9 @@ def _handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
                     "The adapter maps MCP fields to POST /api/ai/ask, fixes "
                     "allow_llm=false and allow_write=false, and returns the unchanged "
                     "omi.decision.v4 envelope. OMI backend owns all market and answer "
-                    "judgment. refresh_if_missing must be explicit."
+                    "judgment. refresh_if_missing must be explicit. For the Taiwan "
+                    "dashboard, call omi.read_tw_market_dashboard before "
+                    "omi.open_tw_market_dashboard."
                 ),
             },
         )
@@ -869,6 +1263,23 @@ def _handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
 
     if method == "tools/list":
         return _response(request_id, {"tools": _tools_for_client()})
+
+    if method == "resources/list":
+        return _response(
+            request_id,
+            {"resources": _tw_dashboard_resources_for_client()},
+        )
+
+    if method == "resources/read":
+        uri = params.get("uri") if isinstance(params, dict) else None
+        if not isinstance(uri, str) or not uri:
+            return _error(request_id, -32602, "Missing required resource URI.")
+        try:
+            return _response(request_id, _read_tw_dashboard_resource(uri))
+        except KeyError as exc:
+            return _error(request_id, -32602, str(exc))
+        except Exception as exc:
+            return _error(request_id, -32603, str(exc))
 
     if method == "tools/call":
         name = str(params.get("name") or "")

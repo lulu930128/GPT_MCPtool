@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
-const url = new URL(process.env.CODEX_BRIDGE_SMOKE_URL?.trim() || "http://127.0.0.1:8828/mcp");
+const url = new URL(process.env.CODEX_BRIDGE_SMOKE_URL?.trim() || "http://127.0.0.1:18828/mcp");
 const token = process.env.CODEX_BRIDGE_HTTP_TOKEN?.trim();
-const client = new Client({ name: "codex-bridge-live-smoke", version: "0.1.0" });
+const client = new Client({ name: "codex-bridge-live-smoke", version: "1.1.0" });
 const transport = new StreamableHTTPClientTransport(url, token ? { requestInit: { headers: { authorization: `Bearer ${token}` } } } : undefined);
 
 try {

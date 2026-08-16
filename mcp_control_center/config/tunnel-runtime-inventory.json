@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "contractVersion": "tunnel-runtime-inventory-v1",
+  "sharedRuntime": {
+    "path": "runtime\\tunnel-client\\tunnel-client.exe",
+    "manifestPath": "runtime\\tunnel-client\\version.json"
+  },
+  "components": [
+    {
+      "id": "project_reading",
+      "path": "project_reading\\vendor\\tunnel-client\\tunnel-client.exe",
+      "source": "legacy_shared_provider",
+      "override": "TunnelClientPath"
+    },
+    {
+      "id": "omi_search",
+      "path": "project_reading\\vendor\\tunnel-client\\tunnel-client.exe",
+      "source": "legacy_shared",
+      "override": "TunnelClientPath"
+    },
+    {
+      "id": "japanese_study",
+      "path": "japanese_study\\vendor\\tunnel-client\\tunnel-client.exe",
+      "source": "component_local",
+      "override": "TunnelClientPath"
+    },
+    {
+      "id": "memory_core",
+      "path": "project_reading\\vendor\\tunnel-client\\tunnel-client.exe",
+      "source": "legacy_shared",
+      "override": "TunnelClientPath"
+    },
+    {
+      "id": "codex_bridge",
+      "path": "project_reading\\vendor\\tunnel-client\\tunnel-client.exe",
+      "source": "legacy_shared",
+      "override": "TunnelClientPath"
+    },
+    {
+      "id": "personal_asset_os",
+      "path": "personal-asset-os\\vendor\\tunnel-client\\tunnel-client.exe",
+      "source": "component_local",
+      "override": "TunnelClientPath"
+    }
+  ]
+}

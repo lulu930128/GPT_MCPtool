@@ -1,7 +1,7 @@
 param(
   [string]$ProjectRoot,
   [string]$HostName = "127.0.0.1",
-  [int]$Port = 8828,
+  [int]$Port = 18828,
   [string]$ProjectsFile,
   [string]$DataDir = "C:\CodexBridge",
   [string]$Token = $env:CODEX_BRIDGE_HTTP_TOKEN,
@@ -10,8 +10,8 @@ param(
   [string]$TunnelClientPath,
   [string]$TunnelProfileDir,
   [string]$TunnelProfile = "codex-bridge",
-  [string]$TunnelId = $env:CODEX_BRIDGE_TUNNEL_ID,
-  [string]$TunnelHealthUrl = "http://127.0.0.1:8829",
+  [string]$TunnelId,
+  [string]$TunnelHealthUrl = "http://127.0.0.1:18829",
   [string]$SecretPath,
   [switch]$NoAutoStart,
   [switch]$AutoStartTunnel,
@@ -27,6 +27,8 @@ $TrayDisplayName = $(if($DiagnosticOnly){"Codex Bridge MCP Diagnostics"}else{"Co
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
   $ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 }
+$explicitTunnelId = if ($PSBoundParameters.ContainsKey('TunnelId')) { $TunnelId } else { $null }
+$settingsTunnelId = $null
 $ComponentDescriptorPath = Join-Path $ProjectRoot "control-center\component.json"
 $V3ControllerActive = $false
 if (Test-Path -LiteralPath $ComponentDescriptorPath -PathType Leaf) {
@@ -57,14 +59,15 @@ if (Test-Path -LiteralPath $localSettingsPath) {
     @{ Parameter = "ProjectsFile"; Name = "projectsFile" },
     @{ Parameter = "DataDir"; Name = "dataDir" },
     @{ Parameter = "CodexCommand"; Name = "codexCommand" },
-    @{ Parameter = "CodexArgs"; Name = "codexArgs" },
-    @{ Parameter = "TunnelId"; Name = "tunnelId" }
+    @{ Parameter = "CodexArgs"; Name = "codexArgs" }
   )) {
     $value = Get-SettingValue $localSettings $binding.Name
     if (-not $PSBoundParameters.ContainsKey($binding.Parameter) -and -not [string]::IsNullOrWhiteSpace([string]$value)) {
       Set-Variable -Name $binding.Parameter -Value ([string]$value)
     }
   }
+  $settingsValue = Get-SettingValue $localSettings 'tunnelId'
+  if (-not [string]::IsNullOrWhiteSpace([string]$settingsValue)) { $settingsTunnelId = [string]$settingsValue }
 }
 
 $HttpEntry = Join-Path $ProjectRoot "dist\src\http-main.js"
@@ -85,11 +88,9 @@ if ([string]::IsNullOrWhiteSpace($SecretPath)) {
 . (Join-Path $SharedProjectReadingRoot "scripts\key-store.ps1")
 $ResolvedSecretPath = Get-ControlPlaneSecretPath -ProjectRoot $ProjectRoot -SecretPath $SecretPath
 $TunnelProfilePath = Join-Path $TunnelProfileDir "$TunnelProfile.yaml"
-if ([string]::IsNullOrWhiteSpace($TunnelId) -and (Test-Path -LiteralPath $TunnelProfilePath)) {
-  foreach ($line in (Get-Content -LiteralPath $TunnelProfilePath -Encoding UTF8)) {
-    if ($line -match '^\s*tunnel_id\s*:\s*"?([^"#\s]+)') { $TunnelId = $matches[1]; break }
-  }
-}
+Import-Module (Join-Path $PSScriptRoot 'component-runtime.psm1') -Force
+$TunnelIdentity = Resolve-CbTunnelIdentity -ExplicitTunnelId $explicitTunnelId -SettingsTunnelId $settingsTunnelId -EnvironmentTunnelId $env:CODEX_BRIDGE_TUNNEL_ID -ProfilePath $TunnelProfilePath
+$TunnelId = if ($TunnelIdentity.status -eq 'Ready') { [string]$TunnelIdentity.resolvedTunnelId } else { $null }
 $TunnelUiUrl = "$($TunnelHealthUrl.TrimEnd('/'))/ui"
 $TmpDir = Join-Path $ProjectRoot ".tmp"
 $TunnelLogFile = Join-Path $TmpDir "tunnel-client.log"
@@ -132,7 +133,8 @@ if ($SelfTest) {
     tunnelProfileExists = Test-Path -LiteralPath $TunnelProfilePath
     secretPath = $ResolvedSecretPath
     secretExists = Test-Path -LiteralPath $ResolvedSecretPath
-    tunnelIdConfigured = -not [string]::IsNullOrWhiteSpace($TunnelId)
+    tunnelIdConfigured = $TunnelIdentity.status -eq 'Ready'
+    tunnelIdentity = Get-CbTunnelIdentitySummary -Identity $TunnelIdentity
     tunnelHealthUrl = $TunnelHealthUrl
     replaceExistingSupported = $true
     trayMenuContract = "unified-always-on-v2"
@@ -248,6 +250,8 @@ function Restart-CodexBridgeServer { Stop-CodexBridgeServer; Start-Sleep -Millis
 
 function Start-TunnelClient {
   if ((Test-OwnedTunnelRunning) -or (Test-TunnelReady)) { return }
+  try { Assert-CbTunnelIdentityReady -Context ([pscustomobject]@{ tunnelIdentity = $TunnelIdentity }) }
+  catch { Show-Warning "Tunnel identity configuration is missing, invalid, or inconsistent. Run tunnel SelfTest before starting."; return }
   if (-not (Test-Path -LiteralPath $TunnelClientPath)) { Show-Warning "Missing tunnel-client.exe at $TunnelClientPath"; return }
   if (-not (Test-Path -LiteralPath $TunnelProfilePath)) { Show-Warning "Missing tunnel profile at $TunnelProfilePath`nRun npm run tunnel:init first."; return }
   Set-ControlPlaneApiKeyEnvFromSecret -ProjectRoot $ProjectRoot -SecretPath $ResolvedSecretPath | Out-Null
@@ -256,7 +260,7 @@ function Start-TunnelClient {
   New-Item -ItemType Directory -Force -Path $TmpDir | Out-Null
   $startInfo = New-Object System.Diagnostics.ProcessStartInfo
   $startInfo.FileName = $TunnelClientPath
-  $startInfo.Arguments = "run --profile-dir `"$TunnelProfileDir`" --profile `"$TunnelProfile`" --log.file `"$TunnelLogFile`" --pid.file `"$TunnelPidFile`""
+  $startInfo.Arguments = "run --profile-dir `"$TunnelProfileDir`" --profile `"$TunnelProfile`" --control-plane.tunnel-id `"$TunnelId`" --log.file `"$TunnelLogFile`" --pid.file `"$TunnelPidFile`""
   $startInfo.WorkingDirectory = $ProjectRoot
   $startInfo.UseShellExecute = $false
   $startInfo.CreateNoWindow = $true

@@ -1,11 +1,11 @@
 # GPT MCP Tool Workspace
 
-本 repository 是六個 MCP 元件與一個 Windows runtime 中樞的 source-only monorepo。
+本 repository 是七個 MCP 元件與一個 Windows runtime 中樞的 source-only monorepo。
 
 ## 工作邊界
 
 - 修改任何元件前，先閱讀該目錄內的 `AGENTS.md` 與 `README.md`。
-- 六個頂層元件維持獨立的依賴、測試、MCP contract 與資料邊界。
+- 七個頂層元件維持獨立的依賴、測試、MCP contract 與資料邊界。
 - 不要為了整理 repository 而 flatten、搬移或重新命名元件；現有 Windows lifecycle
   script、Startup shortcut 與本機設定可能依賴絕對路徑。
 - 跨元件共用 runtime 資源時，必須在根 README 與元件 README 說明，不得把資料層

@@ -51,7 +51,7 @@ export async function loadBridgeConfig(env: NodeJS.ProcessEnv = process.env): Pr
     codexCommand: codexLaunch.command,
     codexArgs: codexLaunch.args,
     httpHost: env.CODEX_BRIDGE_HTTP_HOST?.trim() || "127.0.0.1",
-    httpPort: parsePort(env.CODEX_BRIDGE_HTTP_PORT, 8828),
+    httpPort: parsePort(env.CODEX_BRIDGE_HTTP_PORT, 18828),
     httpToken: env.CODEX_BRIDGE_HTTP_TOKEN?.trim() || undefined,
     maxRecentJobs: parseBoundedInt(env.CODEX_BRIDGE_MAX_RECENT_JOBS, 20, 1, 100),
     buildId: await computeRuntimeBuildId(projectRoot),

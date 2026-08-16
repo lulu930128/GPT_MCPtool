@@ -8,7 +8,7 @@ assert.equal(
   "Set JSTUDY_ALLOW_TEST_WRITE=1 only for a disposable Hub database.",
 );
 
-const url = new URL(process.env.JSTUDY_MCP_URL || "http://127.0.0.1:8790/mcp");
+const url = new URL(process.env.JSTUDY_MCP_URL || "http://127.0.0.1:18790/mcp");
 assert.ok(
   url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "::1",
   "smoke:practice only connects to a loopback MCP endpoint",
@@ -67,7 +67,7 @@ const submission = {
   ],
 };
 
-const client = new Client({ name: "japanese-study-practice-smoke", version: "0.3.0" });
+const client = new Client({ name: "japanese-study-practice-smoke", version: "1.1.0" });
 const transport = new StreamableHTTPClientTransport(url);
 
 try {

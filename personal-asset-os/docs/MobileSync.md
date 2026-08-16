@@ -38,11 +38,11 @@ Pairing codes and device tokens must not be logged, committed, screenshotted, or
 
 ## USB/ADB transport
 
-The desktop API remains on `127.0.0.1:8876`. ADB reverse maps the phone's loopback port to the
+The desktop API uses `127.0.0.1:18876`. ADB reverse maps the phone's loopback port to the
 desktop loopback listener:
 
 ```powershell
-C:\work\bin\adb.cmd reverse tcp:8876 tcp:8876
+C:\work\bin\adb.cmd reverse tcp:18876 tcp:18876
 C:\work\bin\adb.cmd reverse --list
 ```
 

@@ -24,7 +24,7 @@ Runtime assets live under `CODEX_BRIDGE_DATA_DIR` and are not source archive con
 ```text
 ChatGPT host
   -> MCP Apps widget
-  -> Bridge HTTP MCP :8828
+  -> Bridge HTTP MCP :18828
   -> project allowlist + job/staging stores
   -> local controller
   -> Codex App Server over stdio

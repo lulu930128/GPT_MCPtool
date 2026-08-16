@@ -1,6 +1,6 @@
 {
   "name": "codex-handoff-bridge",
-  "version": "0.1.0",
+  "version": "1.1.0",
   "description": "Private MCP Apps control plane for handing ChatGPT work packages to a local Codex App Server.",
   "type": "module",
   "bin": {

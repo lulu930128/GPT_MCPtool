@@ -24,13 +24,13 @@ npm run android:lan
 
 ## USB 配對與同步
 
-先啟動 loopback server，並把手機的 `127.0.0.1:8876` 經 ADB reverse 對應到電腦：
+先啟動 loopback server，並把手機的 `127.0.0.1:18876` 經 ADB reverse 對應到電腦：
 
 ```powershell
 cd C:\GPT_MCPtool\personal-asset-os
-uv run --frozen personal-asset-os serve --host 127.0.0.1 --port 8876
+uv run --frozen personal-asset-os serve --host 127.0.0.1 --port 18876
 
-C:\work\bin\adb.cmd reverse tcp:8876 tcp:8876
+C:\work\bin\adb.cmd reverse tcp:18876 tcp:18876
 C:\work\bin\adb.cmd reverse --list
 ```
 

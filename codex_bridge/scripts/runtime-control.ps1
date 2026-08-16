@@ -1,7 +1,7 @@
 param(
   [ValidateSet('SelfTest','Status','EnsureRunning','RepairConnectivity','RestartCore','ReloadRuntime','ShutdownRuntime')][string]$Action='Status',
-  [string]$ProjectRoot,[string]$HostName='127.0.0.1',[int]$Port=8828,[string]$ProjectsFile,[string]$DataDir='C:\CodexBridge',[string]$Token=$env:CODEX_BRIDGE_HTTP_TOKEN,
-  [string]$CodexCommand,[string]$CodexArgs,[string]$NodePath,[string]$TunnelClientPath,[string]$TunnelProfileDir,[string]$TunnelProfile='codex-bridge',[string]$TunnelHealthUrl='http://127.0.0.1:8829',
+  [string]$ProjectRoot,[string]$HostName='127.0.0.1',[int]$Port=18828,[string]$ProjectsFile,[string]$DataDir='C:\CodexBridge',[string]$Token=$env:CODEX_BRIDGE_HTTP_TOKEN,
+  [string]$CodexCommand,[string]$CodexArgs,[string]$NodePath,[string]$TunnelClientPath,[string]$TunnelProfileDir,[string]$TunnelProfile='codex-bridge',[string]$TunnelId,[string]$TunnelHealthUrl='http://127.0.0.1:18829',
   [string]$KeyStorePath='C:\GPT_MCPtool\project_reading\scripts\key-store.ps1',[string]$SecretPath='C:\GPT_MCPtool\project_reading\.secrets\control-plane-api-key.dpapi',[string]$ExpectedBuildId,[string]$TestActiveFlag,
   [int]$ServerReadyTimeoutSeconds=20,[int[]]$TunnelRecoveryDelaysSeconds=@(15,30,60),[switch]$AdoptLegacyExactListeners
 )
@@ -9,10 +9,12 @@ param(
 Set-StrictMode -Version 3.0
 $ErrorActionPreference='Stop'
 if([string]::IsNullOrWhiteSpace($ProjectRoot)){$ProjectRoot=(Resolve-Path -LiteralPath(Join-Path $PSScriptRoot '..')).Path}
+$explicitTunnelId=if($PSBoundParameters.ContainsKey('TunnelId')){$TunnelId}else{$null};$settingsTunnelId=$null
 
 $settingsPath=Join-Path $ProjectRoot '.local\tray-settings.json'
 if(Test-Path -LiteralPath $settingsPath -PathType Leaf){
   try{$settings=Get-Content -LiteralPath $settingsPath -Encoding UTF8 -Raw|ConvertFrom-Json}catch{throw 'Invalid local tray settings.'}
+  $tunnelIdProperty=$settings.PSObject.Properties['tunnelId'];if($null-ne$tunnelIdProperty-and-not[string]::IsNullOrWhiteSpace([string]$tunnelIdProperty.Value)){$settingsTunnelId=[string]$tunnelIdProperty.Value}
   foreach($binding in @(@{Parameter='ProjectsFile';Name='projectsFile'},@{Parameter='DataDir';Name='dataDir'},@{Parameter='CodexCommand';Name='codexCommand'},@{Parameter='CodexArgs';Name='codexArgs'})){
     $property=$settings.PSObject.Properties[$binding.Name]
     if(-not$PSBoundParameters.ContainsKey($binding.Parameter)-and$null-ne$property-and-not[string]::IsNullOrWhiteSpace([string]$property.Value)){Set-Variable -Name $binding.Parameter -Value([string]$property.Value)}
@@ -20,10 +22,10 @@ if(Test-Path -LiteralPath $settingsPath -PathType Leaf){
 }
 
 Import-Module(Join-Path $PSScriptRoot 'component-runtime.psm1')-Force
-$context=New-CodexBridgeRuntimeContext -ProjectRoot $ProjectRoot -HostName $HostName -Port $Port -ProjectsFile $ProjectsFile -DataDir $DataDir -Token $Token -CodexCommand $CodexCommand -CodexArgs $CodexArgs -NodePath $NodePath -TunnelClientPath $TunnelClientPath -TunnelProfileDir $TunnelProfileDir -TunnelProfile $TunnelProfile -TunnelHealthUrl $TunnelHealthUrl -KeyStorePath $KeyStorePath -SecretPath $SecretPath -ExpectedBuildId $ExpectedBuildId -TestActiveFlag $TestActiveFlag -ServerReadyTimeoutSeconds $ServerReadyTimeoutSeconds -TunnelRecoveryDelaysSeconds $TunnelRecoveryDelaysSeconds
+$context=New-CodexBridgeRuntimeContext -ProjectRoot $ProjectRoot -HostName $HostName -Port $Port -ProjectsFile $ProjectsFile -DataDir $DataDir -Token $Token -CodexCommand $CodexCommand -CodexArgs $CodexArgs -NodePath $NodePath -TunnelClientPath $TunnelClientPath -TunnelProfileDir $TunnelProfileDir -TunnelProfile $TunnelProfile -ExplicitTunnelId $explicitTunnelId -SettingsTunnelId $settingsTunnelId -EnvironmentTunnelId $env:CODEX_BRIDGE_TUNNEL_ID -TunnelHealthUrl $TunnelHealthUrl -KeyStorePath $KeyStorePath -SecretPath $SecretPath -ExpectedBuildId $ExpectedBuildId -TestActiveFlag $TestActiveFlag -ServerReadyTimeoutSeconds $ServerReadyTimeoutSeconds -TunnelRecoveryDelaysSeconds $TunnelRecoveryDelaysSeconds
 
 if($Action-eq'SelfTest'){
-  [pscustomobject]@{runtimeContract='unified-lifecycle-v3';lifecycleModel='stateless-controller';supportsDiagnosticTray=$true;controllerEntryExists=Test-Path -LiteralPath $PSCommandPath -PathType Leaf;autoStartCore=$true;autoStartTunnel=$true;exitUiStopsRuntime=$false;exactOwnershipEnforced=$true;activeWorkMutationBlocked=$true;approvalDecisionsDelegated=$false;capabilities=@('ensure_running','repair_connectivity','restart_core','reload_runtime','shutdown_runtime','show_diagnostic_tray');resultFields=@('ok','action','before','after','ownedPids','elapsedMs','errorCode','message')}|ConvertTo-Json -Depth 5
+  [pscustomobject]@{runtimeContract='unified-lifecycle-v3';lifecycleModel='stateless-controller';supportsDiagnosticTray=$true;controllerEntryExists=Test-Path -LiteralPath $PSCommandPath -PathType Leaf;autoStartCore=$true;autoStartTunnel=$true;exitUiStopsRuntime=$false;exactOwnershipEnforced=$true;tunnelIdentityConsistencyEnforced=$true;tunnelIdentity=Get-CbTunnelIdentitySummary -Identity $context.tunnelIdentity;activeWorkMutationBlocked=$true;approvalDecisionsDelegated=$false;capabilities=@('ensure_running','repair_connectivity','restart_core','reload_runtime','shutdown_runtime','show_diagnostic_tray');resultFields=@('ok','action','before','after','ownedPids','elapsedMs','errorCode','message')}|ConvertTo-Json -Depth 5
   exit 0
 }
 

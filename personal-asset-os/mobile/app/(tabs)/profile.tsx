@@ -143,7 +143,7 @@ export default function ProfileScreen() {
         )}
 
         <Text style={styles.bridgeHint}>
-          連線前需在電腦啟動服務，並執行 adb reverse tcp:8876 tcp:8876。這條通道只經 USB 與
+          連線前需在電腦啟動服務，並執行 adb reverse tcp:18876 tcp:18876。這條通道只經 USB 與
           127.0.0.1，不開放 LAN 或公網。
         </Text>
       </PaperCard>

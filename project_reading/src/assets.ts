@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import ExcelJS from "exceljs";
-import sharp from "sharp";
+import sharp, { type Metadata, type OutputInfo, type SharpOptions } from "sharp";
 import yauzl from "yauzl";
 import type { ServerConfig } from "./config.js";
 import {
@@ -60,7 +60,7 @@ export interface ImageAssetResult {
   mimeType: "image/jpeg" | "image/png";
 }
 
-interface ResolvedAsset {
+export interface ResolvedAsset {
   scopeId: string;
   rootId: string;
   scopePath: string;
@@ -153,7 +153,7 @@ export async function readImageAsset(
   let dimension = Math.min(requestedMaxDimension, Math.max(metadata.width, metadata.height));
   const usePng = metadata.hasAlpha || metadata.format === "gif";
   let encoded:
-    | { data: Buffer; info: sharp.OutputInfo; mimeType: "image/jpeg" | "image/png" }
+    | { data: Buffer; info: OutputInfo; mimeType: "image/jpeg" | "image/png" }
     | undefined;
 
   for (let attempt = 0; attempt < 7; attempt += 1) {
@@ -389,7 +389,14 @@ async function resolveAsset(config: ServerConfig, args: AssetArgs): Promise<Reso
   };
 }
 
-async function readSharpMetadata(config: ServerConfig, source: Buffer): Promise<sharp.Metadata> {
+export async function resolveAssetFile(
+  config: ServerConfig,
+  args: AssetArgs,
+): Promise<ResolvedAsset> {
+  return resolveAsset(config, args);
+}
+
+async function readSharpMetadata(config: ServerConfig, source: Buffer): Promise<Metadata> {
   try {
     const metadata = await sharp(source, sharpInputOptions(config)).metadata();
     if (!metadata.format || !["jpeg", "png", "webp", "gif"].includes(metadata.format)) {
@@ -406,7 +413,7 @@ async function readSharpMetadata(config: ServerConfig, source: Buffer): Promise<
   }
 }
 
-function sharpInputOptions(config: ServerConfig): sharp.SharpOptions {
+function sharpInputOptions(config: ServerConfig): SharpOptions {
   return {
     failOn: "warning",
     limitInputPixels: config.maxImagePixels,

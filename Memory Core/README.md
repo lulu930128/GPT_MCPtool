@@ -2,7 +2,7 @@
 
 Memory Core 是 local-first、single-user、可審計的個人資料後端。它是網站、Kuro、MCP 與桌面工具共同使用的 system of record；所有 client 都只能透過 API 存取資料。
 
-目前版本為 `0.2.0`，已完成通用後端核心、tool-only MCP adapter、Cocktail Record
+目前 application release 為 `1.1.0`，已完成通用後端核心、tool-only MCP adapter、Cocktail Record
 Schema v1、相容舊流程的 ChangeSet、Batch／Item／Collection v3 架構，以及本機
 Tkinter 管理控制中心；尚不包含 Kuro adapter。Batch v3 的第一個可用 profile 是
 `media.experience.v1`。
@@ -159,7 +159,7 @@ uv run uvicorn memory_core.main:app --host 127.0.0.1 --port 18765
 避免 Windows／Hyper-V／Docker 動態 excluded range 擋住 bind。Stack 會以同一個
 `BackendPort` 產生 uvicorn argument、`MEMORY_CORE_PORT` 與 MCP API URL；不會讀取或
 改寫私人 `.env`。若使用自訂手動 launcher，必須同步更新 backend、MCP 與 viewer URL。
-對外 MCP `8818` 與 tunnel admin `8800` 沒有變更。
+對外 MCP 與 tunnel admin 已移至 reboot-stable 固定埠 `18818` 與 `18800`。
 
 ## 啟動 MCP adapter
 
@@ -175,8 +175,8 @@ environment，結束時清除。若要用這個單機腳本啟用審核工具，
 process environment 提供 `MEMORY_CORE_MCP_REVIEW_CLIENT_TOKEN`；不要把任何 token
 寫入 `.env`。它不需要也不會讀取 OpenAI API key。
 
-- MCP endpoint：`http://127.0.0.1:8818/mcp`
-- MCP health：`http://127.0.0.1:8818/health`
+- MCP endpoint：`http://127.0.0.1:18818/mcp`
+- MCP health：`http://127.0.0.1:18818/health`
 - Transport：stateless Streamable HTTP，JSON response
 - Listener 與 backend URL 都強制限制為 loopback；不能用設定誤綁到 `0.0.0.0` 或外部 API。
 
@@ -305,7 +305,7 @@ candidate 與新 digest；candidate 預設 7 天到期。approval/rejection retr
 Codex 或其他可連本機 HTTP MCP 的 host，設定 URL 為：
 
 ```text
-http://127.0.0.1:8818/mcp
+http://127.0.0.1:18818/mcp
 ```
 
 ChatGPT 網頁無法直接連 localhost；需要 HTTPS deployment 或獨立的 Secure MCP Tunnel。Tunnel credential 不屬於本 repo，也不能寫入 `.env`、README 或 YAML 明文。請先輪替任何曾貼在聊天中的 credential，再另行設定 tunnel。
@@ -313,6 +313,13 @@ ChatGPT 網頁無法直接連 localhost；需要 HTTPS deployment 或獨立的 S
 ## Secure MCP Tunnel（本機私人連線）
 
 本專案提供 Windows lifecycle script，將 backend、MCP 與 OpenAI Secure MCP Tunnel 維持在同一個 local trust boundary。三者都只監聽 `127.0.0.1`；tunnel client 主動建立 outbound HTTPS 連線，不需要開 inbound firewall port。
+
+Tunnel executable 目前仍來自 legacy `project_reading` 安裝位置；Control Center inventory 只讀取
+path／version／SHA-256，不做 automatic upgrade。Lifecycle script 只在 backend／MCP／tunnel child
+spawn 時清除 ambient proxy、bypass `127.0.0.1`／`localhost`，完成後還原 parent environment；
+不修改 Windows 全域 proxy。Tunnel child 的 stdout／stderr 另寫入 component-owned runtime log，
+不繼承 controller capture handle，避免 runtime 已 Ready 但 cold-boot action 仍等待 pipe EOF。
+需要企業 outbound proxy 時必須使用明確、component-owned 設定。
 
 第一次設定：
 
@@ -469,9 +476,9 @@ Records 左側分類導覽預設依 `domain` 分組，Entities 依
 中間清單刻意只保留資料標題；Kind、Domain、Schema、版本、時間與來源等完整欄位統一
 在右側詳細內容呈現，避免重複資訊與水平捲動；選取中間項目即載入右側內容。
 
-- Tunnel local admin UI：`http://127.0.0.1:8800/ui`
-- Tunnel readiness：`http://127.0.0.1:8800/readyz`
-- Private MCP target：`http://127.0.0.1:8818/mcp`
+- Tunnel local admin UI：`http://127.0.0.1:18800/ui`
+- Tunnel readiness：`http://127.0.0.1:18800/readyz`
+- Private MCP target：`http://127.0.0.1:18818/mcp`
 
 在 ChatGPT developer mode 建立 app 時選擇 **Tunnel** connection，再選取 Platform 已建立且已關聯到目標 workspace 的 tunnel。若 ChatGPT 看不到 tunnel，需在 Platform tunnel settings 檢查 workspace association 與 `Tunnels Read + Use` 權限。
 

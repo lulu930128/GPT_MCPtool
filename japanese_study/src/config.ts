@@ -10,11 +10,11 @@ export interface JapaneseStudyMcpConfig {
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): JapaneseStudyMcpConfig {
-  const hubBaseUrl = normalizeHubUrl(env.JSTUDY_HUB_BASE_URL || "http://127.0.0.1:8791");
+  const hubBaseUrl = normalizeHubUrl(env.JSTUDY_HUB_BASE_URL || "http://127.0.0.1:18791");
   const hubApiToken = env.JSTUDY_HUB_API_TOKEN?.trim() || undefined;
   const hubTimeoutMs = parsePositiveInt(env.JSTUDY_HUB_TIMEOUT_MS, 10_000);
   const host = env.JSTUDY_MCP_HOST?.trim() || "127.0.0.1";
-  const port = parsePort(env.JSTUDY_MCP_PORT, 8790);
+  const port = parsePort(env.JSTUDY_MCP_PORT, 18790);
   const httpToken = env.JSTUDY_MCP_HTTP_TOKEN?.trim() || undefined;
 
   if (!isLoopbackHost(host) && !httpToken) {

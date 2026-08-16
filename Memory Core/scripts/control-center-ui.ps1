@@ -18,9 +18,9 @@ if ($SelfTest) {
     [pscustomobject]@{ ok = $dependenciesReady; menuContract = $menuContract; actions = $supportedActions; managerDomainDataAccess = "none"; managerSecretAccess = "none" } | ConvertTo-Json -Depth 4
     exit $(if ($dependenciesReady) { 0 } else { 1 })
 }
-$mcpUrl = "http://127.0.0.1:8818/mcp"
-$healthUrl = "http://127.0.0.1:8818/health"
-$tunnelUiUrl = "http://127.0.0.1:8800/ui"
+$mcpUrl = "http://127.0.0.1:18818/mcp"
+$healthUrl = "http://127.0.0.1:18818/health"
+$tunnelUiUrl = "http://127.0.0.1:18800/ui"
 $backendHealthUrl = "http://127.0.0.1:$BackendPort/health"
 $backendDocsUrl = "http://127.0.0.1:$BackendPort/docs"
 $runtimeDir = Join-Path $projectRoot ".tmp"

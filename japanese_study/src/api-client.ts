@@ -23,7 +23,106 @@ export interface SearchItemsInput {
   query?: string;
   kind?: StudyKind;
   jlptLevel?: string;
+  tag?: string;
   limit?: number;
+}
+
+export interface ItemDraftInput {
+  kind: "vocab" | "grammar";
+  title: string;
+  reading?: string;
+  meaningTc?: string;
+  jlptLevel?: string;
+  partOfSpeech?: string;
+  senseKey?: string;
+  content?: Record<string, unknown>;
+  tags?: string[];
+  provenance?: "manual" | "chatgpt_proposed" | "external_proposed";
+  addToInbox?: boolean;
+  createNewSense?: boolean;
+}
+
+export interface CreateItemInput {
+  operationId: string;
+  expectedFingerprint: string;
+  draft: ItemDraftInput;
+  actor?: string;
+}
+
+export interface ItemRevisionChangesInput {
+  meaningTc?: string;
+  content?: Record<string, unknown>;
+  tags?: string[];
+}
+
+export interface PreviewItemRevisionInput {
+  itemId: string;
+  changes: ItemRevisionChangesInput;
+  reason: string;
+}
+
+export interface ApplyItemRevisionInput extends PreviewItemRevisionInput {
+  operationId: string;
+  expectedFingerprint: string;
+  actor?: string;
+}
+
+export interface ItemLifecycleInput {
+  itemId: string;
+  action: "retire" | "restore";
+  reason: string;
+  replacementItemId?: string;
+}
+
+export interface ApplyItemLifecycleInput extends ItemLifecycleInput {
+  operationId: string;
+  expectedFingerprint: string;
+  actor?: string;
+}
+
+export interface QualityInboxInput {
+  issueType?: string;
+  kind?: "vocab" | "grammar";
+  limit?: number;
+  offset?: number;
+}
+
+export interface StudyListCreateInput {
+  operationId: string;
+  listId: string;
+  kind: StudyKind;
+  title: string;
+  description?: string;
+  actor?: string;
+}
+
+export interface StudyListItemsInput {
+  listId: string;
+  operationId: string;
+  items: Array<{ itemId: string; priority?: number; note?: string }>;
+  actor?: string;
+}
+
+export interface QuestionCandidateSaveInput {
+  operationId: string;
+  expectedFingerprint: string;
+  candidate: Record<string, unknown>;
+  actor?: string;
+}
+
+export interface QuestionCandidatePromotionInput {
+  candidateId: string;
+  operationId: string;
+  expectedPayloadHash: string;
+  reviewNote: string;
+  actor?: string;
+}
+
+export interface QuestionCandidateRetireInput {
+  candidateId: string;
+  operationId: string;
+  reason: string;
+  actor?: string;
 }
 
 export interface SetManualLabelInput {
@@ -138,6 +237,50 @@ export interface SupersedePracticeSessionInput {
   actor?: string;
 }
 
+export interface LearnerPolicyInput {
+  schemaVersion: 1;
+  practice: {
+    autoRecordCompletedPractice: boolean;
+    preservePartial: true;
+    preserveVoid: true;
+    preserveUnscored: true;
+  };
+  answerNotation: {
+    chineseParentheses: "production_gap";
+    emptyAnswer: "skipped";
+  };
+  questionGeneration: {
+    generator: "ai";
+    useLearningContext: boolean;
+    preferWeakTargets: boolean;
+    avoidFullCatalogDump: true;
+  };
+}
+
+export interface SetLearnerPolicyInput {
+  operationId: string;
+  policy: LearnerPolicyInput;
+  actor?: string;
+}
+
+export interface LearningContextInput {
+  practiceType?: string;
+  requestedLevel?: string;
+  kind?: "vocab" | "grammar";
+  targetLimit?: number;
+  recentSessionLimit?: number;
+  diagnosisLimit?: number;
+}
+
+export interface RecordPracticeRevisionInput {
+  originalSessionId: string;
+  revisionId: string;
+  reason: string;
+  changedQuestionKeys?: string[];
+  submission: PracticeSubmissionInput;
+  actor?: string;
+}
+
 export class HubApiError extends Error {
   constructor(
     message: string,
@@ -161,6 +304,7 @@ export class JapaneseStudyHubClient {
     if (input.query) query.set("query", input.query);
     if (input.kind) query.set("kind", input.kind);
     if (input.jlptLevel) query.set("jlpt_level", input.jlptLevel);
+    if (input.tag) query.set("tag", input.tag);
     if (input.limit !== undefined) query.set("limit", String(input.limit));
     const suffix = query.size ? `?${query.toString()}` : "";
     return this.request(`/api/v1/items${suffix}`);
@@ -170,12 +314,204 @@ export class JapaneseStudyHubClient {
     return this.request(`/api/v1/items/${encodeURIComponent(itemId)}`);
   }
 
+  previewItemCreation(draft: ItemDraftInput): Promise<unknown> {
+    return this.request("/api/v1/items/creation/preview", {
+      method: "POST",
+      body: JSON.stringify({ draft: toHubItemDraft(draft) }),
+    });
+  }
+
+  createItem(input: CreateItemInput): Promise<unknown> {
+    return this.request("/api/v1/items", {
+      method: "POST",
+      body: JSON.stringify({
+        operation_id: input.operationId,
+        expected_fingerprint: input.expectedFingerprint,
+        draft: toHubItemDraft(input.draft),
+        actor: input.actor || "chatgpt_mcp",
+      }),
+    });
+  }
+
+  previewItemRevision(input: PreviewItemRevisionInput): Promise<unknown> {
+    return this.request(`/api/v1/items/${encodeURIComponent(input.itemId)}/revision/preview`, {
+      method: "POST",
+      body: JSON.stringify({ changes: toHubRevisionChanges(input.changes), reason: input.reason }),
+    });
+  }
+
+  applyItemRevision(input: ApplyItemRevisionInput): Promise<unknown> {
+    return this.request(`/api/v1/items/${encodeURIComponent(input.itemId)}/revision/apply`, {
+      method: "POST",
+      body: JSON.stringify({
+        operation_id: input.operationId,
+        expected_fingerprint: input.expectedFingerprint,
+        changes: toHubRevisionChanges(input.changes),
+        reason: input.reason,
+        actor: input.actor || "chatgpt_mcp",
+      }),
+    });
+  }
+
+  previewItemLifecycle(input: ItemLifecycleInput): Promise<unknown> {
+    return this.request(`/api/v1/items/${encodeURIComponent(input.itemId)}/lifecycle/preview`, {
+      method: "POST",
+      body: JSON.stringify({
+        action: input.action,
+        reason: input.reason,
+        replacement_item_id: input.replacementItemId,
+      }),
+    });
+  }
+
+  applyItemLifecycle(input: ApplyItemLifecycleInput): Promise<unknown> {
+    return this.request(`/api/v1/items/${encodeURIComponent(input.itemId)}/lifecycle/apply`, {
+      method: "POST",
+      body: JSON.stringify({
+        operation_id: input.operationId,
+        expected_fingerprint: input.expectedFingerprint,
+        action: input.action,
+        reason: input.reason,
+        replacement_item_id: input.replacementItemId,
+        actor: input.actor || "chatgpt_mcp",
+      }),
+    });
+  }
+
+  qualityInbox(input: QualityInboxInput): Promise<unknown> {
+    const query = new URLSearchParams();
+    if (input.issueType) query.set("issue_type", input.issueType);
+    if (input.kind) query.set("kind", input.kind);
+    if (input.limit !== undefined) query.set("limit", String(input.limit));
+    if (input.offset !== undefined) query.set("offset", String(input.offset));
+    const suffix = query.size ? `?${query.toString()}` : "";
+    return this.request(`/api/v1/quality/inbox${suffix}`);
+  }
+
+  dueReviews(input: { kind?: "vocab" | "grammar"; limit?: number }): Promise<unknown> {
+    const query = new URLSearchParams();
+    if (input.kind) query.set("kind", input.kind);
+    if (input.limit !== undefined) query.set("limit", String(input.limit));
+    const suffix = query.size ? `?${query.toString()}` : "";
+    return this.request(`/api/v1/reviews/due${suffix}`);
+  }
+
+  listStudyLists(input: { kind?: StudyKind; limit?: number }): Promise<unknown> {
+    const query = new URLSearchParams();
+    if (input.kind) query.set("kind", input.kind);
+    if (input.limit !== undefined) query.set("limit", String(input.limit));
+    const suffix = query.size ? `?${query.toString()}` : "";
+    return this.request(`/api/v1/lists${suffix}`);
+  }
+
+  createStudyList(input: StudyListCreateInput): Promise<unknown> {
+    return this.request("/api/v1/lists", {
+      method: "POST",
+      body: JSON.stringify({
+        operation_id: input.operationId,
+        list_id: input.listId,
+        kind: input.kind,
+        title: input.title,
+        description: input.description || "",
+        actor: input.actor || "chatgpt_mcp",
+      }),
+    });
+  }
+
+  addStudyListItems(input: StudyListItemsInput): Promise<unknown> {
+    return this.request(`/api/v1/lists/${encodeURIComponent(input.listId)}/items`, {
+      method: "POST",
+      body: JSON.stringify({
+        operation_id: input.operationId,
+        items: input.items.map((entry) => ({
+          item_id: entry.itemId,
+          priority: entry.priority ?? 1,
+          note: entry.note || "",
+        })),
+        actor: input.actor || "chatgpt_mcp",
+      }),
+    });
+  }
+
+  previewQuestionCandidates(itemIds: string[], questionTypes: string[]): Promise<unknown> {
+    return this.request("/api/v1/question-candidates/preview", {
+      method: "POST",
+      body: JSON.stringify({ item_ids: itemIds, question_types: questionTypes }),
+    });
+  }
+
+  saveQuestionCandidate(input: QuestionCandidateSaveInput): Promise<unknown> {
+    return this.request("/api/v1/question-candidates", {
+      method: "POST",
+      body: JSON.stringify({
+        operation_id: input.operationId,
+        expected_fingerprint: input.expectedFingerprint,
+        candidate: input.candidate,
+        actor: input.actor || "chatgpt_mcp",
+      }),
+    });
+  }
+
+  promoteQuestionCandidate(input: QuestionCandidatePromotionInput): Promise<unknown> {
+    return this.request(`/api/v1/question-candidates/${encodeURIComponent(input.candidateId)}/promote`, {
+      method: "POST",
+      body: JSON.stringify({
+        operation_id: input.operationId,
+        expected_payload_hash: input.expectedPayloadHash,
+        review_note: input.reviewNote,
+        actor: input.actor || "chatgpt_mcp",
+      }),
+    });
+  }
+
+  retireQuestionCandidate(input: QuestionCandidateRetireInput): Promise<unknown> {
+    return this.request(`/api/v1/question-candidates/${encodeURIComponent(input.candidateId)}/retire`, {
+      method: "POST",
+      body: JSON.stringify({
+        operation_id: input.operationId,
+        reason: input.reason,
+        actor: input.actor || "chatgpt_mcp",
+      }),
+    });
+  }
+
   studyPlan(input: { kind?: StudyKind; limit?: number }): Promise<unknown> {
     const query = new URLSearchParams();
     if (input.kind) query.set("kind", input.kind);
     if (input.limit !== undefined) query.set("limit", String(input.limit));
     const suffix = query.size ? `?${query.toString()}` : "";
     return this.request(`/api/v1/study/plan${suffix}`);
+  }
+
+  getLearnerPolicy(): Promise<unknown> {
+    return this.request("/api/v1/learner-policy");
+  }
+
+  setLearnerPolicy(input: SetLearnerPolicyInput): Promise<unknown> {
+    return this.request("/api/v1/learner-policy", {
+      method: "PUT",
+      body: JSON.stringify({
+        operation_id: input.operationId,
+        policy: toHubLearnerPolicy(input.policy),
+        actor: input.actor || "chatgpt_mcp",
+      }),
+    });
+  }
+
+  learningContext(input: LearningContextInput): Promise<unknown> {
+    const query = new URLSearchParams();
+    if (input.practiceType) query.set("practice_type", input.practiceType);
+    if (input.requestedLevel) query.set("requested_level", input.requestedLevel);
+    if (input.kind) query.set("kind", input.kind);
+    if (input.targetLimit !== undefined) query.set("target_limit", String(input.targetLimit));
+    if (input.recentSessionLimit !== undefined) {
+      query.set("recent_session_limit", String(input.recentSessionLimit));
+    }
+    if (input.diagnosisLimit !== undefined) {
+      query.set("diagnosis_limit", String(input.diagnosisLimit));
+    }
+    const suffix = query.size ? `?${query.toString()}` : "";
+    return this.request(`/api/v1/learning-context${suffix}`);
   }
 
   setManualLabels(labels: SetManualLabelInput[]): Promise<unknown> {
@@ -219,6 +555,22 @@ export class JapaneseStudyHubClient {
       method: "POST",
       body: JSON.stringify(toHubPracticePayload(input)),
     });
+  }
+
+  recordPracticeRevision(input: RecordPracticeRevisionInput): Promise<unknown> {
+    return this.request(
+      `/api/v1/practice/sessions/${encodeURIComponent(input.originalSessionId)}/revisions`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          revision_id: input.revisionId,
+          reason: input.reason,
+          changed_question_keys: input.changedQuestionKeys || [],
+          submission: toHubPracticePayload(input.submission),
+          actor: input.actor || "chatgpt_mcp",
+        }),
+      },
+    );
   }
 
   getPracticeSession(sessionId: string): Promise<unknown> {
@@ -391,6 +743,53 @@ function toHubPracticePayload(input: PracticeSubmissionInput): Record<string, un
       },
     })),
   };
+}
+
+function toHubLearnerPolicy(input: LearnerPolicyInput): Record<string, unknown> {
+  return {
+    schema_version: input.schemaVersion,
+    practice: {
+      auto_record_completed_practice: input.practice.autoRecordCompletedPractice,
+      preserve_partial: input.practice.preservePartial,
+      preserve_void: input.practice.preserveVoid,
+      preserve_unscored: input.practice.preserveUnscored,
+    },
+    answer_notation: {
+      chinese_parentheses: input.answerNotation.chineseParentheses,
+      empty_answer: input.answerNotation.emptyAnswer,
+    },
+    question_generation: {
+      generator: input.questionGeneration.generator,
+      use_learning_context: input.questionGeneration.useLearningContext,
+      prefer_weak_targets: input.questionGeneration.preferWeakTargets,
+      avoid_full_catalog_dump: input.questionGeneration.avoidFullCatalogDump,
+    },
+  };
+}
+
+function toHubItemDraft(input: ItemDraftInput): Record<string, unknown> {
+  return {
+    kind: input.kind,
+    title: input.title,
+    reading: input.reading ?? "",
+    meaning_tc: input.meaningTc ?? "",
+    jlpt_level: input.jlptLevel ?? "",
+    part_of_speech: input.partOfSpeech ?? "",
+    sense_key: input.senseKey,
+    content: input.content ?? {},
+    tags: input.tags ?? [],
+    provenance: input.provenance ?? "manual",
+    add_to_inbox: input.addToInbox ?? true,
+    create_new_sense: input.createNewSense ?? false,
+  };
+}
+
+function toHubRevisionChanges(input: ItemRevisionChangesInput): Record<string, unknown> {
+  const output: Record<string, unknown> = {};
+  if (input.meaningTc !== undefined) output.meaning_tc = input.meaningTc;
+  if (input.content !== undefined) output.content = input.content;
+  if (input.tags !== undefined) output.tags = input.tags;
+  return output;
 }
 
 function toHubPracticeTarget(target: PracticeTargetInput): Record<string, unknown> {

@@ -13,6 +13,13 @@ export interface ResolvedWorkspacePath {
   stat: Stats;
 }
 
+export interface WorkspacePathCandidate {
+  rootId: string;
+  rootPath: string;
+  absolute: string;
+  relative: string;
+}
+
 export class WorkspaceAccessError extends Error {
   constructor(message: string) {
     super(message);
@@ -26,20 +33,14 @@ export async function resolveWorkspacePath(
   expectedType?: ExpectedPathType,
   rootId?: string,
 ): Promise<ResolvedWorkspacePath> {
-  const workspaceRoot = resolveWorkspaceRoot(config, rootId);
-  const rawPath = normalizeUserPath(inputPath);
-  const candidate = path.isAbsolute(rawPath)
-    ? path.resolve(rawPath)
-    : path.resolve(workspaceRoot.path, rawPath);
-
-  assertWithinRoot(workspaceRoot.path, candidate, "Path is outside the configured workspace root.");
-  assertNotDenied(config, workspaceRoot, candidate);
+  const candidate = resolveWorkspacePathCandidate(config, inputPath, rootId);
+  const workspaceRoot = resolveWorkspaceRoot(config, candidate.rootId);
 
   let real: string;
   try {
-    real = await fs.realpath(candidate);
+    real = await fs.realpath(candidate.absolute);
   } catch (error) {
-    throw new WorkspaceAccessError(`Path does not exist: ${displayInput(rawPath)}`);
+    throw new WorkspaceAccessError(`Path does not exist: ${displayInput(candidate.relative)}`);
   }
 
   assertWithinRoot(workspaceRoot.path, real, "Resolved path escapes the configured workspace root.");
@@ -59,6 +60,24 @@ export async function resolveWorkspacePath(
     absolute: real,
     relative: toWorkspaceRelative(workspaceRoot.path, real),
     stat,
+  };
+}
+
+export function resolveWorkspacePathCandidate(
+  config: ServerConfig,
+  inputPath: string | undefined,
+  rootId?: string,
+): WorkspacePathCandidate {
+  const workspaceRoot = resolveWorkspaceRoot(config, rootId);
+  const rawPath = normalizeUserPath(inputPath);
+  const candidate = path.resolve(workspaceRoot.path, rawPath);
+  assertWithinRoot(workspaceRoot.path, candidate, "Path is outside the configured workspace root.");
+  assertNotDenied(config, workspaceRoot, candidate);
+  return {
+    rootId: workspaceRoot.id,
+    rootPath: workspaceRoot.path,
+    absolute: candidate,
+    relative: toWorkspaceRelative(workspaceRoot.path, candidate),
   };
 }
 
@@ -156,6 +175,14 @@ function normalizeUserPath(inputPath: string | undefined): string {
   const value = inputPath?.trim() || ".";
   if (value.includes("\0")) {
     throw new WorkspaceAccessError("Path contains a NUL byte.");
+  }
+  if (
+    path.isAbsolute(value) ||
+    path.win32.isAbsolute(value) ||
+    path.posix.isAbsolute(value) ||
+    /^[a-z]:/i.test(value)
+  ) {
+    throw new WorkspaceAccessError("Path must be relative to the selected workspace root.");
   }
   return value;
 }

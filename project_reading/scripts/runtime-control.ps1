@@ -7,14 +7,15 @@ param(
   [string]$DefaultWorkspaceRoot = $env:WORKSPACE_MCP_DEFAULT_ROOT,
   [string]$WorkspaceRootDenyDirs = $env:WORKSPACE_MCP_ROOT_DENY_DIRS,
   [string]$AssetScopes = $env:WORKSPACE_MCP_ASSET_SCOPES,
+  [string]$FileReturnScopes = $env:WORKSPACE_MCP_FILE_RETURN_SCOPES,
   [string]$HostName = "127.0.0.1",
-  [int]$Port = 8787,
+  [int]$Port = 18787,
   [string]$Token = $env:WORKSPACE_MCP_HTTP_TOKEN,
   [string]$NodePath,
   [string]$TunnelClientPath,
   [string]$TunnelProfileDir,
   [string]$TunnelProfile = "project-workspace",
-  [string]$TunnelHealthUrl = "http://127.0.0.1:8788",
+  [string]$TunnelHealthUrl = "http://127.0.0.1:18788",
   [string]$SecretPath,
   [int]$ServerReadyTimeoutSeconds = 20,
   [int[]]$TunnelRecoveryDelaysSeconds = @(15, 30, 60)
@@ -36,6 +37,8 @@ if (Test-Path -LiteralPath $localSettingsPath -PathType Leaf) {
   if (-not $PSBoundParameters.ContainsKey("DefaultWorkspaceRoot") -and [string]::IsNullOrWhiteSpace($DefaultWorkspaceRoot) -and -not [string]::IsNullOrWhiteSpace([string]$localSettings.defaultWorkspaceRoot)) { $DefaultWorkspaceRoot = [string]$localSettings.defaultWorkspaceRoot }
   if (-not $PSBoundParameters.ContainsKey("WorkspaceRootDenyDirs") -and [string]::IsNullOrWhiteSpace($WorkspaceRootDenyDirs) -and -not [string]::IsNullOrWhiteSpace([string]$localSettings.workspaceRootDenyDirs)) { $WorkspaceRootDenyDirs = [string]$localSettings.workspaceRootDenyDirs }
   if (-not $PSBoundParameters.ContainsKey("AssetScopes") -and [string]::IsNullOrWhiteSpace($AssetScopes) -and -not [string]::IsNullOrWhiteSpace([string]$localSettings.assetScopes)) { $AssetScopes = [string]$localSettings.assetScopes }
+  $fileReturnScopesProperty = $localSettings.PSObject.Properties["fileReturnScopes"]
+  if (-not $PSBoundParameters.ContainsKey("FileReturnScopes") -and [string]::IsNullOrWhiteSpace($FileReturnScopes) -and $null -ne $fileReturnScopesProperty -and -not [string]::IsNullOrWhiteSpace([string]$fileReturnScopesProperty.Value)) { $FileReturnScopes = [string]$fileReturnScopesProperty.Value }
 }
 if ([string]::IsNullOrWhiteSpace($DefaultWorkspaceRoot)) { $DefaultWorkspaceRoot = "projects" }
 
@@ -48,6 +51,7 @@ $context = New-PrRuntimeContext `
   -DefaultWorkspaceRoot $DefaultWorkspaceRoot `
   -WorkspaceRootDenyDirs $WorkspaceRootDenyDirs `
   -AssetScopes $AssetScopes `
+  -FileReturnScopes $FileReturnScopes `
   -HostName $HostName `
   -Port $Port `
   -Token $Token `

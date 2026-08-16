@@ -17,10 +17,32 @@ def _load_server_module():
     return module
 
 
+def _dashboard_payload() -> dict:
+    return {
+        "kind": "omi.tw_market_dashboard",
+        "version": "omi.tw_market_dashboard.v1",
+        "snapshot_id": "snapshot-1",
+        "state_version": 1,
+        "trade_date": "2026-08-14",
+        "session": {},
+        "as_of": "2026-08-14T08:35:00+08:00",
+        "indices": [],
+        "breadth": {},
+        "hot_groups": [],
+        "watchlist": {},
+        "freshness": {},
+        "warnings": [],
+        "limitations": [],
+    }
+
+
 class OmiSearchMappingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.server = _load_server_module()
+
+    def test_application_release_version(self) -> None:
+        self.assertEqual(self.server.SERVER_VERSION, "1.1.0")
 
     def test_minimal_canonical_request_is_read_only_and_not_interpreted(self) -> None:
         question = "TSM intraday live quote"
@@ -209,7 +231,7 @@ class OmiSearchMappingTests(unittest.TestCase):
             "/api/ai/tools",
             timeout_seconds=self.server.SCHEMA_TIMEOUT_SECONDS,
         )
-        self.assertEqual(len(tools), 7)
+        self.assertEqual(len(tools), 11)
         ask = tools[0]
         self.assertEqual(ask["title"], "Backend Ask OMI")
         properties = ask["inputSchema"]["properties"]
@@ -277,9 +299,142 @@ class OmiSearchMappingTests(unittest.TestCase):
                 "omi.read_data_freshness",
                 "omi.read_source_health",
                 "omi.read_capability_status",
+                "omi.read_tw_market_dashboard",
+                "omi.open_tw_market_dashboard",
+                "omi.search_tw_symbols",
+                "omi.read_tw_stock_dashboard_detail",
             ],
         )
         self.assertNotIn("omi.search", names)
+
+    def test_initialize_declares_resources_capability(self) -> None:
+        response = self.server._handle_request(
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize"}
+        )
+
+        self.assertEqual(
+            response["result"]["capabilities"]["resources"],
+            {"subscribe": False, "listChanged": False},
+        )
+
+    def test_dashboard_tools_use_generated_exact_output_schemas(self) -> None:
+        tools = {item["name"]: item for item in self.server.PUBLIC_TOOLS}
+        snapshot = self.server.TW_DASHBOARD_CONTRACT_SNAPSHOT
+
+        self.assertTrue(snapshot["digest"])
+        self.assertEqual(
+            tools["omi.read_tw_market_dashboard"]["outputSchema"],
+            snapshot["dashboard_output_schema"],
+        )
+        self.assertEqual(
+            tools["omi.search_tw_symbols"]["outputSchema"],
+            snapshot["symbol_search_output_schema"],
+        )
+        self.assertEqual(
+            tools["omi.read_tw_stock_dashboard_detail"]["outputSchema"],
+            snapshot["stock_detail_output_schema"],
+        )
+        render = tools["omi.open_tw_market_dashboard"]
+        self.assertEqual(
+            render["_meta"]["ui"]["resourceUri"],
+            self.server.TW_DASHBOARD_RESOURCE_URI,
+        )
+        for name, tool in tools.items():
+            if name != "omi.open_tw_market_dashboard":
+                self.assertNotIn("resourceUri", tool.get("_meta", {}).get("ui", {}))
+
+    def test_dashboard_resource_is_versioned_inline_and_network_closed(self) -> None:
+        listed = self.server._handle_request(
+            {"jsonrpc": "2.0", "id": 2, "method": "resources/list"}
+        )
+        read = self.server._handle_request(
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "resources/read",
+                "params": {"uri": self.server.TW_DASHBOARD_RESOURCE_URI},
+            }
+        )
+
+        resource = listed["result"]["resources"][0]
+        self.assertEqual(resource["uri"], self.server.TW_DASHBOARD_RESOURCE_URI)
+        self.assertEqual(
+            resource["mimeType"], self.server.TW_DASHBOARD_RESOURCE_MIME_TYPE
+        )
+        content = read["result"]["contents"][0]
+        self.assertIn("<div id=\"root\"></div>", content["text"])
+        self.assertEqual(
+            content["_meta"]["ui"]["csp"],
+            {"connectDomains": [], "resourceDomains": []},
+        )
+
+    def test_dashboard_tools_mechanically_forward_focused_backend_routes(self) -> None:
+        dashboard = _dashboard_payload()
+        search = {
+            "kind": "omi.tw_symbol_search",
+            "version": "omi.tw_symbol_search.v1",
+            "items": [],
+        }
+        detail = {
+            "kind": "omi.tw_stock_dashboard_detail",
+            "version": "omi.tw_stock_dashboard_detail.v2",
+        }
+        with patch.object(
+            self.server,
+            "_api_request",
+            side_effect=[dashboard, search, detail],
+        ) as request:
+            read_dashboard = self.server._call_tool(
+                "omi.read_tw_market_dashboard",
+                {"watchlist_group_id": 7, "watchlist_limit": 20},
+            )
+            read_search = self.server._call_tool(
+                "omi.search_tw_symbols",
+                {"keyword": "台積 電", "limit": 12},
+            )
+            read_detail = self.server._call_tool(
+                "omi.read_tw_stock_dashboard_detail",
+                {"stock_id": "2330", "timeframe": "weekly", "bars": 60},
+            )
+
+        self.assertIs(read_dashboard, dashboard)
+        self.assertIs(read_search, search)
+        self.assertIs(read_detail, detail)
+        self.assertEqual(
+            request.call_args_list[0].args,
+            (
+                "GET",
+                "/api/market/tw-dashboard/snapshot?"
+                "include_watchlist_children=true&watchlist_limit=20&"
+                "group_limit=8&watchlist_group_id=7",
+            ),
+        )
+        self.assertEqual(
+            request.call_args_list[1].args,
+            (
+                "GET",
+                "/api/market/tw-dashboard/symbols/search?"
+                "keyword=%E5%8F%B0%E7%A9%8D+%E9%9B%BB&limit=12",
+            ),
+        )
+        self.assertEqual(
+            request.call_args_list[2].args,
+            (
+                "GET",
+                "/api/market/tw-dashboard/stocks/2330?timeframe=weekly&bars=60",
+            ),
+        )
+
+    def test_render_dashboard_returns_prepared_snapshot_without_backend_call(self) -> None:
+        dashboard = _dashboard_payload()
+        with patch.object(self.server, "_api_request") as request:
+            rendered = self.server._call_tool(
+                "omi.open_tw_market_dashboard", dashboard
+            )
+
+        request.assert_not_called()
+        self.assertEqual(rendered, dashboard)
+        self.assertIsNot(rendered, dashboard)
 
     def test_refresh_status_maps_to_dedicated_redacted_endpoint(self) -> None:
         backend_response = {

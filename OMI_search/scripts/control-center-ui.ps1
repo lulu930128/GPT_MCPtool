@@ -15,9 +15,9 @@ if ($SelfTest) {
     [pscustomobject]@{ ok = (Test-Path -LiteralPath $keyStorePath -PathType Leaf); menuContract = $menuContract; actions = $supportedActions; managerDomainDataAccess = "none"; managerSecretAccess = "none" } | ConvertTo-Json -Depth 4
     exit $(if (Test-Path -LiteralPath $keyStorePath -PathType Leaf) { 0 } else { 1 })
 }
-$mcpUrl = "http://127.0.0.1:8797/mcp"
-$healthUrl = "http://127.0.0.1:8797/health"
-$tunnelUiUrl = "http://127.0.0.1:8799/ui"
+$mcpUrl = "http://127.0.0.1:18797/mcp"
+$healthUrl = "http://127.0.0.1:18797/health"
+$tunnelUiUrl = "http://127.0.0.1:18799/ui"
 $runtimeDir = Join-Path $projectRoot ".tmp"
 $tunnelId = [string]$env:OMI_SEARCH_TUNNEL_ID
 $tunnelProfilePath = Join-Path $projectRoot ".tunnel-client\omi-search.yaml"

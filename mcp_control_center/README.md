@@ -1,11 +1,15 @@
 # MCP Control Center
 
-`MCP Control Center` 是可擴充的本機 MCP runtime Windows 中樞。它不是第七個 MCP，
+`MCP Control Center` 是可擴充的本機 MCP runtime Windows 中樞。它不是第八個 MCP，
 不持有任何市場、記憶、學習、workspace、Codex job 或財務資料；即使 MCP server 或
 Secure MCP Tunnel 故障，中樞仍可獨立檢查、記錄與協調啟動。
 
-目前預設的 registry v3 已接上六個元件，全部使用 `unified-lifecycle-v3`
-component controller，並由各元件自己持有 runtime ownership。OMI backend 維持 external
+目前 application release 為 `1.1.0`。registry schema v3、component descriptor schema v1
+與 `unified-lifecycle-v3` 是獨立契約版本，不因 application release 而重新編號。
+
+目前預設的 registry v3 已登錄七個元件，全部使用 `unified-lifecycle-v3`
+component controller，並由各元件自己持有 runtime ownership。既有六個正式元件維持 enabled、
+auto-start；English Study 第一版維持 disabled、非 auto-start。OMI backend 維持 external
 dependency，不屬於 Control Center lifecycle ownership；Memory Core 與 Personal Asset OS
 的正式私人資料也不屬於 manager authority：
 
@@ -17,15 +21,16 @@ dependency，不屬於 Control Center lifecycle ownership；Memory Core 與 Pers
 
 目前保留全部舊 component tray source、launcher、Startup／restore artifact 與
 `config/components.json` rollback manifest。中樞提供單一狀態與操作入口，但不隱藏或取代
-component-specific action，也不提供危險的 Stop All／kill-by-name。六個元件皆已完成
-controller 遷移、零重啟 live adoption 與 legacy tray closure；舊 artifact 尚未刪除。
+component-specific action，也不提供危險的 Stop All／kill-by-name。既有六個元件皆已完成
+controller 遷移、零重啟 live adoption 與 legacy tray closure；English Study 尚未進入 production
+adoption，舊 artifact 尚未刪除。
 
 中樞 source 同時支援 registry schema v3、舊 manifest schema v1／v2 與
 `unified-lifecycle-v3`。v3 採用
 component-owned stateless lifecycle controller：controller 以 mutex、PID file、exact
 executable／command、listener ownership 與必要的 process lineage 管理 detached child
 runtime，完成 action 後退出。中樞不持有 child process handle，也不新增 IPC。Loader 仍保留
-`legacy-tray` 相容能力，供 rollback 或尚未升級的新註冊元件使用；目前預設六元件皆為 v3。
+`legacy-tray` 相容能力，供 rollback 或尚未升級的新註冊元件使用；目前七個 descriptor 皆為 v3。
 
 ## 能力
 
@@ -40,9 +45,54 @@ runtime，完成 action 後退出。中樞不持有 child process handle，也�
   不會遮蔽 server 或 tunnel failure。
 - 將目前狀態寫入 atomic `state.json`，只在狀態變化或 action 發生時追加每日 JSONL event。
 - 開機 reconciliation 只對真正 `Stopped` 的元件呼叫既有非破壞性 Start；不自動 Restart
-  `Unhealthy`、上游阻塞或 ownership 不明的程序。
+  `Unhealthy`、上游阻塞或 ownership 不明的程序。每個 component 的 monitor、action 與
+  post-action wait 都有獨立 exception boundary；單一失敗會寫入 bounded
+  `reconcile_component_failed` event 與安全 `actions[]` row，但不會阻止後續元件。
 - 人工 Start／Repair connectivity／Restart core／Reload／Stop 會委派給 manifest 中已驗證、位於 component root 內的固定 entrypoint；Stop 必須逐元件確認，不提供 Stop All。
 - Startup adoption 會先驗證各 descriptor 宣告的 legacy shortcut target，再移到 private backup；不直接刪除，並可依 receipt 回復。
+
+### 本機與遠端連線狀態
+
+Control Center 以 additive [`component-connectivity-v1`](docs/RemoteConnectivityContract.md)
+呈現分層證據，不再用單一 `Ready` 同時代表所有連線範圍：
+
+- `localStatus` 與 `connectivity.localTunnel` 只證明本機 core、ownership 與 tunnel listener。
+- `connectivity.remoteRegistration` 只接受 component-owned diagnostic 產生的安全、具 TTL 證據。
+- `connectivity.chatgptConnector` 必須有獨立端到端證據，不由 local HTTP 200 或 remote registration 推論。
+- `readinessScope` 明確區分 `none`、`local`、`remote`、`end_to_end`。
+
+一般 `Status` 不解密 credential、不查 tunnel identity，也不同步呼叫外部服務。尚未執行遠端診斷時，
+remote／ChatGPT 狀態是 `NotChecked`；證據過期時是 `Stale`。只有新鮮且明確的 remote failure
+可以把本機 `Ready` 投影為 `Degraded`，`Unknown`／`NotChecked`／`Stale` 不會觸發自動 repair。
+
+需要讓 Status 採納 component-owned evidence 時，descriptor 可宣告
+`connectivityEvidence.remoteEvidencePath`。它必須是 component root 內的相對 `.json` 路徑；
+Manager 最多讀取 8192 bytes，只接受固定 contract 與欄位 allowlist。非法、超大或含額外欄位的
+文件會 fail closed，且不把原始內容帶入 manager state。外部 lookup 與原子寫入仍由元件明確操作擁有。
+
+Automatic repair 遵循 [`Bounded Repair Policy`](docs/RepairPolicy.md)：只有 core healthy、ownership
+可驗證且 local tunnel 為 allowlisted transient failure 時，Reconcile 才委派一次
+`repair_connectivity`。Manager 不做外層重試；bounded retry／backoff 仍由 component controller
+擁有。Remote、identity／profile／credential、active work、monitor 或 ownership failure 一律
+`ManualAttention`，不會自動 restart core 或 full reload。
+
+### Tunnel runtime inventory 與 child network policy
+
+[`Child Process Network Policy`](docs/ChildProcessNetworkPolicy.md) 定義六個 production component
+共用的 loopback bypass 與 proxy 邊界。Controller 只在 child spawn 時清除 ambient proxy、設定
+`NO_PROXY=127.0.0.1,localhost`，完成後還原 parent environment；不修改 Windows 全域 proxy。
+
+唯讀 inventory 可用下列命令檢查實際 binary path、version、SHA-256、來源與 cohort：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File scripts\tunnel-runtime-inventory.ps1 -Action SelfTest
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File scripts\tunnel-runtime-inventory.ps1 -Action Inventory
+```
+
+Inventory 不下載、更新、複製或切換 binary。`runtime\tunnel-client\` 是 gated shared-runtime
+候選位置，不是目前已採用的事實；不同 cohort 只產生 warning，不觸發 automatic repair／upgrade。
 
 ## Runtime 資料
 
@@ -105,7 +155,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\control-center.ps1 `
 
 中樞 tray 的 `Exit control center only` 只關閉中樞，不停止任何 component。
 
-六個元件都使用 `component-menu-v1`，把舊托盤的 Copy／Open／金鑰狀態／備份等功能直接列在
+七個元件都使用 `component-menu-v1`；既有元件把舊托盤的 Copy／Open／金鑰狀態／備份等功能直接列在
 Control Center 的元件子選單。中樞只渲染 descriptor 內固定的 action ID，再委派給元件自己的
 `scripts/control-center-ui.ps1`；它不接收任意 arguments，也不讀 tunnel ID、credential、備份結果
 或 domain payload。`Open troubleshooting tools` 仍可按需開啟 component-owned diagnostic UI，
@@ -170,6 +220,29 @@ endpoint、port、expected health fields 與 ownership fragment；不得保存 t
   超過 128 KiB 的設定檔。同一元件的多個 health endpoint 可以共用它自己的 port。
 - `publicSummaryFields` 不在安全 allowlist，或 navigation／launcher／PID path 逃出 component root。
 
+### Windows 固定服務埠政策
+
+Production component 的 owned loopback port 是固定服務埠，不得落在 Windows IPv4／IPv6 TCP
+dynamic client range，也不得落在 current excluded ranges。Control Center 每次建立 system state
+時只讀一次 `netsh interface ipv4|ipv6 show dynamicportrange|excludedportrange protocol=tcp`；它不會
+新增、刪除或修改 Windows port policy，也不會停用 HNS、WinNAT、Docker 或 WSL。
+
+- 明確命中 excluded range：probe 回報 `PORT_EXCLUDED`，component 為 `Misconfigured`。
+- 未 excluded 但位於 dynamic range：probe 回報 `PORT_IN_DYNAMIC_RANGE`，component 為
+  `Misconfigured`。
+- policy command／parser unavailable：state 回報 `PORT_POLICY_UNAVAILABLE` 或
+  `PORT_POLICY_PARTIAL` evidence，但 health／ownership probe 照常執行，避免監測能力本身造成
+  全體 outage。
+
+目前 production cohort 為 Project Reading `18787/18788`、Japanese Study
+`18790/18791/18792`、OMI Search `18797/18799`、Memory Core `18765/18818/18800`、Codex
+Bridge `18828/18829`、Personal Asset OS `18876/18877`。這些 URL 仍由 component descriptor、
+runtime controller、tunnel profile 與 smoke test 共同維持一致；變更時必須重跑 current Windows
+policy inventory 與 reboot acceptance。Windows command contract 參考
+[netsh interface](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/netsh-interface)，
+excluded port bind failure 參考 Microsoft 的
+[WSAEACCES guidance](https://learn.microsoft.com/en-us/troubleshoot/windows-server/networking/error-10013-wsaeacces-is-returned)。
+
 v3 lifecycle action 的 `-Action EnsureRunning|RepairConnectivity|RestartCore|ReloadRuntime|ShutdownRuntime` 參數由 manager
 依 semantic action 固定產生；manifest 只能選擇 component root 內的相對 entrypoint，不能
 注入 command string 或 arguments。`show_diagnostic_tray` 只能使用 component 內的 VBS launcher。
@@ -196,7 +269,7 @@ exact-path lifecycle。PID 檔不存在、內容無效、程序無關或 command
 OMI Search 的 dependency probe 指向 adapter 自己的固定 loopback `/upstream-health`；實際
 OMI backend URL 仍由 OMI launcher 與 adapter 擁有。中樞不讀 OMI launcher log、不接管 backend，
 也不保存 resolved URL 或 upstream response。Memory Core internal backend 預設使用 `18765`；
-MCP `8818` 與 tunnel `8800` 保持不變。
+Memory Core MCP 與 tunnel admin 使用 reboot-stable 固定埠 `18818` 與 `18800`。
 
 ## New Component Kit
 
@@ -287,3 +360,24 @@ Rollback 只還原 receipt 中的 exact registry bytes，保留 component root�
 v3 descriptor 啟用時，六個舊 tray script 會拒絕任何非 `DiagnosticOnly` 的持久化啟動。
 舊 source 與 launcher 仍保留作 rollback；只有把 descriptor 明確回復為 `legacy-tray` 後，
 舊托盤才可重新取得 lifecycle ownership。
+
+## 日常托盤與元件 Health 詳情
+
+Control Center 的日常元件選單固定只呈現：
+
+- `Restart MCP`：狀態感知的 manager façade。`Stopped` 導向 `EnsureRunning`；`Ready`、`Degraded`、`BlockedUpstream`、`Unhealthy` 導向 `ReloadRuntime`。
+- `Open MCP health`：開啟獨立、無 listener 的 WinForms 詳情頁，顯示 safe state、probe、ownership 與低頻連線工具。
+- `Open <Frontend>`：只有 descriptor 宣告正式 `primary-ui` 時出現。第一版支援 VBS `primaryLauncher` 與 `primary_ui` loopback navigation。
+
+`OwnershipMismatch`、`Misconfigured`、`NotInstalled` 與 `MONITOR_EXCEPTION` 一律拒絕 `Restart MCP`。底層 `RepairConnectivity`、`RestartCore`、`ShutdownRuntime` 與 component-owned UI adapter 保留給 CLI、Health > Advanced 與 troubleshooting，不再平鋪到日常托盤。
+
+Health 詳情頁只讀取 registry/descriptor、sanitized `state.json` 與 `%LOCALAPPDATA%\McpControlCenter\last-actions\<component-id>.json`；不讀 MCP domain payload、secret、credential 或 component 私有資料。每個元件的狀態檢查有獨立 exception boundary，意外監測錯誤會合成固定 `MONITOR_EXCEPTION` issue，其餘元件仍會保留並更新。
+
+額外驗證命令：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\component-health.ps1 `
+  -Component personal_asset_os -SelfTest
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\component-health.ps1 `
+  -Component personal_asset_os -SmokeTest
+```

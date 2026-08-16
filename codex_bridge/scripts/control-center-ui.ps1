@@ -13,9 +13,9 @@ if ($SelfTest) {
     [pscustomobject]@{ ok = $true; menuContract = $menuContract; actions = $supportedActions; managerDomainDataAccess = "none"; managerSecretAccess = "none" } | ConvertTo-Json -Depth 4
     exit 0
 }
-$mcpUrl = "http://127.0.0.1:8828/mcp"
-$healthUrl = "http://127.0.0.1:8828/health"
-$tunnelUiUrl = "http://127.0.0.1:8829/ui"
+$mcpUrl = "http://127.0.0.1:18828/mcp"
+$healthUrl = "http://127.0.0.1:18828/health"
+$tunnelUiUrl = "http://127.0.0.1:18829/ui"
 $runtimeDir = Join-Path $projectRoot ".tmp"
 $dataDir = "C:\CodexBridge"
 $tunnelId = [string]$env:CODEX_BRIDGE_TUNNEL_ID

@@ -105,7 +105,7 @@ function Get-OmiListenerState {
 function Get-OmiExpectedSourceBuildId {
   param([Parameter(Mandatory = $true)]$Context)
   $hashes = @()
-  foreach ($artifact in @($Context.httpEntry, $Context.serverEntry, $Context.contractSnapshot)) {
+  foreach ($artifact in @($Context.sourceBuildArtifacts)) {
     if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) { return "" }
     $hashes += (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
   }
@@ -485,7 +485,7 @@ function Start-OmiServer {
   }
   if (-not $ownership.canMutate) { throw "OWNERSHIP_MISMATCH: Cannot start server while ownership is $($ownership.state)." }
   if ($ownership.state -eq "OwnedNotListening") { Stop-OmiOwnedRole -Context $Context -Role server }
-  foreach ($required in @($Context.pythonPath, $Context.httpEntry, $Context.serverEntry, $Context.contractSnapshot)) {
+  foreach ($required in @($Context.pythonPath) + @($Context.sourceBuildArtifacts)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "SERVER_ENTRY_MISSING: Adapter source is incomplete." }
   }
   $resolvedBackend = Resolve-OmiBackendUrl -Context $Context
@@ -616,7 +616,7 @@ function New-OmiSearchRuntimeContext {
   param(
     [Parameter(Mandatory = $true)][string]$ProjectRoot,
     [string]$HostName = "127.0.0.1",
-    [int]$Port = 8797,
+    [int]$Port = 18797,
     [string]$OmiApiBaseUrl = "http://127.0.0.1:8400",
     [switch]$StrictOmiApiBaseUrl,
     [string]$Token,
@@ -624,7 +624,7 @@ function New-OmiSearchRuntimeContext {
     [string]$TunnelClientPath = "C:\GPT_MCPtool\project_reading\vendor\tunnel-client\tunnel-client.exe",
     [string]$TunnelProfileDir,
     [string]$TunnelProfile = "omi-search",
-    [string]$TunnelHealthUrl = "http://127.0.0.1:8799",
+    [string]$TunnelHealthUrl = "http://127.0.0.1:18799",
     [string]$KeyStorePath = "C:\GPT_MCPtool\project_reading\scripts\key-store.ps1",
     [string]$SecretPath,
     [int]$ServerReadyTimeoutSeconds = 20,
@@ -665,6 +665,15 @@ function New-OmiSearchRuntimeContext {
     httpEntry = Join-Path $resolvedRoot "http_server.py"
     serverEntry = Join-Path $resolvedRoot "server.py"
     contractSnapshot = Join-Path $resolvedRoot "public_contract_snapshot.json"
+    dashboardContractSnapshot = Join-Path $resolvedRoot "tw_market_dashboard_contract_snapshot.json"
+    widgetBundle = Join-Path $resolvedRoot "ui\tw-market-dashboard\dist\index.html"
+    sourceBuildArtifacts = @(
+      (Join-Path $resolvedRoot "http_server.py")
+      (Join-Path $resolvedRoot "server.py")
+      (Join-Path $resolvedRoot "public_contract_snapshot.json")
+      (Join-Path $resolvedRoot "tw_market_dashboard_contract_snapshot.json")
+      (Join-Path $resolvedRoot "ui\tw-market-dashboard\dist\index.html")
+    )
     healthUrl = "http://${HostName}:${Port}/health"
     upstreamHealthUrl = "http://${HostName}:${Port}/upstream-health"
     tunnelClientPath = [IO.Path]::GetFullPath($TunnelClientPath)

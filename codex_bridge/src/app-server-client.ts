@@ -165,7 +165,7 @@ export class CodexAppServerClient extends EventEmitter implements AppServerTrans
     try {
       await spawnReady;
       const result = await this.requestWithoutStart<Record<string, unknown>>("initialize", {
-        clientInfo: { name: "codex-handoff-bridge", version: "0.1.0" },
+        clientInfo: { name: "codex-handoff-bridge", version: "1.1.0" },
         capabilities: { experimentalApi: true },
       });
       if (!result || typeof result !== "object") {

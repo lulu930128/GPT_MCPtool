@@ -57,6 +57,7 @@ class OmiSearchHttpServerTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertTrue(body["ok"])
             self.assertEqual(body["service"], "omi-search-http-mcp")
+            self.assertEqual(body["version"], "1.1.0")
             self.assertEqual(body["buildId"], SOURCE_BUILD_ID)
             self.assertRegex(body["buildId"], r"^[0-9a-f]{16}$")
             self.assertIn("/mcp", body["mcp_url"])
@@ -170,7 +171,37 @@ class OmiSearchHttpServerTests(unittest.TestCase):
                     "omi.read_data_freshness",
                     "omi.read_source_health",
                     "omi.read_capability_status",
+                    "omi.read_tw_market_dashboard",
+                    "omi.open_tw_market_dashboard",
+                    "omi.search_tw_symbols",
+                    "omi.read_tw_stock_dashboard_detail",
                 ],
+            )
+
+            resources_status, resources_body, _resources_headers = request_json(
+                f"{handle.base_url}/mcp",
+                {"jsonrpc": "2.0", "id": 3, "method": "resources/list"},
+                method="POST",
+                headers={"Mcp-Session-Id": session_id or ""},
+            )
+            resource_uri = resources_body["result"]["resources"][0]["uri"]
+            read_status, read_body, _read_headers = request_json(
+                f"{handle.base_url}/mcp",
+                {
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "resources/read",
+                    "params": {"uri": resource_uri},
+                },
+                method="POST",
+                headers={"Mcp-Session-Id": session_id or ""},
+            )
+
+            self.assertEqual(resources_status, 200)
+            self.assertEqual(read_status, 200)
+            self.assertEqual(
+                read_body["result"]["contents"][0]["mimeType"],
+                "text/html;profile=mcp-app",
             )
         finally:
             handle.close()

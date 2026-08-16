@@ -9,6 +9,92 @@ function Test-CbPathEqual {
   catch { return $false }
 }
 
+function Read-CbTunnelIdFromProfile {
+  param([Parameter(Mandatory=$true)][string]$ProfilePath)
+  if(-not(Test-Path -LiteralPath $ProfilePath -PathType Leaf)){return [pscustomobject]@{status='MissingProfile';value=$null;errorCode='TUNNEL_PROFILE_MISSING'}}
+  try{$lines=@(Get-Content -LiteralPath $ProfilePath -Encoding UTF8 -ErrorAction Stop)}catch{return [pscustomobject]@{status='InvalidProfile';value=$null;errorCode='TUNNEL_PROFILE_INVALID'}}
+  $values=@()
+  foreach($line in $lines){
+    if([string]$line-notmatch'^\s*tunnel_id\s*:'){continue}
+    $raw=([string]$line-replace'^\s*tunnel_id\s*:\s*','').Trim()
+    if($raw-match'^"([^"\r\n]+)"\s*(?:#.*)?$'){$values+=$matches[1]}
+    elseif($raw-match"^'([^'\r\n]+)'\s*(?:#.*)?$"){$values+=$matches[1]}
+    elseif($raw-match'^([^#\s]+)\s*(?:#.*)?$'){$values+=$matches[1]}
+    else{return [pscustomobject]@{status='InvalidProfile';value=$null;errorCode='TUNNEL_PROFILE_INVALID'}}
+  }
+  if($values.Count-eq 0){return [pscustomobject]@{status='MissingId';value=$null;errorCode='TUNNEL_ID_MISSING'}}
+  if($values.Count-ne 1){return [pscustomobject]@{status='InvalidProfile';value=$null;errorCode='TUNNEL_PROFILE_INVALID'}}
+  return [pscustomobject]@{status='Present';value=[string]$values[0];errorCode=$null}
+}
+
+function Resolve-CbTunnelIdentity {
+  param([string]$ExplicitTunnelId,[string]$SettingsTunnelId,[string]$EnvironmentTunnelId,[Parameter(Mandatory=$true)][string]$ProfilePath)
+  $profile=Read-CbTunnelIdFromProfile -ProfilePath $ProfilePath
+  $sources=@()
+  foreach($candidate in @(
+    [pscustomobject]@{name='explicit';value=$ExplicitTunnelId},
+    [pscustomobject]@{name='settings';value=$SettingsTunnelId},
+    [pscustomobject]@{name='environment';value=$EnvironmentTunnelId},
+    [pscustomobject]@{name='profile';value=$(if($profile.status-eq'Present'){$profile.value}else{$null})}
+  )){if(-not[string]::IsNullOrWhiteSpace([string]$candidate.value)){$sources+=$candidate}}
+  $sourceNames=@($sources|ForEach-Object{[string]$_.name})
+  if($profile.status-eq'InvalidProfile'){return [pscustomobject]@{status='Invalid';errorCode='TUNNEL_PROFILE_INVALID';sourceNames=$sourceNames;sourceCount=$sources.Count;resolvedTunnelId=$null}}
+  foreach($source in $sources){if([string]$source.value-notmatch'^tunnel_[A-Za-z0-9_-]{1,256}$'){return [pscustomobject]@{status='Invalid';errorCode='TUNNEL_ID_INVALID';sourceNames=$sourceNames;sourceCount=$sources.Count;resolvedTunnelId=$null}}}
+  if($sources.Count-eq 0){return [pscustomobject]@{status='Missing';errorCode=$(if($profile.status-eq'MissingProfile'){'TUNNEL_PROFILE_MISSING'}else{'TUNNEL_ID_MISSING'});sourceNames=@();sourceCount=0;resolvedTunnelId=$null}}
+  $distinct=@($sources|ForEach-Object{[string]$_.value}|Sort-Object -Unique)
+  if($distinct.Count-ne 1){return [pscustomobject]@{status='Mismatch';errorCode='TUNNEL_ID_MISMATCH';sourceNames=$sourceNames;sourceCount=$sources.Count;resolvedTunnelId=$null}}
+  return [pscustomobject]@{status='Ready';errorCode=$null;sourceNames=$sourceNames;sourceCount=$sources.Count;resolvedTunnelId=[string]$distinct[0]}
+}
+
+function Get-CbTunnelIdentitySummary {
+  param([Parameter(Mandatory=$true)]$Identity)
+  return [pscustomobject]@{status=[string]$Identity.status;errorCode=$(if([string]::IsNullOrWhiteSpace([string]$Identity.errorCode)){$null}else{[string]$Identity.errorCode});sourceNames=@($Identity.sourceNames);sourceCount=[int]$Identity.sourceCount}
+}
+
+function Assert-CbTunnelIdentityReady {
+  param([Parameter(Mandatory=$true)]$Context)
+  if([string]$Context.tunnelIdentity.status-eq'Ready'){return}
+  switch([string]$Context.tunnelIdentity.errorCode){
+    'TUNNEL_PROFILE_MISSING'{throw 'TUNNEL_PROFILE_MISSING: Tunnel profile is missing and no other tunnel identity source is configured.'}
+    'TUNNEL_PROFILE_INVALID'{throw 'TUNNEL_PROFILE_INVALID: Tunnel profile identity is malformed or duplicated.'}
+    'TUNNEL_ID_INVALID'{throw 'TUNNEL_ID_INVALID: A configured tunnel identity has an invalid format.'}
+    'TUNNEL_ID_MISMATCH'{throw 'TUNNEL_ID_MISMATCH: Configured tunnel identity sources disagree.'}
+    default{throw 'TUNNEL_ID_MISSING: No tunnel identity is configured.'}
+  }
+}
+
+function ConvertTo-CbRemoteRegistrationEvidence {
+  param([int]$ExitCode,[AllowEmptyString()][string]$Output,[switch]$TimedOut,[string]$ExpectedTunnelId,[DateTimeOffset]$CheckedAtUtc=[DateTimeOffset]::UtcNow,[ValidateRange(30,3600)][int]$TtlSeconds=300)
+  $status='Failed';$errorCode=$null
+  if($TimedOut){$errorCode='TUNNEL_REMOTE_TIMEOUT'}
+  elseif([string]::IsNullOrWhiteSpace($ExpectedTunnelId)){$errorCode='TUNNEL_ID_MISSING'}
+  elseif(([string]$Output).Length-gt 65536){$errorCode='TUNNEL_REMOTE_RESPONSE_TOO_LARGE'}
+  elseif($ExitCode-eq 0){
+    try{
+      $document=$Output|ConvertFrom-Json -ErrorAction Stop;$remoteId=$null;$candidates=@($document)
+      foreach($nestedName in @('tunnel','data')){$nestedProperty=$document.PSObject.Properties[$nestedName];if($null-ne$nestedProperty-and$null-ne$nestedProperty.Value){$candidates+=$nestedProperty.Value}}
+      foreach($candidate in $candidates){
+        if($null-eq$candidate){continue}
+        foreach($name in @('id','tunnel_id','tunnelId')){$property=$candidate.PSObject.Properties[$name];if($null-ne$property-and-not[string]::IsNullOrWhiteSpace([string]$property.Value)){$remoteId=[string]$property.Value;break}}
+        if(-not[string]::IsNullOrWhiteSpace($remoteId)){break}
+      }
+      if([string]::IsNullOrWhiteSpace($remoteId)){$errorCode='TUNNEL_REMOTE_RESPONSE_INVALID'}
+      elseif($remoteId-ne$ExpectedTunnelId){$errorCode='TUNNEL_REMOTE_ID_MISMATCH'}
+      else{$status='Ready'}
+    }catch{$errorCode='TUNNEL_REMOTE_RESPONSE_INVALID'}
+  }
+  else{
+    $normalized=([string]$Output).ToLowerInvariant()
+    if($normalized-match'\b401\b|unauthori[sz]ed|authentication'){$errorCode='TUNNEL_REMOTE_UNAUTHORIZED'}
+    elseif($normalized-match'\b403\b|forbidden|permission denied'){$errorCode='TUNNEL_REMOTE_FORBIDDEN'}
+    elseif($normalized-match'\b404\b|not found'){$errorCode='TUNNEL_REMOTE_NOT_FOUND'}
+    elseif($normalized-match'timeout|timed out|connection refused|connection reset|no such host|dns|network'){$errorCode='TUNNEL_REMOTE_UNAVAILABLE'}
+    else{$errorCode='TUNNEL_REMOTE_LOOKUP_FAILED'}
+  }
+  $checked=$CheckedAtUtc.ToUniversalTime();$validUntil=$checked.AddSeconds($TtlSeconds)
+  return [pscustomobject]@{status=$status;checkedAt=$checked.ToString('o');validUntil=$validUntil.ToString('o');errorCode=$errorCode;source='codex_bridge_remote_diagnostic'}
+}
+
 function Write-CbAtomicText {
   param([Parameter(Mandatory=$true)][string]$Path,[Parameter(Mandatory=$true)][string]$Value)
   $directory=Split-Path -Parent $Path; New-Item -ItemType Directory -Force -Path $directory|Out-Null
@@ -144,8 +230,8 @@ function Resolve-CbRoleOwnership {
 function Get-CodexBridgeRuntimeStatus {
   param([Parameter(Mandatory=$true)]$Context,[switch]$AdoptLegacyExactListeners)
   $server=Resolve-CbRoleOwnership -Context $Context -Role server -AdoptLegacyExactListener:$AdoptLegacyExactListeners;$tunnel=Resolve-CbRoleOwnership -Context $Context -Role tunnel -AdoptLegacyExactListener:$AdoptLegacyExactListeners;$serverHealthy=Test-CbServerHealth -Context $Context;$tunnelReady=Test-CbTunnelReady -Context $Context;$states=@($server.state,$tunnel.state)
-  $status=if(@($states|Where-Object{$_-in@('OwnershipMismatch','OwnershipUnknown')}).Count-gt 0){'OwnershipMismatch'}elseif(-not$serverHealthy-and$server.state-eq'Stopped'-and$tunnel.state-eq'Stopped'){'Stopped'}elseif(-not$serverHealthy){'Unhealthy'}elseif(-not$tunnelReady){'Degraded'}else{'Ready'}
-  return [pscustomobject]@{status=$status;server=[pscustomobject]@{healthy=$serverHealthy;ownership=$server.state;pid=$server.pid;listenerPid=$server.listenerPid;adopted=$server.adopted};tunnel=[pscustomobject]@{ready=$tunnelReady;ownership=$tunnel.state;pid=$tunnel.pid;listenerPid=$tunnel.listenerPid;adopted=$tunnel.adopted};ownedPids=@(@($server.pid,$tunnel.pid)|Where-Object{$null-ne$_}|ForEach-Object{[int]$_}|Sort-Object -Unique)}
+  $status=if(@($states|Where-Object{$_-in@('OwnershipMismatch','OwnershipUnknown')}).Count-gt 0){'OwnershipMismatch'}elseif([string]$Context.tunnelIdentity.status-ne'Ready'){'Misconfigured'}elseif(-not$serverHealthy-and$server.state-eq'Stopped'-and$tunnel.state-eq'Stopped'){'Stopped'}elseif(-not$serverHealthy){'Unhealthy'}elseif(-not$tunnelReady){'Degraded'}else{'Ready'}
+  return [pscustomobject]@{status=$status;server=[pscustomobject]@{healthy=$serverHealthy;ownership=$server.state;pid=$server.pid;listenerPid=$server.listenerPid;adopted=$server.adopted};tunnel=[pscustomobject]@{ready=$tunnelReady;ownership=$tunnel.state;pid=$tunnel.pid;listenerPid=$tunnel.listenerPid;adopted=$tunnel.adopted};tunnelIdentity=Get-CbTunnelIdentitySummary -Identity $Context.tunnelIdentity;ownedPids=@(@($server.pid,$tunnel.pid)|Where-Object{$null-ne$_}|ForEach-Object{[int]$_}|Sort-Object -Unique)}
 }
 
 function Wait-CbCondition {param([scriptblock]$Condition,[int]$TimeoutSeconds,[int]$PollMilliseconds=250);$deadline=[DateTime]::UtcNow.AddSeconds($TimeoutSeconds);do{if(&$Condition){return $true};Start-Sleep -Milliseconds $PollMilliseconds}while([DateTime]::UtcNow-lt$deadline);return [bool](&$Condition)}
@@ -175,7 +261,7 @@ function Start-CbServer {
 
 function Start-CbTunnelOnce {
   param($Context)
-  if(-not(Test-CbServerHealth -Context $Context)){throw 'SERVER_NOT_READY: Tunnel start requires Bridge core.'};$ownership=Resolve-CbRoleOwnership -Context $Context -Role tunnel;if(Test-CbTunnelReady -Context $Context){if($ownership.canMutate-and$ownership.state-eq'OwnedReady'){return};throw 'OWNERSHIP_MISMATCH: Ready tunnel is not controller-owned.'};if(-not$ownership.canMutate){throw "OWNERSHIP_MISMATCH: Cannot start tunnel while ownership is $($ownership.state)."};if($ownership.state-eq'OwnedNotListening'){Stop-CbOwnedRole -Context $Context -Role tunnel};if(-not(Test-Path -LiteralPath $Context.tunnelClientPath -PathType Leaf)){throw 'TUNNEL_CLIENT_MISSING: tunnel-client.exe is missing.'};if(-not(Test-Path -LiteralPath $Context.tunnelProfilePath -PathType Leaf)){throw 'TUNNEL_PROFILE_MISSING: Tunnel profile is missing.'};. $Context.keyStorePath;Set-ControlPlaneApiKeyEnvFromSecret -ProjectRoot $Context.projectRoot -SecretPath $Context.secretPath|Out-Null;if([string]::IsNullOrWhiteSpace($env:CONTROL_PLANE_API_KEY)){throw 'TUNNEL_KEY_MISSING: Control-plane key is unavailable.'};New-Item -ItemType Directory -Force -Path $Context.runtimeDir|Out-Null
+  Assert-CbTunnelIdentityReady -Context $Context;if(-not(Test-CbServerHealth -Context $Context)){throw 'SERVER_NOT_READY: Tunnel start requires Bridge core.'};$ownership=Resolve-CbRoleOwnership -Context $Context -Role tunnel;if(Test-CbTunnelReady -Context $Context){if($ownership.canMutate-and$ownership.state-eq'OwnedReady'){return};throw 'OWNERSHIP_MISMATCH: Ready tunnel is not controller-owned.'};if(-not$ownership.canMutate){throw "OWNERSHIP_MISMATCH: Cannot start tunnel while ownership is $($ownership.state)."};if($ownership.state-eq'OwnedNotListening'){Stop-CbOwnedRole -Context $Context -Role tunnel};if(-not(Test-Path -LiteralPath $Context.tunnelClientPath -PathType Leaf)){throw 'TUNNEL_CLIENT_MISSING: tunnel-client.exe is missing.'};if(-not(Test-Path -LiteralPath $Context.tunnelProfilePath -PathType Leaf)){throw 'TUNNEL_PROFILE_MISSING: Tunnel profile is missing.'};. $Context.keyStorePath;Set-ControlPlaneApiKeyEnvFromSecret -ProjectRoot $Context.projectRoot -SecretPath $Context.secretPath|Out-Null;if([string]::IsNullOrWhiteSpace($env:CONTROL_PLANE_API_KEY)){throw 'TUNNEL_KEY_MISSING: Control-plane key is unavailable.'};New-Item -ItemType Directory -Force -Path $Context.runtimeDir|Out-Null
   $startInfo=New-Object Diagnostics.ProcessStartInfo;$startInfo.FileName=$Context.tunnelClientPath;$startInfo.Arguments="run --profile-dir `"$($Context.tunnelProfileDir)`" --profile `"$($Context.tunnelProfile)`" --log.file `"$($Context.tunnelLogFile)`" --pid.file `"$($Context.tunnelPidFile)`"";$startInfo.WorkingDirectory=$Context.projectRoot;$startInfo.UseShellExecute=$true;$startInfo.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden;$process=Start-CbChildProcess -StartInfo $startInfo -Environment @{CONTROL_PLANE_API_KEY=$env:CONTROL_PLANE_API_KEY};if($null-eq$process){throw 'TUNNEL_START_FAILED: Tunnel process did not start.'};Write-CbAtomicText -Path $Context.tunnelPidFile -Value([string]$process.Id);$started=Get-CbProcess -ProcessId $process.Id;if($null-eq$started){throw 'TUNNEL_START_FAILED: Started tunnel is unavailable.'};Write-CbOwnerMetadata -Context $Context -Role tunnel -Process $started
 }
 
@@ -186,20 +272,21 @@ function Assert-CbShutdownPreflight {param($Context);foreach($role in @('tunnel'
 function Invoke-CodexBridgeLifecycleAction {
   param($Context,[ValidateSet('EnsureRunning','RepairConnectivity','RestartCore','ReloadRuntime','ShutdownRuntime')][string]$Action)
   switch($Action){
-    'EnsureRunning'{Start-CbServer -Context $Context;Repair-CbConnectivity -Context $Context}
-    'RepairConnectivity'{Repair-CbConnectivity -Context $Context}
+    'EnsureRunning'{Assert-CbTunnelIdentityReady -Context $Context;Start-CbServer -Context $Context;Repair-CbConnectivity -Context $Context}
+    'RepairConnectivity'{Assert-CbTunnelIdentityReady -Context $Context;Repair-CbConnectivity -Context $Context}
     'RestartCore'{$server=Resolve-CbRoleOwnership -Context $Context -Role server;if(-not$server.canMutate){throw "OWNERSHIP_MISMATCH: Cannot restart core while ownership is $($server.state)."};if($server.state-ne'Stopped'){Assert-CbIdleForMutation -Context $Context;Stop-CbOwnedRole -Context $Context -Role server};Start-CbServer -Context $Context}
-    'ReloadRuntime'{Assert-CbShutdownPreflight -Context $Context;$server=Resolve-CbRoleOwnership -Context $Context -Role server;if($server.state-ne'Stopped'){Assert-CbIdleForMutation -Context $Context};Stop-CbOwnedRole -Context $Context -Role tunnel;Stop-CbOwnedRole -Context $Context -Role server;Start-CbServer -Context $Context;Repair-CbConnectivity -Context $Context}
+    'ReloadRuntime'{Assert-CbTunnelIdentityReady -Context $Context;Assert-CbShutdownPreflight -Context $Context;$server=Resolve-CbRoleOwnership -Context $Context -Role server;if($server.state-ne'Stopped'){Assert-CbIdleForMutation -Context $Context};Stop-CbOwnedRole -Context $Context -Role tunnel;Stop-CbOwnedRole -Context $Context -Role server;Start-CbServer -Context $Context;Repair-CbConnectivity -Context $Context}
     'ShutdownRuntime'{Assert-CbShutdownPreflight -Context $Context;$server=Resolve-CbRoleOwnership -Context $Context -Role server;if($server.state-ne'Stopped'){Assert-CbIdleForMutation -Context $Context};Stop-CbOwnedRole -Context $Context -Role tunnel;Stop-CbOwnedRole -Context $Context -Role server}
   }
 }
 
 function New-CodexBridgeRuntimeContext {
-  param([Parameter(Mandatory=$true)][string]$ProjectRoot,[string]$HostName='127.0.0.1',[int]$Port=8828,[string]$ProjectsFile,[string]$DataDir='C:\CodexBridge',[string]$Token,[string]$CodexCommand,[string]$CodexArgs,[string]$NodePath,[string]$TunnelClientPath,[string]$TunnelProfileDir,[string]$TunnelProfile='codex-bridge',[string]$TunnelHealthUrl='http://127.0.0.1:8829',[string]$KeyStorePath='C:\GPT_MCPtool\project_reading\scripts\key-store.ps1',[string]$SecretPath='C:\GPT_MCPtool\project_reading\.secrets\control-plane-api-key.dpapi',[string]$ExpectedBuildId,[string]$TestActiveFlag,[int]$ServerReadyTimeoutSeconds=20,[int[]]$TunnelRecoveryDelaysSeconds=@(15,30,60))
+  param([Parameter(Mandatory=$true)][string]$ProjectRoot,[string]$HostName='127.0.0.1',[int]$Port=18828,[string]$ProjectsFile,[string]$DataDir='C:\CodexBridge',[string]$Token,[string]$CodexCommand,[string]$CodexArgs,[string]$NodePath,[string]$TunnelClientPath,[string]$TunnelProfileDir,[string]$TunnelProfile='codex-bridge',[string]$ExplicitTunnelId,[string]$SettingsTunnelId,[string]$EnvironmentTunnelId,[string]$TunnelHealthUrl='http://127.0.0.1:18829',[string]$KeyStorePath='C:\GPT_MCPtool\project_reading\scripts\key-store.ps1',[string]$SecretPath='C:\GPT_MCPtool\project_reading\.secrets\control-plane-api-key.dpapi',[string]$ExpectedBuildId,[string]$TestActiveFlag,[int]$ServerReadyTimeoutSeconds=20,[int[]]$TunnelRecoveryDelaysSeconds=@(15,30,60))
   $root=(Resolve-Path -LiteralPath $ProjectRoot -ErrorAction Stop).Path;$runtimeDir=Join-Path $root '.tmp';if([string]::IsNullOrWhiteSpace($ProjectsFile)){$ProjectsFile=Join-Path $root '.local\projects.json'};if([string]::IsNullOrWhiteSpace($NodePath)){$ownerPath=Join-Path $runtimeDir 'codex-bridge-http-server.owner.json';$recorded=$null;if(Test-Path -LiteralPath $ownerPath -PathType Leaf){try{$owner=[IO.File]::ReadAllText($ownerPath,[Text.Encoding]::UTF8)|ConvertFrom-Json;$candidate=[string]$owner.executablePath;if(Test-Path -LiteralPath $candidate -PathType Leaf){$recorded=$candidate}}catch{}};$NodePath=if([string]::IsNullOrWhiteSpace($recorded)){(Get-Command node -ErrorAction Stop).Source}else{$recorded}};if([string]::IsNullOrWhiteSpace($TunnelClientPath)){$TunnelClientPath=Join-Path(Split-Path -Parent $root)'project_reading\vendor\tunnel-client\tunnel-client.exe'};if([string]::IsNullOrWhiteSpace($TunnelProfileDir)){$TunnelProfileDir=Join-Path $root '.tunnel-client'};$healthUri=[Uri]$TunnelHealthUrl;if($HostName-notin@('127.0.0.1','localhost','::1','[::1]')-or$healthUri.Host-notin@('127.0.0.1','localhost','::1','[::1]')){throw 'Runtime endpoints must use loopback.'};if($ServerReadyTimeoutSeconds-lt 1-or$ServerReadyTimeoutSeconds-gt 120){throw 'ServerReadyTimeoutSeconds must be between 1 and 120.'};if(@($TunnelRecoveryDelaysSeconds).Count-lt 1-or@($TunnelRecoveryDelaysSeconds).Count-gt 5-or@($TunnelRecoveryDelaysSeconds|Where-Object{$_-lt 1-or$_-gt 120}).Count-gt 0){throw 'TunnelRecoveryDelaysSeconds must contain 1-5 bounded values.'}
-  return [pscustomobject]@{projectRoot=$root;hostName=$HostName;port=$Port;projectsFile=[IO.Path]::GetFullPath($ProjectsFile);dataDir=[IO.Path]::GetFullPath($DataDir);token=$Token;codexCommand=$CodexCommand;codexArgs=$CodexArgs;nodePath=[IO.Path]::GetFullPath($NodePath);httpEntry=Join-Path $root 'dist\src\http-main.js';healthUrl="http://${HostName}:${Port}/health";tunnelClientPath=[IO.Path]::GetFullPath($TunnelClientPath);tunnelProfileDir=[IO.Path]::GetFullPath($TunnelProfileDir);tunnelProfile=$TunnelProfile;tunnelProfilePath=Join-Path([IO.Path]::GetFullPath($TunnelProfileDir))"$TunnelProfile.yaml";tunnelHealthUrl=$TunnelHealthUrl.TrimEnd('/');tunnelHealthPort=$(if($healthUri.IsDefaultPort){80}else{$healthUri.Port});runtimeDir=$runtimeDir;serverPidFile=Join-Path $runtimeDir 'codex-bridge-http-server.pid';serverOwnerFile=Join-Path $runtimeDir 'codex-bridge-http-server.owner.json';tunnelPidFile=Join-Path $runtimeDir 'tunnel-client.pid';tunnelOwnerFile=Join-Path $runtimeDir 'tunnel-client.owner.json';tunnelLogFile=Join-Path $runtimeDir 'tunnel-client.log';actionLogFile=Join-Path $runtimeDir 'runtime-control.jsonl';keyStorePath=[IO.Path]::GetFullPath($KeyStorePath);secretPath=$SecretPath;expectedBuildId=$ExpectedBuildId;testActiveFlag=$TestActiveFlag;serverReadyTimeoutSeconds=$ServerReadyTimeoutSeconds;tunnelRecoveryDelaysSeconds=@($TunnelRecoveryDelaysSeconds)}
+  $profileDir=[IO.Path]::GetFullPath($TunnelProfileDir);$profilePath=Join-Path $profileDir "$TunnelProfile.yaml";$tunnelIdentity=Resolve-CbTunnelIdentity -ExplicitTunnelId $ExplicitTunnelId -SettingsTunnelId $SettingsTunnelId -EnvironmentTunnelId $EnvironmentTunnelId -ProfilePath $profilePath
+  return [pscustomobject]@{projectRoot=$root;hostName=$HostName;port=$Port;projectsFile=[IO.Path]::GetFullPath($ProjectsFile);dataDir=[IO.Path]::GetFullPath($DataDir);token=$Token;codexCommand=$CodexCommand;codexArgs=$CodexArgs;nodePath=[IO.Path]::GetFullPath($NodePath);httpEntry=Join-Path $root 'dist\src\http-main.js';healthUrl="http://${HostName}:${Port}/health";tunnelClientPath=[IO.Path]::GetFullPath($TunnelClientPath);tunnelProfileDir=$profileDir;tunnelProfile=$TunnelProfile;tunnelProfilePath=$profilePath;tunnelIdentity=$tunnelIdentity;tunnelHealthUrl=$TunnelHealthUrl.TrimEnd('/');tunnelHealthPort=$(if($healthUri.IsDefaultPort){80}else{$healthUri.Port});runtimeDir=$runtimeDir;serverPidFile=Join-Path $runtimeDir 'codex-bridge-http-server.pid';serverOwnerFile=Join-Path $runtimeDir 'codex-bridge-http-server.owner.json';tunnelPidFile=Join-Path $runtimeDir 'tunnel-client.pid';tunnelOwnerFile=Join-Path $runtimeDir 'tunnel-client.owner.json';tunnelLogFile=Join-Path $runtimeDir 'tunnel-client.log';actionLogFile=Join-Path $runtimeDir 'runtime-control.jsonl';keyStorePath=[IO.Path]::GetFullPath($KeyStorePath);secretPath=$SecretPath;expectedBuildId=$ExpectedBuildId;testActiveFlag=$TestActiveFlag;serverReadyTimeoutSeconds=$ServerReadyTimeoutSeconds;tunnelRecoveryDelaysSeconds=@($TunnelRecoveryDelaysSeconds)}
 }
 
 function Write-CodexBridgeLifecycleEvent {param($Context,[string]$Action,[bool]$Ok,[string]$BeforeStatus,[string]$AfterStatus,[int[]]$OwnedPids=@(),[int]$ElapsedMs,[string]$ErrorCode,[string]$Message);New-Item -ItemType Directory -Force -Path $Context.runtimeDir|Out-Null;$event=[ordered]@{timestamp=[DateTime]::UtcNow.ToString('o');action=$Action;ok=$Ok;beforeStatus=$BeforeStatus;afterStatus=$AfterStatus;ownedPids=@($OwnedPids);elapsedMs=$ElapsedMs;errorCode=$ErrorCode;message=$Message};[IO.File]::AppendAllText($Context.actionLogFile,(($event|ConvertTo-Json -Compress -Depth 5)+[Environment]::NewLine),$script:Utf8NoBom)}
 
-Export-ModuleMember -Function @('New-CodexBridgeRuntimeContext','Get-CodexBridgeRuntimeStatus','Invoke-CodexBridgeLifecycleAction','Write-CodexBridgeLifecycleEvent')
+Export-ModuleMember -Function @('New-CodexBridgeRuntimeContext','Get-CodexBridgeRuntimeStatus','Invoke-CodexBridgeLifecycleAction','Write-CodexBridgeLifecycleEvent','Resolve-CbTunnelIdentity','Get-CbTunnelIdentitySummary','Assert-CbTunnelIdentityReady','ConvertTo-CbRemoteRegistrationEvidence')

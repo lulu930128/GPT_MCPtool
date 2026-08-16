@@ -45,7 +45,7 @@ function New-ManagerShortcut {
     $shortcut.Arguments = "`"$managerLauncher`""
     $shortcut.WorkingDirectory = $projectRoot
     $shortcut.WindowStyle = 7
-    $shortcut.Description = "Start MCP Control Center and safely reconcile six local MCP runtimes"
+    $shortcut.Description = "Start MCP Control Center and safely reconcile enabled local MCP runtimes"
     $shortcut.Save()
     if ((Get-ManagerShortcutStatus) -ne "Recognized") { throw "Manager Startup shortcut verification failed." }
 }

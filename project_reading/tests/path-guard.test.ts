@@ -31,6 +31,21 @@ test("resolveWorkspacePath rejects traversal outside the workspace root", async 
   );
 });
 
+test("resolveWorkspacePath rejects absolute paths even when they are inside an allowed root", async () => {
+  const config = await makeFixture();
+  const absolute = path.join(config.root, "README.md");
+  await fs.writeFile(absolute, "inside but absolute", "utf8");
+
+  await assert.rejects(
+    () => resolveWorkspacePath(config, absolute, "file"),
+    /relative to/,
+  );
+  await assert.rejects(
+    () => resolveWorkspacePath(config, "C:\\GPT_MCPtool\\project_reading\\README.md", "file"),
+    /relative to/,
+  );
+});
+
 test("resolveWorkspacePath rejects denied secret-like files", async () => {
   const config = await makeFixture();
   await fs.writeFile(path.join(config.root, ".env"), "SECRET=1", "utf8");
@@ -118,6 +133,28 @@ test("loadConfig accepts contained asset scopes and rejects unknown roots", asyn
   );
 });
 
+test("loadConfig requires file-return scopes to reference configured asset scopes", async () => {
+  const projectsRoot = await fs.mkdtemp(path.join(os.tmpdir(), "workspace-projects-"));
+  await fs.mkdir(path.join(projectsRoot, "shared"));
+
+  const config = await loadConfig({
+    WORKSPACE_MCP_ROOTS: `projects=${projectsRoot}`,
+    WORKSPACE_MCP_ASSET_SCOPES: "shared_assets=projects:shared",
+    WORKSPACE_MCP_FILE_RETURN_SCOPES: "shared_assets",
+  });
+  assert.deepEqual(Array.from(config.fileReturnScopeIds), ["shared_assets"]);
+
+  await assert.rejects(
+    () =>
+      loadConfig({
+        WORKSPACE_MCP_ROOTS: `projects=${projectsRoot}`,
+        WORKSPACE_MCP_ASSET_SCOPES: "shared_assets=projects:shared",
+        WORKSPACE_MCP_FILE_RETURN_SCOPES: "unknown",
+      }),
+    /references unknown asset scope unknown/,
+  );
+});
+
 test("loadConfig rejects asset scopes that traverse above a root", async () => {
   const projectsRoot = await fs.mkdtemp(path.join(os.tmpdir(), "workspace-projects-"));
 
@@ -183,15 +220,49 @@ async function makeFixture(): Promise<ServerConfig> {
     root: realRoot,
     roots: new Map([["projects", workspaceRoot]]),
     assetScopes: new Map(),
-    maxFileBytes: 4096,
+    fileReturnScopeIds: new Set(),
+    runtimeIdentity: {
+      applicationVersion: "test",
+      toolContractVersion: "test",
+      buildId: "test",
+      buildTime: "2026-08-13T00:00:00.000Z",
+      gitCommit: null,
+      dirty: false,
+      runtimeStartedAt: "2026-08-13T00:00:00.000Z",
+    },
+    searchRuntime: {
+      preferred: "ripgrep",
+      active: "javascript",
+      version: null,
+      source: "fallback",
+      command: null,
+    },
+    maxFileBytes: 20_971_520,
+    maxReturnedBytes: 4096,
     maxReadLines: 20,
+    maxBatchFiles: 10,
+    maxBatchTotalLines: 100,
+    maxBatchTotalBytes: 16_384,
     maxSearchResults: 10,
+    maxSearchReturnedBytes: 16_384,
+    maxSearchVisitedEntries: 1_000,
     maxDirEntries: 20,
     searchTimeoutMs: 1000,
+    gitTimeoutMs: 5_000,
+    maxGitDiffFiles: 10,
+    maxGitDiffLines: 1_000,
+    maxGitDiffBytes: 262_144,
+    maxCodeFiles: 100,
+    maxCodeSymbols: 500,
+    maxCodeResults: 100,
+    maxCodeFileBytes: 1_048_576,
+    maxCodeTotalBytes: 33_554_432,
+    codeTimeoutMs: 5_000,
     maxImageFileBytes: 52_428_800,
     maxImagePixels: 100_000_000,
     maxImageDimension: 4_096,
     maxImageOutputBytes: 12_582_912,
+    maxFetchFileBytes: 12_582_912,
     maxSpreadsheetFileBytes: 26_214_400,
     maxSpreadsheetExpandedBytes: 104_857_600,
     maxSpreadsheetZipEntries: 2_048,
@@ -207,6 +278,14 @@ async function makeFixture(): Promise<ServerConfig> {
     maxDocumentBlocks: 300,
     maxDocumentTableCells: 5_000,
     maxPresentationSlides: 50,
+    maxPdfFileBytes: 52_428_800,
+    maxPdfPages: 500,
+    maxPdfReadPages: 10,
+    maxPdfTextChars: 100_000,
+    maxPdfRenderDimension: 4_096,
+    maxPdfRenderPixels: 16_777_216,
+    maxPdfOutputBytes: 12_582_912,
+    pdfTimeoutMs: 15_000,
     denyDirs,
     denyExtensions: new Set(DEFAULT_DENY_EXTENSIONS),
   };

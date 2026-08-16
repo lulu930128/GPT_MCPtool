@@ -10,6 +10,32 @@ param(
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = "Stop"
 
+function Start-MemoryCoreChildProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][string]$Arguments,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [string]$RedirectStandardOutput,
+        [string]$RedirectStandardError
+    )
+    $names = @('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy','NO_PROXY','no_proxy')
+    $saved = @{}
+    try {
+        foreach ($name in $names) { $saved[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process) }
+        foreach ($name in @('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy')) { [Environment]::SetEnvironmentVariable($name, $null, [EnvironmentVariableTarget]::Process) }
+        [Environment]::SetEnvironmentVariable('NO_PROXY', '127.0.0.1,localhost', [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable('no_proxy', '127.0.0.1,localhost', [EnvironmentVariableTarget]::Process)
+        $parameters = @{
+            FilePath = $FilePath; ArgumentList = $Arguments; WorkingDirectory = $WorkingDirectory
+            WindowStyle = 'Hidden'; PassThru = $true
+        }
+        if (-not [string]::IsNullOrWhiteSpace($RedirectStandardOutput)) { $parameters['RedirectStandardOutput'] = $RedirectStandardOutput }
+        if (-not [string]::IsNullOrWhiteSpace($RedirectStandardError)) { $parameters['RedirectStandardError'] = $RedirectStandardError }
+        return Start-Process @parameters
+    }
+    finally { foreach ($name in $names) { [Environment]::SetEnvironmentVariable($name, $saved[$name], [EnvironmentVariableTarget]::Process) } }
+}
+
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $pythonPath = Join-Path $projectRoot ".venv\Scripts\python.exe"
 $pythonBasePath = $null
@@ -30,9 +56,9 @@ $mcpPidPath = Join-Path $runtimeDir "mcp.pid"
 $tunnelPidPath = Join-Path $runtimeDir "tunnel-client.pid"
 $backendBaseUrl = "http://127.0.0.1:$BackendPort"
 $backendHealthUrl = "$backendBaseUrl/health"
-$mcpHealthUrl = "http://127.0.0.1:8818/health"
-$mcpUrl = "http://127.0.0.1:8818/mcp"
-$tunnelAdminUrl = "http://127.0.0.1:8800"
+$mcpHealthUrl = "http://127.0.0.1:18818/health"
+$mcpUrl = "http://127.0.0.1:18818/mcp"
+$tunnelAdminUrl = "http://127.0.0.1:18800"
 $tunnelReadyUrl = "$tunnelAdminUrl/readyz"
 
 function Ensure-PrivateDirectories {
@@ -421,13 +447,9 @@ function Start-ProjectPythonProcess(
         Set-Item -LiteralPath "Env:$name" -Value ([string]$EnvironmentValues[$name])
     }
     try {
-        $process = Start-Process -FilePath $pythonPath `
-            -ArgumentList $Arguments `
-            -WorkingDirectory $projectRoot `
-            -WindowStyle Hidden `
-            -RedirectStandardOutput $StdoutPath `
-            -RedirectStandardError $StderrPath `
-            -PassThru
+        $process = Start-MemoryCoreChildProcess -FilePath $pythonPath `
+            -Arguments $Arguments -WorkingDirectory $projectRoot `
+            -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath
         Write-Pid $PidPath $process.Id
         return $process.Id
     }
@@ -674,7 +696,7 @@ function Initialize-TunnelProfile {
         --tunnel-id $TunnelId `
         --mcp-server-url $mcpUrl `
         --control-plane-api-key-ref env:CONTROL_PLANE_API_KEY `
-        --health-listen-addr "127.0.0.1:8800" `
+        --health-listen-addr "127.0.0.1:18800" `
         --force
     if ($LASTEXITCODE -ne 0) {
         throw "tunnel-client profile initialization failed with exit code $LASTEXITCODE."
@@ -758,10 +780,10 @@ function Start-Mcp {
         -PidPath $mcpPidPath `
         -ExpectedExecutables @($pythonPath, $pythonBasePath) `
         -ExpectedCommandFragment "memory_core.mcp.main" `
-        -ExpectedListenPort 8818
-    $existing = @(Get-LoopbackListenerOwnerIds 8818)
+        -ExpectedListenPort 18818
+    $existing = @(Get-LoopbackListenerOwnerIds 18818)
     if ($existing.Count -gt 0) {
-        throw "Port 8818 is occupied by a process that is not a healthy Memory Core MCP server."
+        throw "Port 18818 is occupied by a process that is not a healthy Memory Core MCP server."
     }
     $mcpToken = Read-CurrentUserSecret $mcpClientSecretPath
     $mcpReviewToken = Read-CurrentUserSecret $mcpReviewSecretPath
@@ -775,7 +797,7 @@ function Start-Mcp {
                 PYTHONUNBUFFERED = "1"
                 MEMORY_CORE_MCP_API_BASE_URL = $backendBaseUrl
                 MEMORY_CORE_MCP_HOST = "127.0.0.1"
-                MEMORY_CORE_MCP_PORT = "8818"
+                MEMORY_CORE_MCP_PORT = "18818"
                 MEMORY_CORE_MCP_CLIENT_TOKEN = $mcpToken
                 MEMORY_CORE_MCP_REVIEW_CLIENT_TOKEN = $mcpReviewToken
             } | Out-Null
@@ -797,21 +819,22 @@ function Start-Tunnel {
         -PidPath $tunnelPidPath `
         -ExpectedExecutables @($TunnelClientPath) `
         -ExpectedCommandFragment $profileName `
-        -ExpectedListenPort 8800
-    $existing = @(Get-LoopbackListenerOwnerIds 8800)
+        -ExpectedListenPort 18800
+    $existing = @(Get-LoopbackListenerOwnerIds 18800)
     if ($existing.Count -gt 0) {
-        throw "Port 8800 is occupied by a process that is not a ready Memory Core tunnel."
+        throw "Port 18800 is occupied by a process that is not a ready Memory Core tunnel."
     }
     $runtimeKey = Read-CurrentUserSecret $runtimeKeySecretPath
     $originalKey = $env:CONTROL_PLANE_API_KEY
     try {
         $env:CONTROL_PLANE_API_KEY = $runtimeKey
         $arguments = "run --profile-dir `"$profileDir`" --profile $profileName --log.file `"$(Join-Path $runtimeDir 'tunnel-client.log')`" --pid.file `"$tunnelPidPath`""
-        $process = Start-Process -FilePath $TunnelClientPath `
-            -ArgumentList $arguments `
+        $process = Start-MemoryCoreChildProcess `
+            -FilePath $TunnelClientPath `
+            -Arguments $arguments `
             -WorkingDirectory $projectRoot `
-            -WindowStyle Hidden `
-            -PassThru
+            -RedirectStandardOutput (Join-Path $runtimeDir 'tunnel-client.stdout.log') `
+            -RedirectStandardError (Join-Path $runtimeDir 'tunnel-client.stderr.log')
         Write-Pid $tunnelPidPath $process.Id
     }
     finally {
@@ -832,15 +855,15 @@ function Get-StatusDocument {
         -PidPath $mcpPidPath `
         -ExpectedExecutables @($pythonPath, $pythonBasePath) `
         -ExpectedCommandFragment "memory_core.mcp.main" `
-        -ExpectedListenPort 8818
+        -ExpectedListenPort 18818
     $tunnelOwnership = Get-ManagedProcessOwnership `
         -PidPath $tunnelPidPath `
         -ExpectedExecutables @($TunnelClientPath) `
         -ExpectedCommandFragment $profileName `
-        -ExpectedListenPort 8800
+        -ExpectedListenPort 18800
     $backendListenerPids = @(Get-LoopbackListenerOwnerIds $BackendPort)
-    $mcpListenerPids = @(Get-LoopbackListenerOwnerIds 8818)
-    $tunnelListenerPids = @(Get-LoopbackListenerOwnerIds 8800)
+    $mcpListenerPids = @(Get-LoopbackListenerOwnerIds 18818)
+    $tunnelListenerPids = @(Get-LoopbackListenerOwnerIds 18800)
     $backendPortPreflight = if ($backendHealthy) {
         [pscustomobject][ordered]@{
             port = $BackendPort
@@ -922,18 +945,18 @@ function Stop-ManagedProcess(
 }
 
 function Stop-Stack {
-    Stop-ManagedProcess -PidPath $tunnelPidPath -ExpectedExecutables @($TunnelClientPath) -ExpectedCommandFragment $profileName -ExpectedListenPort 8800
-    Stop-ManagedProcess -PidPath $mcpPidPath -ExpectedExecutables @($pythonPath, $pythonBasePath) -ExpectedCommandFragment "memory_core.mcp.main" -ExpectedListenPort 8818
+    Stop-ManagedProcess -PidPath $tunnelPidPath -ExpectedExecutables @($TunnelClientPath) -ExpectedCommandFragment $profileName -ExpectedListenPort 18800
+    Stop-ManagedProcess -PidPath $mcpPidPath -ExpectedExecutables @($pythonPath, $pythonBasePath) -ExpectedCommandFragment "memory_core.mcp.main" -ExpectedListenPort 18818
     Stop-ManagedProcess -PidPath $backendPidPath -ExpectedExecutables @($pythonPath, $pythonBasePath) -ExpectedCommandFragment "memory_core.main:app" -ExpectedListenPort $BackendPort
 }
 
 function Stop-Core {
-    Stop-ManagedProcess -PidPath $mcpPidPath -ExpectedExecutables @($pythonPath, $pythonBasePath) -ExpectedCommandFragment "memory_core.mcp.main" -ExpectedListenPort 8818
+    Stop-ManagedProcess -PidPath $mcpPidPath -ExpectedExecutables @($pythonPath, $pythonBasePath) -ExpectedCommandFragment "memory_core.mcp.main" -ExpectedListenPort 18818
     Stop-ManagedProcess -PidPath $backendPidPath -ExpectedExecutables @($pythonPath, $pythonBasePath) -ExpectedCommandFragment "memory_core.main:app" -ExpectedListenPort $BackendPort
 }
 
 function Stop-Tunnel {
-    Stop-ManagedProcess -PidPath $tunnelPidPath -ExpectedExecutables @($TunnelClientPath) -ExpectedCommandFragment $profileName -ExpectedListenPort 8800
+    Stop-ManagedProcess -PidPath $tunnelPidPath -ExpectedExecutables @($TunnelClientPath) -ExpectedCommandFragment $profileName -ExpectedListenPort 18800
 }
 
 function Assert-CoreStable {

@@ -47,7 +47,7 @@ class ViewerApiClient:
             base_url=self.base_url,
             headers={
                 "Accept": "application/json",
-                "User-Agent": "memory-core-control-center/0.2.0",
+                "User-Agent": "memory-core-control-center/1.1.0",
                 "X-Memory-Core-Token": token,
             },
             timeout=timeout_seconds,

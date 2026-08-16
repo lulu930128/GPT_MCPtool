@@ -1,6 +1,6 @@
 import type { OutboxEvent } from './financial-event';
 
-export const MOBILE_API_BASE_URL = 'http://127.0.0.1:8876/api/mobile';
+export const MOBILE_API_BASE_URL = 'http://127.0.0.1:18876/api/mobile';
 
 export type SyncFailureStatus = 'failed' | 'needs_review';
 

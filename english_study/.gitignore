@@ -1,0 +1,9 @@
+.env
+.local/
+.secrets/
+.tunnel-client/
+.tmp/
+node_modules/
+dist/
+*.log
+*.pid

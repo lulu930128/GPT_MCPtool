@@ -98,7 +98,7 @@ function healthPayload(runtime: BridgeRuntime) {
   return {
     ok: true,
     service: "codex-handoff-bridge",
-    version: "0.1.0",
+    version: "1.1.0",
     buildId: runtime.config.buildId,
     controller: runtime.controller.status,
     projectIds: Array.from(runtime.config.projects.keys()),

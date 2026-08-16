@@ -3,6 +3,22 @@ $ErrorActionPreference = 'Stop'
 
 $script:Utf8NoBom = New-Object Text.UTF8Encoding($false)
 
+function Read-McCapturedText {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
+    $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+    $stream = New-Object IO.FileStream($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share)
+    $reader = $null
+    try {
+        $reader = New-Object IO.StreamReader($stream, [Text.Encoding]::UTF8, $true, 4096, $true)
+        return $reader.ReadToEnd()
+    }
+    finally {
+        if ($null -ne $reader) { $reader.Dispose() }
+        $stream.Dispose()
+    }
+}
+
 function Get-McJsonDocument {
     param([string]$Text)
     if ([string]::IsNullOrWhiteSpace($Text)) { throw 'STACK_OUTPUT_INVALID: Memory Core stack returned no status document.' }
@@ -16,26 +32,48 @@ function Get-McJsonDocument {
 function Invoke-McStackAction {
     param($Context, [ValidateSet('Status', 'Start', 'StartTunnel', 'RestartCore', 'Restart', 'Stop')][string]$Action)
     if (-not (Test-Path -LiteralPath $Context.stackScript -PathType Leaf)) { throw 'STACK_SCRIPT_MISSING: Memory Core stack script is unavailable.' }
-    $startInfo = New-Object Diagnostics.ProcessStartInfo
-    $startInfo.FileName = $Context.powershellPath
-    $startInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$($Context.stackScript)`" -Action $Action -BackendPort $($Context.backendPort)"
-    $startInfo.WorkingDirectory = $Context.projectRoot
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
-    $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
-    $process = [Diagnostics.Process]::Start($startInfo)
-    if ($null -eq $process) { throw 'STACK_ACTION_FAILED: Memory Core stack action did not start.' }
-    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-    $stderrTask = $process.StandardError.ReadToEndAsync()
-    if (-not $process.WaitForExit($Context.actionTimeoutSeconds * 1000)) {
-        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-        throw 'STACK_ACTION_TIMEOUT: Memory Core stack action exceeded its bounded timeout.'
+    $captureRoot = Join-Path $Context.runtimeDir 'stack-captures'
+    New-Item -ItemType Directory -Force -Path $captureRoot | Out-Null
+    Get-ChildItem -LiteralPath $captureRoot -File -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+    $captureId = [Guid]::NewGuid().ToString('N')
+    $stdoutPath = Join-Path $captureRoot "$captureId.stdout"
+    $stderrPath = Join-Path $captureRoot "$captureId.stderr"
+    $process = $null
+    try {
+        $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$($Context.stackScript)`" -Action $Action -BackendPort $($Context.backendPort)"
+        $process = Start-Process `
+            -FilePath $Context.powershellPath `
+            -ArgumentList $arguments `
+            -WorkingDirectory $Context.projectRoot `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath `
+            -PassThru
+        if ($null -eq $process) { throw 'STACK_ACTION_FAILED: Memory Core stack action did not start.' }
+        if (-not $process.WaitForExit($Context.actionTimeoutSeconds * 1000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            $null = $process.WaitForExit(5000)
+            throw 'STACK_ACTION_TIMEOUT: Memory Core stack action exceeded its bounded timeout.'
+        }
+        $process.WaitForExit()
+        $stdout = Read-McCapturedText -Path $stdoutPath
+        $exitCode = [int]$process.ExitCode
+        if ($exitCode -ne 0) { throw "STACK_ACTION_FAILED: Memory Core stack action exited with code $exitCode; inspect component runtime logs." }
+        return Get-McJsonDocument -Text $stdout
     }
-    $stdout = $stdoutTask.Result
-    $null = $stderrTask.Result
-    if ($process.ExitCode -ne 0) { throw 'STACK_ACTION_FAILED: Memory Core stack action failed; inspect component runtime logs.' }
-    return Get-McJsonDocument -Text $stdout
+    finally {
+        if ($null -ne $process) { $process.Dispose() }
+        foreach ($capturePath in @($stdoutPath, $stderrPath)) {
+            Remove-Item -LiteralPath $capturePath -Force -ErrorAction SilentlyContinue
+        }
+        try {
+            if (@(Get-ChildItem -LiteralPath $captureRoot -Force -ErrorAction SilentlyContinue).Count -eq 0) {
+                [IO.Directory]::Delete($captureRoot, $false)
+            }
+        }
+        catch { }
+    }
 }
 
 function Get-McFirstPid {

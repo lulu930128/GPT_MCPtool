@@ -6,8 +6,8 @@ param(
     [string]$ProfileDir,
     [string]$Profile = "personal-asset-os",
     [string]$TunnelId = $env:PAOS_TUNNEL_ID,
-    [string]$McpUrl = "http://127.0.0.1:8876/mcp/",
-    [string]$HealthListenAddr = "127.0.0.1:8877",
+    [string]$McpUrl = "http://127.0.0.1:18876/mcp/",
+    [string]$HealthListenAddr = "127.0.0.1:18877",
     [switch]$Explain
 )
 

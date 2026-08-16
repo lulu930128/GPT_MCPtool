@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "id": "english_study",
+  "displayName": "English Study",
+  "runtimeMode": "component-controller",
+  "runtimeContract": "unified-lifecycle-v3",
+  "traits": ["multi-core", "diagnostic-ui"],
+  "contractScript": "scripts\\runtime-control.ps1",
+  "capabilities": ["ensure_running", "restart_core", "reload_runtime", "shutdown_runtime", "show_diagnostic_tray"],
+  "lifecycle": {
+    "controller": { "kind": "powershell", "path": "scripts\\runtime-control.ps1" },
+    "diagnosticLauncher": { "kind": "vbs", "path": "scripts\\show-diagnostic-tray.vbs" }
+  },
+  "probes": [
+    {
+      "id": "hub",
+      "label": "English Study Hub",
+      "role": "core",
+      "kind": "json",
+      "url": "http://127.0.0.1:8831/health",
+      "port": 8831,
+      "required": true,
+      "expected": { "ok": true, "service": "english-study-hub" },
+      "publicSummaryFields": ["service", "version"],
+      "ownership": {
+        "managedPidFile": ".tmp\\english-study-hub.pid",
+        "managedCommandContains": ["english-study-hub\\.venv\\Scripts\\python.exe", "-m english_study_hub", "serve"]
+      }
+    },
+    {
+      "id": "mcp",
+      "label": "English Study MCP",
+      "role": "core",
+      "kind": "json",
+      "url": "http://127.0.0.1:8830/health",
+      "port": 8830,
+      "required": true,
+      "expected": { "ok": true, "service": "english-study-mcp" },
+      "publicSummaryFields": ["service", "version", "contractVersion", "buildId", "toolCount"],
+      "ownership": {
+        "managedPidFile": ".tmp\\english-study-mcp.pid",
+        "managedCommandContains": ["english_study", "dist\\src\\http-main.js"]
+      }
+    }
+  ],
+  "navigation": [
+    { "id": "health", "label": "Open health", "kind": "probe", "target": "mcp" }
+  ],
+  "ui": {
+    "menuContract": "component-menu-v1",
+    "actionEntrypoint": { "kind": "powershell", "path": "scripts\\control-center-ui.ps1" },
+    "menuActions": [
+      { "id": "copy_mcp_url", "label": "Copy MCP URL", "group": "connection", "confirmation": "none" },
+      { "id": "copy_health_url", "label": "Copy health URL", "group": "connection", "confirmation": "none" },
+      { "id": "open_mcp_health", "label": "Open MCP health", "group": "connection", "confirmation": "none" },
+      { "id": "open_runtime_logs", "label": "Open runtime logs", "group": "connection", "confirmation": "none" }
+    ]
+  },
+  "safety": {
+    "managerDomainDataAccess": "none",
+    "managerSecretAccess": "none",
+    "shutdownConfirmation": "required"
+  }
+}

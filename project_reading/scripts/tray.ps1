@@ -5,14 +5,15 @@ param(
   [string]$DefaultWorkspaceRoot = $env:WORKSPACE_MCP_DEFAULT_ROOT,
   [string]$WorkspaceRootDenyDirs = $env:WORKSPACE_MCP_ROOT_DENY_DIRS,
   [string]$AssetScopes = $env:WORKSPACE_MCP_ASSET_SCOPES,
+  [string]$FileReturnScopes = $env:WORKSPACE_MCP_FILE_RETURN_SCOPES,
   [string]$HostName = "127.0.0.1",
-  [int]$Port = 8787,
+  [int]$Port = 18787,
   [string]$Token = $env:WORKSPACE_MCP_HTTP_TOKEN,
   [string]$TunnelClientPath,
   [string]$TunnelProfileDir,
   [string]$TunnelProfile = "project-workspace",
   [string]$TunnelId = $env:WORKSPACE_MCP_TUNNEL_ID,
-  [string]$TunnelHealthUrl = "http://127.0.0.1:8788",
+  [string]$TunnelHealthUrl = "http://127.0.0.1:18788",
   [string]$SecretPath,
   [switch]$NoAutoStart,
   [switch]$AutoStartTunnel,
@@ -217,6 +218,8 @@ function Start-LifecycleAction {
   }
   if ([string]::IsNullOrWhiteSpace($AssetScopes)) { Remove-Item Env:\WORKSPACE_MCP_ASSET_SCOPES -ErrorAction SilentlyContinue }
   else { $env:WORKSPACE_MCP_ASSET_SCOPES = $AssetScopes }
+  if ([string]::IsNullOrWhiteSpace($FileReturnScopes)) { Remove-Item Env:\WORKSPACE_MCP_FILE_RETURN_SCOPES -ErrorAction SilentlyContinue }
+  else { $env:WORKSPACE_MCP_FILE_RETURN_SCOPES = $FileReturnScopes }
   if ([string]::IsNullOrWhiteSpace($Token)) { Remove-Item Env:\WORKSPACE_MCP_HTTP_TOKEN -ErrorAction SilentlyContinue }
   else { $env:WORKSPACE_MCP_HTTP_TOKEN = $Token }
 

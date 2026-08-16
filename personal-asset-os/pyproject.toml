@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "personal-asset-os"
-version = "0.2.0"
+version = "1.1.0"
 description = "Local-first personal asset ledger and reconciliation system"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"

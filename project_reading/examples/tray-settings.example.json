@@ -3,5 +3,6 @@
   "workspaceRoots": "projects=C:\\project;mcp_tools=C:\\GPT_MCPtool;work=C:\\work",
   "defaultWorkspaceRoot": "projects",
   "workspaceRootDenyDirs": "",
-  "assetScopes": "projects=projects:.;mcp_tools=mcp_tools:.;work=work:."
+  "assetScopes": "projects=projects:.;mcp_tools=mcp_tools:.;work=work:.",
+  "fileReturnScopes": "projects"
 }

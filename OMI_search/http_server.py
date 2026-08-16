@@ -16,15 +16,25 @@ import server as omi_search_stdio
 
 
 SERVER_NAME = "omi-search-http-mcp"
-SERVER_VERSION = "0.2.0"
+SERVER_VERSION = "1.1.0"
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 8797
+DEFAULT_PORT = 18797
 MAX_BODY_BYTES = 1_048_576
 UPSTREAM_HEALTH_TIMEOUT_SECONDS = 2
 SOURCE_BUILD_FILES = (
     Path(__file__).resolve(),
     Path(omi_search_stdio.__file__).resolve(),
     Path(__file__).resolve().with_name("public_contract_snapshot.json"),
+    Path(__file__).resolve().with_name(
+        "tw_market_dashboard_contract_snapshot.json"
+    ),
+    (
+        Path(__file__).resolve().parent
+        / "ui"
+        / "tw-market-dashboard"
+        / "dist"
+        / "index.html"
+    ),
 )
 
 

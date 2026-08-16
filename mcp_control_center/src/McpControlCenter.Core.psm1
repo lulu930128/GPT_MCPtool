@@ -650,7 +650,7 @@ function ConvertFrom-McpCcComponentDescriptor {
     $componentId = [string]$RegistryEntry.id
     Assert-McpCcObjectShape `
         -Object $Descriptor `
-        -Allowed @("schemaVersion", "id", "displayName", "runtimeMode", "runtimeContract", "traits", "contractScript", "capabilities", "lifecycle", "legacyStartup", "timing", "probes", "navigation", "ui", "safety") `
+        -Allowed @("schemaVersion", "id", "displayName", "runtimeMode", "runtimeContract", "traits", "contractScript", "capabilities", "lifecycle", "legacyStartup", "timing", "connectivityEvidence", "probes", "navigation", "ui", "safety") `
         -Required @("schemaVersion", "id", "displayName", "runtimeMode", "runtimeContract", "traits", "contractScript", "capabilities", "lifecycle", "probes", "navigation", "safety") `
         -Label "Component descriptor '$componentId'"
     if ($Descriptor.schemaVersion -isnot [int] -and $Descriptor.schemaVersion -isnot [long]) { throw "Component descriptor '$componentId' schemaVersion must be an integer." }
@@ -729,6 +729,28 @@ function ConvertFrom-McpCcComponentDescriptor {
         if ($postStartResult.found) { $timingHash["postStartTimeoutSeconds"] = Assert-McpCcIntegerRange -Value $postStartResult.value -Label "Component '$componentId' postStartTimeoutSeconds" -Minimum 5 -Maximum 300 }
         if ($controllerTimeoutResult.found) { $timingHash["controllerActionTimeoutSeconds"] = Assert-McpCcIntegerRange -Value $controllerTimeoutResult.value -Label "Component '$componentId' controllerActionTimeoutSeconds" -Minimum 5 -Maximum 300 }
         $timing = [pscustomobject]$timingHash
+    }
+
+    $connectivityEvidence = [pscustomobject]@{}
+    $connectivityEvidenceResult = Get-McpCcObjectProperty -Object $Descriptor -Name "connectivityEvidence"
+    if ($connectivityEvidenceResult.found) {
+        Assert-McpCcObjectShape `
+            -Object $connectivityEvidenceResult.value `
+            -Allowed @("remoteEvidencePath") `
+            -Required @("remoteEvidencePath") `
+            -Label "Component '$componentId' connectivityEvidence"
+        $remoteEvidencePath = [string]$connectivityEvidenceResult.value.remoteEvidencePath
+        if ([string]::IsNullOrWhiteSpace($remoteEvidencePath) -or -not $remoteEvidencePath.EndsWith(".json", [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Component '$componentId' connectivityEvidence.remoteEvidencePath must be a JSON file."
+        }
+        $resolvedRemoteEvidencePath = Resolve-McpCcChildPath `
+            -Root $ResolvedRoot `
+            -RelativePath $remoteEvidencePath `
+            -Label "Component '$componentId' remote connectivity evidence"
+        $connectivityEvidence = [pscustomobject]@{
+            remoteEvidencePath = $remoteEvidencePath
+            resolvedRemoteEvidencePath = $resolvedRemoteEvidencePath
+        }
     }
 
     if ($null -eq $Descriptor.probes -or $Descriptor.probes -is [string]) { throw "Component '$componentId' probes must be an array." }
@@ -892,6 +914,7 @@ function ConvertFrom-McpCcComponentDescriptor {
         actions = [pscustomobject]$actions
         legacyStartup = $legacyStartup
         timing = $timing
+        connectivityEvidence = $connectivityEvidence
         probes = $probes
         navigation = $navigation
         ui = [pscustomobject]$uiHash
@@ -1084,6 +1107,170 @@ function Test-McpCcTcpPort {
     }
     catch { return $false }
     finally { $client.Dispose() }
+}
+
+function ConvertFrom-McpCcDynamicPortRangeText {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text)
+
+    $values = @()
+    foreach ($line in @($Text -split "`r?`n")) {
+        if ([string]$line -match ':\s*(\d+)\s*$') {
+            $values += [int]$matches[1]
+        }
+    }
+    if ($values.Count -lt 2) {
+        throw "Windows dynamic TCP port range output is invalid."
+    }
+    $start = [int]$values[0]
+    $count = [int]$values[1]
+    $end = $start + $count - 1
+    if ($start -lt 1 -or $count -lt 1 -or $end -gt 65535) {
+        throw "Windows dynamic TCP port range is outside the valid TCP port space."
+    }
+    return [pscustomobject]@{
+        start = $start
+        end = $end
+        count = $count
+    }
+}
+
+function ConvertFrom-McpCcExcludedPortRangeText {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text)
+
+    $ranges = @()
+    foreach ($line in @($Text -split "`r?`n")) {
+        if ([string]$line -match '^\s*(\d+)\s+(\d+)(?:\s+(\*))?\s*$') {
+            $start = [int]$matches[1]
+            $end = [int]$matches[2]
+            if ($start -lt 1 -or $end -lt $start -or $end -gt 65535) {
+                throw "Windows excluded TCP port range is outside the valid TCP port space."
+            }
+            $ranges += [pscustomobject]@{
+                start = $start
+                end = $end
+                administered = -not [string]::IsNullOrWhiteSpace([string]$matches[3])
+            }
+        }
+    }
+    return [object[]]$ranges
+}
+
+function Get-McpCcWindowsTcpPortPolicy {
+    param([scriptblock]$CommandRunner)
+
+    if ($null -eq $CommandRunner) {
+        $netshPath = Join-Path $env:WINDIR "System32\netsh.exe"
+        $CommandRunner = {
+            param([string[]]$Arguments)
+            $output = @(& $netshPath @Arguments 2>&1)
+            if ($LASTEXITCODE -ne 0) {
+                throw "netsh exited with code $LASTEXITCODE."
+            }
+            return $output
+        }.GetNewClosure()
+    }
+
+    $families = [ordered]@{}
+    foreach ($family in @("ipv4", "ipv6")) {
+        try {
+            $dynamicText = (@(& $CommandRunner ([string[]]@("interface", $family, "show", "dynamicportrange", "protocol=tcp"))) -join "`n")
+            $excludedText = (@(& $CommandRunner ([string[]]@("interface", $family, "show", "excludedportrange", "protocol=tcp"))) -join "`n")
+            $families[$family] = [pscustomobject]@{
+                available = $true
+                errorCode = $null
+                dynamicRange = ConvertFrom-McpCcDynamicPortRangeText -Text $dynamicText
+                excludedRanges = @(ConvertFrom-McpCcExcludedPortRangeText -Text $excludedText)
+            }
+        }
+        catch {
+            $families[$family] = [pscustomobject]@{
+                available = $false
+                errorCode = "PORT_POLICY_UNAVAILABLE"
+                dynamicRange = $null
+                excludedRanges = @()
+            }
+        }
+    }
+    $availableCount = @($families.Values | Where-Object { $_.available }).Count
+    return [pscustomobject]@{
+        contractVersion = "windows-tcp-port-policy-v1"
+        available = $availableCount -eq 2
+        errorCode = if ($availableCount -eq 2) { $null } elseif ($availableCount -eq 1) { "PORT_POLICY_PARTIAL" } else { "PORT_POLICY_UNAVAILABLE" }
+        ipv4 = $families.ipv4
+        ipv6 = $families.ipv6
+    }
+}
+
+function Test-McpCcPortAgainstPolicy {
+    param(
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$HostName,
+        $Policy
+    )
+
+    $familyNames = @(
+        if ($HostName -eq "::1" -or $HostName -eq "[::1]") {
+            "ipv6"
+        }
+        elseif ($HostName.Equals("localhost", [StringComparison]::OrdinalIgnoreCase)) {
+            "ipv4"
+            "ipv6"
+        }
+        else {
+            "ipv4"
+        }
+    )
+    $checkedFamilies = @()
+    if ($null -eq $Policy) {
+        return [pscustomobject]@{ known = $false; safe = $null; errorCode = $null; families = $checkedFamilies }
+    }
+    foreach ($familyName in $familyNames) {
+        $familyResult = Get-McpCcObjectProperty -Object $Policy -Name $familyName
+        if (-not $familyResult.found -or $null -eq $familyResult.value -or -not [bool]$familyResult.value.available) {
+            continue
+        }
+        $checkedFamilies += $familyName
+        foreach ($range in @($familyResult.value.excludedRanges)) {
+            if ($Port -ge [int]$range.start -and $Port -le [int]$range.end) {
+                return [pscustomobject]@{ known = $true; safe = $false; errorCode = "PORT_EXCLUDED"; families = $checkedFamilies }
+            }
+        }
+        $dynamicRange = $familyResult.value.dynamicRange
+        if ($null -ne $dynamicRange -and $Port -ge [int]$dynamicRange.start -and $Port -le [int]$dynamicRange.end) {
+            return [pscustomobject]@{ known = $true; safe = $false; errorCode = "PORT_IN_DYNAMIC_RANGE"; families = $checkedFamilies }
+        }
+    }
+    if ($checkedFamilies.Count -lt $familyNames.Count) {
+        $policyErrorCode = if ($checkedFamilies.Count -eq 0) { "PORT_POLICY_UNAVAILABLE" } else { "PORT_POLICY_PARTIAL" }
+        return [pscustomobject]@{ known = $false; safe = $null; errorCode = $policyErrorCode; families = $checkedFamilies }
+    }
+    return [pscustomobject]@{ known = $true; safe = $true; errorCode = $null; families = $checkedFamilies }
+}
+
+function ConvertTo-McpCcPortPolicySummary {
+    param($Policy)
+
+    if ($null -eq $Policy) { return $null }
+    $familySummaries = [ordered]@{}
+    foreach ($familyName in @("ipv4", "ipv6")) {
+        $familyResult = Get-McpCcObjectProperty -Object $Policy -Name $familyName
+        $family = if ($familyResult.found) { $familyResult.value } else { $null }
+        $dynamicRange = if ($null -ne $family) { $family.dynamicRange } else { $null }
+        $familySummaries[$familyName] = [pscustomobject]@{
+            available = $null -ne $family -and [bool]$family.available
+            errorCode = if ($null -eq $family) { "PORT_POLICY_UNAVAILABLE" } elseif ([string]::IsNullOrWhiteSpace([string]$family.errorCode)) { $null } else { [string]$family.errorCode }
+            dynamicStart = if ($null -eq $dynamicRange) { $null } else { [int]$dynamicRange.start }
+            dynamicEnd = if ($null -eq $dynamicRange) { $null } else { [int]$dynamicRange.end }
+            excludedRangeCount = if ($null -eq $family) { 0 } else { @($family.excludedRanges).Count }
+        }
+    }
+    return [pscustomobject]@{
+        contractVersion = "windows-tcp-port-policy-v1"
+        available = [bool]$Policy.available
+        errorCode = if ([string]::IsNullOrWhiteSpace([string]$Policy.errorCode)) { $null } else { [string]$Policy.errorCode }
+        ipv4 = $familySummaries.ipv4
+        ipv6 = $familySummaries.ipv6
+    }
 }
 
 function Test-McpCcCommandLineContains {
@@ -1281,14 +1468,25 @@ function Get-McpCcPortOwner {
 function Get-McpCcProbeResult {
     param(
         [Parameter(Mandatory = $true)]$Probe,
-        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
+        $PortPolicy,
+        [scriptblock]$TcpPortTester
     )
     $started = [Diagnostics.Stopwatch]::StartNew()
     $success = $false
     $errorCode = $null
     $errorMessage = $null
     $summary = [ordered]@{}
+    $probeUri = [Uri]([string]$Probe.url)
+    $portPolicyResult = Test-McpCcPortAgainstPolicy -Port ([int]$Probe.port) -HostName $probeUri.Host -Policy $PortPolicy
     try {
+        if ($portPolicyResult.known -and -not $portPolicyResult.safe) {
+            $errorCode = [string]$portPolicyResult.errorCode
+            if ($errorCode -eq "PORT_EXCLUDED") {
+                throw "Configured loopback port is inside a Windows excluded TCP range."
+            }
+            throw "Configured loopback port is inside the Windows dynamic TCP client range."
+        }
         $response = Invoke-WebRequest -UseBasicParsing -Uri ([string]$Probe.url) -TimeoutSec $TimeoutSeconds
         if ([int]$response.StatusCode -lt 200 -or [int]$response.StatusCode -ge 300) {
             throw "Unexpected HTTP status $($response.StatusCode)."
@@ -1344,7 +1542,15 @@ function Get-McpCcProbeResult {
     }
     finally { $started.Stop() }
 
-    $tcpOpen = if ($success) { $true } else { Test-McpCcTcpPort -Port ([int]$Probe.port) }
+    $tcpOpen = if ($success) {
+        $true
+    }
+    elseif ($null -ne $TcpPortTester) {
+        [bool](& $TcpPortTester ([int]$Probe.port))
+    }
+    else {
+        Test-McpCcTcpPort -Port ([int]$Probe.port)
+    }
     $ownerFragmentsResult = Get-McpCcObjectProperty -Object $Probe -Name "ownerCommandContains"
     $managedPidPathResult = Get-McpCcObjectProperty -Object $Probe -Name "resolvedOwnerManagedPidFile"
     $managedFragmentsResult = Get-McpCcObjectProperty -Object $Probe -Name "ownerManagedCommandContains"
@@ -1381,6 +1587,7 @@ function Get-McpCcProbeResult {
         error = $errorMessage
         summary = [pscustomobject]$summary
         owner = $owner
+        portPolicy = $portPolicyResult
     }
 }
 
@@ -1393,6 +1600,9 @@ function Resolve-McpCcComponentState {
     )
     if (-not $RootExists) { return "NotInstalled" }
     if (-not $StartActionExists) { return "Misconfigured" }
+    if (@($ProbeResults | Where-Object { $_.errorCode -in @("PORT_EXCLUDED", "PORT_IN_DYNAMIC_RANGE") }).Count -gt 0) {
+        return "Misconfigured"
+    }
     if (@($ProbeResults | Where-Object { $_.owner.known -and $_.owner.matchesExpected -eq $false }).Count -gt 0) {
         return "OwnershipMismatch"
     }
@@ -1419,10 +1629,633 @@ function Get-McpCcRunningAcceptanceStates {
     return [string[]]$states
 }
 
+function Get-McpCcStatusPresentation {
+    param([string]$Status)
+
+    switch ($Status) {
+        "Ready" {
+            return [pscustomobject]@{ level = "Ready"; symbol = [string][char]0x2713; label = "Ready" }
+        }
+        "Degraded" {
+            return [pscustomobject]@{ level = "Warning"; symbol = [string][char]0x26A0; label = "Connectivity degraded" }
+        }
+        "BlockedUpstream" {
+            return [pscustomobject]@{ level = "Warning"; symbol = [string][char]0x26A0; label = "Waiting for upstream" }
+        }
+        "Stopped" {
+            return [pscustomobject]@{ level = "Warning"; symbol = [string][char]0x26A0; label = "Stopped" }
+        }
+        "Unhealthy" {
+            return [pscustomobject]@{ level = "Critical"; symbol = [string][char]0x2715; label = "Unhealthy" }
+        }
+        "OwnershipMismatch" {
+            return [pscustomobject]@{ level = "Critical"; symbol = [string][char]0x2715; label = "Ownership mismatch" }
+        }
+        "Misconfigured" {
+            return [pscustomobject]@{ level = "Critical"; symbol = [string][char]0x2715; label = "Misconfigured" }
+        }
+        "NotInstalled" {
+            return [pscustomobject]@{ level = "Critical"; symbol = [string][char]0x2715; label = "Not installed" }
+        }
+        default {
+            return [pscustomobject]@{ level = "Unknown"; symbol = "?"; label = "Not checked" }
+        }
+    }
+}
+
+function Get-McpCcRestartMcpDecision {
+    param([Parameter(Mandatory = $true)]$ComponentStatus)
+
+    $status = [string]$ComponentStatus.status
+    $issues = @(if ($null -ne $ComponentStatus.PSObject.Properties["issues"]) { $ComponentStatus.issues } else { @() })
+    if (@($issues | Where-Object { [string]$_.code -eq "MONITOR_EXCEPTION" }).Count -gt 0) {
+        return [pscustomobject]@{
+            allowed = $false
+            action = $null
+            errorCode = "MONITOR_EXCEPTION"
+            message = "Monitoring failed; restart is disabled until component ownership can be verified."
+        }
+    }
+
+    switch ($status) {
+        "Stopped" {
+            return [pscustomobject]@{
+                allowed = $true
+                action = "ensure_running"
+                errorCode = $null
+                message = "Start the stopped component-owned runtime."
+            }
+        }
+        { $_ -in @("Ready", "Degraded", "BlockedUpstream", "Unhealthy") } {
+            return [pscustomobject]@{
+                allowed = $true
+                action = "reload_runtime"
+                errorCode = $null
+                message = "Reload the complete component-owned runtime."
+            }
+        }
+        "OwnershipMismatch" {
+            return [pscustomobject]@{ allowed = $false; action = $null; errorCode = "OWNERSHIP_MISMATCH"; message = "Ownership could not be verified." }
+        }
+        "Misconfigured" {
+            return [pscustomobject]@{ allowed = $false; action = $null; errorCode = "MISCONFIGURED"; message = "The component configuration must be repaired first." }
+        }
+        "NotInstalled" {
+            return [pscustomobject]@{ allowed = $false; action = $null; errorCode = "NOT_INSTALLED"; message = "The component is not installed." }
+        }
+        default {
+            return [pscustomobject]@{ allowed = $false; action = $null; errorCode = "RESTART_STATE_UNSUPPORTED"; message = "The component state is not safe for restart." }
+        }
+    }
+}
+
+function Get-McpCcActionErrorCode {
+    param([string]$Message)
+
+    foreach ($code in @(
+        "MONITOR_EXCEPTION",
+        "OWNERSHIP_MISMATCH",
+        "MISCONFIGURED",
+        "NOT_INSTALLED",
+        "ACTIVE_WORK_PRESENT",
+        "ACTION_BUSY",
+        "SERVER_NOT_READY",
+        "CORE_NOT_READY",
+        "TUNNEL_NOT_READY",
+        "TUNNEL_KEY_MISSING",
+        "TUNNEL_PROFILE_MISSING",
+        "TUNNEL_PROFILE_INVALID",
+        "TUNNEL_ID_MISSING",
+        "TUNNEL_ID_INVALID",
+        "TUNNEL_ID_MISMATCH",
+        "TUNNEL_CONFIG_MISSING",
+        "POST_ACTION_NOT_READY",
+        "RECONCILE_COMPONENT_FAILED",
+        "RESTART_STATE_UNSUPPORTED",
+        "CONTROLLER_REPORTED_FAILURE",
+        "COMPONENT_UI_ACTION_FAILED"
+    )) {
+        if (-not [string]::IsNullOrWhiteSpace($Message) -and $Message -match ("(?<![A-Z0-9_])" + [Regex]::Escape($code) + "(?![A-Z0-9_])")) {
+            return $code
+        }
+    }
+    return "MANAGER_ACTION_FAILED"
+}
+
+function Get-McpCcSafeActionMessage {
+    param([bool]$Ok, [string]$ErrorCode)
+
+    if ($Ok) { return "Action completed." }
+    switch ($ErrorCode) {
+        "MONITOR_EXCEPTION" { return "Monitoring failed; restart is disabled until component ownership can be verified." }
+        "OWNERSHIP_MISMATCH" { return "Ownership could not be verified; no runtime was changed." }
+        "MISCONFIGURED" { return "The component configuration must be repaired before retrying." }
+        "NOT_INSTALLED" { return "The component is not installed." }
+        "ACTIVE_WORK_PRESENT" { return "Active work or a pending approval blocks this runtime change." }
+        "ACTION_BUSY" { return "Another component lifecycle action is still running." }
+        "SERVER_NOT_READY" { return "The component-owned server is not ready." }
+        "CORE_NOT_READY" { return "The component-owned core is not ready." }
+        "TUNNEL_NOT_READY" { return "The component-owned local tunnel is not ready." }
+        "TUNNEL_KEY_MISSING" { return "The component-owned tunnel credential is unavailable." }
+        "TUNNEL_PROFILE_MISSING" { return "The component-owned tunnel profile is missing." }
+        "TUNNEL_PROFILE_INVALID" { return "The component-owned tunnel profile is invalid." }
+        "TUNNEL_ID_MISSING" { return "The component-owned tunnel identity is missing." }
+        "TUNNEL_ID_INVALID" { return "A component-owned tunnel identity is invalid." }
+        "TUNNEL_ID_MISMATCH" { return "Component-owned tunnel identity sources disagree." }
+        "TUNNEL_CONFIG_MISSING" { return "The component-owned tunnel configuration is incomplete." }
+        "POST_ACTION_NOT_READY" { return "The lifecycle action completed, but required readiness was not restored." }
+        "RECONCILE_COMPONENT_FAILED" { return "Component reconciliation failed; inspect component-owned runtime logs." }
+        "RESTART_STATE_UNSUPPORTED" { return "The component state is not safe for restart." }
+        default { return "The action failed; inspect component-owned runtime logs." }
+    }
+}
+
+function ConvertTo-McpCcRemoteConnectivityEvidence {
+    param(
+        $Evidence,
+        [Parameter(Mandatory = $true)][ValidateSet("remote_registration", "chatgpt_connector")][string]$Scope,
+        [DateTimeOffset]$NowUtc = [DateTimeOffset]::UtcNow
+    )
+
+    if ($null -eq $Evidence) {
+        return [pscustomobject]@{
+            scope = $Scope
+            status = "NotChecked"
+            observedStatus = "NotChecked"
+            checkedAt = $null
+            validUntil = $null
+            errorCode = $null
+            source = "none"
+        }
+    }
+
+    $statusResult = Get-McpCcObjectProperty -Object $Evidence -Name "status"
+    $sourceResult = Get-McpCcObjectProperty -Object $Evidence -Name "source"
+    $status = if ($statusResult.found) { [string]$statusResult.value } else { "" }
+    $source = if ($sourceResult.found) { [string]$sourceResult.value } else { "component_controller" }
+    if ($source -notmatch '^[a-z][a-z0-9_]{0,63}$') { $source = "invalid" }
+    if ($status -notin @("Ready", "Failed", "Unknown", "NotChecked", "Stale")) {
+        return [pscustomobject]@{
+            scope = $Scope
+            status = "Unknown"
+            observedStatus = "Unknown"
+            checkedAt = $null
+            validUntil = $null
+            errorCode = "REMOTE_EVIDENCE_INVALID"
+            source = $source
+        }
+    }
+    if ($status -eq "NotChecked") {
+        return [pscustomobject]@{
+            scope = $Scope
+            status = "NotChecked"
+            observedStatus = "NotChecked"
+            checkedAt = $null
+            validUntil = $null
+            errorCode = $null
+            source = $source
+        }
+    }
+
+    try {
+        $checkedAtResult = Get-McpCcObjectProperty -Object $Evidence -Name "checkedAt"
+        $validUntilResult = Get-McpCcObjectProperty -Object $Evidence -Name "validUntil"
+        if (-not $checkedAtResult.found -or -not $validUntilResult.found) { throw "missing timestamp" }
+        $checkedAt = [DateTimeOffset]::Parse([string]$checkedAtResult.value).ToUniversalTime()
+        $validUntil = [DateTimeOffset]::Parse([string]$validUntilResult.value).ToUniversalTime()
+        if ($validUntil -lt $checkedAt) { throw "invalid TTL" }
+    }
+    catch {
+        return [pscustomobject]@{
+            scope = $Scope
+            status = "Unknown"
+            observedStatus = $status
+            checkedAt = $null
+            validUntil = $null
+            errorCode = "REMOTE_EVIDENCE_INVALID"
+            source = $source
+        }
+    }
+
+    $errorCodeResult = Get-McpCcObjectProperty -Object $Evidence -Name "errorCode"
+    $errorCode = if ($errorCodeResult.found) { [string]$errorCodeResult.value } else { $null }
+    if (-not [string]::IsNullOrWhiteSpace($errorCode) -and $errorCode -notmatch '^[A-Z][A-Z0-9_]{0,63}$') {
+        $status = "Unknown"
+        $errorCode = "REMOTE_EVIDENCE_INVALID"
+    }
+    elseif ($status -eq "Failed" -and [string]::IsNullOrWhiteSpace($errorCode)) {
+        $errorCode = "REMOTE_CONNECTIVITY_FAILED"
+    }
+    $projectedStatus = if ($validUntil -lt $NowUtc.ToUniversalTime()) { "Stale" } else { $status }
+    return [pscustomobject]@{
+        scope = $Scope
+        status = $projectedStatus
+        observedStatus = $status
+        checkedAt = $checkedAt.ToString("o")
+        validUntil = $validUntil.ToString("o")
+        errorCode = $errorCode
+        source = $source
+    }
+}
+
+function New-McpCcConnectivityDetail {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$ProbeResults,
+        [string]$CheckedAt = ([DateTimeOffset]::UtcNow.ToString("o")),
+        $RemoteEvidence,
+        [DateTimeOffset]$NowUtc = [DateTimeOffset]::UtcNow,
+        [ValidateSet("Observed", "Unknown", "NotChecked")][string]$LocalObservation = "Observed"
+    )
+
+    $connectivityProbes = @($ProbeResults | Where-Object { [string]$_.role -eq "connectivity" })
+    if ($LocalObservation -ne "Observed") {
+        $localTunnel = [pscustomobject]@{
+            scope = "local_tunnel"
+            status = $LocalObservation
+            checkedAt = if ($LocalObservation -eq "NotChecked") { $null } else { $CheckedAt }
+            errorCode = if ($LocalObservation -eq "Unknown") { "MONITOR_EXCEPTION" } else { $null }
+            source = "loopback_probe"
+        }
+    }
+    elseif ($connectivityProbes.Count -eq 0) {
+        $localTunnel = [pscustomobject]@{
+            scope = "local_tunnel"
+            status = "NotConfigured"
+            checkedAt = $CheckedAt
+            errorCode = $null
+            source = "none"
+        }
+    }
+    else {
+        $ownershipMismatch = @($connectivityProbes | Where-Object { $_.owner.known -and $_.owner.matchesExpected -eq $false }).Count -gt 0
+        $failedProbe = @($connectivityProbes | Where-Object { -not [bool]$_.success } | Select-Object -First 1)
+        $localStatus = if ($ownershipMismatch) { "OwnershipMismatch" } elseif ($failedProbe.Count -gt 0) { "Failed" } else { "Ready" }
+        $localErrorCode = if ($ownershipMismatch) {
+            "OWNERSHIP_MISMATCH"
+        }
+        elseif ($failedProbe.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$failedProbe[0].errorCode)) {
+            [string]$failedProbe[0].errorCode
+        }
+        elseif ($failedProbe.Count -gt 0) {
+            "TUNNEL_NOT_READY"
+        }
+        else { $null }
+        $localTunnel = [pscustomobject]@{
+            scope = "local_tunnel"
+            status = $localStatus
+            checkedAt = $CheckedAt
+            errorCode = $localErrorCode
+            source = "loopback_probe"
+        }
+    }
+
+    $registrationInput = $null
+    $connectorInput = $null
+    if ($null -ne $RemoteEvidence) {
+        $registrationResult = Get-McpCcObjectProperty -Object $RemoteEvidence -Name "remoteRegistration"
+        if ($registrationResult.found) { $registrationInput = $registrationResult.value }
+        $connectorResult = Get-McpCcObjectProperty -Object $RemoteEvidence -Name "chatgptConnector"
+        if ($connectorResult.found) { $connectorInput = $connectorResult.value }
+    }
+    return [pscustomobject]@{
+        contractVersion = "component-connectivity-v1"
+        localTunnel = $localTunnel
+        remoteRegistration = ConvertTo-McpCcRemoteConnectivityEvidence -Evidence $registrationInput -Scope "remote_registration" -NowUtc $NowUtc
+        chatgptConnector = ConvertTo-McpCcRemoteConnectivityEvidence -Evidence $connectorInput -Scope "chatgpt_connector" -NowUtc $NowUtc
+    }
+}
+
+function Read-McpCcRemoteEvidenceFile {
+    param(
+        [Parameter(Mandatory = $true)]$Component,
+        [ValidateRange(1024, 65536)][int]$MaxBytes = 8192,
+        [DateTimeOffset]$NowUtc = [DateTimeOffset]::UtcNow
+    )
+
+    $bindingResult = Get-McpCcObjectProperty -Object $Component -Name "connectivityEvidence"
+    if (-not $bindingResult.found -or $null -eq $bindingResult.value) { return $null }
+    $pathResult = Get-McpCcObjectProperty -Object $bindingResult.value -Name "resolvedRemoteEvidencePath"
+    if (-not $pathResult.found -or [string]::IsNullOrWhiteSpace([string]$pathResult.value)) { return $null }
+    $path = [string]$pathResult.value
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+
+    try {
+        $item = Get-Item -LiteralPath $path -ErrorAction Stop
+        if ([int64]$item.Length -gt $MaxBytes) { throw "evidence exceeds size limit" }
+        $document = [IO.File]::ReadAllText($path, [Text.Encoding]::UTF8) | ConvertFrom-Json -ErrorAction Stop
+        Assert-McpCcObjectShape `
+            -Object $document `
+            -Allowed @("contractVersion", "remoteRegistration", "chatgptConnector") `
+            -Required @("contractVersion") `
+            -Label "Remote connectivity evidence"
+        if ([string]$document.contractVersion -ne "component-connectivity-v1") { throw "unsupported evidence contract" }
+        $evidenceCount = 0
+        foreach ($name in @("remoteRegistration", "chatgptConnector")) {
+            $evidenceResult = Get-McpCcObjectProperty -Object $document -Name $name
+            if (-not $evidenceResult.found) { continue }
+            $evidenceCount += 1
+            Assert-McpCcObjectShape `
+                -Object $evidenceResult.value `
+                -Allowed @("status", "checkedAt", "validUntil", "errorCode", "source") `
+                -Required @("status", "checkedAt", "validUntil", "errorCode", "source") `
+                -Label "Remote connectivity evidence '$name'"
+        }
+        if ($evidenceCount -eq 0) { throw "evidence has no supported layer" }
+        return $document
+    }
+    catch {
+        $checkedAt = $NowUtc.ToUniversalTime()
+        return [pscustomobject]@{
+            contractVersion = "component-connectivity-v1"
+            remoteRegistration = [pscustomobject]@{
+                status = "Unknown"
+                checkedAt = $checkedAt.ToString("o")
+                validUntil = $checkedAt.AddMinutes(5).ToString("o")
+                errorCode = "REMOTE_EVIDENCE_INVALID"
+                source = "component_evidence_file"
+            }
+        }
+    }
+}
+
+function Resolve-McpCcStatusWithConnectivity {
+    param(
+        [Parameter(Mandatory = $true)][string]$LocalStatus,
+        [Parameter(Mandatory = $true)]$Connectivity
+    )
+
+    if ($LocalStatus -ne "Ready") { return $LocalStatus }
+    if (
+        [string]$Connectivity.remoteRegistration.status -eq "Failed" -or
+        [string]$Connectivity.chatgptConnector.status -eq "Failed"
+    ) {
+        return "Degraded"
+    }
+    return $LocalStatus
+}
+
+function Get-McpCcReadinessScope {
+    param(
+        [Parameter(Mandatory = $true)][string]$LocalStatus,
+        [Parameter(Mandatory = $true)]$Connectivity
+    )
+
+    if ([string]$Connectivity.localTunnel.status -ne "Ready") {
+        if ($LocalStatus -eq "Degraded") { return "core" }
+        return "none"
+    }
+    if ([string]$Connectivity.chatgptConnector.status -eq "Ready") { return "end_to_end" }
+    if ([string]$Connectivity.remoteRegistration.status -eq "Ready") { return "remote_registration" }
+    return "local"
+}
+
+function Write-McpCcLastActionResult {
+    param(
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [Parameter(Mandatory = $true)][string]$Component,
+        [Parameter(Mandatory = $true)][string]$Action,
+        [string]$RoutedAction,
+        [string]$UiAction,
+        [Parameter(Mandatory = $true)][bool]$Ok,
+        [string]$ErrorCode
+    )
+
+    if ($Component -notmatch '^[a-z][a-z0-9_]{0,63}$') { throw "Last-action component id is invalid." }
+    $root = Assert-McpCcSafeRuntimeRoot -RuntimeRoot $RuntimeRoot
+    $normalizedErrorCode = if ($Ok) { $null } elseif ([string]::IsNullOrWhiteSpace($ErrorCode)) { "MANAGER_ACTION_FAILED" } else { $ErrorCode }
+    $document = [pscustomobject]@{
+        schemaVersion = 1
+        generatedAt = [DateTime]::UtcNow.ToString("o")
+        component = $Component
+        action = $Action
+        routedAction = if ([string]::IsNullOrWhiteSpace($RoutedAction)) { $null } else { $RoutedAction }
+        uiAction = if ([string]::IsNullOrWhiteSpace($UiAction)) { $null } else { $UiAction }
+        ok = $Ok
+        errorCode = $normalizedErrorCode
+        message = Get-McpCcSafeActionMessage -Ok $Ok -ErrorCode $normalizedErrorCode
+    }
+    $lastActionRoot = Join-Path $root "last-actions"
+    New-Item -ItemType Directory -Force -Path $lastActionRoot | Out-Null
+    Write-McpCcJsonAtomic -Path (Join-Path $lastActionRoot "$Component.json") -Document $document
+    return $document
+}
+
+function Read-McpCcLastActionResult {
+    param(
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [Parameter(Mandatory = $true)][string]$Component
+    )
+
+    if ($Component -notmatch '^[a-z][a-z0-9_]{0,63}$') { throw "Last-action component id is invalid." }
+    $path = Join-Path (Join-Path (Assert-McpCcSafeRuntimeRoot -RuntimeRoot $RuntimeRoot) "last-actions") "$Component.json"
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+    try {
+        $document = Get-Content -LiteralPath $path -Encoding UTF8 -Raw | ConvertFrom-Json
+        if (
+            [int]$document.schemaVersion -ne 1 -or
+            [string]::IsNullOrWhiteSpace([string]$document.component) -or
+            [string]::IsNullOrWhiteSpace([string]$document.action) -or
+            $document.ok -isnot [bool]
+        ) {
+            return $null
+        }
+        return $document
+    }
+    catch { return $null }
+}
+
+function Get-McpCcTrayComponentModel {
+    param([Parameter(Mandatory = $true)]$Component)
+
+    $capabilitiesResult = Get-McpCcObjectProperty -Object $Component -Name "capabilities"
+    $capabilities = if ($capabilitiesResult.found) { @($capabilitiesResult.value | ForEach-Object { [string]$_ }) } else { @() }
+    $traitsResult = Get-McpCcObjectProperty -Object $Component -Name "traits"
+    $traits = if ($traitsResult.found) { @($traitsResult.value | ForEach-Object { [string]$_ }) } else { @() }
+    $actions = @()
+    if ("ensure_running" -in $capabilities -and "reload_runtime" -in $capabilities) {
+        $actions += [pscustomobject]@{ id = "restart_mcp"; label = "Restart MCP"; kind = "manager-action"; target = "RestartMcp" }
+    }
+    $actions += [pscustomobject]@{ id = "open_health"; label = "Open MCP health"; kind = "health-detail"; target = [string]$Component.id }
+
+    $frontend = $null
+    if ("primary-ui" -in $traits) {
+        $uiResult = Get-McpCcObjectProperty -Object $Component -Name "ui"
+        if ($uiResult.found -and $null -ne $uiResult.value) {
+            $launcherResult = Get-McpCcObjectProperty -Object $uiResult.value -Name "primaryLauncher"
+            if ($launcherResult.found -and $null -ne $launcherResult.value) {
+                $frontend = [pscustomobject]@{
+                    kind = "vbs"
+                    label = "Open $([string]$Component.displayName)"
+                    path = [string]$launcherResult.value.path
+                    target = $null
+                }
+            }
+        }
+        if ($null -eq $frontend) {
+            $navigationResult = Get-McpCcObjectProperty -Object $Component -Name "navigation"
+            $navigation = if ($navigationResult.found) { @($navigationResult.value) } else { @() }
+            $primaryNavigation = @($navigation | Where-Object { [string]$_.id -eq "primary_ui" -and [string]$_.kind -eq "loopback-url" } | Select-Object -First 1)
+            if ($primaryNavigation.Count -eq 1) {
+                $frontendLabel = [string]$primaryNavigation[0].label
+                if ([string]::IsNullOrWhiteSpace($frontendLabel) -or $frontendLabel -eq "Open primary UI") {
+                    $frontendLabel = "Open $([string]$Component.displayName)"
+                }
+                $frontend = [pscustomobject]@{
+                    kind = "loopback-url"
+                    label = $frontendLabel
+                    path = $null
+                    target = [string]$primaryNavigation[0].target
+                }
+            }
+        }
+    }
+    if ($null -ne $frontend) {
+        $actions += [pscustomobject]@{ id = "open_frontend"; label = [string]$frontend.label; kind = [string]$frontend.kind; target = $frontend }
+    }
+
+    return [pscustomobject]@{
+        id = [string]$Component.id
+        displayName = [string]$Component.displayName
+        actions = $actions
+        frontend = $frontend
+    }
+}
+
+function Get-McpCcComponentHealthModel {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)]$State,
+        [Parameter(Mandatory = $true)][string]$ComponentId,
+        $LastAction
+    )
+
+    $definition = Get-McpCcComponent -Manifest $Manifest -Id $ComponentId
+    $stateEntries = @($State.components | Where-Object { [string]$_.id -eq $ComponentId } | Select-Object -First 1)
+    $componentState = if ($stateEntries.Count -eq 1) { $stateEntries[0] } else {
+        [pscustomobject]@{
+            id = $ComponentId
+            displayName = [string]$definition.displayName
+            status = "NotChecked"
+            localStatus = "NotChecked"
+            readinessScope = "none"
+            checkedAt = $null
+            elapsedMs = 0
+            healthUrl = $null
+            probes = @()
+            issues = @()
+        }
+    }
+    $connectivityResult = Get-McpCcObjectProperty -Object $componentState -Name "connectivity"
+    $connectivity = if ($connectivityResult.found -and $null -ne $connectivityResult.value) {
+        $connectivityResult.value
+    }
+    else {
+        New-McpCcConnectivityDetail -ProbeResults @($componentState.probes) -CheckedAt ([string]$componentState.checkedAt) -LocalObservation $(if ([string]$componentState.status -eq "NotChecked") { "NotChecked" } else { "Observed" })
+    }
+    $localStatusResult = Get-McpCcObjectProperty -Object $componentState -Name "localStatus"
+    $localStatus = if ($localStatusResult.found) { [string]$localStatusResult.value } else { [string]$componentState.status }
+    $scopeResult = Get-McpCcObjectProperty -Object $componentState -Name "readinessScope"
+    $readinessScope = if ($scopeResult.found) { [string]$scopeResult.value } else { Get-McpCcReadinessScope -LocalStatus $localStatus -Connectivity $connectivity }
+    $presentation = Get-McpCcStatusPresentation -Status ([string]$componentState.status)
+    $statusLabel = if ([string]$componentState.status -eq "Ready" -and $readinessScope -eq "local") {
+        "Ready locally"
+    }
+    elseif ([string]$componentState.status -eq "Ready" -and $readinessScope -eq "remote_registration") {
+        "Remote registered"
+    }
+    elseif ([string]$componentState.status -eq "Ready" -and $readinessScope -eq "end_to_end") {
+        "End-to-end ready"
+    }
+    else { [string]$presentation.label }
+    $probes = @()
+    foreach ($probe in @($componentState.probes)) {
+        $ownerResult = Get-McpCcObjectProperty -Object $probe -Name "owner"
+        $owner = if ($ownerResult.found -and $null -ne $ownerResult.value) { $ownerResult.value } else { $null }
+        $ownerKnown = $null -ne $owner -and [bool]$owner.known
+        $ownerMatches = if ($ownerKnown) { $owner.matchesExpected } else { $null }
+        $ownershipLabel = if (-not [bool]$probe.tcpOpen) {
+            "Not listening"
+        }
+        elseif (-not $ownerKnown) {
+            "Unknown"
+        }
+        elseif ($ownerMatches -eq $false) {
+            "Mismatch"
+        }
+        elseif ($ownerMatches -eq $true) {
+            "Verified"
+        }
+        else {
+            "Observed"
+        }
+        $probes += [pscustomobject]@{
+            id = [string]$probe.id
+            label = [string]$probe.label
+            role = [string]$probe.role
+            required = [bool]$probe.required
+            url = [string]$probe.url
+            port = [int]$probe.port
+            success = [bool]$probe.success
+            elapsedMs = [int]$probe.elapsedMs
+            tcpOpen = [bool]$probe.tcpOpen
+            errorCode = [string]$probe.errorCode
+            error = [string]$probe.error
+            ownership = $ownershipLabel
+            ownerKnown = $ownerKnown
+            ownerPid = if ($ownerKnown) { $owner.pid } else { $null }
+            managedPid = if ($ownerKnown) { $owner.managedPid } else { $null }
+            processName = if ($ownerKnown) { [string]$owner.processName } else { $null }
+            relation = if ($ownerKnown) { [string]$owner.relation } else { $null }
+            matchesExpected = $ownerMatches
+        }
+    }
+
+    $actionIds = @()
+    $uiResult = Get-McpCcObjectProperty -Object $definition -Name "ui"
+    if ($uiResult.found -and $null -ne $uiResult.value) {
+        $menuActionsResult = Get-McpCcObjectProperty -Object $uiResult.value -Name "menuActions"
+        if ($menuActionsResult.found) {
+            $actionIds = @($menuActionsResult.value | ForEach-Object { [string]$_.id })
+        }
+    }
+    $healthUrl = [string]$componentState.healthUrl
+    if ([string]::IsNullOrWhiteSpace($healthUrl)) {
+        $primaryProbe = @($definition.probes | Where-Object { [string]$_.role -eq "core" } | Select-Object -First 1)
+        if ($primaryProbe.Count -eq 1) { $healthUrl = [string]$primaryProbe[0].url }
+    }
+    $tunnelProbe = @($probes | Where-Object { [string]$_.role -eq "connectivity" } | Select-Object -First 1)
+    $componentLastAction = if ($null -ne $LastAction -and [string]$LastAction.component -eq $ComponentId) { $LastAction } else { $null }
+
+    return [pscustomobject]@{
+        id = $ComponentId
+        displayName = [string]$definition.displayName
+        status = [string]$componentState.status
+        localStatus = $localStatus
+        readinessScope = $readinessScope
+        connectivity = $connectivity
+        level = [string]$presentation.level
+        symbol = [string]$presentation.symbol
+        statusLabel = $statusLabel
+        checkedAt = $componentState.checkedAt
+        elapsedMs = [int]$componentState.elapsedMs
+        generatedAt = $State.generatedAt
+        healthUrl = $healthUrl
+        componentRoot = [string]$definition.resolvedRoot
+        probes = $probes
+        issues = @($componentState.issues)
+        tunnelReady = $tunnelProbe.Count -eq 1 -and [bool]$tunnelProbe[0].success
+        actionIds = $actionIds
+        lastAction = $componentLastAction
+    }
+}
+
 function Get-McpCcComponentStatus {
     param(
         [Parameter(Mandatory = $true)]$Component,
-        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
+        $RemoteEvidence,
+        $PortPolicy,
+        [DateTimeOffset]$NowUtc = [DateTimeOffset]::UtcNow
     )
     $started = [Diagnostics.Stopwatch]::StartNew()
     $rootExists = Test-Path -LiteralPath $Component.resolvedRoot -PathType Container
@@ -1435,13 +2268,26 @@ function Get-McpCcComponentStatus {
     $probeResults = @()
     if ($rootExists) {
         foreach ($probe in @($Component.probes)) {
-            $probeResults += Get-McpCcProbeResult -Probe $probe -TimeoutSeconds $TimeoutSeconds
+            $probeResults += Get-McpCcProbeResult -Probe $probe -TimeoutSeconds $TimeoutSeconds -PortPolicy $PortPolicy
         }
     }
-    $status = Resolve-McpCcComponentState -Component $Component -RootExists $rootExists -StartActionExists $startExists -ProbeResults $probeResults
+    $localStatus = Resolve-McpCcComponentState -Component $Component -RootExists $rootExists -StartActionExists $startExists -ProbeResults $probeResults
+    $checkedAt = $NowUtc.ToUniversalTime().ToString("o")
+    if (-not $PSBoundParameters.ContainsKey("RemoteEvidence")) {
+        $RemoteEvidence = Read-McpCcRemoteEvidenceFile -Component $Component -NowUtc $NowUtc
+    }
+    $connectivity = New-McpCcConnectivityDetail -ProbeResults $probeResults -CheckedAt $checkedAt -RemoteEvidence $RemoteEvidence -NowUtc $NowUtc
+    $status = Resolve-McpCcStatusWithConnectivity -LocalStatus $localStatus -Connectivity $connectivity
+    $readinessScope = Get-McpCcReadinessScope -LocalStatus $localStatus -Connectivity $connectivity
     $issues = @($probeResults | Where-Object { -not $_.success } | ForEach-Object {
         [pscustomobject]@{ probe = $_.id; code = $_.errorCode; message = $_.error }
     })
+    if ([string]$connectivity.remoteRegistration.status -eq "Failed") {
+        $issues += [pscustomobject]@{ probe = "remoteRegistration"; code = [string]$connectivity.remoteRegistration.errorCode; message = "Remote tunnel registration failed." }
+    }
+    if ([string]$connectivity.chatgptConnector.status -eq "Failed") {
+        $issues += [pscustomobject]@{ probe = "chatgptConnector"; code = [string]$connectivity.chatgptConnector.errorCode; message = "ChatGPT connector validation failed." }
+    }
     $started.Stop()
     $primaryProbe = @($Component.probes | Where-Object { $_.role -eq "core" } | Select-Object -First 1)
     return [pscustomobject]@{
@@ -1452,7 +2298,10 @@ function Get-McpCcComponentStatus {
         autoStart = [bool]$Component.autoStart
         startupOrder = [int]$Component.startupOrder
         status = $status
-        checkedAt = [DateTime]::UtcNow.ToString("o")
+        localStatus = $localStatus
+        readinessScope = $readinessScope
+        connectivity = $connectivity
+        checkedAt = $checkedAt
         elapsedMs = [int]$started.ElapsedMilliseconds
         rootExists = $rootExists
         startActionExists = $startExists
@@ -1462,14 +2311,66 @@ function Get-McpCcComponentStatus {
     }
 }
 
+function New-McpCcMonitorExceptionStatus {
+    param([Parameter(Mandatory = $true)]$Component)
+
+    $primaryProbe = @($Component.probes | Where-Object { $_.role -eq "core" } | Select-Object -First 1)
+    $checkedAt = [DateTimeOffset]::UtcNow.ToString("o")
+    $connectivity = New-McpCcConnectivityDetail -ProbeResults @() -CheckedAt $checkedAt -LocalObservation "Unknown"
+    return [pscustomobject]@{
+        id = [string]$Component.id
+        displayName = [string]$Component.displayName
+        runtimeMode = Get-McpCcRuntimeMode -Component $Component
+        capabilities = @($Component.capabilities)
+        autoStart = [bool]$Component.autoStart
+        startupOrder = [int]$Component.startupOrder
+        status = "Unhealthy"
+        localStatus = "Unhealthy"
+        readinessScope = "none"
+        connectivity = $connectivity
+        checkedAt = $checkedAt
+        elapsedMs = 0
+        rootExists = $null
+        startActionExists = $null
+        healthUrl = if ($primaryProbe.Count -gt 0) { [string]$primaryProbe[0].url } else { $null }
+        probes = @()
+        issues = @([pscustomobject]@{
+            probe = $null
+            code = "MONITOR_EXCEPTION"
+            message = "Component monitoring failed; inspect control-center diagnostics."
+        })
+    }
+}
+
 function Get-McpCcSystemState {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
-        [string]$BootId = (Get-McpCcBootId)
+        [string]$BootId = (Get-McpCcBootId),
+        [scriptblock]$StatusProvider,
+        $PortPolicy
     )
+    $effectivePortPolicy = if ($PSBoundParameters.ContainsKey("PortPolicy")) {
+        $PortPolicy
+    }
+    elseif ($null -eq $StatusProvider) {
+        Get-McpCcWindowsTcpPortPolicy
+    }
+    else {
+        $null
+    }
     $components = @()
     foreach ($component in @($Manifest.components | Sort-Object startupOrder)) {
-        $components += Get-McpCcComponentStatus -Component $component -TimeoutSeconds ([int]$Manifest.settings.probeTimeoutSeconds)
+        try {
+            if ($null -eq $StatusProvider) {
+                $components += Get-McpCcComponentStatus -Component $component -TimeoutSeconds ([int]$Manifest.settings.probeTimeoutSeconds) -PortPolicy $effectivePortPolicy
+            }
+            else {
+                $components += & $StatusProvider $component ([int]$Manifest.settings.probeTimeoutSeconds)
+            }
+        }
+        catch {
+            $components += New-McpCcMonitorExceptionStatus -Component $component
+        }
     }
     $severe = @("NotInstalled", "Misconfigured", "OwnershipMismatch", "Unhealthy")
     $overall = if (@($components | Where-Object { $_.status -in $severe }).Count -gt 0) {
@@ -1489,6 +2390,7 @@ function Get-McpCcSystemState {
         bootId = $BootId
         overall = $overall
         counts = [pscustomobject]$counts
+        portPolicy = ConvertTo-McpCcPortPolicySummary -Policy $effectivePortPolicy
         components = $components
     }
 }
@@ -1917,7 +2819,9 @@ function Assert-McpCcControllerActionResult {
     }
     if (-not [bool]$Document.ok) {
         $errorCode = [string]$Document.errorCode
-        if ([string]::IsNullOrWhiteSpace($errorCode)) { $errorCode = "CONTROLLER_REPORTED_FAILURE" }
+        if ([string]::IsNullOrWhiteSpace($errorCode) -or $errorCode -notmatch '^[A-Z][A-Z0-9_]{0,63}$') {
+            $errorCode = "CONTROLLER_REPORTED_FAILURE"
+        }
         throw "Component controller reported failure '$errorCode'; inspect the component-owned runtime log."
     }
 }
@@ -2089,24 +2993,32 @@ function Invoke-McpCcComponentAction {
             $execution = Invoke-McpCcBoundedPowerShell -ScriptPath $actionPath -Arguments $arguments -WorkingDirectory $component.resolvedRoot -RuntimeRoot $RuntimeRoot -TimeoutSeconds $timeoutSeconds -MaxCapturedOutputBytes $MaxCapturedOutputBytes
             $pid = $execution.processId
             $exitCode = $execution.exitCode
-            if ($exitCode -ne 0) {
-                throw "Component action failed with exit code $exitCode. See the component-owned runtime log for details."
-            }
             $outputText = ([string]$execution.stdout).Trim()
             if ($binding.runtimeMode -eq "component-controller") {
                 if ([string]::IsNullOrWhiteSpace($outputText)) {
+                    if ($exitCode -ne 0) {
+                        throw "Component action failed with exit code $exitCode. See the component-owned runtime log for details."
+                    }
                     throw "Component controller returned no JSON result."
                 }
                 try { $actionResult = $outputText | ConvertFrom-Json }
                 catch { throw "Component controller returned invalid JSON; inspect the component-owned runtime log." }
                 $expectedControllerAction = [string]@($binding.standardArguments)[1]
                 Assert-McpCcControllerActionResult -Document $actionResult -ExpectedAction $expectedControllerAction
+                if ($exitCode -ne 0) {
+                    throw "Component controller returned success JSON with nonzero exit code; inspect the component-owned runtime log."
+                }
                 $actionResult = ConvertTo-McpCcSafeObject -Value $actionResult
             }
-            elseif (-not [string]::IsNullOrWhiteSpace($outputText)) {
-                try { $actionResult = $outputText | ConvertFrom-Json }
-                catch { $actionResult = "[non-json component output omitted]" }
-                $actionResult = ConvertTo-McpCcSafeObject -Value $actionResult
+            else {
+                if ($exitCode -ne 0) {
+                    throw "Component action failed with exit code $exitCode. See the component-owned runtime log for details."
+                }
+                if (-not [string]::IsNullOrWhiteSpace($outputText)) {
+                    try { $actionResult = $outputText | ConvertFrom-Json }
+                    catch { $actionResult = "[non-json component output omitted]" }
+                    $actionResult = ConvertTo-McpCcSafeObject -Value $actionResult
+                }
             }
         }
         $started.Stop()
@@ -2212,6 +3124,111 @@ function Get-McpCcControllerAudit {
     }
 }
 
+function Get-McpCcAutomaticRepairDecision {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)]$Component,
+        [Parameter(Mandatory = $true)]$ComponentStatus
+    )
+
+    $managerAttemptLimit = 1
+    $result = [ordered]@{
+        allowed = $false
+        decision = "ManualAttention"
+        action = $null
+        classification = "NotEligible"
+        errorCode = "REPAIR_STATUS_NOT_ELIGIBLE"
+        managerAttemptLimit = $managerAttemptLimit
+        retryOwner = "component_controller"
+        controllerTimeoutSeconds = 0
+    }
+    if ([string]$ComponentStatus.status -ne "Degraded") { return [pscustomobject]$result }
+
+    $capabilities = @($Component.capabilities | ForEach-Object { [string]$_ })
+    if ("repair_connectivity" -notin $capabilities) {
+        $result.classification = "Unsupported"
+        $result.errorCode = "REPAIR_CAPABILITY_MISSING"
+        return [pscustomobject]$result
+    }
+
+    $issues = @(if ($null -ne $ComponentStatus.PSObject.Properties["issues"]) { $ComponentStatus.issues } else { @() })
+    $blockedCodes = @(
+        "MONITOR_EXCEPTION", "OWNERSHIP_MISMATCH", "MISCONFIGURED", "NOT_INSTALLED",
+        "ACTIVE_WORK_PRESENT", "ACTION_BUSY", "TUNNEL_KEY_MISSING", "TUNNEL_PROFILE_MISSING",
+        "TUNNEL_PROFILE_INVALID", "TUNNEL_ID_MISSING", "TUNNEL_ID_INVALID", "TUNNEL_ID_MISMATCH",
+        "TUNNEL_CONFIG_MISSING"
+    )
+    $blockedIssue = @($issues | Where-Object { [string]$_.code -in $blockedCodes } | Select-Object -First 1)
+    if ($blockedIssue.Count -gt 0) {
+        $result.classification = "Blocked"
+        $result.errorCode = [string]$blockedIssue[0].code
+        return [pscustomobject]$result
+    }
+
+    $connectivityResult = Get-McpCcObjectProperty -Object $ComponentStatus -Name "connectivity"
+    if (-not $connectivityResult.found -or $null -eq $connectivityResult.value) {
+        $result.classification = "InsufficientEvidence"
+        $result.errorCode = "REPAIR_EVIDENCE_INSUFFICIENT"
+        return [pscustomobject]$result
+    }
+    $connectivity = $connectivityResult.value
+    foreach ($remoteName in @("remoteRegistration", "chatgptConnector")) {
+        $remoteResult = Get-McpCcObjectProperty -Object $connectivity -Name $remoteName
+        if ($remoteResult.found -and $null -ne $remoteResult.value -and [string]$remoteResult.value.status -eq "Failed") {
+            $result.classification = "RemoteFailure"
+            $result.errorCode = "REMOTE_REPAIR_NOT_ALLOWED"
+            return [pscustomobject]$result
+        }
+    }
+
+    $localStatusResult = Get-McpCcObjectProperty -Object $ComponentStatus -Name "localStatus"
+    if (-not $localStatusResult.found -or [string]$localStatusResult.value -ne "Degraded") {
+        $result.classification = "NonLocalFailure"
+        $result.errorCode = "REMOTE_REPAIR_NOT_ALLOWED"
+        return [pscustomobject]$result
+    }
+    $localTunnelResult = Get-McpCcObjectProperty -Object $connectivity -Name "localTunnel"
+    if (-not $localTunnelResult.found -or $null -eq $localTunnelResult.value -or [string]$localTunnelResult.value.status -ne "Failed") {
+        $result.classification = "InsufficientEvidence"
+        $result.errorCode = "REPAIR_EVIDENCE_INSUFFICIENT"
+        return [pscustomobject]$result
+    }
+    $transientCodes = @("HTTP_ERROR", "TIMEOUT", "EXPECTED_MISMATCH", "TUNNEL_NOT_READY")
+    if ([string]$localTunnelResult.value.errorCode -notin $transientCodes) {
+        $result.classification = "NonTransientLocalFailure"
+        $result.errorCode = "LOCAL_FAILURE_NOT_TRANSIENT"
+        return [pscustomobject]$result
+    }
+
+    $probes = @(if ($null -ne $ComponentStatus.PSObject.Properties["probes"]) { $ComponentStatus.probes } else { @() })
+    $coreProbes = @($probes | Where-Object { [string]$_.role -eq "core" -and [bool]$_.required })
+    if ($coreProbes.Count -eq 0 -or @($coreProbes | Where-Object { -not [bool]$_.success }).Count -gt 0) {
+        $result.classification = "CoreNotReady"
+        $result.errorCode = "CORE_NOT_READY"
+        return [pscustomobject]$result
+    }
+    $ownershipMismatch = @($probes | Where-Object { $_.owner.known -and $_.owner.matchesExpected -eq $false }).Count -gt 0
+    if ($ownershipMismatch) {
+        $result.classification = "OwnershipFailure"
+        $result.errorCode = "OWNERSHIP_MISMATCH"
+        return [pscustomobject]$result
+    }
+    $openFailedTunnel = @($probes | Where-Object { [string]$_.role -eq "connectivity" -and -not [bool]$_.success -and [bool]$_.tcpOpen })
+    if (@($openFailedTunnel | Where-Object { -not [bool]$_.owner.known -or $_.owner.matchesExpected -ne $true }).Count -gt 0) {
+        $result.classification = "OwnershipUnverified"
+        $result.errorCode = "OWNERSHIP_UNVERIFIED"
+        return [pscustomobject]$result
+    }
+
+    $result.allowed = $true
+    $result.decision = "RepairConnectivity"
+    $result.action = "repair_connectivity"
+    $result.classification = "LocalTransientConnectivity"
+    $result.errorCode = $null
+    $result.controllerTimeoutSeconds = Get-McpCcComponentTimingSeconds -Manifest $Manifest -Component $Component -Name "controllerActionTimeoutSeconds"
+    return [pscustomobject]$result
+}
+
 function Get-McpCcReconcilePlan {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
@@ -2220,19 +3237,72 @@ function Get-McpCcReconcilePlan {
     $items = @()
     foreach ($component in @($Manifest.components | Sort-Object startupOrder)) {
         $status = @($State.components | Where-Object { $_.id -eq $component.id } | Select-Object -First 1)[0]
+        $repairDecision = Get-McpCcAutomaticRepairDecision -Manifest $Manifest -Component $component -ComponentStatus $status
         $decision = if (-not [bool]$component.autoStart) { "SkipDisabled" }
         elseif ($status.status -eq "Stopped") { "Start" }
         elseif ($status.status -eq "Ready") { "NoAction" }
         elseif ($status.status -eq "BlockedUpstream") { "WaitForDependency" }
+        elseif ($repairDecision.allowed) { "RepairConnectivity" }
         else { "ManualAttention" }
         $items += [pscustomobject]@{
             component = [string]$component.id
             displayName = [string]$component.displayName
             currentStatus = [string]$status.status
             decision = $decision
+            classification = if ($decision -eq "RepairConnectivity" -or $status.status -eq "Degraded") { [string]$repairDecision.classification } else { $null }
+            reasonCode = if ($decision -eq "ManualAttention" -and $status.status -eq "Degraded") { [string]$repairDecision.errorCode } else { $null }
+            managerAttemptLimit = if ($decision -eq "RepairConnectivity") { [int]$repairDecision.managerAttemptLimit } else { 0 }
+            retryOwner = if ($decision -eq "RepairConnectivity") { [string]$repairDecision.retryOwner } else { $null }
+            controllerTimeoutSeconds = if ($decision -eq "RepairConnectivity") { [int]$repairDecision.controllerTimeoutSeconds } else { 0 }
         }
     }
     return $items
+}
+
+function Invoke-McpCcReconcileItems {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Plan,
+        [Parameter(Mandatory = $true)][scriptblock]$ItemExecutor,
+        [scriptblock]$FailureObserver
+    )
+
+    $actions = @()
+    foreach ($item in @($Plan)) {
+        $componentId = [string]$item.component
+        try {
+            $results = @(& $ItemExecutor $item)
+            if ($results.Count -ne 1 -or $null -eq $results[0]) {
+                throw "RECONCILE_COMPONENT_FAILED: Reconcile executor must return exactly one action result."
+            }
+            $result = $results[0]
+            $resultComponent = Get-McpCcObjectProperty -Object $result -Name "component"
+            if (-not $resultComponent.found -or -not ([string]$resultComponent.value).Equals($componentId, [StringComparison]::Ordinal)) {
+                throw "RECONCILE_COMPONENT_FAILED: Reconcile executor returned a mismatched component result."
+            }
+            $actions += $result
+        }
+        catch {
+            $rawMessage = ([string]$_.Exception.Message -replace '[\r\n]+', ' ').Trim()
+            $errorCode = Get-McpCcActionErrorCode -Message $rawMessage
+            if ($errorCode -eq "MANAGER_ACTION_FAILED") { $errorCode = "RECONCILE_COMPONENT_FAILED" }
+            $before = if ($null -ne $item.PSObject.Properties["currentStatus"]) { [string]$item.currentStatus } else { "Unknown" }
+            $failure = [pscustomobject]@{
+                component = $componentId
+                action = "Failed"
+                before = $before
+                after = "Unknown"
+                ok = $false
+                errorCode = $errorCode
+                message = Get-McpCcSafeActionMessage -Ok $false -ErrorCode $errorCode
+            }
+            $actions += $failure
+            if ($null -ne $FailureObserver) {
+                try { & $FailureObserver $item $failure | Out-Null }
+                catch { }
+            }
+        }
+    }
+    return $actions
 }
 
 function Test-McpCcShortcutMatches {
@@ -2300,6 +3370,11 @@ Export-ModuleMember -Function @(
     "Resolve-McpCcChildPath",
     "Assert-McpCcLoopbackUrl",
     "Test-McpCcCommandLineContains",
+    "ConvertFrom-McpCcDynamicPortRangeText",
+    "ConvertFrom-McpCcExcludedPortRangeText",
+    "Get-McpCcWindowsTcpPortPolicy",
+    "Test-McpCcPortAgainstPolicy",
+    "ConvertTo-McpCcPortPolicySummary",
     "Get-McpCcProcessLineage",
     "Read-McpCcManifest",
     "Read-McpCcComponentCandidate",
@@ -2308,7 +3383,22 @@ Export-ModuleMember -Function @(
     "Get-McpCcProbeResult",
     "Resolve-McpCcComponentState",
     "Get-McpCcRunningAcceptanceStates",
+    "Get-McpCcStatusPresentation",
+    "Get-McpCcRestartMcpDecision",
+    "Get-McpCcAutomaticRepairDecision",
+    "Get-McpCcActionErrorCode",
+    "Get-McpCcSafeActionMessage",
+    "ConvertTo-McpCcRemoteConnectivityEvidence",
+    "New-McpCcConnectivityDetail",
+    "Read-McpCcRemoteEvidenceFile",
+    "Resolve-McpCcStatusWithConnectivity",
+    "Get-McpCcReadinessScope",
+    "Write-McpCcLastActionResult",
+    "Read-McpCcLastActionResult",
+    "Get-McpCcTrayComponentModel",
+    "Get-McpCcComponentHealthModel",
     "Get-McpCcComponentStatus",
+    "New-McpCcMonitorExceptionStatus",
     "Get-McpCcSystemState",
     "ConvertTo-McpCcSafeObject",
     "Write-McpCcJsonAtomic",
@@ -2321,6 +3411,7 @@ Export-ModuleMember -Function @(
     "Invoke-McpCcComponentUiAction",
     "Get-McpCcControllerAudit",
     "Get-McpCcReconcilePlan",
+    "Invoke-McpCcReconcileItems",
     "Test-McpCcShortcutMatches",
     "Get-McpCcStartupAudit"
 )

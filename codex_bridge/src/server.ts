@@ -23,7 +23,7 @@ const workPackageInput = {
 
 export function createCodexBridgeMcpServer(runtime: BridgeRuntime): McpServer {
   const server = new McpServer(
-    { name: "codex-handoff-bridge", version: "0.1.0" },
+    { name: "codex-handoff-bridge", version: "1.1.0" },
     {
       instructions:
         "Private, allowlisted handoff bridge to a local Codex App Server. Use read tools to inspect status and preview work. Render codex_console when the user wants the interactive control surface. Dispatch, steering, cancellation, and approval decisions are UI-only and require an explicit user action. Never represent this bridge as a way to bypass employer policy or upload controls.",
@@ -421,7 +421,7 @@ async function bridgeStatus(runtime: BridgeRuntime): Promise<BridgeStatus> {
   return {
     ok: true,
     service: "codex-handoff-bridge",
-    version: "0.1.0",
+    version: "1.1.0",
     buildId: runtime.config.buildId,
     controller: runtime.controller.status,
     projects: Array.from(runtime.config.projects.values()).map(({ id, name }) => ({ id, name })),

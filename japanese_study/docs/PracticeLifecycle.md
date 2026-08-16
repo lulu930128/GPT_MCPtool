@@ -66,17 +66,22 @@ catalog search during apply, or guess from the highest-ranked candidate.
 
 ## Correct an immutable session
 
-Do not update a recorded session in place. Create the corrected complete session, then use
-`study_supersede_practice_session` to link it as the current revision of the earlier session.
+Do not update a recorded session in place. When the correction is already known, send the full
+corrected submission to `study_record_practice_revision`. The Hub records the replacement,
+creates the supersession link, and rebuilds affected SRS projections in one transaction.
 
 ```text
 old immutable session
-  -> corrected immutable session
-  -> explicit supersede link
+  -> explicit correction request with full replacement submission
+  -> study_record_practice_revision
+       atomic corrected session + supersede link + SRS rebuild
   -> list/get shows correction lineage and current revision
 ```
 
 Superseding is not deletion. Historical evidence remains available for audit and scoring lineage.
+The older `study_record_practice` plus `study_supersede_practice_session` sequence remains for
+compatibility and deliberate administration, but it is not the normal path for a known correction
+because a failure between those calls would expose a temporary double-counting window.
 
 ## Single attempts versus practice sessions
 
@@ -98,7 +103,7 @@ Neither operation synthesizes manual known/unknown labels.
 | Override request times out | Retry same `operationId`, fingerprint, and overrides |
 | Candidate search ambiguous | Ask for exact selection; do not auto-apply |
 | Score policy mismatch | Require a per-question human `gradingOverrideReason` |
-| Correction required | Record corrected immutable session, then explicitly supersede |
+| Correction required | Call `study_record_practice_revision` once with a stable revision id and complete replacement |
 
 ## Write-test safety
 

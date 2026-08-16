@@ -5,9 +5,9 @@ import { loadConfig } from "../src/config.js";
 
 test("defaults are private loopback endpoints", () => {
   const config = loadConfig({});
-  assert.equal(config.hubBaseUrl, "http://127.0.0.1:8791");
+  assert.equal(config.hubBaseUrl, "http://127.0.0.1:18791");
   assert.equal(config.host, "127.0.0.1");
-  assert.equal(config.port, 8790);
+  assert.equal(config.port, 18790);
 });
 
 

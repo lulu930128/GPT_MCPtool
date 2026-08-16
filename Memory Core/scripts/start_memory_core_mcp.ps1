@@ -1,7 +1,7 @@
 param(
     [string]$ApiBaseUrl = "http://127.0.0.1:18765",
     [ValidateRange(1, 65535)]
-    [int]$Port = 8818
+    [int]$Port = 18818
 )
 
 $ErrorActionPreference = "Stop"

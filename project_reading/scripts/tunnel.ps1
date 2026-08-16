@@ -7,8 +7,8 @@ param(
   [string]$SecretPath,
   [string]$Profile = "project-workspace",
   [string]$TunnelId = $env:WORKSPACE_MCP_TUNNEL_ID,
-  [string]$McpUrl = "http://127.0.0.1:8787/mcp",
-  [string]$HealthListenAddr = "127.0.0.1:8788",
+  [string]$McpUrl = "http://127.0.0.1:18787/mcp",
+  [string]$HealthListenAddr = "127.0.0.1:18788",
   [string]$ControlPlaneApiKeyRef = "env:CONTROL_PLANE_API_KEY",
   [switch]$Explain
 )

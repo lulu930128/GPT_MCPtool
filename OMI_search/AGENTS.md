@@ -35,7 +35,7 @@ Adapter 不得替 backend contract 欄位補預設、clamp 數值或做語意驗
 
 ## Schema contract
 
-`tools/list` 正常時從 OMI backend `GET /api/ai/tools` 取得 `omi.ask` schema；`public_contract_snapshot.json` 只作離線 fallback，且必須由 OMI repo 的 generator 產生。
+`tools/list` 正常時從 OMI backend `GET /api/ai/tools` 取得 `omi.ask` schema；`public_contract_snapshot.json` 只作離線 fallback，且必須由 OMI repo 的 generator 產生。台股 dashboard tools 的 `outputSchema` 只能載入 backend generator 產生的 `tw_market_dashboard_contract_snapshot.json`，不得手工重建 Pydantic contract。
 
 Adapter 只能投影自己的安全 surface：隱藏固定 trust flags、限制不可執行的 LLM/write modes，以及加入明確的 compatibility aliases。Target、capability、selection、parameter schema、registry metadata 與 digest 都由 backend 擁有。
 
@@ -50,6 +50,12 @@ Adapter 只能投影自己的安全 surface：隱藏固定 trust flags、限制�
 - `omi.read_data_freshness`
 - `omi.read_source_health`
 - `omi.read_capability_status`
+- `omi.read_tw_market_dashboard`
+- `omi.open_tw_market_dashboard`
+- `omi.search_tw_symbols`
+- `omi.read_tw_stock_dashboard_detail`
+
+只有 `omi.open_tw_market_dashboard` 可綁定 `_meta.ui.resourceUri`。其他 dashboard/search/detail tools 是 data-only；widget 只能透過 MCP Apps `tools/call` 取得 business data，不得直接連 OMI backend。UI resource 固定使用版本化 URI 與 `text/html;profile=mcp-app`，production bundle 缺失時必須 fail closed。
 
 Shortcuts 只能把 tool 名稱與明確 arguments 映射成 canonical target/parameters，固定 `mode=data_only`。不得分析自然語言後改變 target 或 refresh。
 
@@ -72,7 +78,7 @@ python -B -m unittest discover -s tests
 - 未明確指定時不會開啟 external fetch。
 - backend-owned fields 未被補值或 clamp。
 - live schema 與 generated snapshot digest 一致。
-- initialize -> tools/list -> representative tools/call protocol smoke。
+- initialize -> resources/list -> resources/read -> tools/list -> representative tools/call protocol smoke。
 - structured business rejection 維持 `isError=false`。
 
 Live backend smoke 不是每次預設驗證；只有確認正式 OMI runtime endpoint 與 process owner 後才執行。

@@ -21,7 +21,7 @@ budget enforcement, and response shaping. The adapter must not duplicate or rein
 
 ## Public tools
 
-`tools/list` exposes exactly these seven tools:
+`tools/list` exposes exactly these eleven tools:
 
 | Tool | Mechanical mapping |
 | --- | --- |
@@ -32,6 +32,10 @@ budget enforcement, and response shaping. The adapter must not duplicate or rein
 | `omi.read_data_freshness` | `target.type=data_freshness` and optional market |
 | `omi.read_source_health` | `target.type=source_health` plus explicit filters |
 | `omi.read_capability_status` | `target.type=capability_status` plus explicit filters |
+| `omi.read_tw_market_dashboard` | Cache-only `GET /api/market/tw-dashboard/snapshot` |
+| `omi.open_tw_market_dashboard` | Render the complete prepared `omi.tw_market_dashboard.v1` snapshot without backend IO |
+| `omi.search_tw_symbols` | Bounded local `GET /api/market/tw-dashboard/symbols/search` |
+| `omi.read_tw_stock_dashboard_detail` | Cache-only focused OHLC, backend MA, and technical detail |
 
 `omi.search` remains callable only as a legacy compatibility alias and is omitted from
 `tools/list`. Only that alias may translate `query`, `stock_id`, or `symbol` into canonical
@@ -94,7 +98,16 @@ The local Streamable HTTP endpoint is `/mcp`. A client must:
 
 1. send `initialize`;
 2. preserve the returned `Mcp-Session-Id`;
-3. reuse it for `tools/list` and `tools/call`.
+3. reuse it for `resources/list`, `resources/read`, `tools/list`, and `tools/call`.
+
+## MCP Apps UI resource
+
+- URI: `ui://omi/tw-market-dashboard/v1.html`
+- MIME: `text/html;profile=mcp-app`
+- only `omi.open_tw_market_dashboard` declares `_meta.ui.resourceUri`;
+- data/search/detail tools remain independently useful without UI;
+- the resource has no direct network allowlist and calls backend-owned tools through the MCP Apps bridge;
+- `tw_market_dashboard_contract_snapshot.json` is generated from OMI backend Pydantic models and supplies exact tool `outputSchema` values.
 
 `/health` identifies the adapter build. `/upstream-health` performs a bounded check of the selected
 OMI backend without exposing credentials or full upstream errors.

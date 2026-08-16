@@ -78,6 +78,202 @@ test("attempt payload maps camelCase to the Hub contract", async () => {
   }
 });
 
+test("item creation and revision preserve preview fingerprints and map bounded fields", async () => {
+  const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+  const server = createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    requests.push({
+      url: req.url || "",
+      body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
+    });
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const client = new JapaneseStudyHubClient({
+    hubBaseUrl: `http://127.0.0.1:${address.port}`,
+    hubTimeoutMs: 2_000,
+  });
+
+  try {
+    const draft = {
+      kind: "vocab" as const,
+      title: "見落とす",
+      reading: "みおとす",
+      meaningTc: "漏看",
+      jlptLevel: "N3",
+      partOfSpeech: "動詞",
+      tags: ["易混淆"],
+      provenance: "chatgpt_proposed" as const,
+    };
+    await client.previewItemCreation(draft);
+    await client.createItem({
+      operationId: "create-item-001",
+      expectedFingerprint: "a".repeat(64),
+      draft,
+    });
+    await client.applyItemRevision({
+      itemId: "vocab:test/id",
+      operationId: "revise-item-001",
+      expectedFingerprint: "b".repeat(64),
+      changes: { meaningTc: "沒有注意到", tags: ["動詞"] },
+      reason: "補充語義",
+    });
+
+    assert.equal(requests[0].url, "/api/v1/items/creation/preview");
+    assert.deepEqual((requests[0].body.draft as Record<string, unknown>).tags, ["易混淆"]);
+    assert.equal((requests[1].body.draft as Record<string, unknown>).meaning_tc, "漏看");
+    assert.equal(requests[1].body.operation_id, "create-item-001");
+    assert.equal(requests[1].body.actor, "chatgpt_mcp");
+    assert.equal(requests[2].url, "/api/v1/items/vocab%3Atest%2Fid/revision/apply");
+    assert.deepEqual(requests[2].body.changes, {
+      meaning_tc: "沒有注意到",
+      tags: ["動詞"],
+    });
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+});
+
+test("learner policy, learning context, and atomic revision map bounded contracts", async () => {
+  const requests: Array<{
+    url: string;
+    method: string;
+    body?: Record<string, unknown>;
+  }> = [];
+  const server = createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const raw = Buffer.concat(chunks).toString("utf8");
+    requests.push({
+      url: req.url || "",
+      method: req.method || "GET",
+      body: raw ? JSON.parse(raw) : undefined,
+    });
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const client = new JapaneseStudyHubClient({
+    hubBaseUrl: `http://127.0.0.1:${address.port}`,
+    hubTimeoutMs: 2_000,
+  });
+  const policy = {
+    schemaVersion: 1 as const,
+    practice: {
+      autoRecordCompletedPractice: true,
+      preservePartial: true as const,
+      preserveVoid: true as const,
+      preserveUnscored: true as const,
+    },
+    answerNotation: {
+      chineseParentheses: "production_gap" as const,
+      emptyAnswer: "skipped" as const,
+    },
+    questionGeneration: {
+      generator: "ai" as const,
+      useLearningContext: true,
+      preferWeakTargets: true,
+      avoidFullCatalogDump: true as const,
+    },
+  };
+  const submission = {
+    submissionId: "submission-revision-0001",
+    session: {
+      sessionId: "session-revision-0001",
+      title: "修正版練習",
+      practiceType: "grammar",
+      startedAt: "2026-08-12T10:00:00+08:00",
+      completedAt: "2026-08-12T10:05:00+08:00",
+    },
+    questions: [
+      {
+        questionKey: "q01",
+        position: 1,
+        snapshot: { question_type: "translation", prompt: "test" },
+        response: {
+          answer: { text: "回答" },
+          answerResult: "partial" as const,
+          awardedPoints: 0.5,
+          submittedAt: "2026-08-12T10:04:00+08:00",
+        },
+      },
+    ],
+  };
+
+  try {
+    await client.getLearnerPolicy();
+    await client.setLearnerPolicy({ operationId: "policy-operation-0001", policy });
+    await client.learningContext({
+      practiceType: "grammar",
+      requestedLevel: "N3",
+      kind: "grammar",
+      targetLimit: 12,
+      recentSessionLimit: 3,
+      diagnosisLimit: 7,
+    });
+    await client.recordPracticeRevision({
+      originalSessionId: "session-original-0001",
+      revisionId: "practice-revision-0001",
+      reason: "補充括號代表的 production gap。",
+      changedQuestionKeys: ["q01"],
+      submission,
+    });
+
+    assert.deepEqual(
+      requests.map((request) => [request.method, request.url]),
+      [
+        ["GET", "/api/v1/learner-policy"],
+        ["PUT", "/api/v1/learner-policy"],
+        [
+          "GET",
+          "/api/v1/learning-context?practice_type=grammar&requested_level=N3&kind=grammar&target_limit=12&recent_session_limit=3&diagnosis_limit=7",
+        ],
+        ["POST", "/api/v1/practice/sessions/session-original-0001/revisions"],
+      ],
+    );
+    assert.deepEqual(requests[1].body, {
+      operation_id: "policy-operation-0001",
+      policy: {
+        schema_version: 1,
+        practice: {
+          auto_record_completed_practice: true,
+          preserve_partial: true,
+          preserve_void: true,
+          preserve_unscored: true,
+        },
+        answer_notation: {
+          chinese_parentheses: "production_gap",
+          empty_answer: "skipped",
+        },
+        question_generation: {
+          generator: "ai",
+          use_learning_context: true,
+          prefer_weak_targets: true,
+          avoid_full_catalog_dump: true,
+        },
+      },
+      actor: "chatgpt_mcp",
+    });
+    assert.equal(requests[3].body?.revision_id, "practice-revision-0001");
+    assert.equal(
+      (requests[3].body?.submission as Record<string, any>).session.session_id,
+      "session-revision-0001",
+    );
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+});
+
 test("practice payload maps only contract fields and preserves snapshots", async () => {
   let receivedUrl = "";
   let body = "";

@@ -24,7 +24,9 @@ The adapter is not a second study system and must not copy Hub domain rules or p
 | Vocabulary/grammar/question data | Japanese Study Hub |
 | Stable item ids and search semantics | Japanese Study Hub |
 | Practice scoring, atomic submission, idempotency | Japanese Study Hub |
+| Learner policy, learning context and question-selection evidence | Japanese Study Hub |
 | Practice target evidence and fingerprint | Japanese Study Hub |
+| Practice revision linkage and SRS projection rebuild | Japanese Study Hub |
 | Database, migrations, imports, Anki integration | Japanese Study Hub |
 | Tunnel/tray process lifecycle | Adapter component scripts |
 
@@ -37,10 +39,10 @@ Default loopback endpoints:
 
 | Role | Default |
 | --- | --- |
-| Hub API | `http://127.0.0.1:8791` |
-| MCP endpoint | `http://127.0.0.1:8790/mcp` |
-| MCP health | `http://127.0.0.1:8790/health` |
-| Tunnel readiness | `http://127.0.0.1:8792/readyz` |
+| Hub API | `http://127.0.0.1:18791` |
+| MCP endpoint | `http://127.0.0.1:18790/mcp` |
+| MCP health | `http://127.0.0.1:18790/health` |
+| Tunnel readiness | `http://127.0.0.1:18792/readyz` |
 
 The Hub API is not exposed through the tunnel. The tunnel forwards only the MCP endpoint.
 
@@ -66,9 +68,14 @@ operations:
 - set manual labels for exact stable item ids;
 - append one attempt with a caller event id;
 - record one complete previewed practice submission with a stable `submissionId`;
+- replace the learner-owned policy after explicit confirmation with a stable `operationId`;
+- atomically record and supersede one corrected complete practice submission;
 - apply explicitly confirmed practice target overrides bound to a preview fingerprint and stable
   `operationId`;
-- supersede an immutable practice session with an explicit corrected revision.
+- supersede an immutable practice session with an explicit corrected revision for compatibility.
+
+The bounded learning-context read may guide an AI-generated exercise, but generation remains in
+the client. Context retrieval does not authorize recording and never exposes the full catalog.
 
 Search and resolution previews return candidates only. They never authorize a mutation.
 

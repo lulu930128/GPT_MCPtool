@@ -1,5 +1,7 @@
 # Codex Handoff Bridge
 
+目前 application release 為 `1.1.0`；MCP Apps、Codex App Server 與 approval contract 仍各自保留相容性邊界。
+
 Codex Handoff Bridge 是私人、allowlist-first 的 MCP Apps 對話工作區。它讓 ChatGPT 將已整理的
 工作包交給家中 Windows 主機上的 Codex App Server，並在同一個內嵌介面依專案管理多輪對話、
 顯示 Codex 回覆與逐次核准要求。
@@ -47,7 +49,7 @@ Codex Handoff Bridge 是私人、allowlist-first 的 MCP Apps 對話工作區。
 ```mermaid
 flowchart TD
     A["ChatGPT 對話"] --> B["MCP Apps 內嵌控制台"]
-    B --> C["Streamable HTTP MCP :8828"]
+    B --> C["Streamable HTTP MCP :18828"]
     C --> D["Project allowlist 與 Job Store"]
     D --> E["Codex Controller"]
     E --> F["Codex App Server stdio"]
@@ -55,7 +57,7 @@ flowchart TD
     F --> H["Events、Diff、Approval、Result"]
     H --> D
     D --> B
-    I["Secure MCP Tunnel :8829"] --> C
+    I["Secure MCP Tunnel :18829"] --> C
 ```
 
 Codex App Server 不對外開 listener。只有 Bridge 在本機用 stdio 啟動它；公開入口只能經過既有
@@ -113,7 +115,7 @@ Platform API key。若要改用其他 CLI，可在本機設定 `codexCommand` �
 
 ```powershell
 npm start
-Invoke-RestMethod http://127.0.0.1:8828/health
+Invoke-RestMethod http://127.0.0.1:18828/health
 ```
 
 一般托盤入口：
@@ -156,7 +158,14 @@ payload，也沒有 dispatch、turn、steer、cancel 或 approval decision 能�
 
 此元件重用 `project_reading` 已安裝的 `vendor\tunnel-client\tunnel-client.exe` 與目前使用者的
 DPAPI control-plane key，但使用自己的 `.tunnel-client\codex-bridge.yaml`、tunnel id、health port
-`8829` 與 runtime log。這是 Windows runtime 資源重用，不共享 MCP session 或 job data。
+`18829` 與 runtime log。`18829` 刻意與 MCP 連續埠及常見桌面程式埠分離，並須在啟用前通過
+Windows excluded-range、既有 listener 與 workspace port inventory 檢查。這是 Windows runtime
+資源重用，不共享 MCP session 或 job data。
+
+Control Center inventory 只讀取 tunnel executable 的 path／version／SHA-256，不做 automatic
+upgrade 或切換。Bridge controller 只在 server／tunnel child spawn 時清除 ambient proxy、bypass
+`127.0.0.1`／`localhost`，並立即還原 parent environment；需要企業 outbound proxy 時必須改用
+明確、component-owned 設定。
 
 先由 control plane 配發專屬 tunnel id。可將它放入上方 ignored 的
 `.local/tray-settings.json`，之後直接執行：
@@ -176,6 +185,36 @@ npm run tunnel:doctor
 
 不要重用另一個 MCP 元件的 tunnel id。self-test 只回報 ID 是否已設定，不輸出實際值；
 profile、DPAPI 密文、log 與 PID 都被 Git 忽略。
+
+Lifecycle controller、`scripts/tunnel.ps1` 與 legacy tray rollback 路徑會收集所有非空的 explicit parameter、
+`.local/tray-settings.json`、`CODEX_BRIDGE_TUNNEL_ID` 與 profile `tunnel_id`，並要求它們完全一致。
+缺漏、非法格式、重複 profile key 或任一來源不一致都會以固定 errorCode fail closed；
+`EnsureRunning`／`RepairConnectivity`／`ReloadRuntime` 會在建立或替換程序前停止。Status 與 SelfTest
+只輸出來源名稱、數量與一致性狀態，不輸出 identity value。
+
+本機 profile 檢查與遠端 registration 查驗是兩個不同操作：
+
+```powershell
+# 純本機；不查外網
+npm run tunnel:doctor
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File scripts\remote-connectivity.ps1 -Action SelfTest
+
+# 明確的 read-only 外部 lookup；會使用 component-owned runtime key
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File scripts\remote-connectivity.ps1 -Action Lookup
+```
+
+`Lookup` 使用 15 秒 timeout、64 KiB output 上限與 5 分鐘 evidence TTL。輸出只含
+`status`、`checkedAt`、`validUntil`、安全 `errorCode` 與固定 `source`；remote metadata、
+tunnel ID、organization／workspace scope、URL、response body 與 credential 不會被投影。
+它不代表 ChatGPT connector 已完成 MCP initialize 或工具呼叫。
+
+成功或已分類的 `Lookup` 會以原子替換寫入 component-owned
+`.tmp\remote-registration-evidence.json`。`control-center/component.json` 只宣告這個相對路徑；
+Control Center Status 讀取限額 8192 bytes，驗證固定 contract／allowlist／TTL，不會執行外部查詢、
+載入 runtime key 或讀取 profile。新鮮 `Ready` 會顯示 `readinessScope=remote_registration`，過期後
+如實顯示 `Stale`；ChatGPT connector 仍維持獨立的 `NotChecked` 或 E2E 證據。
 
 ## MCP 工具
 

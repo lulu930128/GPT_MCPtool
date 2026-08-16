@@ -27,7 +27,7 @@ const config = await loadBridgeConfig({
 });
 const runtime = await createBridgeRuntime(config);
 const handle = await startBridgeHttpServer(runtime, { host: "127.0.0.1", port: 0, bearerToken: "smoke-token" });
-const client = new Client({ name: "codex-bridge-http-smoke", version: "0.1.0" });
+const client = new Client({ name: "codex-bridge-http-smoke", version: "1.1.0" });
 const transport = new StreamableHTTPClientTransport(new URL(handle.url), {
   requestInit: { headers: { authorization: "Bearer smoke-token" } },
 });

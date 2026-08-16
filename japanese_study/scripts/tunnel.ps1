@@ -7,8 +7,8 @@ param(
   [string]$SecretPath,
   [string]$Profile = "japanese-study",
   [string]$TunnelId = $env:JSTUDY_TUNNEL_ID,
-  [string]$McpUrl = "http://127.0.0.1:8790/mcp",
-  [string]$HealthListenAddr = "127.0.0.1:8792",
+  [string]$McpUrl = "http://127.0.0.1:18790/mcp",
+  [string]$HealthListenAddr = "127.0.0.1:18792",
   [string]$ControlPlaneApiKeyRef = "env:CONTROL_PLANE_API_KEY",
   [switch]$Explain
 )
@@ -36,10 +36,12 @@ if ([string]::IsNullOrWhiteSpace($TunnelId) -and (Test-Path -LiteralPath $LocalS
 if ([string]::IsNullOrWhiteSpace($TunnelId)) {
   $existingProfilePath = Join-Path $ProfileDir "$Profile.yaml"
   if (Test-Path -LiteralPath $existingProfilePath) {
-    $profileMatch = Select-String -LiteralPath $existingProfilePath -Pattern 'tunnel_[A-Za-z0-9]+' | Select-Object -First 1
-    if ($profileMatch) {
-      $TunnelId = $profileMatch.Matches[0].Value
-      $TunnelIdSource = "ignored-generated-profile"
+    foreach ($line in (Get-Content -LiteralPath $existingProfilePath -Encoding UTF8)) {
+      if ($line -match '^\s*tunnel_id\s*:\s*"?([^"#\s]+)') {
+        $TunnelId = $matches[1]
+        $TunnelIdSource = "ignored-generated-profile"
+        break
+      }
     }
   }
 }

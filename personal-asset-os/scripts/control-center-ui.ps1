@@ -14,11 +14,11 @@ if ($SelfTest) {
     exit 0
 }
 . (Join-Path $PSScriptRoot "local-env.ps1")
-$appUrl = "http://127.0.0.1:8876/"
+$appUrl = "http://127.0.0.1:18876/"
 $quickCaptureUrl = "${appUrl}?view=capture"
-$mcpUrl = "http://127.0.0.1:8876/mcp/"
-$healthUrl = "http://127.0.0.1:8876/api/health"
-$tunnelUiUrl = "http://127.0.0.1:8877/ui"
+$mcpUrl = "http://127.0.0.1:18876/mcp/"
+$healthUrl = "http://127.0.0.1:18876/api/health"
+$tunnelUiUrl = "http://127.0.0.1:18877/ui"
 $runtimeDir = Join-Path $projectRoot ".tmp"
 $tunnelId = [string]$env:PAOS_TUNNEL_ID
 if ([string]::IsNullOrWhiteSpace($tunnelId)) { $tunnelId = Get-LocalEnvValue -ProjectRoot $projectRoot -Name "PAOS_TUNNEL_ID" }

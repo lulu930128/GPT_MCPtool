@@ -9,10 +9,10 @@ Default local endpoints:
 | Backend health | `http://127.0.0.1:18765/health` |
 | Backend API | `http://127.0.0.1:18765/api/v1` |
 | Backend OpenAPI | `http://127.0.0.1:18765/docs` |
-| MCP health | `http://127.0.0.1:8818/health` |
-| MCP endpoint | `http://127.0.0.1:8818/mcp` |
-| Tunnel readiness | `http://127.0.0.1:8800/readyz` |
-| Tunnel local UI | `http://127.0.0.1:8800/ui` |
+| MCP health | `http://127.0.0.1:18818/health` |
+| MCP endpoint | `http://127.0.0.1:18818/mcp` |
+| Tunnel readiness | `http://127.0.0.1:18800/readyz` |
+| Tunnel local UI | `http://127.0.0.1:18800/ui` |
 
 All listeners remain loopback-only. A custom launcher must keep the backend port, MCP API URL, and
 viewer URL consistent; the stack does not rewrite private `.env` files.

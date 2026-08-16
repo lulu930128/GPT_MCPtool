@@ -2,9 +2,9 @@
 
 ## Current local contract
 
-- Hub: `http://127.0.0.1:8791`
-- MCP: `http://127.0.0.1:8790/mcp`
-- Tunnel admin UI: `http://127.0.0.1:8792/ui`
+- Hub: `http://127.0.0.1:18791`
+- MCP: `http://127.0.0.1:18790/mcp`
+- Tunnel admin UI: `http://127.0.0.1:18792/ui`
 - Tunnel profile: `.tunnel-client\japanese-study.yaml`
 - Runtime key storage: `.secrets\control-plane-api-key.dpapi`
 
@@ -24,8 +24,8 @@ environment-variable reference, never the runtime key.
 5. Double-click `scripts\Start-Tray.cmd`; wait until Hub, MCP, and Tunnel all
    report Ready.
 6. Confirm `npm run tunnel:health` or open the local tunnel admin UI.
-7. Confirm `http://127.0.0.1:8790/health` reports
-   `contractVersion=practice-resolution-v4.1`, `toolCount=14`, and a
+7. Confirm `http://127.0.0.1:18790/health` reports
+   `contractVersion=learning-content-v7.0`, `toolCount=33`, and a
    16-character `buildId`.
 8. Only after the chain is stable, run `npm run startup:install`.
 
@@ -37,12 +37,12 @@ environment-variable reference, never the runtime key.
    Study tunnel.
 4. Suggested name: `Japanese Study Hub`.
 5. Suggested description: `Practice and manage my Japanese vocabulary, study plans, mastery labels, and answer history.`
-6. Verify discovery shows exactly fourteen tools.
+6. Verify discovery shows exactly 33 tools.
 7. Test one read call first, then use `study_preview_practice_record` with a
    small completed session. Preview is read-only; save only when the user
    explicitly asks to record the completed practice.
 
-If local `npm run smoke:live` reports fourteen tools but ChatGPT still shows an
+If local `npm run smoke:live` reports 33 tools but ChatGPT still shows an
 older count, rebuild and use `scripts\\Restart-Tray.cmd`, then refresh or
 reconnect the ChatGPT connector. Do not rewrite the Hub resolver to work around
 a stale connector schema.

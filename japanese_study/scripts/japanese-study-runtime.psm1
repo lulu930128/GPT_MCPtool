@@ -355,16 +355,20 @@ function Stop-JsOwnedRole {
 
 function Start-JsChildProcess {
   param([Parameter(Mandatory = $true)]$StartInfo, [hashtable]$Environment = @{})
+  $overrides = @{}
+  foreach ($name in @('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy')) { $overrides[$name] = $null }
+  $overrides['NO_PROXY'] = '127.0.0.1,localhost'; $overrides['no_proxy'] = '127.0.0.1,localhost'
+  foreach ($name in $Environment.Keys) { $overrides[[string]$name] = $Environment[$name] }
   $saved = @{}
   try {
-    foreach ($name in $Environment.Keys) {
-      $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
-      [Environment]::SetEnvironmentVariable($name, [string]$Environment[$name], 'Process')
+    foreach ($name in $overrides.Keys) {
+      $saved[$name] = [Environment]::GetEnvironmentVariable([string]$name, 'Process')
+      [Environment]::SetEnvironmentVariable([string]$name, $overrides[$name], 'Process')
     }
     return [Diagnostics.Process]::Start($StartInfo)
   }
   finally {
-    foreach ($name in $Environment.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
+    foreach ($name in $overrides.Keys) { [Environment]::SetEnvironmentVariable([string]$name, $saved[$name], 'Process') }
   }
 }
 
@@ -437,6 +441,7 @@ function Start-JsTunnelOnce {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw 'TUNNEL_CONFIG_MISSING: Tunnel runtime is incomplete.' }
   }
   . $Context.keyStorePath
+  $savedKey = [Environment]::GetEnvironmentVariable('CONTROL_PLANE_API_KEY', 'Process')
   if (-not (Set-ControlPlaneApiKeyEnvFromSecret -ProjectRoot $Context.projectRoot -SecretPath $Context.secretPath)) {
     throw 'TUNNEL_KEY_MISSING: Tunnel runtime key is unavailable.'
   }
@@ -447,7 +452,7 @@ function Start-JsTunnelOnce {
   $startInfo.WorkingDirectory = $Context.projectRoot; $startInfo.UseShellExecute = $true
   $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
   try { $process = Start-JsChildProcess -StartInfo $startInfo -Environment @{ CONTROL_PLANE_API_KEY = $env:CONTROL_PLANE_API_KEY } }
-  finally { Remove-Item Env:\CONTROL_PLANE_API_KEY -ErrorAction SilentlyContinue }
+  finally { [Environment]::SetEnvironmentVariable('CONTROL_PLANE_API_KEY', $savedKey, 'Process') }
   if ($null -eq $process) { throw 'TUNNEL_START_FAILED: Tunnel process did not start.' }
   $started = Get-JsProcess -ProcessId $process.Id
   if ($null -eq $started) { throw 'TUNNEL_START_FAILED: Started tunnel is unavailable.' }
@@ -536,12 +541,12 @@ function Get-JapaneseStudyRuntimeStatus {
 function New-JapaneseStudyRuntimeContext {
   param(
     [Parameter(Mandatory = $true)][string]$ProjectRoot,
-    [string]$HubRoot = 'C:\project\japanese-study-hub', [string]$HostName = '127.0.0.1', [int]$McpPort = 8790, [int]$HubPort = 8791,
+    [string]$HubRoot = 'C:\project\japanese-study-hub', [string]$HostName = '127.0.0.1', [int]$McpPort = 18790, [int]$HubPort = 18791,
     [string]$NodePath, [string]$UvPath, [string]$HubArguments = 'run python -m japanese_study_hub.cli serve', [string]$HubIdentity = 'japanese_study_hub.cli serve',
-    [string]$TunnelClientPath, [string]$TunnelProfileDir, [string]$TunnelProfile = 'japanese-study', [string]$TunnelHealthUrl = 'http://127.0.0.1:8792',
+    [string]$TunnelClientPath, [string]$TunnelProfileDir, [string]$TunnelProfile = 'japanese-study', [string]$TunnelHealthUrl = 'http://127.0.0.1:18792',
     [string]$TunnelArguments, [string]$TunnelIdentity,
     [string]$KeyStorePath, [string]$SecretPath, [string]$ExpectedBuildId,
-    [string]$ExpectedMcpVersion = '0.3.1', [string]$ExpectedContractVersion = 'practice-resolution-v4.1', [int]$ExpectedToolCount = 14,
+    [string]$ExpectedMcpVersion = '1.1.0', [string]$ExpectedContractVersion = 'learning-content-v7.0', [int]$ExpectedToolCount = 33,
     [int]$CoreReadyTimeoutSeconds = 20, [int[]]$TunnelRecoveryDelaysSeconds = @(15, 30, 60)
   )
   $root = (Resolve-Path -LiteralPath $ProjectRoot -ErrorAction Stop).Path

@@ -1,5 +1,11 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import {
+  detectSearchRuntime,
+  loadRuntimeIdentity,
+  type RuntimeIdentity,
+  type SearchRuntime,
+} from "./runtime-identity.js";
 
 export const DEFAULT_DENY_DIRS = [
   ".git",
@@ -63,15 +69,35 @@ export interface ServerConfig {
   root: string;
   roots: Map<string, WorkspaceRootConfig>;
   assetScopes: Map<string, AssetScopeConfig>;
+  fileReturnScopeIds: Set<string>;
+  runtimeIdentity: RuntimeIdentity;
+  searchRuntime: SearchRuntime;
   maxFileBytes: number;
+  maxReturnedBytes: number;
   maxReadLines: number;
+  maxBatchFiles: number;
+  maxBatchTotalLines: number;
+  maxBatchTotalBytes: number;
   maxSearchResults: number;
+  maxSearchReturnedBytes: number;
+  maxSearchVisitedEntries: number;
   maxDirEntries: number;
   searchTimeoutMs: number;
+  gitTimeoutMs: number;
+  maxGitDiffFiles: number;
+  maxGitDiffLines: number;
+  maxGitDiffBytes: number;
+  maxCodeFiles: number;
+  maxCodeSymbols: number;
+  maxCodeResults: number;
+  maxCodeFileBytes: number;
+  maxCodeTotalBytes: number;
+  codeTimeoutMs: number;
   maxImageFileBytes: number;
   maxImagePixels: number;
   maxImageDimension: number;
   maxImageOutputBytes: number;
+  maxFetchFileBytes: number;
   maxSpreadsheetFileBytes: number;
   maxSpreadsheetExpandedBytes: number;
   maxSpreadsheetZipEntries: number;
@@ -87,6 +113,14 @@ export interface ServerConfig {
   maxDocumentBlocks: number;
   maxDocumentTableCells: number;
   maxPresentationSlides: number;
+  maxPdfFileBytes: number;
+  maxPdfPages: number;
+  maxPdfReadPages: number;
+  maxPdfTextChars: number;
+  maxPdfRenderDimension: number;
+  maxPdfRenderPixels: number;
+  maxPdfOutputBytes: number;
+  pdfTimeoutMs: number;
   denyDirs: Set<string>;
   denyExtensions: Set<string>;
 }
@@ -151,21 +185,61 @@ export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<
     throw new Error(`Default workspace root is unavailable: ${defaultRootId}`);
   }
   const assetScopes = parseAssetScopes(env.WORKSPACE_MCP_ASSET_SCOPES, roots);
+  const fileReturnScopeIds = parseFileReturnScopeIds(
+    env.WORKSPACE_MCP_FILE_RETURN_SCOPES,
+    assetScopes,
+  );
+  const [runtimeIdentity, searchRuntime] = await Promise.all([
+    loadRuntimeIdentity(),
+    detectSearchRuntime(env),
+  ]);
 
   return {
     defaultRootId,
     root,
     roots,
     assetScopes,
-    maxFileBytes: parsePositiveInt(env.WORKSPACE_MCP_MAX_FILE_BYTES, 262_144),
+    fileReturnScopeIds,
+    runtimeIdentity,
+    searchRuntime,
+    maxFileBytes: parsePositiveInt(env.WORKSPACE_MCP_MAX_FILE_BYTES, 20_971_520),
+    maxReturnedBytes: parsePositiveInt(env.WORKSPACE_MCP_MAX_RETURNED_BYTES, 262_144),
     maxReadLines: parsePositiveInt(env.WORKSPACE_MCP_MAX_READ_LINES, 300),
+    maxBatchFiles: parsePositiveInt(env.WORKSPACE_MCP_MAX_BATCH_FILES, 10),
+    maxBatchTotalLines: parsePositiveInt(env.WORKSPACE_MCP_MAX_BATCH_TOTAL_LINES, 1_000),
+    maxBatchTotalBytes: parsePositiveInt(env.WORKSPACE_MCP_MAX_BATCH_TOTAL_BYTES, 524_288),
     maxSearchResults: parsePositiveInt(env.WORKSPACE_MCP_MAX_SEARCH_RESULTS, 80),
+    maxSearchReturnedBytes: parsePositiveInt(
+      env.WORKSPACE_MCP_MAX_SEARCH_RETURNED_BYTES,
+      524_288,
+    ),
+    maxSearchVisitedEntries: parsePositiveInt(
+      env.WORKSPACE_MCP_MAX_SEARCH_VISITED_ENTRIES,
+      100_000,
+    ),
     maxDirEntries: parsePositiveInt(env.WORKSPACE_MCP_MAX_DIR_ENTRIES, 200),
     searchTimeoutMs: parsePositiveInt(env.WORKSPACE_MCP_SEARCH_TIMEOUT_MS, 8_000),
+    gitTimeoutMs: parsePositiveInt(env.WORKSPACE_MCP_GIT_TIMEOUT_MS, 10_000),
+    maxGitDiffFiles: parsePositiveInt(env.WORKSPACE_MCP_MAX_GIT_DIFF_FILES, 20),
+    maxGitDiffLines: parsePositiveInt(env.WORKSPACE_MCP_MAX_GIT_DIFF_LINES, 2_000),
+    maxGitDiffBytes: parsePositiveInt(env.WORKSPACE_MCP_MAX_GIT_DIFF_BYTES, 524_288),
+    maxCodeFiles: parsePositiveInt(env.WORKSPACE_MCP_MAX_CODE_FILES, 500),
+    maxCodeSymbols: parsePositiveInt(env.WORKSPACE_MCP_MAX_CODE_SYMBOLS, 2_000),
+    maxCodeResults: parsePositiveInt(env.WORKSPACE_MCP_MAX_CODE_RESULTS, 200),
+    maxCodeFileBytes: parsePositiveInt(env.WORKSPACE_MCP_MAX_CODE_FILE_BYTES, 1_048_576),
+    maxCodeTotalBytes: parsePositiveInt(
+      env.WORKSPACE_MCP_MAX_CODE_TOTAL_BYTES,
+      33_554_432,
+    ),
+    codeTimeoutMs: parsePositiveInt(env.WORKSPACE_MCP_CODE_TIMEOUT_MS, 8_000),
     maxImageFileBytes: parsePositiveInt(env.WORKSPACE_MCP_MAX_IMAGE_FILE_BYTES, 52_428_800),
     maxImagePixels: parsePositiveInt(env.WORKSPACE_MCP_MAX_IMAGE_PIXELS, 100_000_000),
     maxImageDimension: parsePositiveInt(env.WORKSPACE_MCP_MAX_IMAGE_DIMENSION, 4_096),
     maxImageOutputBytes: parsePositiveInt(env.WORKSPACE_MCP_MAX_IMAGE_OUTPUT_BYTES, 12_582_912),
+    maxFetchFileBytes: parsePositiveInt(
+      env.WORKSPACE_MCP_MAX_FETCH_FILE_BYTES,
+      12_582_912,
+    ),
     maxSpreadsheetFileBytes: parsePositiveInt(
       env.WORKSPACE_MCP_MAX_SPREADSHEET_FILE_BYTES,
       26_214_400,
@@ -205,9 +279,52 @@ export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<
       env.WORKSPACE_MCP_MAX_PRESENTATION_SLIDES,
       50,
     ),
+    maxPdfFileBytes: parsePositiveInt(env.WORKSPACE_MCP_MAX_PDF_FILE_BYTES, 52_428_800),
+    maxPdfPages: parsePositiveInt(env.WORKSPACE_MCP_MAX_PDF_PAGES, 500),
+    maxPdfReadPages: parsePositiveInt(env.WORKSPACE_MCP_MAX_PDF_READ_PAGES, 10),
+    maxPdfTextChars: parsePositiveInt(env.WORKSPACE_MCP_MAX_PDF_TEXT_CHARS, 100_000),
+    maxPdfRenderDimension: parsePositiveInt(
+      env.WORKSPACE_MCP_MAX_PDF_RENDER_DIMENSION,
+      4_096,
+    ),
+    maxPdfRenderPixels: parsePositiveInt(
+      env.WORKSPACE_MCP_MAX_PDF_RENDER_PIXELS,
+      16_777_216,
+    ),
+    maxPdfOutputBytes: parsePositiveInt(env.WORKSPACE_MCP_MAX_PDF_OUTPUT_BYTES, 12_582_912),
+    pdfTimeoutMs: parsePositiveInt(env.WORKSPACE_MCP_PDF_TIMEOUT_MS, 15_000),
     denyDirs,
     denyExtensions: mergeSet(DEFAULT_DENY_EXTENSIONS, env.WORKSPACE_MCP_EXTRA_DENY_EXTENSIONS),
   };
+}
+
+function parseFileReturnScopeIds(
+  value: string | undefined,
+  assetScopes: Map<string, AssetScopeConfig>,
+): Set<string> {
+  const result = new Set<string>();
+  if (!value?.trim()) {
+    return result;
+  }
+
+  for (const rawId of value.split(/[;,]/)) {
+    const id = rawId.trim();
+    if (!id) {
+      continue;
+    }
+    if (!/^[a-z][a-z0-9_-]{0,31}$/i.test(id)) {
+      throw new Error(`Invalid file-return scope id: ${id}`);
+    }
+    if (!assetScopes.has(id)) {
+      throw new Error(
+        `WORKSPACE_MCP_FILE_RETURN_SCOPES references unknown asset scope ${id}. ` +
+          `Configured asset scopes: ${Array.from(assetScopes.keys()).join(", ") || "(none)"}`,
+      );
+    }
+    result.add(id);
+  }
+
+  return result;
 }
 
 function parseAssetScopes(

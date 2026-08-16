@@ -2,6 +2,8 @@
 
 Personal Asset OS 是本機優先的個人資產與帳務系統。目前提供可實際使用的桌面 dashboard、日常快速捕捉、複式帳本、信用卡負債、投資部位、手動估值、對帳、月結與可驗證備份。
 
+目前 application release 為 `1.1.0`。Ledger、API、mobile ingest 與資料 schema 版本仍依各自契約獨立演進。
+
 ## 目前能力
 
 - 建立現金、銀行、信用卡、券商現金與投資帳戶。
@@ -97,9 +99,9 @@ Restart 只會終止 command line、Python entry 與本專案 exact path 相符�
 `.env` 中已配置的 Responses API 能力與 Secure MCP Tunnel；Responses API 只有在使用者
 明確操作時才會發出 request，不會因 tray 啟動而背景傳送財務資料或消耗 quota。
 
-預設 dashboard：`http://127.0.0.1:8876/`
+預設 dashboard：`http://127.0.0.1:18876/`
 
-本機 MCP：`http://127.0.0.1:8876/mcp/`
+本機 MCP：`http://127.0.0.1:18876/mcp/`
 
 ## 日常記錄與正式入帳
 
@@ -129,6 +131,12 @@ component-owned diagnostic tray；diagnostic tray 關閉時不會停止 runtime�
 執行；中樞不會取得正式資料路徑、備份路徑、帳務內容或 tunnel ID。
 
 連線採用 [OpenAI Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)，不開 inbound firewall port，也不建立 public URL。`tunnel-client` executable、profile、log、PID、`.env` 與 credential 都是 Git-ignored local runtime state。
+
+此元件目前保留 component-local tunnel executable；Control Center inventory 只讀取
+path／version／SHA-256，不做 automatic upgrade 或切換。Lifecycle controller 只在 server／tunnel
+child spawn 時清除 ambient proxy、bypass `127.0.0.1`／`localhost`，隨後還原 parent environment；
+不修改 dashboard、使用者 shell 或 Windows 全域 proxy。兩個 long-lived child 都使用不繼承
+controller stdout／stderr capture 的啟動模式，避免 runtime 已 Ready 卻被上層誤判為 action timeout。
 
 初始化與檢查：
 
@@ -160,7 +168,7 @@ Backend：
 ```powershell
 uv sync --dev
 uv run alembic upgrade head
-uv run personal-asset-os serve --host 127.0.0.1 --port 8876
+uv run personal-asset-os serve --host 127.0.0.1 --port 18876
 ```
 
 Frontend：

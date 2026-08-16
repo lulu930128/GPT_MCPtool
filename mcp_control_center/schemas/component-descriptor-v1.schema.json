@@ -107,6 +107,19 @@
         "controllerActionTimeoutSeconds": { "type": "integer", "minimum": 5, "maximum": 300 }
       }
     },
+    "connectivityEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["remoteEvidencePath"],
+      "properties": {
+        "remoteEvidencePath": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 260,
+          "pattern": "\\.[jJ][sS][oO][nN]$"
+        }
+      }
+    },
     "probes": {
       "type": "array",
       "minItems": 1,

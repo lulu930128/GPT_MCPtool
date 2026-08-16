@@ -1,9 +1,9 @@
 param(
   [ValidateSet('SelfTest', 'Status', 'EnsureRunning', 'RepairConnectivity', 'RestartCore', 'ReloadRuntime', 'ShutdownRuntime')][string]$Action = 'Status',
-  [string]$ProjectRoot, [string]$HostName = '127.0.0.1', [int]$Port = 8876, [string]$DataDir,
+  [string]$ProjectRoot, [string]$HostName = '127.0.0.1', [int]$Port = 18876, [string]$DataDir,
   [string]$PythonPath, [string]$ServerArguments, [string]$ServerIdentity = 'personal_asset_os.cli serve',
   [string]$TunnelClientPath, [string]$TunnelProfileDir, [string]$TunnelProfile = 'personal-asset-os',
-  [string]$TunnelHealthUrl = 'http://127.0.0.1:8877', [string]$TunnelArguments, [string]$TunnelIdentity,
+  [string]$TunnelHealthUrl = 'http://127.0.0.1:18877', [string]$TunnelArguments, [string]$TunnelIdentity,
   [string]$LocalEnvScript, [string]$ExpectedBuildId,
   [int]$CoreReadyTimeoutSeconds = 30, [int[]]$TunnelRecoveryDelaysSeconds = @(15, 30, 60),
   [switch]$AdoptLegacyExactListeners

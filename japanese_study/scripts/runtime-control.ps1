@@ -1,11 +1,11 @@
 param(
   [ValidateSet('SelfTest', 'Status', 'EnsureRunning', 'RepairConnectivity', 'RestartCore', 'ReloadRuntime', 'ShutdownRuntime')][string]$Action = 'Status',
-  [string]$ProjectRoot, [string]$HubRoot = 'C:\project\japanese-study-hub', [string]$HostName = '127.0.0.1', [int]$McpPort = 8790, [int]$HubPort = 8791,
+  [string]$ProjectRoot, [string]$HubRoot = 'C:\project\japanese-study-hub', [string]$HostName = '127.0.0.1', [int]$McpPort = 18790, [int]$HubPort = 18791,
   [string]$NodePath, [string]$UvPath, [string]$HubArguments = 'run python -m japanese_study_hub.cli serve', [string]$HubIdentity = 'japanese_study_hub.cli serve',
-  [string]$TunnelClientPath, [string]$TunnelProfileDir, [string]$TunnelProfile = 'japanese-study', [string]$TunnelHealthUrl = 'http://127.0.0.1:8792',
+  [string]$TunnelClientPath, [string]$TunnelProfileDir, [string]$TunnelProfile = 'japanese-study', [string]$TunnelHealthUrl = 'http://127.0.0.1:18792',
   [string]$TunnelArguments, [string]$TunnelIdentity,
-  [string]$KeyStorePath, [string]$SecretPath, [string]$ExpectedBuildId, [string]$ExpectedMcpVersion = '0.3.1',
-  [string]$ExpectedContractVersion = 'practice-resolution-v4.1', [int]$ExpectedToolCount = 14,
+  [string]$KeyStorePath, [string]$SecretPath, [string]$ExpectedBuildId, [string]$ExpectedMcpVersion = '1.1.0',
+  [string]$ExpectedContractVersion = 'learning-content-v7.0', [int]$ExpectedToolCount = 33,
   [int]$CoreReadyTimeoutSeconds = 20, [int[]]$TunnelRecoveryDelaysSeconds = @(15, 30, 60), [switch]$AdoptLegacyExactListeners
 )
 

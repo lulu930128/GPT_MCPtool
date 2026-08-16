@@ -597,7 +597,7 @@ wheels = [
 
 [[package]]
 name = "personal-asset-os"
-version = "0.2.0"
+version = "1.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },

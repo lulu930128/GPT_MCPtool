@@ -16,10 +16,10 @@ if ($SelfTest) {
     [pscustomobject]@{ ok = $dependenciesReady; menuContract = $menuContract; actions = $supportedActions; managerDomainDataAccess = "none"; managerSecretAccess = "none" } | ConvertTo-Json -Depth 4
     exit $(if ($dependenciesReady) { 0 } else { 1 })
 }
-$mcpUrl = "http://127.0.0.1:8790/mcp"
-$healthUrl = "http://127.0.0.1:8790/health"
-$hubHealthUrl = "http://127.0.0.1:8791/health"
-$tunnelUiUrl = "http://127.0.0.1:8792/ui"
+$mcpUrl = "http://127.0.0.1:18790/mcp"
+$healthUrl = "http://127.0.0.1:18790/health"
+$hubHealthUrl = "http://127.0.0.1:18791/health"
+$tunnelUiUrl = "http://127.0.0.1:18792/ui"
 $runtimeDir = Join-Path $projectRoot ".tmp"
 $tunnelProfileDir = Join-Path $projectRoot ".tunnel-client"
 $tunnelId = [string]$env:JSTUDY_TUNNEL_ID

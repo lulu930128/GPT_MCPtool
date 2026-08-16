@@ -7,9 +7,9 @@ assert.ok(
   process.env.CODEX_BRIDGE_LIVE_CODEX_CONFIRM === "1" || process.argv.includes("--confirm-live-codex"),
   "Set CODEX_BRIDGE_LIVE_CODEX_CONFIRM=1 or pass --confirm-live-codex to run one real read-only Codex turn.",
 );
-const url = new URL(process.env.CODEX_BRIDGE_SMOKE_URL?.trim() || "http://127.0.0.1:8828/mcp");
+const url = new URL(process.env.CODEX_BRIDGE_SMOKE_URL?.trim() || "http://127.0.0.1:18828/mcp");
 const projectId = process.env.CODEX_BRIDGE_SMOKE_PROJECT_ID?.trim() || "mcp_tools";
-const client = new Client({ name: "codex-bridge-codex-smoke", version: "0.1.0" });
+const client = new Client({ name: "codex-bridge-codex-smoke", version: "1.1.0" });
 const transport = new StreamableHTTPClientTransport(url);
 let jobId;
 

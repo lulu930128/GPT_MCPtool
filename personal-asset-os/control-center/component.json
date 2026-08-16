@@ -38,8 +38,8 @@
       "label": "Personal Asset OS",
       "role": "core",
       "kind": "json",
-      "url": "http://127.0.0.1:8876/api/health",
-      "port": 8876,
+      "url": "http://127.0.0.1:18876/api/health",
+      "port": 18876,
       "required": true,
       "expected": { "ok": true, "service": "personal-asset-os", "database": "ready" },
       "publicSummaryFields": ["service", "version", "buildId", "database", "schemaRevision"],
@@ -54,8 +54,8 @@
       "label": "Dashboard readiness",
       "role": "core",
       "kind": "json",
-      "url": "http://127.0.0.1:8876/api/readyz",
-      "port": 8876,
+      "url": "http://127.0.0.1:18876/api/readyz",
+      "port": 18876,
       "required": true,
       "expected": { "ready": true, "databaseReady": true, "frontendReady": true },
       "publicSummaryFields": ["ready", "databaseReady", "frontendReady", "buildId"]
@@ -65,8 +65,8 @@
       "label": "Secure MCP Tunnel",
       "role": "connectivity",
       "kind": "text",
-      "url": "http://127.0.0.1:8877/readyz",
-      "port": 8877,
+      "url": "http://127.0.0.1:18877/readyz",
+      "port": 18877,
       "required": true,
       "expectedText": ["ready", "ok"],
       "ownership": {
@@ -85,9 +85,9 @@
     },
     {
       "id": "primary_ui",
-      "label": "Open primary UI",
+      "label": "Open Dashboard",
       "kind": "loopback-url",
-      "target": "http://127.0.0.1:8876/"
+      "target": "http://127.0.0.1:18876/"
     }
   ],
   "ui": {

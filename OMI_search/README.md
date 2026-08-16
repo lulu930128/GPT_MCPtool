@@ -2,6 +2,8 @@
 
 `OMI_search` 是 OMI 的 standalone MCP 映射層。它只處理 MCP protocol、公開 tool surface、相容欄位映射與 HTTP transport；所有市場資料與回答判斷都由 OMI backend 擁有。
 
+目前 application release 為 `1.1.0`；`omi.decision.v4` 仍是獨立的 domain contract 版本。
+
 ```text
 MCP client
   -> C:\GPT_MCPtool\OMI_search\server.py
@@ -14,7 +16,7 @@ MCP client
 
 ## 文件導覽
 
-- [公開 MCP 契約](docs/PublicContract.md)：責任邊界、七個公開 tools、schema owner、
+- [公開 MCP 契約](docs/PublicContract.md)：責任邊界、十一個公開 tools、schema owner、
   refresh 與錯誤語意。
 - [故障排除](docs/Troubleshooting.md)：adapter／backend／tunnel／ChatGPT action cache 的
   分層診斷。
@@ -24,7 +26,7 @@ MCP client
 
 Adapter 只負責：
 
-- MCP `initialize`、`tools/list`、`tools/call` 與 JSON serialization。
+- MCP `initialize`、`resources/list`、`resources/read`、`tools/list`、`tools/call` 與 JSON serialization。
 - 將 canonical tool arguments 映射到 `POST /api/ai/ask`。
 - 固定 `contract_version=omi.decision.v4`、`caller_profile=omi_search`、`allow_llm=false`、`allow_write=false`。
 - 將 caller 明確指定的 `refresh_if_missing` 映射成 `allow_external_fetch`。
@@ -51,6 +53,10 @@ Adapter 不負責：
 - `omi.read_data_freshness`：映射成 data-freshness target。
 - `omi.read_source_health`：映射成 source-health target 與 filters。
 - `omi.read_capability_status`：映射成 capability-status target 與 filters。
+- `omi.read_tw_market_dashboard`：讀取 backend-owned `omi.tw_market_dashboard.v1` cache-only snapshot。
+- `omi.open_tw_market_dashboard`：唯一綁定 UI resource 的 render-only tool；輸入為前一工具的完整 dashboard structured content。
+- `omi.search_tw_symbols`：bounded 本機台股代碼／名稱搜尋。
+- `omi.read_tw_stock_dashboard_detail`：cache-only 個股 OHLC、backend MA5/20/60 與 technical report。
 
 `omi.search` 不出現在 `tools/list`，但仍保留為 legacy callable alias。只有這個 legacy alias 會把 `query` 映射成 `question`，並支援舊的 `stock_id` / `symbol` target alias。新 caller 必須使用 `omi.ask`、`question` 與明確 `target`。
 
@@ -76,6 +82,17 @@ cd "C:\project\Open Market Intelligence"
 ```
 
 Live schema 與 snapshot 的 `x-omi-public-contract-digest` 必須一致。
+
+台股 dashboard 的三份精確 `outputSchema` 由 OMI backend Pydantic models 產生，不在 adapter 手工維護：
+
+```powershell
+cd "C:\project\Open Market Intelligence"
+.\.venv\Scripts\python.exe -B .\scripts\generate-tw-dashboard-mcp-contract-snapshot.py `
+  --output .\agents\omi_mcp_server\tw_market_dashboard_contract_snapshot.json `
+  --output C:\GPT_MCPtool\OMI_search\tw_market_dashboard_contract_snapshot.json
+```
+
+兩份 `tw_market_dashboard_contract_snapshot.json` 的 digest 必須一致。
 
 ## Canonical request
 
@@ -180,10 +197,26 @@ cd C:\GPT_MCPtool\OMI_search
 python .\http_server.py
 ```
 
-本機 endpoint 為 `http://127.0.0.1:8797/mcp`，公開連線與 Secure MCP Tunnel 設定見 [docs/ChatGPT-Setup.md](docs/ChatGPT-Setup.md)。
+本機 endpoint 為 `http://127.0.0.1:18797/mcp`，公開連線與 Secure MCP Tunnel 設定見 [docs/ChatGPT-Setup.md](docs/ChatGPT-Setup.md)。
 
-`GET http://127.0.0.1:8797/health` 只表示 adapter core 正常；
-`GET http://127.0.0.1:8797/upstream-health` 由 adapter 以啟動時已解析的 OMI backend URL
+### 台股 dashboard widget
+
+React/TypeScript source 位於 `ui/tw-market-dashboard/`。UI 不直接連 backend 或 provider；所有更新、搜尋與個股詳情都走 MCP Apps bridge `tools/call`。只有 `omi.open_tw_market_dashboard` 綁定 `ui://omi/tw-market-dashboard/v1.html`，resource MIME 為 `text/html;profile=mcp-app`，CSP 的 network allowlist 為空。
+
+首次使用或修改 widget source 後先執行：
+
+```powershell
+cd C:\GPT_MCPtool\OMI_search\ui\tw-market-dashboard
+npm install --ignore-scripts
+npm run typecheck
+npm test
+npm run build
+```
+
+`dist/` 與 `node_modules/` 都是 local artifacts，不進 Git。若 `dist/index.html` 不存在，`resources/read` 會 fail closed；正式 restart 前必須完成 production build。
+
+`GET http://127.0.0.1:18797/health` 只表示 adapter core 正常；
+`GET http://127.0.0.1:18797/upstream-health` 由 adapter 以啟動時已解析的 OMI backend URL
 執行 bounded probe，只回傳 `ready`／`unavailable` 與安全 error code。它不公開實際 backend
 URL、原始 response、exception、credential 或市場資料，供 Control Center 區分 owned runtime
 故障與 OMI upstream 暫時不可用。
@@ -192,8 +225,8 @@ URL、原始 response、exception、credential 或市場資料，供 Control Cen
 
 一般啟動使用 `scripts\Start-Tray.cmd`；它不會破壞性取代已存在的 tray。修改 adapter
 source 或 public contract snapshot 後，使用 `scripts\Restart-Tray.cmd`。Restart 會先
-確認舊的 8797 listener 已釋放，再要求 `/health` 的 `buildId` 與目前
-`http_server.py`、`server.py`、`public_contract_snapshot.json` 完全一致。
+確認舊的 18797 listener 已釋放，再要求 `/health` 的 `buildId` 與目前
+`http_server.py`、`server.py`、兩份 contract snapshots 與 dashboard `dist/index.html` 完全一致。
 
 托盤使用 `unified-always-on-v2` 契約。正式啟動會一起準備 MCP server 與 Secure MCP
 Tunnel；選單不提供 Start／Stop 或 tunnel restart。OMI backend 仍由正式 OMI launcher
@@ -207,6 +240,11 @@ Tray 會從正式 OMI launcher 的 bounded runtime evidence 解析實際 backend
 `control-center/component.json` 是 OMI Search 的正式 runtime descriptor。
 `scripts/runtime-control.ps1` 只管理 adapter HTTP server 與 Secure MCP Tunnel；
 OMI backend 仍是 `external-dependency`，不會被 Control Center 啟動、停止或讀取 domain payload。
+
+Tunnel executable 目前仍由 legacy `project_reading` 安裝位置提供；Control Center inventory 只讀取
+path／version／SHA-256，不做 automatic upgrade。Controller 只在 adapter／tunnel child spawn 時
+清除 ambient proxy、bypass `127.0.0.1`／`localhost`，隨後還原 parent environment；不修改 OMI
+launcher、使用者 shell 或 Windows 全域 proxy。
 
 `scripts/show-diagnostic-tray.vbs` 是 optional diagnostic UI。關閉它只會關閉 UI，
 不會停止 adapter、tunnel 或 OMI backend。完整 ownership、能力矩陣與隔離驗證方式見

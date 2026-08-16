@@ -5,7 +5,7 @@ import { parseHttpPort, startWorkspaceHttpServer } from "./http-server.js";
 const config = await loadConfig();
 const handle = await startWorkspaceHttpServer(config, {
   host: process.env.WORKSPACE_MCP_HTTP_HOST?.trim() || "127.0.0.1",
-  port: parseHttpPort(process.env.WORKSPACE_MCP_HTTP_PORT, 8787),
+  port: parseHttpPort(process.env.WORKSPACE_MCP_HTTP_PORT, 18787),
   bearerToken: process.env.WORKSPACE_MCP_HTTP_TOKEN?.trim() || undefined,
   log: (message) => console.error(message),
 });

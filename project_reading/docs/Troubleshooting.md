@@ -30,6 +30,7 @@ the live `tools/list`; a new local file alone does not prove the running process
 | Path includes denied directory or extension | Global or root-specific deny policy matched | Inspect `workspace_info.denyPolicy`; do not bypass the guard. |
 | File is too large | `WORKSPACE_MCP_MAX_FILE_BYTES` or an asset limit was exceeded | Read a smaller text file or narrow the asset/range. |
 | Asset scope is unknown | Workspace roots and asset scopes are separate | Configure `WORKSPACE_MCP_ASSET_SCOPES` explicitly. |
+| Original file return is not enabled | `fetch_asset` has a separate egress allowlist | Add only reviewed asset scope ids to `WORKSPACE_MCP_FILE_RETURN_SCOPES`. |
 | Office file rejected | Macro, ActiveX, encryption, embedded object, unsafe relationship, zip-bomb, or output limit | Run `inspect_asset`; do not rename or unpack the container to bypass validation. |
 
 `search_text` uses fixed-string matching by default. Set `fixedString=false` only when a regular
@@ -41,7 +42,7 @@ smaller practical search surface.
 Check health, then protocol discovery:
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8787/health
+Invoke-RestMethod http://127.0.0.1:18787/health
 cd C:\GPT_MCPtool\project_reading
 npm run smoke:live
 ```

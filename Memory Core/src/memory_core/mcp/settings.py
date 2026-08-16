@@ -31,7 +31,7 @@ class McpSettings(BaseSettings):
     review_client_token: SecretStr | None = None
     api_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
     host: str = "127.0.0.1"
-    port: int = Field(default=8818, ge=1, le=65535)
+    port: int = Field(default=18818, ge=1, le=65535)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     max_content_chars: int = Field(default=30_000, ge=4_000, le=100_000)
     expose_legacy_candidate_tool: bool = False

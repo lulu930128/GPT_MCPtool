@@ -4,6 +4,8 @@ Private, tool-only MCP adapter for the authoritative Japanese Study Hub at
 `C:\project\japanese-study-hub`. ChatGPT and Kuro can use the same bounded tool
 contract without reading source files or legacy progress data directly.
 
+目前 application release 為 `1.1.0`；`learning-content-v7.0` 是獨立的 Hub/MCP contract 版本。讀取結果會明確區分 canonical `meaning_tc`、待審 `meaning_tc_proposal`，並提供 bounded alias/component 投影。
+
 ## Documentation
 
 - [Architecture](docs/Architecture.md): adapter/Hub ownership, runtime identity, network and data
@@ -21,11 +23,30 @@ contract without reading source files or legacy progress data directly.
 | `study_get_summary` | Read item, label, and attempt counts |
 | `study_search_items` | Read bounded vocabulary/grammar/question matches |
 | `study_get_item` | Read one exact stable item id |
+| `study_preview_item_creation` | Preview stable identity and duplicate candidates |
+| `study_create_item` | Create a confirmed vocabulary or grammar item retry-safely |
+| `study_preview_item_revision` | Preview editable content/tags before and after |
+| `study_apply_item_revision` | Apply a confirmed revision with audit history |
+| `study_preview_item_lifecycle` | Preview reversible retire/restore state |
+| `study_apply_item_lifecycle` | Apply confirmed retire/restore without deletion |
+| `study_get_quality_inbox` | Read missing, incomplete, proposed, and unresolved work |
+| `study_get_due_reviews` | Read the SM-2 style due queue |
+| `study_list_study_lists` | Read bounded imported, inbox, and custom lists |
+| `study_create_study_list` | Create one typed custom list retry-safely |
+| `study_add_study_list_items` | Add exact same-kind item ids to a list |
+| `study_preview_question_candidates` | Generate deterministic pending candidates |
+| `study_save_question_candidate` | Save a confirmed candidate without promotion |
+| `study_promote_question_candidate` | Promote a human-reviewed candidate |
+| `study_retire_question_candidate` | Retire a rejected candidate while retaining audit |
 | `study_get_plan` | Read a bounded prioritized study list |
+| `study_get_learner_policy` | Read the learner-owned generation and recording policy |
+| `study_set_learner_policy` | Replace that policy only after an explicit user request |
+| `study_get_learning_context` | Read bounded weak/recent context for question generation |
 | `study_set_manual_labels` | Retry-safe upsert of known/unknown/uncertain/suspended labels |
 | `study_record_attempt` | Append one retry-safe attempt using a caller event id |
 | `study_preview_practice_record` | Validate a complete practice session without writing |
 | `study_record_practice` | Atomically store a complete retry-safe practice session |
+| `study_record_practice_revision` | Atomically record and supersede a corrected session |
 | `study_preview_target_resolution` | Normalize new selectors and read bounded candidates |
 | `study_list_practice_sessions` | List sessions with filters, score summaries, and cursor pagination |
 | `study_preview_practice_target_resolution` | Preview unresolved targets, evidence, duplicates, and fingerprint |
@@ -33,10 +54,11 @@ contract without reading source files or legacy progress data directly.
 | `study_supersede_practice_session` | Link an immutable corrected session as the current revision |
 | `study_get_practice_session` | Read immutable questions, answers, targets, evidence, and score |
 
-There are intentionally no file browser, SQL, delete, reset, bulk import, shell,
+There are 33 tools. There are intentionally no file browser, SQL, delete, reset, bulk import, shell,
 Anki write, general batch resolver, evidence rebuild, catalog admin, or
 legacy-migration MCP tools. Search selectors return candidates only. Target
 repair writes require exact stable item ids from a prior fingerprinted preview.
+Word and Anki integrations remain local Hub admin CLI workflows.
 
 ## Setup
 
@@ -63,9 +85,9 @@ instance backed by a disposable Hub database.
 
 Defaults:
 
-- Hub: `http://127.0.0.1:8791`
-- MCP: `http://127.0.0.1:8790/mcp`
-- Health: `http://127.0.0.1:8790/health`
+- Hub: `http://127.0.0.1:18791`
+- MCP: `http://127.0.0.1:18790/mcp`
+- Health: `http://127.0.0.1:18790/health`
 
 The health response identifies the loaded contract and artifact with
 `contractVersion`, `toolCount`, and `buildId`. A plain HTTP 200 is not enough
@@ -80,6 +102,13 @@ secrets to the repository.
 The active tunnel identifier stays in the ignored generated profile. The tunnel
 forwards only to the loopback MCP endpoint; the Hub database and HTTP API are
 not exposed directly.
+
+The component-local executable remains an explicit runtime choice. Control
+Center inventories its path, version, and SHA-256 but never upgrades or switches
+it automatically. The controller removes ambient HTTP(S) proxy variables only
+while spawning Hub, MCP, and tunnel children, sets a loopback bypass, and then
+restores the parent environment. Any required corporate outbound proxy must be
+configured explicitly for this component.
 
 ```powershell
 cd C:\GPT_MCPtool\japanese_study

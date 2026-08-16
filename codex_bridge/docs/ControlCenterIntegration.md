@@ -33,6 +33,32 @@ folder directly in the Control Center submenu. The manager delegates only a
 declared action ID to `scripts/control-center-ui.ps1`; it never reads the jobs
 directory, project allowlist, tunnel ID, job payload or approval state.
 
+## Tunnel identity and remote evidence
+
+The component compares every configured explicit, local-settings, environment
+and profile tunnel identity. It never silently chooses one conflicting source.
+Tunnel-starting lifecycle actions fail before process mutation with a bounded
+`TUNNEL_ID_*` or `TUNNEL_PROFILE_*` code when identity evidence is missing,
+invalid or inconsistent. Status exposes only the source names, source count and
+consistency result.
+
+`scripts/remote-connectivity.ps1` is a component-owned producer for
+`component-connectivity-v1` remote-registration evidence. `SelfTest` performs no
+external request. The explicit `Lookup` action uses `tunnel-client admin tunnels
+get` with the component runtime key, a bounded timeout and a bounded output
+projection. It returns only status, timestamps, safe error code and a fixed
+source label. It never returns remote metadata, tunnel identity or credentials,
+and it cannot assert ChatGPT connector end-to-end readiness.
+
+After an explicit `Lookup`, the producer atomically replaces the sanitized
+`.tmp\remote-registration-evidence.json` file declared by
+`control-center/component.json`. Control Center only reads that bounded file; it
+does not execute the lookup, load the runtime key or inspect the tunnel profile.
+The persisted document contains the contract version and the five allowlisted
+remote-registration fields only. Fresh `Ready` evidence raises
+`readinessScope` to `remote_registration`; after its TTL, the same evidence is
+reported as `Stale`. Malformed, oversized or extended documents fail closed.
+
 ## Validation
 
 ```powershell
@@ -51,5 +77,6 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 
 The isolated lifecycle test uses dynamic ports, a fake Bridge health server and
 a fake tunnel. It proves active-work refusal, PID preservation, exact foreign
-owner refusal and audit redaction without consuming a Codex turn or touching
-`C:\CodexBridge`.
+owner refusal, tunnel-identity fail-closed behavior, remote-result
+classification and audit redaction without consuming a Codex turn, making an
+external lookup or touching `C:\CodexBridge`.

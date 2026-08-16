@@ -55,7 +55,7 @@ class MemoryCoreApiClient:
             base_url=f"{settings.api_base_url}/api/v1",
             headers={
                 "Accept": "application/json",
-                "User-Agent": "memory-core-mcp/0.2.0",
+                "User-Agent": "memory-core-mcp/1.1.0",
                 "X-Memory-Core-Token": resolved_token.get_secret_value(),
             },
             timeout=settings.api_timeout_seconds,

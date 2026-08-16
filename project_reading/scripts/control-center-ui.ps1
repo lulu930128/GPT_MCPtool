@@ -13,9 +13,9 @@ if ($SelfTest) {
     [pscustomobject]@{ ok = $true; menuContract = $menuContract; actions = $supportedActions; managerDomainDataAccess = "none"; managerSecretAccess = "none" } | ConvertTo-Json -Depth 4
     exit 0
 }
-$mcpUrl = "http://127.0.0.1:8787/mcp"
-$healthUrl = "http://127.0.0.1:8787/health"
-$tunnelUiUrl = "http://127.0.0.1:8788/ui"
+$mcpUrl = "http://127.0.0.1:18787/mcp"
+$healthUrl = "http://127.0.0.1:18787/health"
+$tunnelUiUrl = "http://127.0.0.1:18788/ui"
 $runtimeDir = Join-Path $projectRoot ".tmp"
 $tunnelId = [string]$env:WORKSPACE_MCP_TUNNEL_ID
 $tunnelProfilePath = Join-Path $projectRoot ".tunnel-client\project-workspace.yaml"

@@ -18,20 +18,20 @@ Invoke-RestMethod http://127.0.0.1:8400/api/system/health
 cd C:\GPT_MCPtool\OMI_search
 $env:OMI_SEARCH_API_BASE_URL = "http://127.0.0.1:8400"
 $env:OMI_SEARCH_MCP_HTTP_HOST = "127.0.0.1"
-$env:OMI_SEARCH_MCP_HTTP_PORT = "8797"
+$env:OMI_SEARCH_MCP_HTTP_PORT = "18797"
 python .\http_server.py
 ```
 
 本機 MCP endpoint：
 
 ```text
-http://127.0.0.1:8797/mcp
+http://127.0.0.1:18797/mcp
 ```
 
 健康檢查：
 
 ```text
-http://127.0.0.1:8797/health
+http://127.0.0.1:18797/health
 ```
 
 ## 3. 初始化 Secure MCP Tunnel profile
@@ -65,7 +65,7 @@ C:\GPT_MCPtool\OMI_search\.tunnel-client\omi-search.yaml
 內容會指向：
 
 ```text
-http://127.0.0.1:8797/mcp
+http://127.0.0.1:18797/mcp
 ```
 
 ## 4. 保存 OpenAI control-plane API key
@@ -113,7 +113,7 @@ cd C:\GPT_MCPtool\OMI_search
 
 1. 選 tunnel / 通道連線方式。
 2. 選剛建立的 OMI Search tunnel，或貼自己的 tunnel ID。
-3. 本機 target 是 `http://127.0.0.1:8797/mcp`。
+3. 本機 target 是 `http://127.0.0.1:18797/mcp`。
 4. 連上後請 ChatGPT 列出 tools，應看到：
    - `omi.ask`
    - `omi.read_market_overview`
@@ -121,13 +121,19 @@ cd C:\GPT_MCPtool\OMI_search
    - `omi.read_data_freshness`
    - `omi.read_source_health`
    - `omi.read_capability_status`
+   - `omi.read_tw_market_dashboard`
+   - `omi.open_tw_market_dashboard`
+   - `omi.search_tw_symbols`
+   - `omi.read_tw_stock_dashboard_detail`
+
+   `resources/list` 也應列出 `ui://omi/tw-market-dashboard/v1.html`。若 tool 已出現但 widget resource 讀取失敗，先到 `ui/tw-market-dashboard` 執行 `npm run build`，再透過 Control Center 只 restart `omi_search` component。
 
 若仍只看到舊 `omi.search`，在 connector/plugin 管理介面 Refresh Actions、
 重新連線或重新載入 schema。`omi.search` 仍保留為隱藏 callable alias，因此
 舊 schema 在遷移期間不會立刻失效。完整界線見
 [OMI_search-Public-Tool-Boundary.txt](OMI_search-Public-Tool-Boundary.txt)。
 
-不要把 `http://127.0.0.1:8797/mcp` 填成公開 server URL；ChatGPT 遠端看不到你的 localhost。
+不要把 `http://127.0.0.1:18797/mcp` 填成公開 server URL；ChatGPT 遠端看不到你的 localhost。
 
 ## 7. 測試提示
 

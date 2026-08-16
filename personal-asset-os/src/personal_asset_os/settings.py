@@ -23,12 +23,12 @@ class Settings(BaseSettings):
     )
 
     host: str = "127.0.0.1"
-    port: int = Field(default=8876, ge=1024, le=65535)
+    port: int = Field(default=18876, ge=1024, le=65535)
     base_currency: str = "TWD"
     data_dir: Path = Field(default_factory=default_data_dir)
     log_level: str = "info"
     tunnel_id: SecretStr | None = None
-    tunnel_health_port: int = Field(default=8877, ge=1024, le=65535)
+    tunnel_health_port: int = Field(default=18877, ge=1024, le=65535)
     openai_api_key: SecretStr | None = Field(
         default=None,
         validation_alias="OPENAI_API_KEY",

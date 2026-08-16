@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import ExcelJS from "exceljs";
+import { PDFDocument, StandardFonts } from "pdf-lib";
 import sharp from "sharp";
 import { loadConfig } from "../dist/src/config.js";
 import { startWorkspaceHttpServer } from "../dist/src/http-server.js";
@@ -28,11 +30,25 @@ worksheet.addRow(["name", "value"]);
 worksheet.addRow(["ready", 1]);
 await workbook.xlsx.writeFile(path.join(assets, "sample.xlsx"));
 await writeOfficeSmokeFixtures(assets);
+const pdf = await PDFDocument.create();
+pdf.setTitle("Project Reading PDF smoke");
+const pdfFont = await pdf.embedFont(StandardFonts.Helvetica);
+pdf.addPage([360, 480]).drawText("Project Reading PDF ready", {
+  x: 36,
+  y: 400,
+  size: 18,
+  font: pdfFont,
+});
+await fs.writeFile(
+  path.join(assets, "sample.pdf"),
+  await pdf.save({ useObjectStreams: false }),
+);
 
 const config = await loadConfig({
   WORKSPACE_MCP_ROOTS: `smoke=${root}`,
   WORKSPACE_MCP_DEFAULT_ROOT: "smoke",
   WORKSPACE_MCP_ASSET_SCOPES: "media=smoke:assets",
+  WORKSPACE_MCP_FILE_RETURN_SCOPES: "media",
 });
 const handle = await startWorkspaceHttpServer(config, {
   host: "127.0.0.1",
@@ -68,9 +84,34 @@ try {
   const initialized = await rpc("initialize", {
     protocolVersion: "2025-06-18",
     capabilities: {},
-    clientInfo: { name: "asset-smoke", version: "1.0.0" },
+    clientInfo: { name: "asset-smoke", version: "1.5.0" },
   });
-  assert.equal(initialized.serverInfo.version, "0.5.0");
+  assert.equal(initialized.serverInfo.version, "1.5.0");
+  const resourceTemplates = await rpc("resources/templates/list", {});
+  assert.ok(
+    resourceTemplates.resourceTemplates.some(
+      (template) => template.uriTemplate === "workspace-asset:///{scope}/{+path}",
+    ),
+    "Missing workspace asset resource template",
+  );
+  const listed = await rpc("tools/list", {});
+  assert.equal(listed.tools.length, 24);
+  for (const required of [
+    "read_files",
+    "find_files",
+    "git_diff",
+    "git_diff_file",
+    "find_symbol",
+    "find_references",
+    "import_graph",
+    "project_map",
+    "fetch_asset",
+    "inspect_pdf",
+    "read_pdf_text",
+    "read_pdf_page",
+  ]) {
+    assert.ok(listed.tools.some((tool) => tool.name === required), `Missing tool: ${required}`);
+  }
 
   const image = await rpc("tools/call", {
     name: "read_image",
@@ -82,6 +123,26 @@ try {
   const imageMetadata = await sharp(decodedImage).metadata();
   assert.equal(imageMetadata.width, 128);
   assert.equal(imageMetadata.height, 64);
+  assert.equal(image.structuredContent.mimeType, "image/png");
+
+  const fetched = await rpc("tools/call", {
+    name: "fetch_asset",
+    arguments: { scope: "media", path: "sample.gif" },
+  });
+  const fetchedResource = fetched.content.find((item) => item.type === "resource_link");
+  const originalImage = await fs.readFile(path.join(assets, "sample.gif"));
+  const readResource = await rpc("resources/read", { uri: fetchedResource.uri });
+  const returnedResource = readResource.contents[0];
+  const fetchedBytes = Buffer.from(returnedResource.blob, "base64");
+  assert.deepEqual(fetchedBytes, originalImage);
+  assert.equal(fetchedResource.mimeType, "image/gif");
+  assert.equal(returnedResource.mimeType, "image/gif");
+  assert.equal(fetched.structuredContent.bytes, originalImage.length);
+  assert.equal(
+    fetched.structuredContent.sha256,
+    createHash("sha256").update(originalImage).digest("hex"),
+  );
+  assert.equal(fetched.structuredContent.transfer, "resource_link");
 
   const spreadsheet = await rpc("tools/call", {
     name: "read_spreadsheet",
@@ -117,16 +178,45 @@ try {
     "PowerPoint extraction ready",
   ]);
 
+  const pdfInspection = await rpc("tools/call", {
+    name: "inspect_pdf",
+    arguments: { scope: "media", path: "sample.pdf" },
+  });
+  assert.equal(pdfInspection.structuredContent.pageCount, 1);
+  assert.equal(pdfInspection.structuredContent.metadata.title, "Project Reading PDF smoke");
+
+  const pdfText = await rpc("tools/call", {
+    name: "read_pdf_text",
+    arguments: { scope: "media", path: "sample.pdf", pageCount: 1 },
+  });
+  assert.match(pdfText.structuredContent.pages[0].text, /Project Reading PDF ready/);
+
+  const pdfPage = await rpc("tools/call", {
+    name: "read_pdf_page",
+    arguments: { scope: "media", path: "sample.pdf", page: 1, maxDimension: 256 },
+  });
+  const pdfImage = pdfPage.content.find((item) => item.type === "image");
+  assert.equal(pdfImage?.mimeType, "image/png");
+  const pdfImageMetadata = await sharp(Buffer.from(pdfImage.data, "base64")).metadata();
+  assert.ok(pdfImageMetadata.width <= 256);
+  assert.ok(pdfImageMetadata.height <= 256);
+
   console.log(
     JSON.stringify(
       {
         ok: true,
         serverVersion: initialized.serverInfo.version,
+        toolCount: listed.tools.length,
         image: {
           mimeType: imageContent.mimeType,
           width: imageMetadata.width,
           height: imageMetadata.height,
           bytes: decodedImage.length,
+        },
+        fetch: {
+          mimeType: fetchedResource.mimeType,
+          bytes: fetchedBytes.length,
+          sha256: fetched.structuredContent.sha256,
         },
         spreadsheet: {
           sheet: spreadsheetResult.sheet,
@@ -141,6 +231,12 @@ try {
         presentation: {
           slides: presentationResult.returnedSlides,
           title: presentationResult.slides[0].title,
+        },
+        pdf: {
+          pages: pdfInspection.structuredContent.pageCount,
+          text: pdfText.structuredContent.pages[0].text,
+          width: pdfImageMetadata.width,
+          height: pdfImageMetadata.height,
         },
       },
       null,

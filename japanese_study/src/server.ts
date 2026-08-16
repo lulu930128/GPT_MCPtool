@@ -3,20 +3,35 @@ import { z } from "zod";
 import {
   HubApiError,
   JapaneseStudyHubClient,
+  type ApplyItemLifecycleInput,
+  type ApplyItemRevisionInput,
   type ApplyPracticeResolutionInput,
+  type CreateItemInput,
+  type ItemDraftInput,
+  type ItemLifecycleInput,
+  type LearningContextInput,
   type ListPracticeSessionsInput,
+  type PreviewItemRevisionInput,
   type PracticeSubmissionInput,
   type PracticeTargetInput,
+  type QualityInboxInput,
+  type QuestionCandidatePromotionInput,
+  type QuestionCandidateRetireInput,
+  type QuestionCandidateSaveInput,
   type RecordAttemptInput,
+  type RecordPracticeRevisionInput,
   type SearchItemsInput,
   type SetManualLabelInput,
+  type SetLearnerPolicyInput,
+  type StudyListCreateInput,
+  type StudyListItemsInput,
   type SupersedePracticeSessionInput,
 } from "./api-client.js";
 import type { JapaneseStudyMcpConfig } from "./config.js";
 
-export const JAPANESE_STUDY_MCP_VERSION = "0.3.1";
-export const JAPANESE_STUDY_CONTRACT_VERSION = "practice-resolution-v4.1";
-export const JAPANESE_STUDY_TOOL_COUNT = 14;
+export const JAPANESE_STUDY_MCP_VERSION = "1.1.0";
+export const JAPANESE_STUDY_CONTRACT_VERSION = "learning-content-v7.0";
+export const JAPANESE_STUDY_TOOL_COUNT = 33;
 
 const kindSchema = z.enum(["vocab", "grammar", "question"]);
 const labelSchema = z.enum(["known", "unknown", "uncertain", "suspended"]);
@@ -25,6 +40,40 @@ const targetKindSchema = z.enum(["vocab", "grammar"]);
 const targetRoleSchema = z.enum(["primary", "secondary", "context"]);
 const questionValiditySchema = z.enum(["valid", "void", "unscored"]);
 const answerResultSchema = z.enum(["correct", "partial", "wrong", "skipped"]);
+const itemDraftSchema = z
+  .object({
+    kind: z.enum(["vocab", "grammar"]),
+    title: z.string().min(1).max(200),
+    reading: z.string().max(200).optional(),
+    meaningTc: z.string().max(2000).optional(),
+    jlptLevel: z.string().max(20).optional(),
+    partOfSpeech: z.string().max(100).optional(),
+    senseKey: z.string().min(1).max(100).optional(),
+    content: z.record(z.unknown()).optional(),
+    tags: z.array(z.string().min(1).max(50)).max(30).optional(),
+    provenance: z.enum(["manual", "chatgpt_proposed", "external_proposed"]).optional(),
+    addToInbox: z.boolean().optional(),
+    createNewSense: z.boolean().optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.kind === "grammar" && !value.senseKey) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["senseKey"],
+        message: "Grammar drafts require an explicit senseKey.",
+      });
+    }
+  });
+const itemRevisionChangesSchema = z
+  .object({
+    meaningTc: z.string().max(2000).optional(),
+    content: z.record(z.unknown()).optional(),
+    tags: z.array(z.string().min(1).max(50)).max(30).optional(),
+  })
+  .strict()
+  .refine((value) => Object.keys(value).length > 0, "At least one revision field is required.");
+const questionTypeSchema = z.enum(["recall", "reading", "meaning", "cloze"]);
 const offsetDateTimeSchema = z
   .string()
   .datetime({ offset: true })
@@ -171,6 +220,33 @@ const practiceSubmissionSchema = z
     questions: z.array(practiceQuestionSchema).min(1).max(100),
   })
   .strict();
+const learnerPolicySchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    practice: z
+      .object({
+        autoRecordCompletedPractice: z.boolean(),
+        preservePartial: z.literal(true),
+        preserveVoid: z.literal(true),
+        preserveUnscored: z.literal(true),
+      })
+      .strict(),
+    answerNotation: z
+      .object({
+        chineseParentheses: z.literal("production_gap"),
+        emptyAnswer: z.literal("skipped"),
+      })
+      .strict(),
+    questionGeneration: z
+      .object({
+        generator: z.literal("ai"),
+        useLearningContext: z.boolean(),
+        preferWeakTargets: z.boolean(),
+        avoidFullCatalogDump: z.literal(true),
+      })
+      .strict(),
+  })
+  .strict();
 
 const readOnlyAnnotations = {
   readOnlyHint: true,
@@ -191,7 +267,7 @@ export function createJapaneseStudyMcpServer(config: JapaneseStudyMcpConfig): Mc
     { name: "japanese-study-mcp", version: JAPANESE_STUDY_MCP_VERSION },
     {
       instructions:
-        "Private Japanese study tools backed by Japanese Study Hub. Search or preview target candidates before mutations. Use exact stable item ids for labels, attempts, and target overrides. Practice target search is candidate-only and never auto-applies. Preview a session resolution and preserve its fingerprint before an explicitly confirmed item-id override. This server has no delete, reset, file, SQL, shell, general batch resolver, catalog import, Anki-write, or legacy-migration tools.",
+        "Private Japanese study tools backed by Japanese Study Hub. Preview item creation, revision, lifecycle, question candidates, and target resolution before writes. Reuse operation ids only for exact retries. Stable identity fields cannot be revised: create a corrected item and retire the old one instead. Proposed content remains visible in the quality inbox until reviewed. This server has no delete, reset, file, SQL, shell, unrestricted import, Anki-write, or legacy-migration tools.",
     },
   );
 
@@ -212,11 +288,100 @@ export function createJapaneseStudyMcpServer(config: JapaneseStudyMcpConfig): Mc
   );
 
   server.registerTool(
+    "study_get_learner_policy",
+    {
+      title: "取得日文學習規則",
+      description:
+        "Use this before interpreting answer notation or deciding whether a completed practice may be recorded. The policy is typed and does not itself authorize a write.",
+      annotations: readOnlyAnnotations,
+      inputSchema: {},
+      outputSchema: {
+        ...baseOutputSchema,
+        contract_version: z.string().optional(),
+        policy_id: z.string().optional(),
+        version: z.number().int().nonnegative().optional(),
+        policy: z.record(z.unknown()).optional(),
+        persisted: z.boolean().optional(),
+        updated_at: z.string().nullable().optional(),
+        updated_by: z.string().nullable().optional(),
+      },
+    },
+    async () => safeResult(() => client.getLearnerPolicy(), "已取得日文學習規則。"),
+  );
+
+  server.registerTool(
+    "study_set_learner_policy",
+    {
+      title: "設定日文學習規則",
+      description:
+        "Use only when the user explicitly asks to persist a complete typed learning policy. Reuse operationId only for an exact retry; this tool cannot add arbitrary policy keys.",
+      annotations: retrySafeWriteAnnotations,
+      inputSchema: {
+        operationId: z.string().min(8).max(128),
+        policy: learnerPolicySchema,
+      },
+      outputSchema: {
+        ...baseOutputSchema,
+        contract_version: z.string().optional(),
+        policy_id: z.string().optional(),
+        version: z.number().int().nonnegative().optional(),
+        policy: z.record(z.unknown()).optional(),
+        persisted: z.boolean().optional(),
+        changed: z.boolean().optional(),
+        duplicate: z.boolean().optional(),
+        updated_at: z.string().nullable().optional(),
+        updated_by: z.string().nullable().optional(),
+        operation_id: z.string().optional(),
+      },
+    },
+    async (args) =>
+      safeResult(
+        () => client.setLearnerPolicy({ ...(args as SetLearnerPolicyInput), actor: "chatgpt_mcp" }),
+        "已依使用者要求保存 typed 日文學習規則。",
+      ),
+  );
+
+  server.registerTool(
+    "study_get_learning_context",
+    {
+      title: "取得個人化出題脈絡",
+      description:
+        "Use this before generating personalized Japanese practice. It returns bounded policy, recommended targets, clearly separated canonical/proposed meanings, verified components, active-revision diagnoses, and recent practice; it never generates questions or returns the full catalog.",
+      annotations: readOnlyAnnotations,
+      inputSchema: {
+        practiceType: z.string().min(1).max(50).optional(),
+        requestedLevel: z.string().min(1).max(50).optional(),
+        kind: z.enum(["vocab", "grammar"]).optional(),
+        targetLimit: z.number().int().min(1).max(50).optional(),
+        recentSessionLimit: z.number().int().min(1).max(20).optional(),
+        diagnosisLimit: z.number().int().min(1).max(50).optional(),
+      },
+      outputSchema: {
+        ...baseOutputSchema,
+        contract_version: z.string().optional(),
+        policy: z.record(z.unknown()).optional(),
+        policy_version: z.number().int().nonnegative().optional(),
+        policy_persisted: z.boolean().optional(),
+        recommended_targets: z.array(z.record(z.unknown())).optional(),
+        recent_diagnoses: z.array(z.record(z.unknown())).optional(),
+        recent_practice: z.array(z.record(z.unknown())).optional(),
+        generation_guidance: z.record(z.unknown()).optional(),
+        limits: z.record(z.unknown()).optional(),
+      },
+    },
+    async (args) =>
+      safeResult(
+        () => client.learningContext(args as LearningContextInput),
+        "已取得 bounded 個人化日文學習脈絡；尚未生成或寫入題目。",
+      ),
+  );
+
+  server.registerTool(
     "study_search_items",
     {
       title: "搜尋日文學習項目",
       description:
-        "Use this when the user wants to find vocabulary, grammar, or questions and obtain exact stable item ids before another action.",
+        "Use this when the user wants to find vocabulary, grammar, or questions and obtain exact stable item ids before another action. Search includes canonical content plus reviewable proposals, aliases, and components, but results remain item-level candidates.",
       annotations: readOnlyAnnotations,
       inputSchema: {
         query: z.string().max(200).optional().describe("Word, reading, or Traditional Chinese meaning."),
@@ -227,6 +392,10 @@ export function createJapaneseStudyMcpServer(config: JapaneseStudyMcpConfig): Mc
       outputSchema: {
         ...baseOutputSchema,
         count: z.number().int().nonnegative().optional(),
+        total: z.number().int().nonnegative().optional(),
+        offset: z.number().int().nonnegative().optional(),
+        limit: z.number().int().positive().optional(),
+        has_more: z.boolean().optional(),
         items: z.array(z.record(z.unknown())).optional(),
       },
     },
@@ -242,7 +411,7 @@ export function createJapaneseStudyMcpServer(config: JapaneseStudyMcpConfig): Mc
     {
       title: "取得單一學習項目",
       description:
-        "Use this when an exact stable study item id is already known and the user needs its current content, manual label, and attempt evidence.",
+        "Use this when an exact stable study item id is already known and the user needs canonical content, separately labelled proposals, verified aliases/components, manual label, and attempt evidence.",
       annotations: readOnlyAnnotations,
       inputSchema: {
         itemId: z.string().min(1).max(128).describe("Exact stable item id returned by search or a study plan."),
@@ -253,6 +422,435 @@ export function createJapaneseStudyMcpServer(config: JapaneseStudyMcpConfig): Mc
       },
     },
     async ({ itemId }) => safeResult(() => client.getItem(itemId), "已取得指定學習項目。"),
+  );
+
+  server.registerTool(
+    "study_preview_item_creation",
+    {
+      title: "預覽新增日語教材",
+      description:
+        "Use this before creating a vocabulary or grammar item. It computes the stable identity and shows exact or possible duplicates without writing.",
+      annotations: readOnlyAnnotations,
+      inputSchema: { draft: itemDraftSchema },
+      outputSchema: {
+        ...baseOutputSchema,
+        contract_version: z.string().optional(),
+        candidate: z.record(z.unknown()).optional(),
+        can_create: z.boolean().optional(),
+        exact_duplicate_item_id: z.string().nullable().optional(),
+        possible_duplicate_ids: z.array(z.string()).optional(),
+        possible_duplicates: z.array(z.record(z.unknown())).optional(),
+        warnings: z.array(z.string()).optional(),
+        fingerprint: z.string().optional(),
+      },
+    },
+    async ({ draft }) =>
+      safeResult(
+        () => client.previewItemCreation(draft as ItemDraftInput),
+        "已預覽教材 identity 與重複候選；尚未新增。",
+      ),
+  );
+
+  server.registerTool(
+    "study_create_item",
+    {
+      title: "新增日語教材",
+      description:
+        "Use only after the user confirms a creation preview. Preserve the exact draft and fingerprint, and reuse operationId only for the same retry.",
+      annotations: retrySafeWriteAnnotations,
+      inputSchema: {
+        operationId: z.string().min(8).max(128),
+        expectedFingerprint: z.string().regex(/^[0-9a-f]{64}$/),
+        draft: itemDraftSchema,
+      },
+      outputSchema: {
+        ...baseOutputSchema,
+        operation_id: z.string().optional(),
+        item_id: z.string().optional(),
+        revision_number: z.number().int().nonnegative().optional(),
+        created: z.boolean().optional(),
+        duplicate: z.boolean().optional(),
+        item: z.record(z.unknown()).optional(),
+      },
+    },
+    async (args) =>
+      safeResult(
+        () => client.createItem({ ...(args as CreateItemInput), actor: "chatgpt_mcp" }),
+        "已新增教材並建立來源、revision、待學清單與 SRS 排程。",
+      ),
+  );
+
+  server.registerTool(
+    "study_preview_item_revision",
+    {
+      title: "預覽教材修訂",
+      description:
+        "Use this before revising an exact item. Only meaning, content, and tags can change; stable identity fields remain locked.",
+      annotations: readOnlyAnnotations,
+      inputSchema: {
+        itemId: z.string().min(1).max(128),
+        changes: itemRevisionChangesSchema,
+        reason: z.string().min(1).max(1000),
+      },
+      outputSchema: {
+        ...baseOutputSchema,
+        contract_version: z.string().optional(),
+        item_id: z.string().optional(),
+        expected_revision: z.number().int().nonnegative().optional(),
+        before: z.record(z.unknown()).optional(),
+        after: z.record(z.unknown()).optional(),
+        reason: z.string().optional(),
+        fingerprint: z.string().optional(),
+      },
+    },
+    async (args) =>
+      safeResult(
+        () => client.previewItemRevision(args as PreviewItemRevisionInput),
+        "已預覽教材修訂前後內容；尚未寫入。",
+      ),
+  );
+
+  server.registerTool(
+    "study_apply_item_revision",
+    {
+      title: "套用教材修訂",
+      description:
+        "Use only after the user confirms the before/after preview. Preserve its fingerprint and use a retry-stable operationId.",
+      annotations: retrySafeWriteAnnotations,
+      inputSchema: {
+        itemId: z.string().min(1).max(128),
+        operationId: z.string().min(8).max(128),
+        expectedFingerprint: z.string().regex(/^[0-9a-f]{64}$/),
+        changes: itemRevisionChangesSchema,
+        reason: z.string().min(1).max(1000),
+      },
+      outputSchema: {
+        ...baseOutputSchema,
+        operation_id: z.string().optional(),
+        item_id: z.string().optional(),
+        revision_number: z.number().int().nonnegative().optional(),
+        updated: z.boolean().optional(),
+        duplicate: z.boolean().optional(),
+        item: z.record(z.unknown()).optional(),
+      },
+    },
+    async (args) =>
+      safeResult(
+        () => client.applyItemRevision({ ...(args as ApplyItemRevisionInput), actor: "chatgpt_mcp" }),
+        "已套用教材修訂並保留 audit revision。",
+      ),
+  );
+
+  server.registerTool(
+    "study_preview_item_lifecycle",
+    {
+      title: "預覽教材退役或還原",
+      description:
+        "Use this before retiring or restoring an exact item. Retirement is reversible and may point to a confirmed replacement of the same kind.",
+      annotations: readOnlyAnnotations,
+      inputSchema: {
+        itemId: z.string().min(1).max(128),
+        action: z.enum(["retire", "restore"]),
+        reason: z.string().min(1).max(1000),
+        replacementItemId: z.string().min(1).max(128).optional(),
+      },
+      outputSchema: {
+        ...baseOutputSchema,
+        contract_version: z.string().optional(),
+        item_id: z.string().optional(),
+        expected_revision: z.number().int().nonnegative().optional(),
+        action: z.enum(["retire", "restore"]).optional(),
+        from_status: z.string().optional(),
+        to_status: z.string().optional(),
+        reason: z.string().optional(),
+        replacement_item_id: z.string().nullable().optional(),
+        replacement: z.record(z.unknown()).nullable().optional(),
+        fingerprint: z.string().optional(),
+      },
+    },
+    async (args) =>
+      safeResult(
+        () => client.previewItemLifecycle(args as ItemLifecycleInput),
+        "已預覽教材 lifecycle 變更；尚未寫入。",
+      ),
+  );
+
+  server.registerTool(
+    "study_apply_item_lifecycle",
+    {
+      title: "套用教材退役或還原",
+      description:
+        "Use only after explicit confirmation of a lifecycle preview. It never deletes the item or its history.",
+      annotations: retrySafeWriteAnnotations,
+      inputSchema: {
+        itemId: z.string().min(1).max(128),
+        operationId: z.string().min(8).max(128),
+        expectedFingerprint: z.string().regex(/^[0-9a-f]{64}$/),
+        action: z.enum(["retire", "restore"]),
+        reason: z.string().min(1).max(1000),
+        replacementItemId: z.string().min(1).max(128).optional(),
+      },
+      outputSchema: {
+        ...baseOutputSchema,
+        operation_id: z.string().optional(),
+        item_id: z.string().optional(),
+        lifecycle_status: z.string().optional(),
+        revision_number: z.number().int().nonnegative().optional(),
+        duplicate: z.boolean().optional(),
+        item: z.record(z.unknown()).optional(),
+      },
+    },
+    async (args) =>
+      safeResult(
+        () => client.applyItemLifecycle({ ...(args as ApplyItemLifecycleInput), actor: "chatgpt_mcp" }),
+        "已套用教材 lifecycle 變更；教材與歷史均未刪除。",
+      ),
+  );
+
+  server.registerTool(
+    "study_get_quality_inbox",
+    {
+      title: "取得教材品質待辦",
+      description:
+        "Use this to inspect missing translations, pending meaning/alias/component proposals, incomplete vocabulary, content-review items, and unresolved practice targets without modifying data.",
+      annotations: readOnlyAnnotations,
+      inputSchema: {
+        issueType: z.string().max(100).optional(),
+        kind: z.enum(["vocab", "grammar"]).optional(),
+        limit: z.number().int().min(1).max(100).optional(),
+        offset: z.number().int().min(0).max(1_000_000).optional(),
+      },
+      outputSchema: {
+        ...baseOutputSchema,
+        count: z.number().int().nonnegative().optional(),
+        total: z.number().int().nonnegative().optional(),
+        offset: z.number().int().nonnegative().optional(),
+        limit: z.number().int().positive().optional(),
+        has_more: z.boolean().optional(),
+        summary: z.record(z.unknown()).optional(),
+        items: z.array(z.record(z.unknown())).optional(),
+      },
+    },
+    async (args) =>
+      safeResult(
+        () => client.qualityInbox(args as QualityInboxInput),
+        "已取得教材品質待辦。",
+      ),
+  );
+
+  server.registerTool(
+    "study_get_due_reviews",
+    {
+      title: "取得到期複習",
+      description:
+        "Use this to read the bounded SRS due queue. It returns only items actually enrolled in SRS; catalog membership alone never makes an item due. It does not mark any item reviewed.",
+      annotations: readOnlyAnnotations,
+      inputSchema: {
+        kind: z.enum(["vocab", "grammar"]).optional(),
+        limit: z.number().int().min(1).max(100).optional(),
+      },
+      outputSchema: {
+        ...baseOutputSchema,
+        as_of: z.string().optional(),
+        count: z.number().int().nonnegative().optional(),
+        items: z.array(z.record(z.unknown())).optional(),
+      },
+    },
+    async (args) => safeResult(() => client.dueReviews(args), "已取得到期複習項目。"),
+  );
+
+  server.registerTool(
+    "study_list_study_lists",
+    {
+      title: "列出學習清單",
+      description: "Use this to inspect custom, imported, or manual-inbox study lists.",
+      annotations: readOnlyAnnotations,
+      inputSchema: {
+        kind: kindSchema.optional(),
+        limit: z.number().int().min(1).max(100).optional(),
+      },
+      outputSchema: {
+        ...baseOutputSchema,
+        count: z.number().int().nonnegative().optional(),
+        items: z.array(z.record(z.unknown())).optional(),
+      },
+    },
+    async (args) => safeResult(() => client.listStudyLists(args), "已取得學習清單。"),
+  );
+
+  server.registerTool(
+    "study_create_study_list",
+    {
+      title: "建立自訂學習清單",
+      description:
+        "Use when the user explicitly asks to create one bounded custom list. A list accepts only items of its declared kind.",
+      annotations: retrySafeWriteAnnotations,
+      inputSchema: {
+        operationId: z.string().min(8).max(128),
+        listId: z.string().min(1).max(128),
+        kind: kindSchema,
+        title: z.string().min(1).max(200),
+        description: z.string().max(1000).optional(),
+      },
+      outputSchema: {
+        ...baseOutputSchema,
+        operation_id: z.string().optional(),
+        list_id: z.string().optional(),
+        created: z.boolean().optional(),
+        duplicate: z.boolean().optional(),
+        list: z.record(z.unknown()).optional(),
+      },
+    },
+    async (args) =>
+      safeResult(
+        () => client.createStudyList({ ...(args as StudyListCreateInput), actor: "chatgpt_mcp" }),
+        "已建立自訂學習清單。",
+      ),
+  );
+
+  server.registerTool(
+    "study_add_study_list_items",
+    {
+      title: "加入教材至學習清單",
+      description:
+        "Use when the user confirms exact stable item ids to add to one existing list. Kind mismatches are rejected.",
+      annotations: retrySafeWriteAnnotations,
+      inputSchema: {
+        listId: z.string().min(1).max(128),
+        operationId: z.string().min(8).max(128),
+        items: z.array(z.object({
+          itemId: z.string().min(1).max(128),
+          priority: z.number().int().min(1).max(1_000_000).optional(),
+          note: z.string().max(1000).optional(),
+        }).strict()).min(1).max(200),
+      },
+      outputSchema: {
+        ...baseOutputSchema,
+        operation_id: z.string().optional(),
+        list_id: z.string().optional(),
+        items_changed: z.number().int().nonnegative().optional(),
+        duplicate: z.boolean().optional(),
+        list: z.record(z.unknown()).optional(),
+      },
+    },
+    async (args) =>
+      safeResult(
+        () => client.addStudyListItems({ ...(args as StudyListItemsInput), actor: "chatgpt_mcp" }),
+        "已將教材加入學習清單。",
+      ),
+  );
+
+  server.registerTool(
+    "study_preview_question_candidates",
+    {
+      title: "預覽題庫候選",
+      description:
+        "Use this to deterministically generate bounded question candidates from exact item ids. Candidates require human review and are not saved or promoted by preview.",
+      annotations: readOnlyAnnotations,
+      inputSchema: {
+        itemIds: z.array(z.string().min(1).max(128)).min(1).max(50),
+        questionTypes: z.array(questionTypeSchema).min(1).max(4),
+      },
+      outputSchema: {
+        ...baseOutputSchema,
+        contract_version: z.string().optional(),
+        count: z.number().int().nonnegative().optional(),
+        candidates: z.array(z.record(z.unknown())).optional(),
+        fingerprint: z.string().optional(),
+      },
+    },
+    async ({ itemIds, questionTypes }) =>
+      safeResult(
+        () => client.previewQuestionCandidates(itemIds, questionTypes),
+        "已產生題庫候選；尚未儲存或 promotion。",
+      ),
+  );
+
+  server.registerTool(
+    "study_save_question_candidate",
+    {
+      title: "儲存題庫候選",
+      description:
+        "Use after the user confirms one unchanged deterministic candidate. Saving keeps it pending and does not make it a formal question.",
+      annotations: retrySafeWriteAnnotations,
+      inputSchema: {
+        operationId: z.string().min(8).max(128),
+        expectedFingerprint: z.string().regex(/^[0-9a-f]{64}$/),
+        candidate: z.record(z.unknown()),
+      },
+      outputSchema: {
+        ...baseOutputSchema,
+        operation_id: z.string().optional(),
+        candidate_id: z.string().optional(),
+        payload_hash: z.string().optional(),
+        duplicate: z.boolean().optional(),
+        candidate: z.record(z.unknown()).optional(),
+      },
+    },
+    async (args) =>
+      safeResult(
+        () => client.saveQuestionCandidate({ ...(args as QuestionCandidateSaveInput), actor: "chatgpt_mcp" }),
+        "已儲存 pending 題庫候選；尚未 promotion。",
+      ),
+  );
+
+  server.registerTool(
+    "study_promote_question_candidate",
+    {
+      title: "升級正式題目",
+      description:
+        "Use only after the user has manually reviewed the candidate answer and prompt. Requires its exact payload hash and an auditable review note.",
+      annotations: retrySafeWriteAnnotations,
+      inputSchema: {
+        candidateId: z.string().min(1).max(128),
+        operationId: z.string().min(8).max(128),
+        expectedPayloadHash: z.string().regex(/^[0-9a-f]{64}$/),
+        reviewNote: z.string().min(1).max(1000),
+      },
+      outputSchema: {
+        ...baseOutputSchema,
+        operation_id: z.string().optional(),
+        candidate_id: z.string().optional(),
+        question_item_id: z.string().optional(),
+        promoted: z.boolean().optional(),
+        duplicate: z.boolean().optional(),
+        candidate: z.record(z.unknown()).optional(),
+        question_item: z.record(z.unknown()).optional(),
+      },
+    },
+    async (args) =>
+      safeResult(
+        () => client.promoteQuestionCandidate({ ...(args as QuestionCandidatePromotionInput), actor: "chatgpt_mcp" }),
+        "已將人工核對過的候選升級為正式題目。",
+      ),
+  );
+
+  server.registerTool(
+    "study_retire_question_candidate",
+    {
+      title: "退役題庫候選",
+      description:
+        "Use when the user explicitly rejects one exact pending candidate. It is retained for audit and cannot be promoted afterward.",
+      annotations: retrySafeWriteAnnotations,
+      inputSchema: {
+        candidateId: z.string().min(1).max(128),
+        operationId: z.string().min(8).max(128),
+        reason: z.string().min(1).max(1000),
+      },
+      outputSchema: {
+        ...baseOutputSchema,
+        operation_id: z.string().optional(),
+        candidate_id: z.string().optional(),
+        retired: z.boolean().optional(),
+        duplicate: z.boolean().optional(),
+        candidate: z.record(z.unknown()).optional(),
+      },
+    },
+    async (args) =>
+      safeResult(
+        () => client.retireQuestionCandidate({ ...(args as QuestionCandidateRetireInput), actor: "chatgpt_mcp" }),
+        "已退役題庫候選並保留稽核資料。",
+      ),
   );
 
   server.registerTool(
@@ -358,7 +956,7 @@ export function createJapaneseStudyMcpServer(config: JapaneseStudyMcpConfig): Mc
     {
       title: "寫入完整練習紀錄",
       description:
-        "Use this only after the user completed a multi-question practice session and asked to save it. Preview first, preserve void or partial results, and reuse the same submissionId on retry.",
+        "Use this only for a new completed multi-question practice session after the user or persisted learner policy authorizes saving. Preview first, preserve void or partial results, and reuse the same submissionId on retry. For a known correction, use study_record_practice_revision instead.",
       annotations: retrySafeWriteAnnotations,
       inputSchema: practiceSubmissionSchema.shape,
       outputSchema: {
@@ -377,6 +975,41 @@ export function createJapaneseStudyMcpServer(config: JapaneseStudyMcpConfig): Mc
       safeResult(
         () => client.recordPractice(args as PracticeSubmissionInput),
         "已寫入完整練習紀錄；相同 submissionId 的相同內容重試不會重複計入。",
+      ),
+  );
+
+  server.registerTool(
+    "study_record_practice_revision",
+    {
+      title: "原子化修正練習紀錄",
+      description:
+        "Use when an already-recorded practice session must be corrected or enriched. The Hub atomically records the complete replacement session, links the immutable revision, and rebuilds affected SRS projections. Do not call study_record_practice first for a known correction.",
+      annotations: retrySafeWriteAnnotations,
+      inputSchema: {
+        originalSessionId: z.string().min(8).max(128),
+        revisionId: z.string().min(8).max(128),
+        reason: z.string().min(1).max(1000),
+        changedQuestionKeys: z.array(z.string().min(1).max(100)).max(100).optional(),
+        submission: practiceSubmissionSchema,
+      },
+      outputSchema: {
+        ...baseOutputSchema,
+        duplicate: z.boolean().optional(),
+        original_session_id: z.string().optional(),
+        replacement_session_id: z.string().optional(),
+        revision_id: z.string().optional(),
+        affected_item_ids: z.array(z.string()).optional(),
+        rebuilt_srs_count: z.number().int().nonnegative().optional(),
+        score: z.record(z.unknown()).optional(),
+        warnings: z.array(z.unknown()).optional(),
+        record: z.record(z.unknown()).optional(),
+        revision: z.record(z.unknown()).optional(),
+      },
+    },
+    async (args) =>
+      safeResult(
+        () => client.recordPracticeRevision({ ...(args as RecordPracticeRevisionInput), actor: "chatgpt_mcp" }),
+        "已原子化保存修正版練習、revision 關係與重建後的 SRS projection。",
       ),
   );
 

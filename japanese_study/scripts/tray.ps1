@@ -2,13 +2,13 @@ param(
   [string]$ProjectRoot,
   [string]$HubRoot = "C:\project\japanese-study-hub",
   [string]$HostName = "127.0.0.1",
-  [int]$McpPort = 8790,
-  [int]$HubPort = 8791,
+  [int]$McpPort = 18790,
+  [int]$HubPort = 18791,
   [string]$TunnelClientPath,
   [string]$TunnelProfileDir,
   [string]$TunnelProfile = "japanese-study",
   [string]$TunnelId = $env:JSTUDY_TUNNEL_ID,
-  [string]$TunnelHealthUrl = "http://127.0.0.1:8792",
+  [string]$TunnelHealthUrl = "http://127.0.0.1:18792",
   [string]$SecretPath,
   [switch]$NoAutoStart,
   [switch]$AutoStartTunnel,
@@ -71,9 +71,9 @@ $McpBuildArtifacts = @(
   (Join-Path $ProjectRoot "dist\src\http-server.js"),
   $McpServerEntry
 )
-$ExpectedMcpVersion = "0.3.1"
-$ExpectedMcpContractVersion = "practice-resolution-v4.1"
-$ExpectedMcpToolCount = 14
+$ExpectedMcpVersion = "1.1.0"
+$ExpectedMcpContractVersion = "learning-content-v7.0"
+$ExpectedMcpToolCount = 33
 $HubPyproject = Join-Path $HubRoot "pyproject.toml"
 $McpUrl = "http://${HostName}:${McpPort}/mcp"
 $McpHealthUrl = "http://${HostName}:${McpPort}/health"

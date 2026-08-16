@@ -43,13 +43,13 @@ Secure MCP Tunnel。正式單一托盤架構則由 MCP Control Center 呼叫同�
 本機 MCP URL：
 
 ```text
-http://127.0.0.1:8787/mcp
+http://127.0.0.1:18787/mcp
 ```
 
 健康檢查 URL：
 
 ```text
-http://127.0.0.1:8787/health
+http://127.0.0.1:18787/health
 ```
 
 ## 3. 啟動 OpenAI Secure MCP Tunnel
@@ -126,7 +126,7 @@ ChatGPT 不能直接連到你電腦上的 `127.0.0.1`。請使用 OpenAI Secure 
 
 建議流程：
 
-1. 保持這個 server 只綁定 `127.0.0.1:8787`。
+1. 保持這個 server 只綁定 `127.0.0.1:18787`。
 2. 保持 `npm run tunnel:run` 或托盤的 tunnel daemon 正在執行。
 3. 在 ChatGPT 的 connector 設定中建立 custom connector / MCP connector。
 4. 連線方式選 `Tunnel` / `通道`，不要選 `伺服器 URL`。
@@ -139,7 +139,7 @@ tunnel_<your-id>
 6. tunnel 的本機 MCP target 是：
 
 ```text
-http://127.0.0.1:8787/mcp
+http://127.0.0.1:18787/mcp
 ```
 
 7. 驗證方式若可選，使用 tunnel 預設流程；不要把私人 workspace MCP endpoint 無驗證公開成 `伺服器 URL`。
