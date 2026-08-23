@@ -10,6 +10,10 @@ Codex Bridge is an `approval-sensitive`, tunnel-enabled
 - `scripts/component-runtime.psm1` is the stable New Component Kit facade.
 - `scripts/codex-bridge-runtime.psm1` implements exact process ownership.
 - The controller owns only the Bridge HTTP server and Secure MCP Tunnel.
+- After reboot, Windows can reuse a persisted PID for an unrelated process. If
+  the role's expected port has no listener, the controller removes only its own
+  stale PID and owner-metadata files and leaves that process untouched. Any
+  listener on the expected port still fails closed as `OwnershipMismatch`.
 - It never reads the job store, project allowlist contents, requests, messages,
   diffs, results, project paths or approval details.
 - It has no job dispatch, turn, steering, cancellation or approval-decision API.
