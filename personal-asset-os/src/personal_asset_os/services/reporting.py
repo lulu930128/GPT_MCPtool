@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 from typing import cast
 
@@ -26,6 +26,12 @@ from personal_asset_os.models import (
     Posting,
     Snapshot,
 )
+from personal_asset_os.services.broker_read import BrokerReadResult
+from personal_asset_os.services.dashboard_review import (
+    build_dashboard_review,
+    calendar_month_start,
+)
+from personal_asset_os.services.fx_rates import FxRateProvider
 from personal_asset_os.services.ledger import (
     MONEY_QUANT,
     ZERO,
@@ -33,7 +39,8 @@ from personal_asset_os.services.ledger import (
     money,
     require_account,
 )
-from personal_asset_os.services.portfolio import portfolio
+from personal_asset_os.services.portfolio import portfolio_read_model
+from personal_asset_os.services.reporting_annotations import metadata_by_transaction
 from personal_asset_os.temporal import ensure_utc, utc_now
 
 CALCULATION_VERSION = "net-worth-v1"
@@ -123,7 +130,16 @@ def _monthly_flow(
     return -normalized if kind is AccountKind.INCOME else normalized
 
 
-def dashboard(session: Session, *, as_of: datetime | None = None) -> dict[str, object]:
+def dashboard(
+    session: Session,
+    *,
+    as_of: datetime | None = None,
+    broker_read: BrokerReadResult | None = None,
+    broker_investment_account_id: str | None = None,
+    broker_us_investment_account_id: str | None = None,
+    fx_provider: FxRateProvider | None = None,
+    reporting_timezone: str = "Asia/Taipei",
+) -> dict[str, object]:
     cutoff = ensure_utc(as_of or utc_now())
     accounts = list(session.scalars(select(Account).order_by(Account.is_system, Account.name)))
     account_rows: list[dict[str, object]] = []
@@ -156,17 +172,50 @@ def dashboard(session: Session, *, as_of: datetime | None = None) -> dict[str, o
             }
         )
 
-    positions = portfolio(session, as_of=cutoff)
+    portfolio_view = portfolio_read_model(
+        session,
+        broker_read=broker_read,
+        broker_investment_account_id=broker_investment_account_id,
+        broker_us_investment_account_id=broker_us_investment_account_id,
+        fx_provider=fx_provider,
+        as_of=cutoff,
+    )
+    positions = portfolio_view.positions
     valued_market = sum(
-        (value for item in positions if (value := item["market_value"]) is not None),
+        (
+            value
+            for item in positions
+            if item["valuation_included"] and (value := item["market_value"]) is not None
+        ),
         start=ZERO,
     )
     unpriced_cost = sum(
-        (item["cost_basis"] for item in positions if item["market_value"] is None), start=ZERO
+        (
+            cost
+            for item in positions
+            if item["valuation_included"]
+            and item["market_value"] is None
+            and (cost := item["cost_basis"]) is not None
+        ),
+        start=ZERO,
     )
-    missing_count = sum(1 for item in positions if item["valuation_status"] == "missing")
-    stale_count = sum(1 for item in positions if item["valuation_status"] == "stale")
-    price_times = [price_at for item in positions if (price_at := item["price_at"]) is not None]
+    missing_count = sum(
+        1
+        for item in positions
+        if item["valuation_status"] == "missing"
+        and (item["valuation_included"] or item["position_source"] == "kgi_broker")
+    )
+    stale_count = sum(
+        1
+        for item in positions
+        if item["valuation_included"]
+        and item["valuation_status"] in {"stale", "broker_stale"}
+    )
+    price_times = [
+        price_at
+        for item in positions
+        if item["valuation_included"] and (price_at := item["price_at"]) is not None
+    ]
     provisional_net_worth = non_investment_assets + valued_market + unpriced_cost - debt
     known_net_worth = non_investment_assets + valued_market - debt
     reserve = reserved_cash(session)
@@ -213,7 +262,7 @@ def dashboard(session: Session, *, as_of: datetime | None = None) -> dict[str, o
             }
         )
 
-    start = datetime(cutoff.year, cutoff.month, 1, tzinfo=UTC)
+    start = calendar_month_start(cutoff, 1, reporting_timezone)
     pending_count = int(
         session.scalar(
             select(func.count())
@@ -240,7 +289,7 @@ def dashboard(session: Session, *, as_of: datetime | None = None) -> dict[str, o
         )
         or ZERO
     )
-    warnings: list[str] = []
+    warnings = list(portfolio_view.warnings)
     if missing_count:
         warnings.append(f"{missing_count} 個投資部位缺少價格，淨資產包含成本替代值")
     if stale_count:
@@ -252,17 +301,39 @@ def dashboard(session: Session, *, as_of: datetime | None = None) -> dict[str, o
     if not accounts or all(account.is_system for account in accounts):
         warnings.append("尚未建立個人帳戶，請先新增帳戶與期初餘額")
 
-    recent_transactions = []
-    for transaction in session.scalars(
+    review, review_warnings = build_dashboard_review(
+        session,
+        as_of=cutoff,
+        non_investment_assets=non_investment_assets,
+        investment_market_value=valued_market,
+        unpriced_investment_cost=unpriced_cost,
+        debt=debt,
+        positions=positions,
+        reporting_timezone=reporting_timezone,
+    )
+    warnings.extend(review_warnings)
+
+    recent_transaction_rows = list(
+        session.scalars(
         select(LedgerTransaction)
         .order_by(LedgerTransaction.occurred_at.desc(), LedgerTransaction.recorded_at.desc())
         .limit(12)
-    ):
+        )
+    )
+    recent_metadata = metadata_by_transaction(
+        session, {transaction.id for transaction in recent_transaction_rows}
+    )
+    recent_transactions = []
+    for transaction in recent_transaction_rows:
+        metadata = recent_metadata.get(transaction.id)
         recent_transactions.append(
             {
                 "id": transaction.id,
                 "occurred_at": transaction.occurred_at,
                 "description": transaction.description,
+                "category": metadata.category if metadata else None,
+                "note": metadata.note if metadata else None,
+                "category_source": metadata.category_source if metadata else None,
                 "source": transaction.source,
                 "status": transaction.status.value,
                 "reversal_of_id": transaction.reversal_of_id,
@@ -270,20 +341,31 @@ def dashboard(session: Session, *, as_of: datetime | None = None) -> dict[str, o
         )
 
     not_initialized = not accounts or all(account.is_system for account in accounts)
+    broker = portfolio_view.broker
+    broker_reconciliation_count = sum(
+        int(cast(int, broker[key]))
+        for key in (
+            "quantity_mismatch_count",
+            "broker_only_count",
+            "unmapped_count",
+            "ledger_only_count",
+        )
+    )
+    broker_degraded = broker["status"] in {"unavailable", "stale", "partial"}
     quality_flags = sum(
         [
             bool(missing_count or pending_count or needs_review_count),
-            bool(stale_count),
-            bool(unresolved_count),
+            bool(stale_count or broker_degraded),
+            bool(unresolved_count or broker_reconciliation_count),
         ]
     )
     if not_initialized:
         quality = "not_initialized"
     elif quality_flags > 1:
         quality = "mixed"
-    elif unresolved_count:
+    elif unresolved_count or broker_reconciliation_count:
         quality = "unreconciled"
-    elif stale_count:
+    elif stale_count or broker_degraded:
         quality = "stale"
     elif missing_count or pending_count or needs_review_count:
         quality = "partial"
@@ -308,6 +390,9 @@ def dashboard(session: Session, *, as_of: datetime | None = None) -> dict[str, o
             "available_cash": available_cash,
             "investment_book_value": investment_book_value,
             "investment_market_value": valued_market,
+            "broker_market_value": broker["market_value"],
+            "broker_position_count": broker["position_count"],
+            "broker_unreconciled_count": broker_reconciliation_count,
             "unpriced_investment_cost": unpriced_cost,
             "monthly_income": _monthly_flow(
                 session, kind=AccountKind.INCOME, start=start, end=cutoff
@@ -326,6 +411,8 @@ def dashboard(session: Session, *, as_of: datetime | None = None) -> dict[str, o
             "policy": "manual prices older than 7 calendar days are marked stale",
         },
         "warnings": warnings,
+        "review": review,
+        "broker": broker,
         "accounts": account_rows,
         "positions": positions,
         "reconciliations": reconciliation_rows,

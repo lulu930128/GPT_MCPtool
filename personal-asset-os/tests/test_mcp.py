@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 
 import pytest
 from mcp import Client
@@ -10,10 +11,12 @@ from personal_asset_os.database import Database
 from personal_asset_os.mcp_server import create_mcp_server
 from personal_asset_os.models import AuditLog, FinancialEvent, LedgerTransaction
 from personal_asset_os.settings import Settings
+from tests.broker_helpers import FakeBrokerReader, broker_result
 
 
 def test_mcp_exposes_only_read_only_tools(database: Database, settings: Settings) -> None:
-    server = create_mcp_server(database, settings)
+    reader = FakeBrokerReader(broker_result(as_of=datetime(2026, 8, 20, 2, 0, tzinfo=UTC)))
+    server = create_mcp_server(database, settings, reader)
 
     async def exercise() -> None:
         async with Client(server, raise_exceptions=True) as client:
@@ -43,6 +46,8 @@ def test_mcp_exposes_only_read_only_tools(database: Database, settings: Settings
             assert result.is_error is False
             assert result.structured_content is not None
             assert result.structured_content["base_currency"] == "TWD"
+            assert result.structured_content["broker"]["status"] == "complete"
+            assert result.structured_content["metrics"]["investment_market_value"] == "12000.000000"
             with database.session() as session:
                 after = (
                     int(session.scalar(transaction_count) or 0),
@@ -50,6 +55,12 @@ def test_mcp_exposes_only_read_only_tools(database: Database, settings: Settings
                     int(session.scalar(audit_count) or 0),
                 )
             assert after == before
+
+            positions = await client.call_tool("list_asset_positions", {})
+            assert positions.is_error is False
+            assert positions.structured_content is not None
+            assert positions.structured_content["broker"]["status"] == "complete"
+            assert positions.structured_content["positions"][0]["position_source"] == "kgi_broker"
 
             pending = await client.call_tool("get_pending_financial_events", {"limit": 10})
             assert pending.is_error is False

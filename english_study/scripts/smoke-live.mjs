@@ -2,14 +2,17 @@ import { randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
-const url = process.env.ESTUDY_MCP_URL || "http://127.0.0.1:8830/mcp";
+const url = process.env.ESTUDY_MCP_URL || "http://127.0.0.1:18886/mcp";
 const allowWrite = process.env.ESTUDY_ALLOW_TEST_WRITE === "1";
-const client = new Client({ name: "english-study-live-smoke", version: "0.2.0" });
+const client = new Client({ name: "english-study-live-smoke", version: "0.3.0" });
 const transport = new StreamableHTTPClientTransport(new URL(url));
 try {
   await client.connect(transport);
   const listed = await client.listTools();
-  if (listed.tools.length !== 12) throw new Error(`Expected 12 tools, received ${listed.tools.length}.`);
+  if (listed.tools.length !== 15) throw new Error(`Expected 15 tools, received ${listed.tools.length}.`);
+  for (const required of ["english_search_reference_entries", "english_get_reference_entry", "english_preview_item_enrichment"]) {
+    if (!listed.tools.some((tool) => tool.name === required)) throw new Error(`Missing Reference Catalog tool: ${required}`);
+  }
   const summary = await client.callTool({ name: "english_get_summary", arguments: {} });
   if (summary.isError || summary.structuredContent?.ok !== true) throw new Error("Summary call failed.");
   const result = { ok: true, toolCount: listed.tools.length, summary: summary.structuredContent };

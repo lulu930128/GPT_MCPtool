@@ -41,6 +41,12 @@
       "path": "personal-asset-os\\vendor\\tunnel-client\\tunnel-client.exe",
       "source": "component_local",
       "override": "TunnelClientPath"
+    },
+    {
+      "id": "english_study",
+      "path": "english_study\\vendor\\tunnel-client\\tunnel-client.exe",
+      "source": "component_local",
+      "override": "TunnelClientPath"
     }
   ]
 }

@@ -73,14 +73,17 @@ export default function EventDetailScreen() {
         </View>
         <Text style={styles.successTitle}>已安全保存</Text>
         <Text style={[typeStyles.body, styles.successCopy]}>
-          這筆記錄已寫入手機 SQLite；等配對完成後，才會經加密通道交給桌面驗證。
+          這筆記錄已寫入手機 SQLite；等你手動同步後，才會經 USB 通道交給桌面驗證。
         </Text>
       </View>
 
       <PaperCard style={styles.detailCard}>
         <DetailRow icon="swap-vertical" label="類型" value={event.eventKind === 'expense' ? '支出' : '收入'} />
         <DetailRow icon="cash" label="金額" value={formatTwd(event.amount)} />
-        <DetailRow icon="pencil-outline" label="描述" value={event.description} />
+        <DetailRow icon="shape-outline" label="分類" value={event.categoryHint || '舊版未分類'} />
+        {event.description ? (
+          <DetailRow icon="pencil-outline" label="描述" value={event.description} />
+        ) : null}
         <DetailRow icon="clock-outline" label="時間" value={happenedAt} />
         <DetailRow icon="wallet-outline" label="帳戶" value="尚未選擇" />
         <View style={styles.statusRow}>

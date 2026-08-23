@@ -53,6 +53,35 @@ test("resolveWorkspacePath rejects denied secret-like files", async () => {
   await assert.rejects(() => resolveWorkspacePath(config, ".env", "file"), /denied file name/);
 });
 
+test("resolveWorkspacePath rejects Codex credentials and runtime identity files", async () => {
+  const config = await makeFixture();
+  const deniedNames = [
+    "auth.json",
+    "cap_sid",
+    "installation_id",
+    "session_index.jsonl",
+    "transcription-history.jsonl",
+    ".codex-global-state.json",
+    ".codex-global-state.json.bak",
+  ];
+
+  for (const name of deniedNames) {
+    await fs.writeFile(path.join(config.root, name), "sensitive", "utf8");
+    await assert.rejects(
+      () => resolveWorkspacePath(config, name, "file"),
+      /denied file name/,
+      name,
+    );
+  }
+
+  const tempState = "..codex-global-state.json.tmp-123";
+  await fs.writeFile(path.join(config.root, tempState), "sensitive", "utf8");
+  await assert.rejects(
+    () => resolveWorkspacePath(config, tempState, "file"),
+    /denied file name|outside the configured workspace root/,
+  );
+});
+
 test("resolveWorkspacePath rejects globally denied runtime secret directories", async () => {
   const config = await makeFixture();
   const secretsDir = path.join(config.root, ".secrets");

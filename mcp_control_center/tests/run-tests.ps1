@@ -26,6 +26,9 @@ function Assert-Throws([scriptblock]$Action, [string]$Message) {
     $script:Passed += 1
 }
 
+$captureRegression = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "test-controller-capture.ps1")) | ConvertFrom-Json
+Assert-True ($LASTEXITCODE -eq 0 -and $captureRegression.ok) "controller capture regression passes"
+
 function Copy-JsonDocument($Value) {
     return (($Value | ConvertTo-Json -Depth 30) | ConvertFrom-Json)
 }
@@ -135,15 +138,24 @@ $registryManifest = Read-McpCcManifest
 Assert-Equal $registryManifest.schemaVersion 3 "default control-center registry uses schema version 3"
 Assert-True ((Get-McpCcDefaultManifestPath).EndsWith("mcp_control_center\config\registry.json", [StringComparison]::OrdinalIgnoreCase)) "default loader selects registry v3"
 Assert-Equal $registryManifest.registeredCount 7 "registry v3 has seven registered components"
-Assert-Equal $registryManifest.enabledCount 6 "registry v3 keeps the established six components enabled"
-Assert-Equal (@($registryManifest.components.id) -join ",") (@($manifest.components.id) -join ",") "registry v3 preserves the legacy component order"
-Assert-True (@($registryManifest.components | Where-Object { $_.runtimeMode -eq "component-controller" }).Count -eq 6) "registry v3 activates all six migrated component controllers"
+Assert-Equal $registryManifest.enabledCount 7 "registry v3 enables all seven production components"
+$expectedActiveIds = @($manifest.components.id) + "english_study"
+Assert-Equal (@($registryManifest.components.id) -join ",") ($expectedActiveIds -join ",") "registry v3 preserves legacy order and appends English Study"
+Assert-True (@($registryManifest.components | Where-Object { $_.runtimeMode -eq "component-controller" }).Count -eq 7) "registry v3 activates all seven component controllers"
 Assert-True (@($registryManifest.components | Where-Object { $_.runtimeMode -eq "legacy-tray" }).Count -eq 0) "registry v3 no longer requires a component legacy tray"
 $registeredEnglish = @($registryManifest.registeredComponents | Where-Object { $_.id -eq "english_study" })[0]
-Assert-True ($null -ne $registeredEnglish) "English Study remains visible to registry validation while disabled"
-Assert-True (-not $registeredEnglish.enabled -and -not $registeredEnglish.autoStart) "English Study registration is fail-closed by default"
+Assert-True ($null -ne $registeredEnglish) "English Study remains visible to registry validation"
+Assert-True ($registeredEnglish.enabled -and $registeredEnglish.autoStart) "English Study is adopted into the production startup chain"
 Assert-Equal $registeredEnglish.startupOrder 70 "English Study registration follows the established components"
-Assert-Equal $registeredEnglish.runtimeMode "component-controller" "English Study registers its component-owned lifecycle without activation"
+Assert-Equal $registeredEnglish.runtimeMode "component-controller" "English Study activates its component-owned lifecycle"
+Assert-Equal (@($registeredEnglish.capabilities) -join ",") "ensure_running,repair_connectivity,restart_core,reload_runtime,shutdown_runtime,show_diagnostic_tray" "English Study exposes only its bounded lifecycle capabilities"
+$registryEnglishTunnel = @($registeredEnglish.probes | Where-Object { $_.id -eq "tunnel" })[0]
+$registryEnglishHub = @($registeredEnglish.probes | Where-Object { $_.id -eq "hub" })[0]
+$registryEnglishMcp = @($registeredEnglish.probes | Where-Object { $_.id -eq "mcp" })[0]
+Assert-Equal $registryEnglishHub.port 18887 "English Study Hub uses a reboot-stable fixed port"
+Assert-Equal $registryEnglishMcp.port 18886 "English Study MCP uses a reboot-stable fixed port"
+Assert-Equal $registryEnglishTunnel.port 18888 "English Study tunnel uses a reboot-stable fixed port"
+Assert-Equal (@($registeredEnglish.traits) -join ",") "tunnel,multi-core,credential-sensitive,primary-ui,diagnostic-ui" "English Study declares its tunnel, credential, and primary UI boundary"
 foreach ($legacyDefinition in @($manifest.components)) {
     $registryDefinition = @($registryManifest.components | Where-Object { $_.id -eq $legacyDefinition.id })[0]
     Assert-Equal $registryDefinition.displayName $legacyDefinition.displayName "registry v3 preserves display name for $($legacyDefinition.id)"
@@ -178,6 +190,9 @@ Assert-Equal (@($registryJapanese.traits) -join ",") "tunnel,multi-core,credenti
 Assert-Equal $registryJapanese.ui.primaryLauncher.path "scripts\start-japanese-study-desktop.vbs" "Japanese Study keeps a component-owned primary UI launcher"
 $registryJapaneseHub = @($registryJapanese.probes | Where-Object { $_.id -eq "hub" })[0]
 Assert-True ($registryJapaneseHub.resolvedOwnerManagedPidFile.EndsWith("japanese_study\.tmp\japanese-study-hub-runner.pid", [StringComparison]::OrdinalIgnoreCase)) "Japanese Study Hub uses its component-owned runner PID file"
+$registryEnglish = @($registryManifest.components | Where-Object { $_.id -eq "english_study" })[0]
+Assert-Equal (@($registryEnglish.traits) -join ",") "tunnel,multi-core,credential-sensitive,primary-ui,diagnostic-ui" "English Study retains its ordered multi-core, credential-sensitive and primary-UI differences"
+Assert-Equal $registryEnglish.ui.primaryLauncher.path "scripts\start-english-study-desktop.vbs" "English Study keeps a component-owned primary UI launcher"
 $registryOmi = @($registryManifest.components | Where-Object { $_.id -eq "omi_search" })[0]
 Assert-True ("omi_api_base_url" -notin @($registryOmi.probes.summaryFields)) "OMI descriptor does not expose an upstream URL in public summaries"
 Assert-Equal $registryOmi.runtimeMode "component-controller" "OMI Search descriptor activates the v3 controller"
@@ -202,7 +217,7 @@ $registryPaosCore = @($registryPaos.probes | Where-Object { $_.id -eq "app" })[0
 Assert-True ($registryPaosCore.resolvedOwnerManagedPidFile.EndsWith("personal-asset-os\.tmp\personal-asset-os-server.pid", [StringComparison]::OrdinalIgnoreCase)) "Personal Asset OS uses its component-owned runner PID file"
 Assert-True ("dataDir" -notin @($registryPaos.probes.summaryFields)) "Personal Asset OS public summaries omit the formal data path"
 $productionPorts = @($registryManifest.components | ForEach-Object { @($_.probes) } | ForEach-Object { [int]$_.port } | Sort-Object -Unique)
-Assert-Equal ($productionPorts -join ",") "18765,18787,18788,18790,18791,18792,18797,18799,18800,18818,18828,18829,18876,18877" "production fixed ports use the reboot-stable high-port cohort"
+Assert-Equal ($productionPorts -join ",") "18765,18787,18788,18790,18791,18792,18797,18799,18800,18818,18828,18829,18876,18877,18886,18887,18888" "production fixed ports use the reboot-stable high-port cohort"
 foreach ($productionPort in $productionPorts) {
     $assessment = Test-McpCcPortAgainstPolicy -Port $productionPort -HostName "127.0.0.1" -Policy $fixturePortPolicy
     Assert-True ($assessment.known -and $assessment.safe) "production port $productionPort stays outside the fixed-service exclusion policy"
@@ -213,7 +228,8 @@ $expectedComponentMenus = [ordered]@{
     japanese_study = "copy_mcp_url,copy_health_url,copy_tunnel_id,open_mcp_health,open_tunnel_ui,open_runtime_logs,open_study_browser,open_hub_health,save_tunnel_key,show_key_status"
     memory_core = "copy_mcp_url,copy_health_url,copy_tunnel_id,open_mcp_health,open_tunnel_ui,open_runtime_logs,open_control_center,open_backend_api_docs,replace_runtime_tunnel_key,show_key_status"
     codex_bridge = "copy_mcp_url,copy_health_url,copy_tunnel_id,open_mcp_health,open_tunnel_ui,open_runtime_logs,open_jobs_folder"
-    personal_asset_os = "copy_mcp_url,copy_health_url,copy_tunnel_id,open_mcp_health,open_tunnel_ui,open_runtime_logs,open_dashboard,quick_capture,create_verified_backup,copy_app_url,open_data_folder,open_backup_folder"
+    personal_asset_os = "copy_mcp_url,copy_health_url,copy_tunnel_id,open_mcp_health,open_tunnel_ui,open_runtime_logs,open_dashboard,create_verified_backup,copy_app_url,open_data_folder,open_backup_folder"
+    english_study = "copy_mcp_url,copy_health_url,copy_tunnel_id,open_mcp_health,open_tunnel_ui,open_runtime_logs,open_study_browser,open_hub_health,save_tunnel_key,show_key_status"
 }
 foreach ($componentId in $expectedComponentMenus.Keys) {
     $definition = @($registryManifest.components | Where-Object { $_.id -eq $componentId })[0]
@@ -228,6 +244,7 @@ $expectedDailyMenus = [ordered]@{
     memory_core = "restart_mcp,open_health,open_frontend"
     codex_bridge = "restart_mcp,open_health"
     personal_asset_os = "restart_mcp,open_health,open_frontend"
+    english_study = "restart_mcp,open_health,open_frontend"
 }
 foreach ($componentId in $expectedDailyMenus.Keys) {
     $definition = @($registryManifest.components | Where-Object { $_.id -eq $componentId })[0]
@@ -248,7 +265,19 @@ Assert-Equal $paosDailyModel.frontend.kind "loopback-url" "Personal Asset OS fro
 Assert-Equal $paosDailyModel.frontend.label "Open Dashboard" "Personal Asset OS daily frontend uses the product-facing dashboard label"
 Assert-Equal $paosDailyModel.frontend.target "http://127.0.0.1:18876/" "Personal Asset OS daily frontend preserves its descriptor target"
 Assert-Equal ([string]@($registryJapanese.ui.menuActions | Where-Object { $_.id -eq "open_study_browser" })[0].label) "Open Japanese Study browser" "Japanese Study exposes its desktop browser with an explicit label"
+Assert-Equal ([string]@($registryEnglish.ui.menuActions | Where-Object { $_.id -eq "open_study_browser" })[0].label) "Open English Study" "English Study exposes its desktop with the product-facing label"
 Assert-Equal ([string]@($registryMemory.ui.menuActions | Where-Object { $_.id -eq "open_control_center" })[0].label) "Open Memory Core viewer" "Memory Core identifies its viewer without colliding with the manager name"
+$japaneseUiSelfTest = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $registryJapanese.resolvedRoot "scripts\control-center-ui.ps1") -SelfTest | ConvertFrom-Json
+Assert-True $japaneseUiSelfTest.ok "Japanese Study component-owned UI dependencies are ready"
+Assert-Equal $japaneseUiSelfTest.desktopApiBaseUrl "http://127.0.0.1:18791" "Japanese Study desktop launcher targets the managed Hub port"
+$englishDailyModel = Get-McpCcTrayComponentModel -Component $registryEnglish
+Assert-Equal $englishDailyModel.frontend.kind "vbs" "English Study frontend uses its validated VBS launcher"
+Assert-True ($englishDailyModel.frontend.path.EndsWith("scripts\start-english-study-desktop.vbs", [StringComparison]::OrdinalIgnoreCase)) "English Study daily frontend keeps its exact launcher"
+$englishUiSource = Get-Content -LiteralPath (Join-Path $registryEnglish.resolvedRoot "scripts\control-center-ui.ps1") -Encoding UTF8 -Raw
+Assert-True ($englishUiSource.Contains('-m english_study_hub desktop') -and -not $englishUiSource.Contains('-m english_study_hub.cli desktop')) "English Study desktop action uses the package CLI entrypoint"
+$englishUiSelfTest = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $registryEnglish.resolvedRoot "scripts\control-center-ui.ps1") -SelfTest | ConvertFrom-Json
+Assert-True $englishUiSelfTest.ok "English Study component-owned UI dependencies are ready"
+Assert-Equal $englishUiSelfTest.desktopApiBaseUrl "http://127.0.0.1:18887" "English Study desktop launcher targets the managed Hub port"
 $projectUiPlan = Invoke-McpCcComponentUiAction -Manifest $registryManifest -ComponentId "project_reading" -ActionId "copy_mcp_url" -PlanOnly
 Assert-Equal ($projectUiPlan.arguments -join " ") "-Action copy_mcp_url" "component UI action arguments are fixed by the manager"
 Assert-True ($projectUiPlan.path.EndsWith("project_reading\scripts\control-center-ui.ps1", [StringComparison]::OrdinalIgnoreCase)) "component UI action resolves only inside the component root"
@@ -258,7 +287,7 @@ Assert-Equal $paosBackupAction.confirmation "required" "Personal Asset OS backup
 $registrySelfTest = Test-McpCcManifest -Manifest $registryManifest
 Assert-True $registrySelfTest.ok "registry v3 passes all seven registered component contracts"
 Assert-Equal $registrySelfTest.registeredCount 7 "registry self-test reports registered count"
-Assert-Equal $registrySelfTest.enabledCount 6 "registry self-test reports enabled count"
+Assert-Equal $registrySelfTest.enabledCount 7 "registry self-test reports enabled count"
 Assert-Equal $registrySelfTest.expectedComponentMenuContract "component-menu-v1" "registry self-test publishes the shared component menu contract"
 foreach ($schemaPath in @("registry-v3.schema.json", "component-descriptor-v1.schema.json")) {
     $null = Get-Content -LiteralPath (Join-Path $projectRoot "schemas\$schemaPath") -Encoding UTF8 -Raw | ConvertFrom-Json
@@ -301,7 +330,7 @@ $controllerAudit = Get-McpCcControllerAudit -Manifest $registryManifest -Runtime
     $status = if ([string]$Definition.id -eq "omi_search") { "OwnershipMismatch" } else { "Ready" }
     return [pscustomobject]@{ ok=$true; action="Status"; before=$null; after=[pscustomobject]@{ status=$status }; ownedPids=@(); elapsedMs=0; errorCode=$null; message="Status checked." }
 }
-Assert-Equal $controllerAudit.manageableCount 5 "controller audit counts components that remain safe to manage"
+Assert-Equal $controllerAudit.manageableCount 6 "controller audit counts components that remain safe to manage"
 Assert-Equal $controllerAudit.unmanageableCount 1 "controller audit rejects an ownership mismatch even when health probes may be ready"
 Assert-True (-not @($controllerAudit.entries | Where-Object { $_.component -eq "omi_search" })[0].manageable) "controller audit exposes the unmanageable component without domain payloads"
 
@@ -1311,13 +1340,13 @@ $inventoryHashBeforeSelfTest = (Get-FileHash -LiteralPath $inventoryPath -Algori
 $inventorySelfTest = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $inventoryScript -Action SelfTest | ConvertFrom-Json
 Assert-True ($LASTEXITCODE -eq 0 -and $inventorySelfTest.ok) "tunnel runtime inventory SelfTest passes"
 Assert-Equal $inventorySelfTest.contractVersion "tunnel-runtime-inventory-v1" "inventory exposes a versioned contract"
-Assert-Equal $inventorySelfTest.configuredComponentCount 6 "inventory covers six production components"
+Assert-Equal $inventorySelfTest.configuredComponentCount 7 "inventory covers seven production components"
 Assert-True ($inventorySelfTest.executesVersionOnly -and -not $inventorySelfTest.mutatesRuntime -and -not $inventorySelfTest.updatesBinary) "inventory SelfTest declares bounded read-only behavior"
 Assert-Equal (Get-FileHash -LiteralPath $inventoryPath -Algorithm SHA256).Hash $inventoryHashBeforeSelfTest "inventory SelfTest leaves configuration bytes unchanged"
 
 $inventoryConfig = Get-Content -LiteralPath $inventoryPath -Encoding UTF8 -Raw | ConvertFrom-Json
-Assert-Equal @($inventoryConfig.components).Count 6 "inventory configuration declares six entries"
-Assert-Equal @($inventoryConfig.components.id | Sort-Object -Unique).Count 6 "inventory component ids are unique"
+Assert-Equal @($inventoryConfig.components).Count 7 "inventory configuration declares seven entries"
+Assert-Equal @($inventoryConfig.components.id | Sort-Object -Unique).Count 7 "inventory component ids are unique"
 Assert-True (@($inventoryConfig.components | Where-Object { [string]$_.override -ne "TunnelClientPath" }).Count -eq 0) "every component keeps the explicit TunnelClientPath override"
 Assert-True (-not [IO.Path]::IsPathRooted([string]$inventoryConfig.sharedRuntime.path)) "shared runtime path remains workspace-relative"
 
@@ -1327,7 +1356,8 @@ $networkPolicySources = @(
     "japanese_study\scripts\japanese-study-runtime.psm1",
     "Memory Core\scripts\memory_core_stack.ps1",
     "codex_bridge\scripts\codex-bridge-runtime.psm1",
-    "personal-asset-os\scripts\personal-asset-os-runtime.psm1"
+    "personal-asset-os\scripts\personal-asset-os-runtime.psm1",
+    "english_study\scripts\component-runtime.psm1"
 )
 foreach ($relativeSourcePath in $networkPolicySources) {
     $sourcePath = Join-Path $workspaceRoot $relativeSourcePath

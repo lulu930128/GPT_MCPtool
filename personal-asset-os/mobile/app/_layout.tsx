@@ -6,6 +6,7 @@ import { Suspense } from 'react';
 import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 import 'react-native-reanimated';
 
+import { AutoSyncAgent } from '@/src/components/AutoSyncAgent';
 import { migrateDatabase, MOBILE_DATABASE_NAME } from '@/src/storage/database';
 import { palette, spacing, typeStyles } from '@/src/theme/tokens';
 
@@ -40,6 +41,7 @@ export default function RootLayout() {
           databaseName={MOBILE_DATABASE_NAME}
           onInit={migrateDatabase}
           useSuspense>
+          <AutoSyncAgent />
           <Stack screenOptions={{ contentStyle: { backgroundColor: palette.canvas } }}>
             <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
             <Stack.Screen name="event/[id]" options={{ headerShown: false }} />

@@ -8,22 +8,22 @@ Secure MCP Tunnel 故障，中樞仍可獨立檢查、記錄與協調啟動。
 與 `unified-lifecycle-v3` 是獨立契約版本，不因 application release 而重新編號。
 
 目前預設的 registry v3 已登錄七個元件，全部使用 `unified-lifecycle-v3`
-component controller，並由各元件自己持有 runtime ownership。既有六個正式元件維持 enabled、
-auto-start；English Study 第一版維持 disabled、非 auto-start。OMI backend 維持 external
+component controller，並由各元件自己持有 runtime ownership。七個正式元件都維持 enabled、
+auto-start；English Study 常駐 Hub、MCP 與元件自有 tunnel。OMI backend 維持 external
 dependency，不屬於 Control Center lifecycle ownership；Memory Core 與 Personal Asset OS
 的正式私人資料也不屬於 manager authority：
 
-- `autoStartServer=true`
-- `autoStartTunnel=true`
+- `autoStartCore=true`
+- 只有宣告 `tunnel` trait 的元件使用 `autoStartTunnel=true`
 - production Start 不取代既有 instance
 - replacement／restart 使用 component 自己的 exact-path lifecycle
 - legacy tray 的 `Exit` 維持完整停止；v3 diagnostic UI 的 `Exit` 只關閉 UI
 
 目前保留全部舊 component tray source、launcher、Startup／restore artifact 與
 `config/components.json` rollback manifest。中樞提供單一狀態與操作入口，但不隱藏或取代
-component-specific action，也不提供危險的 Stop All／kill-by-name。既有六個元件皆已完成
-controller 遷移、零重啟 live adoption 與 legacy tray closure；English Study 尚未進入 production
-adoption，舊 artifact 尚未刪除。
+component-specific action，也不提供危險的 Stop All／kill-by-name。七個元件皆已完成
+controller 遷移與 live adoption；既有六個元件另保留 legacy tray closure artifact，舊 artifact
+尚未刪除。
 
 中樞 source 同時支援 registry schema v3、舊 manifest schema v1／v2 與
 `unified-lifecycle-v3`。v3 採用
@@ -78,7 +78,7 @@ Automatic repair 遵循 [`Bounded Repair Policy`](docs/RepairPolicy.md)：只有
 
 ### Tunnel runtime inventory 與 child network policy
 
-[`Child Process Network Policy`](docs/ChildProcessNetworkPolicy.md) 定義六個 production component
+[`Child Process Network Policy`](docs/ChildProcessNetworkPolicy.md) 定義七個 production component
 共用的 loopback bypass 與 proxy 邊界。Controller 只在 child spawn 時清除 ambient proxy、設定
 `NO_PROXY=127.0.0.1,localhost`，完成後還原 parent environment；不修改 Windows 全域 proxy。
 

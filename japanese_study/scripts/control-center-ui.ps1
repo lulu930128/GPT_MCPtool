@@ -8,12 +8,13 @@ Set-StrictMode -Version 3.0
 $ErrorActionPreference = "Stop"
 $menuContract = "component-menu-v1"
 $supportedActions = @("copy_mcp_url", "copy_health_url", "copy_tunnel_id", "open_mcp_health", "open_tunnel_ui", "open_runtime_logs", "open_study_browser", "open_hub_health", "save_tunnel_key", "show_key_status")
+$desktopApiBaseUrl = "http://127.0.0.1:18791"
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $keyStorePath = Join-Path $PSScriptRoot "key-store.ps1"
 $desktopLauncher = Join-Path $PSScriptRoot "start-japanese-study-desktop.vbs"
 if ($SelfTest) {
     $dependenciesReady = (Test-Path -LiteralPath $keyStorePath -PathType Leaf) -and (Test-Path -LiteralPath $desktopLauncher -PathType Leaf)
-    [pscustomobject]@{ ok = $dependenciesReady; menuContract = $menuContract; actions = $supportedActions; managerDomainDataAccess = "none"; managerSecretAccess = "none" } | ConvertTo-Json -Depth 4
+    [pscustomobject]@{ ok = $dependenciesReady; menuContract = $menuContract; actions = $supportedActions; desktopApiBaseUrl = $desktopApiBaseUrl; managerDomainDataAccess = "none"; managerSecretAccess = "none" } | ConvertTo-Json -Depth 4
     exit $(if ($dependenciesReady) { 0 } else { 1 })
 }
 $mcpUrl = "http://127.0.0.1:18790/mcp"
@@ -85,7 +86,14 @@ try {
             $hubRoot = if ([string]::IsNullOrWhiteSpace([string]$env:JSTUDY_HUB_ROOT)) { "C:\project\japanese-study-hub" } else { [string]$env:JSTUDY_HUB_ROOT }
             $pythonwPath = Join-Path $hubRoot ".venv\Scripts\pythonw.exe"
             if (-not (Test-Path -LiteralPath $pythonwPath -PathType Leaf)) { throw "Japanese Study Hub desktop runtime is not installed." }
-            Start-Process -FilePath $pythonwPath -ArgumentList "-m japanese_study_hub.cli desktop" -WorkingDirectory $hubRoot | Out-Null
+            $previousApiBaseUrl = [Environment]::GetEnvironmentVariable("JSTUDY_API_BASE_URL", "Process")
+            try {
+                [Environment]::SetEnvironmentVariable("JSTUDY_API_BASE_URL", $desktopApiBaseUrl, "Process")
+                Start-Process -FilePath $pythonwPath -ArgumentList "-m japanese_study_hub.cli desktop" -WorkingDirectory $hubRoot | Out-Null
+            }
+            finally {
+                [Environment]::SetEnvironmentVariable("JSTUDY_API_BASE_URL", $previousApiBaseUrl, "Process")
+            }
         }
         "open_hub_health" { Start-Process $hubHealthUrl | Out-Null }
         "save_tunnel_key" { $null = Save-TunnelKey }

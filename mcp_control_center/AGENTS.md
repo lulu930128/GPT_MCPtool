@@ -12,7 +12,7 @@
 - controller action 必須在 bounded timeout 內回傳完整 JSON contract；manager capture 必須限制大小、清除暫存輸出，且不得把 stderr 或未驗證 output 寫入 event。
 - 自動 reconciliation 只能執行既有非破壞性 Start。Restart 必須由使用者明確觸發並委派給元件既有 exact-path script。
 - 不提供 Stop All、kill-by-name、任意 command、任意 URL 或 domain write action。
-- 既有六個 enabled 元件採 `autoStart=true`；English Study 維持 disabled、`autoStart=false`。對 enabled 元件，server、已配置的外部 API 能力與 tunnel 視為同一條
+- 七個 enabled 元件都採 `autoStart=true`。對 enabled 元件，server、已配置的外部 API 能力與 tunnel 視為同一條
   production startup chain。中樞只能啟動既有 runtime，不得因此背景呼叫外部 API、
   傳送 tool payload／財務資料或消耗模型 quota。
 

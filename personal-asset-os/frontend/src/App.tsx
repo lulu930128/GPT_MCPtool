@@ -2,9 +2,6 @@ import {
   Badge,
   Button,
   FluentProvider,
-  MessageBar,
-  MessageBarBody,
-  MessageBarTitle,
   Tab,
   TabList,
   Title1,
@@ -14,19 +11,18 @@ import {
 import { DarkTheme24Regular, WeatherSunny24Regular } from "@fluentui/react-icons";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError } from "./api";
-import { AccountsView } from "./components/AccountsView";
+import { AssetTrendChart } from "./components/AssetTrendChart";
 import { CloseView } from "./components/CloseView";
+import { DataStatusPanel } from "./components/DataStatusPanel";
 import { DashboardView } from "./components/DashboardView";
-import { InvestmentsView } from "./components/InvestmentsView";
 import { LoadingState, ReloadButton } from "./components/Common";
 import { PendingEventsView } from "./components/PendingEventsView";
-import { QuickCapture } from "./components/QuickCapture";
 import { TransactionsView } from "./components/TransactionsView";
 import { qualityLabel } from "./format";
-import type { Account, Dashboard, FinancialEvent, Instrument, Snapshot } from "./types";
+import type { Account, Dashboard, DashboardHistory, DashboardHistoryRange, FinancialEvent, MobileUsbTransportStatus, Snapshot } from "./types";
 import "./styles.css";
 
-type View = "dashboard" | "pending" | "accounts" | "transactions" | "investments" | "close";
+type View = "dashboard" | "pending" | "transactions" | "close";
 
 function initialView(): View {
   return new URLSearchParams(window.location.search).get("view") === "pending"
@@ -39,33 +35,75 @@ function qualityColor(quality: string | undefined): "success" | "warning" | "inf
   return quality === "complete" || quality === "complete_manual" ? "success" : "warning";
 }
 
+function mobileTransportWarning(status: MobileUsbTransportStatus | null): string[] {
+  if (!status?.enabled || status.ready) return [];
+  return [`mobile_usb_bridge:${status.status}`];
+}
+
 export default function App() {
   const [view, setView] = useState<View>(initialView);
   const [dark, setDark] = useState(() => window.matchMedia("(prefers-color-scheme: dark)").matches);
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
+  const [history, setHistory] = useState<DashboardHistory | null>(null);
+  const [historyRange, setHistoryRange] = useState<DashboardHistoryRange>("1m");
   const [accounts, setAccounts] = useState<Account[]>([]);
-  const [instruments, setInstruments] = useState<Instrument[]>([]);
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
   const [financialEvents, setFinancialEvents] = useState<FinancialEvent[]>([]);
+  const [mobileTransport, setMobileTransport] = useState<MobileUsbTransportStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  const [historyLoading, setHistoryLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const loadedOnce = useRef(false);
+  const historyRangeRef = useRef<DashboardHistoryRange>("1m");
+
+  const loadHistory = useCallback(async (range: DashboardHistoryRange) => {
+    setHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      setHistory(await api.dashboardHistory(range));
+    } catch (caught) {
+      setHistoryError(caught instanceof Error ? caught.message : "無法讀取資產歷史");
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, []);
 
   const reload = useCallback(async () => {
     if (!loadedOnce.current) setLoading(true);
+    setHistoryLoading(true);
     setError(null);
+    setHistoryError(null);
     try {
-      const [nextDashboard, nextAccounts, nextInstruments, nextSnapshots, nextEvents] = await Promise.all([api.dashboard(), api.accounts(), api.instruments(), api.snapshots(), api.financialEvents()]);
-      setDashboard(nextDashboard); setAccounts(nextAccounts); setInstruments(nextInstruments); setSnapshots(nextSnapshots); setFinancialEvents(nextEvents);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "無法讀取資產資料");
+      const [coreResult, historyResult] = await Promise.allSettled([
+        Promise.all([api.dashboard(), api.accounts(), api.snapshots(), api.financialEvents(), api.mobileTransport()]),
+        api.dashboardHistory(historyRangeRef.current),
+      ]);
+      if (coreResult.status === "fulfilled") {
+        const [nextDashboard, nextAccounts, nextSnapshots, nextEvents, nextMobileTransport] = coreResult.value;
+        setDashboard(nextDashboard); setAccounts(nextAccounts); setSnapshots(nextSnapshots); setFinancialEvents(nextEvents); setMobileTransport(nextMobileTransport);
+      } else {
+        setError(coreResult.reason instanceof Error ? coreResult.reason.message : "無法讀取資產資料");
+      }
+      if (historyResult.status === "fulfilled") {
+        setHistory(historyResult.value);
+      } else {
+        setHistoryError(historyResult.reason instanceof Error ? historyResult.reason.message : "無法讀取資產歷史");
+      }
     } finally {
       loadedOnce.current = true;
       setLoading(false);
+      setHistoryLoading(false);
     }
   }, []);
+
+  function changeHistoryRange(range: DashboardHistoryRange) {
+    historyRangeRef.current = range;
+    setHistoryRange(range);
+    void loadHistory(range);
+  }
 
   useEffect(() => {
     const timer = window.setTimeout(() => void reload(), 0);
@@ -89,17 +127,20 @@ export default function App() {
         <div className="header-actions"><ReloadButton onClick={() => void reload()} disabled={loading || busy} /><Button appearance="subtle" icon={dark ? <WeatherSunny24Regular /> : <DarkTheme24Regular />} onClick={() => setDark((value) => !value)} aria-label="切換明暗主題">{dark ? "淺色" : "深色"}</Button></div>
       </header>
       <nav className="app-nav" aria-label="主要功能"><TabList selectedValue={view} onTabSelect={(_, data) => setView(data.value as View)}>
-        <Tab value="dashboard">總覽</Tab><Tab value="pending">待處理（{financialEvents.length}）</Tab><Tab value="accounts">帳戶</Tab><Tab value="transactions">交易</Tab><Tab value="investments">投資</Tab><Tab value="close">對帳與月結</Tab>
+        <Tab value="dashboard">總覽</Tab><Tab value="pending">待處理（{financialEvents.length}）</Tab><Tab value="transactions">交易</Tab><Tab value="close">對帳與月結</Tab>
       </TabList></nav>
       <main className="app-main" aria-busy={loading || busy}>
-        {error ? <MessageBar intent="error"><MessageBarBody><MessageBarTitle>操作未完成</MessageBarTitle>{error}</MessageBarBody></MessageBar> : null}
-        {success ? <MessageBar intent="success"><MessageBarBody><MessageBarTitle>完成</MessageBarTitle>{success}</MessageBarBody></MessageBar> : null}
+        <DataStatusPanel
+          warnings={[...(dashboard?.warnings ?? []), ...mobileTransportWarning(mobileTransport), ...(historyError ? [`資產歷史：${historyError}`] : [])]}
+          error={error}
+          success={success}
+          loading={loading || busy}
+          onRefresh={() => void reload()}
+        />
         {loading || !dashboard ? <LoadingState /> : <>
-          {view === "dashboard" ? <div className="view-stack"><QuickCapture accounts={accounts} onChanged={reload} /><DashboardView dashboard={dashboard} /></div> : null}
+          {view === "dashboard" ? <DashboardView dashboard={dashboard} trend={<AssetTrendChart history={history} range={historyRange} loading={historyLoading} unavailable={Boolean(historyError)} onRangeChange={changeHistoryRange} />} /> : null}
           {view === "pending" ? <PendingEventsView events={financialEvents} accounts={accounts} onChanged={reload} /> : null}
-          {view === "accounts" ? <AccountsView accounts={accounts} mutate={mutate} /> : null}
           {view === "transactions" ? <TransactionsView accounts={accounts} mutate={mutate} /> : null}
-          {view === "investments" ? <InvestmentsView accounts={accounts} instruments={instruments} positions={dashboard.positions} mutate={mutate} /> : null}
           {view === "close" ? <CloseView accounts={accounts} reconciliations={dashboard.reconciliations} snapshots={snapshots} reservedCash={dashboard.metrics.reserved_cash} mutate={mutate} /> : null}
         </>}
       </main>

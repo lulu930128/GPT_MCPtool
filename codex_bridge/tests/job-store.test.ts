@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -60,10 +60,49 @@ test("restart marks active jobs interrupted and expires live approvals", async (
   assert.equal(recovered?.approvals[0]?.state, "expired");
 });
 
+test("cancellation settles pending approvals and restart repairs stale terminal records", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-bridge-cancel-recovery-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const store = new JobStore(root);
+  await store.initialize();
+  const preview = previewWorkPackage({ projectId: "omi", title: "Cancel recovery", objective: "Close the old job." });
+  const created = await store.create({
+    project: { id: "omi", name: "OMI", path: join(root, "project") },
+    workPackage: preview.workPackage,
+    previewDigest: preview.previewDigest,
+    idempotencyKey: "cancel-recovery-key-123",
+  });
+  await store.addApproval(created.record.id, {
+    id: "66bfa71e-7740-40cc-a643-d6e86f15a5d1",
+    kind: "command",
+    state: "pending",
+    method: "item/commandExecution/requestApproval",
+    createdAt: new Date().toISOString(),
+    summary: { command: "npm test" },
+  });
+  const cancelled = await store.complete(created.record.id, {
+    status: "cancelled",
+    message: "Job cancelled by the operator.",
+    completedAt: new Date().toISOString(),
+  });
+  assert.equal(cancelled.approvals[0]?.state, "cancelled");
+
+  const manifestPath = join(root, created.record.id, "manifest.json");
+  const staleRecord = JSON.parse(await readFile(manifestPath, "utf8"));
+  staleRecord.approvals[0].state = "pending";
+  delete staleRecord.approvals[0].resolvedAt;
+  await writeFile(manifestPath, `${JSON.stringify(staleRecord, null, 2)}\n`, "utf8");
+
+  const restarted = new JobStore(root);
+  await restarted.initialize();
+  assert.equal(restarted.get(created.record.id)?.approvals[0]?.state, "cancelled");
+});
+
 test("job store materializes staged text and exposes bounded result artifacts", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "codex-bridge-artifacts-"));
   context.after(() => rm(root, { recursive: true, force: true }));
-  const store = new JobStore(root);
+  const handoffRoot = join(root, ".local", "codex-inbox");
+  const store = new JobStore(root, handoffRoot);
   await store.initialize();
   const artifactId = randomUUID();
   const content = "Validated engineering notes.\n";
@@ -91,6 +130,10 @@ test("job store materializes staged text and exposes bounded result artifacts", 
   });
 
   assert.equal(await readFile(join(root, created.record.id, "inbox", `${artifactId}.txt`), "utf8"), content);
+  assert.equal(await readFile(join(handoffRoot, created.record.id, `${artifactId}.txt`), "utf8"), content);
+  const materialized = await store.readInputArtifacts(created.record.id, [artifactId]);
+  assert.equal(materialized[0]?.localPath, join(handoffRoot, created.record.id, `${artifactId}.txt`));
+  assert.match(await readFile(join(handoffRoot, created.record.id, "manifest.json"), "utf8"), /"access": "read-only"/);
   assert.match(await store.readArtifact(created.record.id, "request"), /engineering_spec\.txt/);
   await store.setDiff(created.record.id, "diff --git a/a.ts b/a.ts\n");
   await store.complete(created.record.id, {

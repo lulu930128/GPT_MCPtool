@@ -8,9 +8,9 @@ import {
 } from "./api-client.js";
 import type { EnglishStudyMcpConfig } from "./config.js";
 
-export const ENGLISH_STUDY_MCP_VERSION = "0.2.0";
+export const ENGLISH_STUDY_MCP_VERSION = "0.3.0";
 export const ENGLISH_STUDY_CONTRACT_VERSION = "english-learning-v1";
-export const ENGLISH_STUDY_TOOL_COUNT = 12;
+export const ENGLISH_STUDY_TOOL_COUNT = 15;
 
 const itemKindSchema = z.enum(["vocab", "phrase", "grammar", "question"]);
 const targetKindSchema = z.enum(["vocab", "phrase", "grammar"]);
@@ -78,7 +78,7 @@ export function createEnglishStudyMcpServer(config: EnglishStudyMcpConfig): McpS
   const client = new EnglishStudyHubClient(config);
   const server = new McpServer(
     { name: "english-study-mcp", version: ENGLISH_STUDY_MCP_VERSION },
-    { instructions: "Private English study tools backed by an independent English Study Hub. Preview item creation and complete practice before writes. Reuse operation, event, and submission ids only for exact retries. Vocabulary and phrase identity requires lemma, part of speech, and explicit sense key. This server has no delete, reset, file, SQL, shell, unrestricted import, audio, speech-recognition, Anki, or migration/admin tools." },
+    { instructions: "Private English study tools backed by an independent English Study Hub. Public lexical sources live in a separately rebuildable Reference Catalog and remain source-attributed evidence. Reference search, detail, and enrichment preview are read-only; no reference result authorizes a study-item write. Preview item creation and complete practice before writes. Reuse operation, event, and submission ids only for exact retries. Vocabulary and phrase identity requires lemma, part of speech, and explicit sense key. This server has no delete, reset, file, SQL, shell, unrestricted import, source download, catalog rebuild, audio, speech-recognition, Anki, or migration/admin tools." },
   );
 
   server.registerTool("english_get_summary", {
@@ -108,6 +108,39 @@ export function createEnglishStudyMcpServer(config: EnglishStudyMcpConfig): McpS
     inputSchema: { itemId: z.string().min(8).max(120) },
     outputSchema: { ...baseOutputSchema, item: z.record(z.unknown()).optional() },
   }, async ({ itemId }) => safeResult(() => client.getItem(itemId), "已取得英文教材詳情。"));
+
+  server.registerTool("english_search_reference_entries", {
+    title: "搜尋英文公開參考資料",
+    description: "Search the bounded, source-attributed English Reference Catalog by lemma or form prefix. Results remain candidates and never mutate study data.",
+    annotations: readOnlyAnnotations,
+    inputSchema: {
+      query: z.string().min(1).max(200),
+      sourceId: z.string().min(1).max(100).optional(),
+      partOfSpeech: z.string().min(1).max(80).optional(),
+      limit: z.number().int().min(1).max(50).optional(),
+      offset: z.number().int().nonnegative().optional(),
+    },
+    outputSchema: { ...baseOutputSchema, count: z.number().int().nonnegative().optional(), total: z.number().int().nonnegative().optional(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional(), has_more: z.boolean().optional(), items: z.array(z.record(z.unknown())).optional() },
+  }, async (args) => safeResult(() => client.searchReferenceEntries(args), "已取得具來源標示的英文參考候選。"));
+
+  server.registerTool("english_get_reference_entry", {
+    title: "取得英文公開參考詳情",
+    description: "Read one exact Reference Catalog entry with source version, license, attribution, senses, forms, and pronunciation variants.",
+    annotations: readOnlyAnnotations,
+    inputSchema: { entryId: z.string().min(8).max(120) },
+    outputSchema: { ...baseOutputSchema, entry: z.record(z.unknown()).optional() },
+  }, async ({ entryId }) => safeResult(() => client.getReferenceEntry(entryId), "已取得英文參考資料詳情。"));
+
+  server.registerTool("english_preview_item_enrichment", {
+    title: "預覽英文教材參考補充",
+    description: "Compare one existing study item with exact or selected reference entries. Returns source evidence only and never writes or auto-selects a sense or pronunciation.",
+    annotations: readOnlyAnnotations,
+    inputSchema: {
+      itemId: z.string().min(8).max(120),
+      referenceEntryIds: z.array(z.string().min(8).max(120)).max(20).optional(),
+    },
+    outputSchema: { ...baseOutputSchema, item: z.record(z.unknown()).optional(), candidate_count: z.number().int().nonnegative().optional(), candidates: z.array(z.record(z.unknown())).optional(), proposals: z.record(z.unknown()).optional(), can_apply: z.boolean().optional(), warnings: z.array(z.string()).optional() },
+  }, async (args) => safeResult(() => client.previewItemEnrichment(args), "已產生唯讀英文參考補充預覽。"));
 
   server.registerTool("english_preview_item_creation", {
     title: "預覽新增英文教材",

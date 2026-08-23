@@ -1,7 +1,7 @@
 import { Badge, Button, Field, Input, Select, Table, TableBody, TableCell, TableHeader, TableHeaderCell, TableRow } from "@fluentui/react-components";
 import { Add24Regular, Save24Regular } from "@fluentui/react-icons";
 import { useState } from "react";
-import { formatCurrency, formatDate, formatDecimal, localDateTimeValue, qualityLabel, toIso } from "../format";
+import { formatCurrency, formatCurrencyAmount, formatDate, formatDecimal, localDateTimeValue, qualityLabel, toIso } from "../format";
 import type { Account, Instrument, Position } from "../types";
 import { EmptyState, Section } from "./Common";
 
@@ -20,8 +20,8 @@ export function InvestmentsView({ accounts, instruments, positions, mutate }: { 
   return <div className="view-stack">
     <Section title="投資部位">
       {positions.length === 0 ? <EmptyState title="尚無持倉" body="先建立投資帳戶與商品，再記錄第一筆買進。" /> : <div className="table-scroll"><Table aria-label="投資部位">
-        <TableHeader><TableRow><TableHeaderCell>商品</TableHeaderCell><TableHeaderCell>數量</TableHeaderCell><TableHeaderCell>成本</TableHeaderCell><TableHeaderCell>市值</TableHeaderCell><TableHeaderCell>未實現</TableHeaderCell><TableHeaderCell>估值</TableHeaderCell></TableRow></TableHeader>
-        <TableBody>{positions.map((item) => <TableRow key={`${item.instrument_id}-${item.investment_account_id}`}><TableCell><strong>{item.symbol}</strong><br /><small>{item.name}</small></TableCell><TableCell>{formatDecimal(item.quantity)}</TableCell><TableCell>{formatCurrency(item.cost_basis)}</TableCell><TableCell>{formatCurrency(item.market_value)}</TableCell><TableCell>{formatCurrency(item.unrealized_pnl)}</TableCell><TableCell><Badge appearance="tint" color={item.valuation_status === "manual" ? "success" : "warning"}>{qualityLabel(item.valuation_status)}</Badge><br /><small>{formatDate(item.price_at)}</small></TableCell></TableRow>)}</TableBody>
+        <TableHeader><TableRow><TableHeaderCell>商品</TableHeaderCell><TableHeaderCell>數量</TableHeaderCell><TableHeaderCell>成本</TableHeaderCell><TableHeaderCell>市值</TableHeaderCell><TableHeaderCell>未實現</TableHeaderCell><TableHeaderCell>來源／估值</TableHeaderCell></TableRow></TableHeader>
+        <TableBody>{positions.map((item) => <TableRow key={`${item.instrument_id}-${item.investment_account_id}`}><TableCell><strong>{item.symbol}</strong><br /><small>{item.market} · {item.name}</small></TableCell><TableCell>{formatDecimal(item.quantity)}{item.reconciliation_status === "quantity_mismatch" ? <><br /><small>帳本 {formatDecimal(item.ledger_quantity)}</small></> : null}</TableCell><TableCell>{formatCurrency(item.cost_basis)}</TableCell><TableCell>{item.valuation_included ? formatCurrency(item.market_value) : "未計入"}{item.native_currency !== "TWD" ? <><br /><small>原幣 {formatCurrencyAmount(item.native_market_value, item.native_currency)}</small></> : null}</TableCell><TableCell>{formatCurrency(item.unrealized_pnl)}{item.broker_unrealized_pnl != null ? <><br /><small>券商參考 {formatCurrency(item.broker_unrealized_pnl)}</small></> : null}</TableCell><TableCell><Badge appearance="tint" color={item.valuation_status === "manual" || item.valuation_status === "broker_live" ? "success" : "warning"}>{qualityLabel(item.valuation_status)}</Badge><br /><small>{item.position_source === "kgi_broker" ? "KGI 唯讀" : "PAOS 帳本"} · {qualityLabel(item.reconciliation_status)}</small>{item.fx_rate != null && item.native_currency !== "TWD" ? <><br /><small>USD/TWD {formatDecimal(item.fx_rate)} · {formatDate(item.fx_at)}</small></> : null}<br /><small>{formatDate(item.price_at)}</small></TableCell></TableRow>)}</TableBody>
       </Table></div>}
     </Section>
     <div className="split-grid">

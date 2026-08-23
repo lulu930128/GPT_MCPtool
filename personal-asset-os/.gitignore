@@ -30,3 +30,4 @@ dist/
 build/
 *.egg-info/
 vendor/tunnel-client/*.exe
+kgi_broker_bridge/errMsg.ini

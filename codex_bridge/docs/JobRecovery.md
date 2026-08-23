@@ -16,8 +16,9 @@ jobs/<job_id>/
   result.json
 ```
 
-Text staging uses a separate server-generated bundle directory. These files are private runtime
-state and are not part of Git.
+Text staging uses a separate server-generated bundle directory. Validated attachments also have a
+server-generated, read-only mirror under `.local/codex-inbox/<job_id>/` for Codex file-path access.
+These files are private runtime state and are not part of Git.
 
 ## Job states
 
@@ -86,8 +87,8 @@ npm run smoke:codex -- --confirm-live-codex
 
 ## Retention and cleanup
 
-The current version does not automatically remove old job or staging history. Before manually
-archiving or removing runtime data:
+The current version does not automatically remove old job, staging, or `codex-inbox` history.
+Before manually archiving or removing runtime data:
 
 1. stop the Bridge so files are not active;
 2. verify the exact repo-external data directory;

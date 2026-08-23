@@ -91,6 +91,9 @@ class LedgerTransaction(Base):
     financial_event_links: Mapped[list[FinancialEventTransactionLink]] = relationship(
         back_populates="transaction"
     )
+    reporting_annotation: Mapped[TransactionReportingAnnotation | None] = relationship(
+        back_populates="transaction", uselist=False
+    )
 
 
 class Posting(Base):
@@ -116,6 +119,31 @@ class Posting(Base):
 
     transaction: Mapped[LedgerTransaction] = relationship(back_populates="postings")
     account: Mapped[Account] = relationship(back_populates="postings")
+
+
+class TransactionReportingAnnotation(Base):
+    """Mutable reporting metadata kept outside the immutable ledger payload."""
+
+    __tablename__ = "transaction_reporting_annotations"
+    __table_args__ = (
+        CheckConstraint("version >= 1", name="ck_reporting_annotation_version_positive"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    transaction_id: Mapped[str] = mapped_column(
+        ForeignKey("transactions.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    category: Mapped[str] = mapped_column(String(120), nullable=False)
+    note: Mapped[str | None] = mapped_column(String(500))
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    actor: Mapped[str] = mapped_column(String(80), nullable=False, default="local_user")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=utc_now)
+
+    transaction: Mapped[LedgerTransaction] = relationship(back_populates="reporting_annotation")
 
 
 class FinancialEvent(Base):
@@ -325,6 +353,51 @@ class BalanceObservation(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=utc_now)
 
     account: Mapped[Account] = relationship()
+
+
+class DailyValuationSnapshot(Base):
+    __tablename__ = "daily_valuation_snapshots"
+    __table_args__ = (
+        CheckConstraint("missing_count >= 0", name="ck_daily_valuation_missing_nonnegative"),
+        CheckConstraint("stale_count >= 0", name="ck_daily_valuation_stale_nonnegative"),
+        CheckConstraint(
+            "broker_position_count >= 0",
+            name="ck_daily_valuation_broker_positions_nonnegative",
+        ),
+        Index(
+            "uq_daily_valuation_snapshot_date",
+            "snapshot_date",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    snapshot_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    reporting_timezone: Mapped[str] = mapped_column(String(64), nullable=False)
+    as_of: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=utc_now)
+    base_currency: Mapped[str] = mapped_column(String(3), nullable=False, default="TWD")
+    quality: Mapped[str] = mapped_column(String(32), nullable=False)
+    provisional_net_worth: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
+    known_net_worth: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
+    non_investment_assets: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
+    liquid_cash: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
+    available_cash: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
+    debt: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
+    investment_book_value: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
+    investment_market_value: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
+    unpriced_investment_cost: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
+    broker_market_value: Mapped[Decimal | None] = mapped_column(MONEY)
+    broker_position_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    price_as_of_min: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    price_as_of_max: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    missing_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    stale_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    broker_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    warnings_json: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_json: Mapped[str] = mapped_column(Text, nullable=False)
+    calculation_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(80), nullable=False, default="local_user")
 
 
 class Snapshot(Base):

@@ -18,6 +18,8 @@ from personal_asset_os.domain.enums import FinancialEventStatus
 from personal_asset_os.models import Account, LedgerTransaction
 from personal_asset_os.services import financial_events, ledger, portfolio, reporting
 from personal_asset_os.services.ai import connection_status
+from personal_asset_os.services.broker_read import BrokerBridgeClient, BrokerSnapshotProvider
+from personal_asset_os.services.fx_rates import FxRateProvider, OfficialUsdTwdRateProvider
 from personal_asset_os.settings import Settings
 from personal_asset_os.temporal import ensure_utc
 
@@ -44,13 +46,22 @@ def _payload(value: Mapping[str, object]) -> dict[str, object]:
     return cast(dict[str, object], _json_safe(value))
 
 
-def create_mcp_server(database: Database, settings: Settings) -> MCPServer:
+def create_mcp_server(
+    database: Database,
+    settings: Settings,
+    broker_reader: BrokerSnapshotProvider | None = None,
+    fx_reader: FxRateProvider | None = None,
+) -> MCPServer:
+    resolved_broker_reader = broker_reader or BrokerBridgeClient(settings)
+    resolved_fx_reader = fx_reader or OfficialUsdTwdRateProvider(settings)
     mcp = MCPServer(
         "Personal Asset OS",
         instructions=(
             "Read-only access to the owner's local personal asset read models. "
-            "All monetary values are decimal strings in TWD. Never claim data is live: "
-            "preserve as-of, price quality, missing-price, stale-price, and reconciliation "
+            "Aggregate values are decimal strings in TWD; KGI US positions also carry explicit "
+            "USD native values. Only describe KGI values as live when broker.status is complete "
+            "and preserve as-of, price/FX quality, missing/stale price or FX, market scope, "
+            "broker-account mapping, and reconciliation "
             "warnings. "
             "This server has no mutation tools and cannot write to the ledger."
         ),
@@ -60,7 +71,14 @@ def create_mcp_server(database: Database, settings: Settings) -> MCPServer:
     def get_asset_overview() -> dict[str, object]:
         """Return aggregate asset metrics, valuation freshness, quality, and warnings."""
         with database.session() as session:
-            view = reporting.dashboard(session)
+            view = reporting.dashboard(
+                session,
+                broker_read=resolved_broker_reader.read(),
+                broker_investment_account_id=settings.broker_investment_account_id,
+                broker_us_investment_account_id=settings.broker_us_investment_account_id,
+                fx_provider=resolved_fx_reader,
+                reporting_timezone=settings.reporting_timezone,
+            )
             return _payload(
                 {
                     "as_of": view["as_of"],
@@ -68,6 +86,7 @@ def create_mcp_server(database: Database, settings: Settings) -> MCPServer:
                     "quality": view["quality"],
                     "metrics": view["metrics"],
                     "valuation": view["valuation"],
+                    "broker": view["broker"],
                     "warnings": view["warnings"],
                 }
             )
@@ -105,8 +124,21 @@ def create_mcp_server(database: Database, settings: Settings) -> MCPServer:
     def list_asset_positions() -> dict[str, object]:
         """List derived investment positions with price provider, as-of, age, and quality."""
         with database.session() as session:
-            rows = portfolio.portfolio(session)
-        return _payload({"positions": rows, "count": len(rows)})
+            view = portfolio.portfolio_read_model(
+                session,
+                broker_read=resolved_broker_reader.read(),
+                broker_investment_account_id=settings.broker_investment_account_id,
+                broker_us_investment_account_id=settings.broker_us_investment_account_id,
+                fx_provider=resolved_fx_reader,
+            )
+        return _payload(
+            {
+                "positions": view.positions,
+                "count": len(view.positions),
+                "broker": view.broker,
+                "warnings": view.warnings,
+            }
+        )
 
     @mcp.tool(title="近期交易", annotations=READ_ONLY)
     def list_recent_asset_transactions(
@@ -181,7 +213,10 @@ def create_mcp_server(database: Database, settings: Settings) -> MCPServer:
     def get_reconciliation_status() -> dict[str, object]:
         """Return the latest reconciliation evidence and unresolved differences."""
         with database.session() as session:
-            view = reporting.dashboard(session)
+            view = reporting.dashboard(
+                session,
+                reporting_timezone=settings.reporting_timezone,
+            )
             metrics = cast(Mapping[str, object], view["metrics"])
             return _payload(
                 {
@@ -205,6 +240,18 @@ def create_mcp_server(database: Database, settings: Settings) -> MCPServer:
                 "http_policy": "loopback-only",
                 "mcp_policy": "private-tunnel-read-only",
                 "openai": connection_status(settings),
+                "broker_bridge": {
+                    "enabled": settings.broker_bridge_enabled,
+                    "configured": settings.broker_bridge_configured,
+                    "loopback_url": settings.broker_bridge_url,
+                    "ledger_account_mapping_configured": bool(
+                        settings.broker_investment_account_id
+                    ),
+                    "us_ledger_account_mapping_configured": bool(
+                        settings.broker_us_investment_account_id
+                    ),
+                    "fx_enabled": settings.fx_enabled,
+                },
             }
         )
 

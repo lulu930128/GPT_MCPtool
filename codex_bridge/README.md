@@ -27,8 +27,10 @@ Codex Handoff Bridge 是私人、allowlist-first 的 MCP Apps 對話工作區。
 - `plan` 唯讀與 `workspace_write` 兩種執行模式。
 - 輸入框可加入最多 8 份命名純文字文件；Widget 會分段傳送，Bridge 驗證每段與整體 SHA-256、
   UTF-8 大小、MIME、專案及資料分類後，才將內容交給 Codex。
-- Codex 不會取得 staging 或 job 目錄權限；Controller 只把驗證後文字內嵌到 turn，runtime workspace
-  roots 仍只有 allowlisted project。
+- Bridge 會把驗證後文字複製到 ignored 的 `.local/codex-inbox/<job_id>/`，用 server-generated path
+  唯讀交給 Codex，並在 turn 保留相同內容的 verified inline fallback。
+- Codex 不會取得 staging 或 job 目錄權限；runtime workspace roots 仍只有 allowlisted project，
+  `codex-inbox` 也不會成為可寫 workspace root。
 - request、final response 與 aggregated diff 會顯示為聊天內成品卡。Widget 按需分段讀取，內容放在
   app-only tool result `_meta`，不會因預覽而自動灌入 ChatGPT transcript。
 - 成品可複製；host 支援 MCP Apps `ui/download-file` 時可下載，否則自動改為複製。也可明確送出
@@ -41,8 +43,9 @@ Codex Handoff Bridge 是私人、allowlist-first 的 MCP Apps 對話工作區。
 - 重啟後不自動重送未完成 turn，舊核准會標成 expired。
 - Windows tray、Startup shortcut 與 Secure MCP Tunnel lifecycle。
 
-第一版不提供任意本機路徑、二進位附件、專案檔案瀏覽或雙向目錄同步，也沒有 commit、push、發布、
-刪除資料、背景網路存取或自動接受核准的工具。白天整理的工程稿需以受控純文字文件貼入 Widget。
+第一版不接受 caller 指定任意本機路徑，也不提供二進位附件、專案檔案瀏覽或雙向目錄同步；只有經過
+Widget 驗證的純文字文件會取得固定、唯讀的 `codex-inbox` 路徑。Bridge 也沒有 commit、push、發布、
+刪除資料、背景網路存取或自動接受核准的工具。
 
 ## 架構
 
@@ -237,8 +240,10 @@ Control Center Status 讀取限額 8192 bytes，驗證固定 contract／allowlis
 | `codex_approval_decide` | app-only action | 決定單次 command 或 file change 核准 |
 
 `plan` 模式即使收到 file change request 也不能核准。公司資料分類另外要求控制台中的明確授權勾選。
-Bridge 會先向 App Server 查詢目前允許的 permission profiles：`plan` 使用 `:read-only`，
-`workspace_write` 使用 `:workspace`，且永遠不選擇 `:danger-full-access`。
+Bridge 啟動 App Server 時會在既有 profile 上加入兩個狹窄的 inline permission profiles：
+`plan` 使用繼承 `:read-only` 的 `codex-bridge-read-only`，`workspace_write` 使用繼承 `:workspace`
+的 `codex-bridge-workspace`。兩者只額外允許讀取固定的 `.local/codex-inbox`；Bridge 會先用
+`permissionProfile/list` 驗證 profile 存在，且永遠不選擇 `:danger-full-access`。
 
 ## 驗證
 
@@ -287,10 +292,15 @@ C:\CodexBridge\staging\<bundle_id>\
   manifest.json
   content.txt
   chunks\
+
+C:\GPT_MCPtool\codex_bridge\.local\codex-inbox\<job_id>\
+  manifest.json
+  <server_generated_artifact_id>.<validated_text_extension>
 ```
 
-這些是本機 runtime state，不屬於 source archive。若 server 在 job 未完成時重啟，該 job 會標為
-`interrupted`，不會自動再送一次可能有 side effect 的 turn。
+這些是本機 runtime state，不屬於 source archive；`.local/codex-inbox` 由 Bridge 自動建立，且受 repo
+根目錄 `.gitignore` 保護。若 server 在 job 未完成時重啟，該 job 會標為 `interrupted`，不會自動再送
+一次可能有 side effect 的 turn。
 
 ## 已知限制
 
@@ -305,4 +315,5 @@ C:\CodexBridge\staging\<bundle_id>\
   bounded 摘要並寫入後台 log，不在主要聊天介面逐筆顯示。
 - 文字文件允許副檔名為 `.txt`、`.md`、`.log`、`.json`、`.yaml`、`.yml`、`.diff`、`.patch`；
   單份最多 500,000 字元／2,000,000 UTF-8 bytes，同一次最多 8 份且合計不超過 2,000,000 bytes。
-- 目前不提供跨主機檔案同步、二進位附件上傳、任意輸出檔案掃描或自動清除歷史 staging。
+- 目前不提供跨主機檔案同步、二進位附件上傳、任意輸出檔案掃描，亦不會自動清除歷史 staging、
+  job inbox 或 `codex-inbox`；清理前必須停止 Bridge 並確認沒有執行中的 job。

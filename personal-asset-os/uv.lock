@@ -602,6 +602,7 @@ source = { editable = "." }
 dependencies = [
     { name = "alembic" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "mcp" },
     { name = "openai" },
     { name = "pydantic-settings" },
@@ -612,7 +613,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "httpx" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "ruff" },
@@ -622,6 +622,7 @@ dev = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.16,<2" },
     { name = "fastapi", specifier = ">=0.116,<1" },
+    { name = "httpx", specifier = ">=0.28,<1" },
     { name = "mcp", specifier = ">=2,<3" },
     { name = "openai", specifier = ">=2,<3" },
     { name = "pydantic-settings", specifier = ">=2.10,<3" },
@@ -632,7 +633,6 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "httpx", specifier = ">=0.28,<1" },
     { name = "mypy", specifier = ">=1.17,<2" },
     { name = "pytest", specifier = ">=8.4,<9" },
     { name = "ruff", specifier = ">=0.14,<1" },

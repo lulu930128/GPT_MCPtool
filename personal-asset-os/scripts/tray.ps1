@@ -51,7 +51,6 @@ $TunnelAutoStartEnabled = $true
 $PythonPath = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
 $FrontendIndex = Join-Path $ProjectRoot "frontend\dist\index.html"
 $AppUrl = "http://${HostName}:${Port}/"
-$QuickCaptureUrl = "${AppUrl}?view=capture"
 $McpUrl = "http://${HostName}:${Port}/mcp/"
 $HealthUrl = "http://${HostName}:${Port}/api/health"
 $ReadyUrl = "http://${HostName}:${Port}/api/readyz"
@@ -177,7 +176,6 @@ if ($SelfTest) {
         frontendIndex = $FrontendIndex
         frontendExists = Test-Path -LiteralPath $FrontendIndex
         appUrl = $AppUrl
-        quickCaptureUrl = $QuickCaptureUrl
         mcpUrl = $McpUrl
         healthUrl = $HealthUrl
         readyUrl = $ReadyUrl
@@ -489,7 +487,6 @@ $statusItem.Enabled = $false
 $restartItem = New-Object System.Windows.Forms.MenuItem $(if ($DiagnosticOnly) { "Reload managed runtime" } else { "Restart MCP server" })
 $openTunnelUiItem = New-Object System.Windows.Forms.MenuItem "Open tunnel UI"
 $openDashboardItem = New-Object System.Windows.Forms.MenuItem "Open dashboard"
-$openQuickCaptureItem = New-Object System.Windows.Forms.MenuItem "Quick capture"
 $backupItem = New-Object System.Windows.Forms.MenuItem "Create verified backup"
 $copyAppItem = New-Object System.Windows.Forms.MenuItem "Copy app URL"
 $copyMcpItem = New-Object System.Windows.Forms.MenuItem "Copy MCP URL"
@@ -505,7 +502,6 @@ $exitItem = New-Object System.Windows.Forms.MenuItem $(if ($DiagnosticOnly) { "E
 $restartItem.add_Click({ if ($DiagnosticOnly) { Invoke-ControllerReload | Out-Null } else { Restart-Server }; Update-TrayStatus })
 $openTunnelUiItem.add_Click({ Open-LocalUrl $TunnelUiUrl })
 $openDashboardItem.add_Click({ Open-LocalUrl $AppUrl })
-$openQuickCaptureItem.add_Click({ Open-LocalUrl $QuickCaptureUrl })
 $backupItem.add_Click({ Create-VerifiedBackup })
 $copyAppItem.add_Click({ Copy-Text $AppUrl "app URL" })
 $copyMcpItem.add_Click({ Copy-Text $McpUrl "MCP URL" })
@@ -530,7 +526,6 @@ $contextMenu.MenuItems.Add($openTunnelUiItem) | Out-Null
 $contextMenu.MenuItems.Add($openRuntimeItem) | Out-Null
 $contextMenu.MenuItems.Add("-") | Out-Null
 $contextMenu.MenuItems.Add($openDashboardItem) | Out-Null
-$contextMenu.MenuItems.Add($openQuickCaptureItem) | Out-Null
 $contextMenu.MenuItems.Add($backupItem) | Out-Null
 $contextMenu.MenuItems.Add($copyAppItem) | Out-Null
 $contextMenu.MenuItems.Add($openDataItem) | Out-Null

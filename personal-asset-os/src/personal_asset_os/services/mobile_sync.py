@@ -23,7 +23,8 @@ from personal_asset_os.models import FinancialEvent, MobileDevice, MobilePairing
 from personal_asset_os.services import financial_events
 from personal_asset_os.temporal import ensure_utc, utc_now
 
-MOBILE_SCHEMA_VERSION = 1
+MOBILE_SCHEMA_VERSION = 3
+SUPPORTED_MOBILE_SCHEMA_VERSIONS = frozenset({1, 2, MOBILE_SCHEMA_VERSION})
 PAIRING_CODE_TTL = timedelta(minutes=10)
 PAIRING_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 PAIRING_CODE_LENGTH = 12
@@ -163,8 +164,9 @@ def canonical_mobile_payload(payload: Mapping[str, object]) -> str:
     event_kind = payload["event_kind"]
     if isinstance(event_kind, FinancialEventKind):
         event_kind = event_kind.value
-    document = {
-        "schema_version": payload["schema_version"],
+    schema_version = int(cast(int, payload["schema_version"]))
+    document: dict[str, object] = {
+        "schema_version": schema_version,
         "id": str(payload["id"]),
         "event_kind": event_kind,
         "occurred_at": payload["occurred_at"],
@@ -172,6 +174,10 @@ def canonical_mobile_payload(payload: Mapping[str, object]) -> str:
         "amount": payload["amount"],
         "currency": payload["currency"],
         "description": payload["description"],
+    }
+    if schema_version >= 3:
+        document["category_hint"] = payload.get("category_hint")
+    document.update({
         "merchant": payload.get("merchant"),
         "note": payload.get("note"),
         "payment_hint": payload.get("payment_hint"),
@@ -179,7 +185,7 @@ def canonical_mobile_payload(payload: Mapping[str, object]) -> str:
         "device_id": payload["device_id"],
         "local_sequence": payload["local_sequence"],
         "idempotency_key": payload["idempotency_key"],
-    }
+    })
     return json.dumps(document, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -195,8 +201,18 @@ def capture_mobile_event(
     payload: Mapping[str, object],
     payload_hash: str,
 ) -> tuple[FinancialEvent, bool]:
-    if int(cast(int, payload["schema_version"])) != MOBILE_SCHEMA_VERSION:
+    schema_version = int(cast(int, payload["schema_version"]))
+    if schema_version not in SUPPORTED_MOBILE_SCHEMA_VERSIONS:
         raise ValidationError("不支援的手機 outbox schema version")
+    category_hint = cast(str | None, payload.get("category_hint"))
+    clean_category = category_hint.strip() if category_hint else ""
+    clean_description = str(payload.get("description") or "").strip()
+    if schema_version >= 3 and not clean_category:
+        raise ValidationError("新版手機記錄必須提供分類")
+    if schema_version < 3 and category_hint is not None:
+        raise ValidationError("舊版手機記錄不支援分類欄位")
+    if schema_version < 3 and not clean_description:
+        raise ValidationError("舊版手機記錄必須提供描述")
     if str(payload["device_id"]) != device.id:
         raise AuthenticationError("裝置識別與憑證不一致")
     expected_hash = mobile_payload_hash(payload)
@@ -240,9 +256,10 @@ def capture_mobile_event(
         ),
         amount=Decimal(str(payload["amount"])),
         currency=str(payload["currency"]),
-        description=str(payload["description"]),
+        description=clean_description or clean_category,
         merchant=cast(str | None, payload.get("merchant")),
         note=cast(str | None, payload.get("note")),
+        category_hint=clean_category or None,
         payment_hint=cast(str | None, payload.get("payment_hint")),
         source="mobile_sync",
         source_reference=source_reference,

@@ -388,10 +388,24 @@ def finalize_event(
     destination_account_id: str | None = None,
     approval_source: ApprovalSource = ApprovalSource.LOCAL_UI,
     actor: str = "local_user",
+    authenticated_mobile_device_id: str | None = None,
 ) -> tuple[FinancialEvent, LedgerTransaction, bool]:
     event = _require_event(session, event_id)
     if approval_source is ApprovalSource.PAIRED_MOBILE:
-        raise UnsafeOperationError("paired-mobile 驗證器尚未啟用，不能偽裝手機核准")
+        expected_actor = (
+            f"mobile_device:{authenticated_mobile_device_id}"
+            if authenticated_mobile_device_id
+            else None
+        )
+        if (
+            not authenticated_mobile_device_id
+            or event.source != "mobile_sync"
+            or event.device_id != authenticated_mobile_device_id
+            or actor != expected_actor
+        ):
+            raise UnsafeOperationError(
+                "paired-mobile 入帳需要已驗證且與事件相符的裝置身分"
+            )
 
     decision = {
         "event_id": event.id,

@@ -9,8 +9,13 @@ from sqlalchemy.orm import Session
 
 from personal_asset_os.database import Database
 from personal_asset_os.domain.enums import AccountKind, AccountSubtype
-from personal_asset_os.models import Account, LedgerTransaction, Snapshot
-from personal_asset_os.services import backup, ledger, reporting
+from personal_asset_os.models import (
+    Account,
+    DailyValuationSnapshot,
+    LedgerTransaction,
+    Snapshot,
+)
+from personal_asset_os.services import backup, ledger, reporting, valuation_history
 from personal_asset_os.settings import Settings
 from tests.helpers import NOW, add_account
 
@@ -76,6 +81,12 @@ def test_backup_restore_recovers_core_rows(
             description="備份測試",
         )
         reporting.close_month(session, period_key="2026-08", as_of=NOW)
+        valuation_history.capture_daily_snapshot(
+            session,
+            dashboard_view=reporting.dashboard(session, as_of=NOW),
+            reporting_timezone="Asia/Taipei",
+            captured_at=NOW,
+        )
 
     result = backup.create_backup(settings.database_path, settings.backup_dir, now=NOW)
     backup_path = Path(str(result["backup_path"]))
@@ -90,5 +101,8 @@ def test_backup_restore_recovers_core_rows(
             assert session.scalar(select(func.count()).select_from(Account)) >= 7
             assert session.scalar(select(func.count()).select_from(LedgerTransaction)) == 2
             assert session.scalar(select(func.count()).select_from(Snapshot)) == 1
+            assert (
+                session.scalar(select(func.count()).select_from(DailyValuationSnapshot)) == 1
+            )
     finally:
         restored.engine.dispose()

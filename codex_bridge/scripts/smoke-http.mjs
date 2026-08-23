@@ -26,6 +26,12 @@ const config = await loadBridgeConfig({
   CODEX_BRIDGE_HTTP_TOKEN: "smoke-token",
 });
 const runtime = await createBridgeRuntime(config);
+assert.match(config.handoffDir, /[\\/]\.local[\\/]codex-inbox$/);
+assert.ok(config.codexArgs.includes('default_permissions="codex-bridge-read-only"'));
+assert.ok(config.codexArgs.some((value) => value.includes("permissions.codex-bridge-read-only=")));
+assert.ok(config.codexArgs.some((value) => value.includes("permissions.codex-bridge-workspace=")));
+const handoffFilesystemRule = `filesystem = { ${JSON.stringify(config.handoffDir)} = "read" }`;
+assert.equal(config.codexArgs.filter((value) => value.includes(handoffFilesystemRule)).length, 2);
 const handle = await startBridgeHttpServer(runtime, { host: "127.0.0.1", port: 0, bearerToken: "smoke-token" });
 const client = new Client({ name: "codex-bridge-http-smoke", version: "1.1.0" });
 const transport = new StreamableHTTPClientTransport(new URL(handle.url), {
@@ -81,7 +87,7 @@ try {
   ]) {
     assert.deepEqual(tools.find((tool) => tool.name === action)?._meta?.ui?.visibility, ["app"], `${action} must be app-only`);
   }
-  assert.equal(tools.find((tool) => tool.name === "render_codex_console")?._meta?.ui?.resourceUri, "ui://codex-bridge/chat-workspace-v3.html");
+  assert.equal(tools.find((tool) => tool.name === "render_codex_console")?._meta?.ui?.resourceUri, "ui://codex-bridge/chat-workspace-v4.html");
 
   const statusResult = await client.callTool({ name: "codex_bridge_status", arguments: {} });
   assert.equal(statusResult.structuredContent?.service, "codex-handoff-bridge");
@@ -122,8 +128,8 @@ try {
   assert.equal(runtime.store.list().length, 0, "Preview must not create a job.");
 
   const resources = await client.listResources();
-  assert.ok(resources.resources.some((resource) => resource.uri === "ui://codex-bridge/chat-workspace-v3.html"));
-  const widget = await client.readResource({ uri: "ui://codex-bridge/chat-workspace-v3.html" });
+  assert.ok(resources.resources.some((resource) => resource.uri === "ui://codex-bridge/chat-workspace-v4.html"));
+  const widget = await client.readResource({ uri: "ui://codex-bridge/chat-workspace-v4.html" });
   assert.equal(widget.contents[0]?.mimeType, "text/html;profile=mcp-app");
   assert.match(widget.contents[0]?.text || "", /ui\/initialize/);
 

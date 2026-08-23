@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from personal_asset_os.domain.enums import (
     AccountKind,
@@ -79,6 +79,13 @@ class ReversalRequest(StrictModel):
     @classmethod
     def normalize_occurred_at(cls, value: datetime) -> datetime:
         return ensure_utc(value)
+
+
+class TransactionReportingAnnotationUpsert(StrictModel):
+    category: str = Field(min_length=1, max_length=120)
+    note: str | None = Field(default=None, max_length=500)
+    expected_version: int = Field(ge=0)
+    reason: str = Field(min_length=1, max_length=240)
 
 
 class InstrumentCreate(StrictModel):
@@ -202,14 +209,15 @@ class MobilePairRequest(StrictModel):
 
 
 class MobileEventIngestRequest(StrictModel):
-    schema_version: Literal[1]
+    schema_version: Literal[1, 2, 3]
     id: str = Field(min_length=36, max_length=36)
     event_kind: Literal[FinancialEventKind.EXPENSE, FinancialEventKind.INCOME]
     occurred_at: str = Field(min_length=24, max_length=24)
     captured_at: str = Field(min_length=24, max_length=24)
     amount: str = Field(pattern=r"^(?:0|[1-9]\d{0,12})(?:\.\d?[1-9])?$")
     currency: Literal["TWD"]
-    description: str = Field(min_length=1, max_length=240)
+    description: str = Field(default="", max_length=240)
+    category_hint: str | None = Field(default=None, max_length=120)
     merchant: str | None = Field(default=None, max_length=120)
     note: str | None = Field(default=None, max_length=500)
     payment_hint: str | None = Field(default=None, max_length=120)
@@ -250,6 +258,18 @@ class MobileEventIngestRequest(StrictModel):
         if Decimal(value) <= 0:
             raise ValueError("amount 必須大於零")
         return value
+
+    @model_validator(mode="after")
+    def validate_capture_copy(self) -> MobileEventIngestRequest:
+        if self.schema_version >= 3:
+            if not self.category_hint:
+                raise ValueError("schema version 3 必須提供分類")
+            return self
+        if self.category_hint is not None:
+            raise ValueError("舊版手機 payload 不支援分類欄位")
+        if not self.description:
+            raise ValueError("舊版手機 payload 必須提供描述")
+        return self
 
 
 class ErrorEnvelope(BaseModel):

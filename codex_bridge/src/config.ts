@@ -12,6 +12,7 @@ export interface BridgeConfig {
   dataDir: string;
   jobsDir: string;
   stagingDir: string;
+  handoffDir: string;
   widgetPath: string;
   codexCommand: string;
   codexArgs: string[];
@@ -37,8 +38,9 @@ export async function loadBridgeConfig(env: NodeJS.ProcessEnv = process.env): Pr
     env.CODEX_BRIDGE_DATA_DIR?.trim() ||
       (process.platform === "win32" ? "C:\\CodexBridge" : join(homedir(), ".codex-bridge")),
   );
+  const handoffDir = join(projectRoot, ".local", "codex-inbox");
   const projects = await loadProjects(projectsFile);
-  const codexLaunch = await resolveCodexLaunch(projectRoot, env);
+  const codexLaunch = await resolveCodexLaunch(projectRoot, handoffDir, env);
 
   return {
     projectRoot,
@@ -47,6 +49,7 @@ export async function loadBridgeConfig(env: NodeJS.ProcessEnv = process.env): Pr
     dataDir,
     jobsDir: join(dataDir, "jobs"),
     stagingDir: join(dataDir, "staging"),
+    handoffDir,
     widgetPath: join(projectRoot, "web", "codex-console.html"),
     codexCommand: codexLaunch.command,
     codexArgs: codexLaunch.args,
@@ -178,24 +181,52 @@ function parseCommandArgs(raw: string | undefined): string[] | undefined {
 
 async function resolveCodexLaunch(
   projectRoot: string,
+  handoffDir: string,
   env: NodeJS.ProcessEnv,
 ): Promise<{ command: string; args: string[] }> {
   const configuredCommand = env.CODEX_BRIDGE_CODEX_COMMAND?.trim();
   const configuredArgs = parseCommandArgs(env.CODEX_BRIDGE_CODEX_ARGS);
+  const args = withHandoffPermissionProfiles(configuredArgs ?? ["app-server"], handoffDir);
   if (configuredCommand) {
-    return { command: configuredCommand, args: configuredArgs ?? ["app-server"] };
+    return { command: configuredCommand, args };
   }
 
   const localLauncher = join(projectRoot, "node_modules", "@openai", "codex", "bin", "codex.js");
   try {
     const info = await stat(localLauncher);
     if (info.isFile()) {
-      return { command: process.execPath, args: [localLauncher, ...(configuredArgs ?? ["app-server"])] };
+      return { command: process.execPath, args: [localLauncher, ...args] };
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  return { command: "codex", args: configuredArgs ?? ["app-server"] };
+  return { command: "codex", args };
+}
+
+function withHandoffPermissionProfiles(args: string[], handoffDir: string): string[] {
+  if (!args.includes("app-server")) {
+    throw new Error("CODEX_BRIDGE_CODEX_ARGS must launch the Codex app-server subcommand.");
+  }
+  const pathKey = JSON.stringify(handoffDir);
+  const readOnlyProfile = [
+    'description = "Read-only Codex Bridge project and text handoff access."',
+    'extends = ":read-only"',
+    `filesystem = { ${pathKey} = "read" }`,
+  ].join(", ");
+  const workspaceProfile = [
+    'description = "Project write access with read-only Codex Bridge text handoff access."',
+    'extends = ":workspace"',
+    `filesystem = { ${pathKey} = "read" }`,
+  ].join(", ");
+  return [
+    ...args,
+    "-c",
+    'default_permissions="codex-bridge-read-only"',
+    "-c",
+    `permissions.codex-bridge-read-only={ ${readOnlyProfile} }`,
+    "-c",
+    `permissions.codex-bridge-workspace={ ${workspaceProfile} }`,
+  ];
 }
 
 function parseBoundedInt(value: string | undefined, fallback: number, min: number, max: number): number {

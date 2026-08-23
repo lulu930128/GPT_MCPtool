@@ -8,16 +8,19 @@
 
 1. 建立本機帳務核心與可用 dashboard。
 2. 建立月結、對帳、備份與 exact-path tray lifecycle。
-3. 讓 Financial Event、Quick Capture、Pending Inbox 與低風險 finalize 成為可連續使用的日常入口。
-4. 以相同 contract 建立手機 SQLite outbox、裝置配對、加密 relay 與桌面 pull worker。
+3. 讓手機分類式 Quick Capture、Financial Event、Pending Inbox 與低風險 finalize 成為可連續使用的日常入口，桌面專注複盤與例外處理。
+4. 先以 PAOS-owned USB Bridge 自癒與 authenticated preflight 穩定目前路徑，再以相同 contract 建立
+   加密 relay 與桌面 pull worker。
 5. 再設計 import staging 與銀行／信用卡 CSV mapping。
 6. 以唯讀 MCP 累積真實查詢案例，再決定 AI proposal／approval 的最小資料契約。
 
 ## 里程碑
 
 - First version：TWD 核心帳本、手動投資、估值品質、月結、備份、托盤。
+- Valuation history：每日 first-ready 彙總估值與 quality-aware 資產歷史已進入第一版；初期資料
+  稀疏時不宣稱已有趨勢。
 - Import version：銀行／信用卡／券商匯入、去重、配對與人工核准。
-- Capture version：Financial Event、Quick Capture、Pending Inbox、低風險 finalize 與第七個 pending read-only MCP tool（第一個垂直切片已完成）。
+- Capture version：Financial Event、分類式 Quick Capture、本機常用分類、Pending Inbox、低風險 finalize 與第七個 pending read-only MCP tool（第一個垂直切片已完成）。
 - Mobile version：手機 SQLite、加密 relay、device identity、idempotent sync 與低風險 approval envelope。
 - AI read version：read-only MCP 工具、Secure MCP Tunnel、OpenAI 連線檢查。
 - AI proposal version：解釋與 proposal／approval workflow；尚未實作，且 AI 不得自行核准。

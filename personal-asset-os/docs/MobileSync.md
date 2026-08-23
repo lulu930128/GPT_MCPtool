@@ -2,20 +2,20 @@
 
 ## Scope
 
-The v0.1 mobile path is Android-first, offline-first quick capture. It moves TWD expense/income
-events from a phone SQLite outbox to the desktop Financial Event staging area over USB/ADB
-loopback.
+The mobile path is Android-first, offline-first quick capture. It moves low-risk TWD
+expense/income approval intents from a phone SQLite outbox to the desktop over USB/ADB loopback.
 
-It is not a cloud relay and it never writes `transactions + postings` directly.
+It is not a cloud relay. The phone never connects to SQLite or writes `transactions + postings`;
+the desktop remains the validator and executor.
 
 ```text
 phone SQLite outbox
   -> Expo SecureStore device token
   -> USB cable + adb reverse
   -> desktop loopback /api/mobile/*
-  -> source=mobile_sync Financial Event
-  -> desktop review/finalize
-  -> formal ledger transaction
+  -> authenticate device + require one activity-fund account
+  -> source=mobile_sync Financial Event + paired-mobile finalization
+  -> formal ledger transaction (same database transaction)
 ```
 
 ## Pairing
@@ -46,6 +46,23 @@ C:\work\bin\adb.cmd reverse tcp:18876 tcp:18876
 C:\work\bin\adb.cmd reverse --list
 ```
 
+For durable local use, PAOS can own an optional background bridge inside the server lifecycle. It
+checks one explicitly configured device (or fails closed unless exactly one authorized device is
+present), recreates the fixed reverse mapping after reconnect, and publishes only sanitized status.
+It never stops the shared ADB daemon and does not make core readiness depend on a connected phone.
+
+Configure the ignored local `.env` without printing the selected serial:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\configure-mobile-usb-bridge.py `
+  --adb-path C:\work\mobile-dev\android-sdk\platform-tools\adb.exe `
+  --server-socket tcp:localhost:15037
+```
+
+`GET /api/mobile/transport` reports the optional bridge state without device identity. The phone
+uses authenticated `GET /api/mobile/session` as a preflight and does not begin an outbox attempt or
+POST a financial event until the desktop and unique activity-fund contract are reachable.
+
 Cleartext HTTP is allowed only for `127.0.0.1`/`localhost` in this USB development path. Other HTTP
 destinations remain blocked. The Secure MCP Tunnel does not carry mobile routes.
 
@@ -53,9 +70,10 @@ destinations remain blocked. The Secure MCP Tunnel does not carry mobile routes.
 
 Each event contains:
 
-- schema version 1;
+- schema version 3 for category-first direct activity-fund finalization;
 - stable event id;
-- event kind, occurred/captured time, amount, TWD currency, description, and optional fields;
+- event kind, occurred/captured time, amount, TWD currency, required `category_hint`, optional
+  description, and optional legacy detail fields;
 - `source=mobile_sync`;
 - device id and monotonically assigned local sequence;
 - idempotency key;
@@ -79,20 +97,44 @@ The pair `(device_id, local_sequence)` is unique.
 The desktop records `last_seen_at` and the greatest accepted sequence for diagnostics. It does not
 use the sequence to skip payload/hash validation.
 
-## Ingest-only boundary
+## Single activity-fund boundary
 
-`GET /api/mobile/session` explicitly reports `ingest_only=true`. `POST /api/mobile/events` creates
-or returns a pending Financial Event and also reports `ingest_only=true`.
+`GET /api/mobile/session` reports `write_mode=single_activity_fund`, readiness, candidate count, and
+the selected account only when exactly one eligible account exists. An eligible activity-fund
+account is active, non-system, TWD, liquid, asset-kind, and either `cash` or `bank` subtype.
+
+`POST /api/mobile/events` atomically captures the Financial Event and finalizes it against that
+account. A successful response must contain the matching payload hash, `auto_finalized=true`, a
+`matched` event with `approval_source=paired_mobile`, and its formal transaction ID. The phone does
+not mark an outbox row synced unless all of those facts agree.
+
+If there are zero or multiple eligible accounts, the desktop returns 503 and rolls back the whole
+request. The phone keeps the row retryable; it never guesses an account and never stages a partial
+success.
+
+Schema v1 is retained as a compatibility-only staging path. An older installed App, or an existing
+v1 outbox row opened after upgrade, receives the original `ingest_only=true` pending acknowledgement
+and cannot create a formal transaction. Existing v2 rows retain their original canonical payload,
+hash and direct-finalize behavior. Newly captured rows use v3, which requires `category_hint` and
+allows an empty supplemental description. The desktop stores the category on the Financial Event and
+uses it as the formal transaction description only when the optional description is empty.
+
+The phone suggests bounded categories from its own successfully saved outbox history, separated by
+expense/income kind, then fills the list with built-in defaults such as `吃飯` and `油費`. Merely typing
+a value does not persist it; the custom category becomes selectable after the capture is committed to
+phone SQLite. Category suggestions are local convenience state, not a second ledger truth source.
 
 Mobile cannot:
 
 - create or edit an Account;
-- finalize, reverse, or adjust a transaction;
+- choose an arbitrary account, reverse, or adjust a transaction;
 - write postings, trades, prices, observations, or snapshots;
 - approve imports, month close, or AI proposals;
 - access read-only MCP through the device token.
 
-Desktop services remain the only validators/executors for ledger finalization.
+Desktop services remain the only validators/executors for ledger finalization. The paired token is
+required, the payload device id must match it, and the Financial Event finalize service rejects a
+`paired_mobile` source without the authenticated matching device identity.
 
 ## Device management
 
@@ -121,10 +163,11 @@ deletion.
 | Token rejected | Revocation or token rotation | Clear phone token and pair again |
 | Payload hash conflict | Canonical fields and phone implementation version | Keep row pending; do not edit hash to force acceptance |
 | Device sequence conflict | Existing desktop event for same device/sequence | Compare ids and hash; never overwrite the accepted event |
-| Event synced but absent from net worth | It is staging by design | Review/finalize it in the trusted desktop UI |
+| Activity-fund service unavailable | No eligible account or multiple candidates | Keep the phone row; configure exactly one activity-fund account on desktop and retry |
 
 ## Validation
 
 Follow [mobile/README.md](../mobile/README.md) for build and device smoke steps. Acceptance includes
-offline capture, process restart persistence, exact retry without duplication, desktop pending
-event appearance, and token rejection after revocation.
+offline capture, process restart persistence, exact retry without duplication, balanced desktop
+transaction creation, activity-fund balance movement, fail-closed account ambiguity, and token
+rejection after revocation.

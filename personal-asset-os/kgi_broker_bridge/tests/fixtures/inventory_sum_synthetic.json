@@ -1,0 +1,35 @@
+{
+  "account_ref": "SYNTHETIC-ACCOUNT-0001",
+  "captured_at": "2026-08-19T15:00:01+08:00",
+  "source_as_of": "2026-08-19T15:00:00+08:00",
+  "explicit_empty": false,
+  "warnings": ["synthetic_fixture_only"],
+  "rows": [
+    {
+      "Symbol": "3711",
+      "SymbolName": "合成測試股票甲",
+      "RLPRICE": "588.0",
+      "ASSET": "89964.0",
+      "NETPL": "-3842.0",
+      "NETPL_TWD": "-3842.0",
+      "NETQTY0": "100",
+      "NETQTY3": "50",
+      "NETQTY4": "0",
+      "NETQTY9": "3",
+      "AVG_PRICE0": "623.15"
+    },
+    {
+      "Symbol": "0050",
+      "SymbolName": "合成測試 ETF",
+      "RLPRICE": "199.5",
+      "ASSET": "19950.0",
+      "NETPL": "950.0",
+      "NETPL_TWD": "950.0",
+      "NETQTY0": "100",
+      "NETQTY3": "0",
+      "NETQTY4": "0",
+      "NETQTY9": "0",
+      "AVG_PRICE0": "190.0"
+    }
+  ]
+}

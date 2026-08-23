@@ -161,7 +161,15 @@ export function isDeniedFileName(name: string): boolean {
     lower === "id_dsa" ||
     lower === "id_ecdsa" ||
     lower === "id_ed25519" ||
+    lower === "auth.json" ||
+    lower === "cap_sid" ||
     lower === "credentials.json" ||
+    lower === "installation_id" ||
+    lower === "session_index.jsonl" ||
+    lower === "transcription-history.jsonl" ||
+    lower === ".codex-global-state.json" ||
+    lower === ".codex-global-state.json.bak" ||
+    lower.startsWith("..codex-global-state.json.") ||
     lower === "token.json"
   );
 }

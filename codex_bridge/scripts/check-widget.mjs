@@ -43,6 +43,10 @@ assert.ok(!html.includes("function renderEvent"), "Technical event renderers mus
 assert.ok(!html.includes("100vh") && !html.includes("100dvh"), "Widget root must not couple its intrinsic height to the host iframe viewport.");
 assert.ok(!html.includes("min-height: 100%"), "Widget body must remain shrinkable inside an auto-sized host iframe.");
 assert.ok(!html.includes('type="file"'), "The core text shuttle must not depend on host file upload controls.");
+assert.match(html, /\.chat-heading\s*\{[^}]*flex:\s*1 1 auto;[^}]*overflow:\s*hidden;/s, "Chat heading must shrink before it reaches the widget boundary.");
+assert.match(html, /\.thread\s*\{[^}]*min-width:\s*0;[^}]*max-width:\s*100%;/s, "Transcript thread must remain shrinkable.");
+assert.match(html, /\.approval-card\s*\{[^}]*min-width:\s*0;[^}]*max-width:\s*100%;[^}]*overflow:\s*hidden;/s, "Approval cards must not overflow the transcript.");
+assert.match(html, /\.approval-card pre\s*\{[^}]*max-width:\s*100%;[^}]*overflow-wrap:\s*anywhere;/s, "Long approval payloads must wrap inside the card.");
 const inlineScript = html.match(/<script>([\s\S]*?)<\/script>/)?.[1];
 assert.ok(inlineScript, "Widget must include an inline bridge script.");
 new Script(inlineScript, { filename: "codex-console.inline.js" });

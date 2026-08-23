@@ -7,11 +7,11 @@ import {
   MessageBar,
   MessageBarBody,
   MessageBarTitle,
-  Select,
   Text,
 } from "@fluentui/react-components";
 import { Checkmark24Regular, Delete24Regular, Save24Regular } from "@fluentui/react-icons";
 import { useMemo, useState } from "react";
+import { activityFundCandidates } from "../activity-fund";
 import { api, ApiError } from "../api";
 import { formatDate } from "../format";
 import type { Account, FinancialEvent, FinancialEventFinalizeResult } from "../types";
@@ -20,14 +20,12 @@ import { EmptyState, Section } from "./Common";
 interface Draft {
   amount: string;
   description: string;
-  accountId: string;
 }
 
 function draftFor(event: FinancialEvent, previous?: Draft): Draft {
   return previous ?? {
     amount: String(event.amount),
     description: event.description,
-    accountId: "",
   };
 }
 
@@ -48,10 +46,8 @@ export function PendingEventsView({
     body: string;
   } | null>(null);
 
-  const personalAccounts = useMemo(
-    () => accounts.filter((account) => !account.is_system && account.is_active),
-    [accounts],
-  );
+  const activityFundAccounts = useMemo(() => activityFundCandidates(accounts), [accounts]);
+  const activityFund = activityFundAccounts.length === 1 ? activityFundAccounts[0] : null;
 
   function updateDraft(event: FinancialEvent, patch: Partial<Draft>) {
     setDrafts((current) => ({
@@ -89,15 +85,14 @@ export function PendingEventsView({
   }
 
   async function finalize(event: FinancialEvent) {
-    const draft = drafts[event.id];
-    if (!draft?.accountId) return;
+    if (!activityFund) return;
     setBusyId(event.id);
     setMessage(null);
     try {
       await api.post<FinancialEventFinalizeResult>(`/api/financial-events/${event.id}/finalize`, {
         expected_version: event.version,
-        payment_account_id: event.event_kind === "expense" ? draft.accountId : null,
-        destination_account_id: event.event_kind === "income" ? draft.accountId : null,
+        payment_account_id: event.event_kind === "expense" ? activityFund.id : null,
+        destination_account_id: event.event_kind === "income" ? activityFund.id : null,
       });
       setMessage({ intent: "success", title: "已正式入帳", body: event.description });
       await onChanged();
@@ -140,16 +135,11 @@ export function PendingEventsView({
           <div className="pending-list">
             {events.map((event) => {
               const draft = draftFor(event, drafts[event.id]);
-              const eligible = personalAccounts.filter((account) =>
-                event.event_kind === "income"
-                  ? account.kind === "asset"
-                  : account.kind === "asset" || account.kind === "liability",
-              );
               const dirty =
                 draft.amount !== String(event.amount) || draft.description !== event.description;
               const finalizable =
                 (event.event_kind === "expense" || event.event_kind === "income") &&
-                Boolean(draft.accountId) &&
+                Boolean(activityFund) &&
                 !dirty;
               return (
                 <article className="pending-item" key={event.id}>
@@ -176,16 +166,8 @@ export function PendingEventsView({
                         onChange={(_, data) => updateDraft(event, { description: data.value })}
                       />
                     </Field>
-                    <Field label={event.event_kind === "income" ? "收款帳戶" : "付款帳戶"}>
-                      <Select
-                        value={draft.accountId}
-                        onChange={(change) => updateDraft(event, { accountId: change.target.value })}
-                      >
-                        <option value="">選擇帳戶</option>
-                        {eligible.map((account) => (
-                          <option key={account.id} value={account.id}>{account.name}</option>
-                        ))}
-                      </Select>
+                    <Field label="活動資金帳戶">
+                      <Input readOnly value={activityFund?.name ?? "尚未設定唯一活動資金"} />
                     </Field>
                   </div>
                   <div className="pending-actions">

@@ -5,7 +5,7 @@ import type { BridgeRuntime } from "./runtime.js";
 import type { BridgeStatus, JobSnapshot } from "./types.js";
 import { previewWorkPackage } from "./work-package.js";
 
-const WIDGET_URI = "ui://codex-bridge/chat-workspace-v3.html";
+const WIDGET_URI = "ui://codex-bridge/chat-workspace-v4.html";
 
 const workPackageInput = {
   projectId: z.string().min(2).max(32),

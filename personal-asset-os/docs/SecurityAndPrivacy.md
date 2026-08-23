@@ -32,6 +32,8 @@ ChatGPT
 - Dashboard and REST API bind to loopback only.
 - The tunnel forwards read-only `/mcp` and does not forward dashboard or REST write routes.
 - Mobile writes use local USB/ADB reverse to the loopback API; they do not use the MCP tunnel.
+- Optional Mobile USB Bridge only maintains exact local transport state. It never exposes the
+  device serial in health, stops the shared ADB daemon, or changes Android authorization settings.
 - MCP and AI cannot create, edit, reverse, finalize, or approve transactions.
 
 ## Ledger integrity controls
@@ -41,7 +43,8 @@ ChatGPT
 - Corrections use reversal/adjustment, not history overwrite.
 - Idempotency protects retries; same key with changed content is a conflict.
 - Financial Events remain staging until desktop finalization succeeds.
-- Mobile input remains ingest-only and cannot finalize ledger entries.
+- A paired phone may submit only low-risk expense/income approval intents for the unique activity-fund account.
+- The phone never writes SQLite. Desktop authentication, account resolution, event capture, ledger validation, and finalization execute atomically; missing or ambiguous account configuration rolls back.
 
 See [LedgerModel.md](LedgerModel.md).
 
@@ -64,6 +67,10 @@ to the tunnel profile.
   and conflict handling.
 - Revocation invalidates the token but does not delete historical event/audit evidence.
 - Cleartext HTTP is permitted only for `127.0.0.1`/`localhost` through USB/ADB reverse.
+- Without an explicitly configured serial, automatic repair proceeds only when exactly one
+  authorized device exists. Multiple, unauthorized, offline, and missing-device states fail closed.
+- The phone completes authenticated `GET /api/mobile/session` preflight before changing outbox
+  attempt state or sending a financial event.
 
 See [MobileSync.md](MobileSync.md).
 

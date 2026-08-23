@@ -201,8 +201,9 @@
         gap: 12px;
         border-bottom: 1px solid var(--line);
       }
-      .chat-heading { min-width: 0; }
+      .chat-heading { min-width: 0; flex: 1 1 auto; overflow: hidden; }
       .chat-title {
+        max-width: 100%;
         margin: 0;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -215,7 +216,7 @@
         color: var(--quiet);
         font-size: 11px;
       }
-      .chat-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+      .chat-actions { flex: 0 0 auto; margin-left: auto; display: flex; align-items: center; gap: 6px; }
       .head-button {
         min-height: 32px;
         padding: 0 10px;
@@ -272,6 +273,8 @@
       }
       .thread {
         width: min(780px, 100%);
+        min-width: 0;
+        max-width: 100%;
         margin: 0 auto;
         display: flex;
         flex-direction: column;
@@ -292,7 +295,7 @@
         letter-spacing: -.035em;
       }
       .empty-chat span { font-size: 13px; }
-      .message { display: flex; flex-direction: column; gap: 7px; }
+      .message { min-width: 0; max-width: 100%; display: flex; flex-direction: column; gap: 7px; }
       .message.user { align-items: flex-end; }
       .message.assistant { align-items: flex-start; }
       .message-meta {
@@ -303,6 +306,7 @@
         font-size: 10px;
       }
       .message-body {
+        min-width: 0;
         max-width: min(680px, 92%);
         padding: 12px 14px;
         border-radius: 15px;
@@ -356,14 +360,20 @@
       @keyframes pulse { 0%, 70%, 100% { opacity: .25; transform: translateY(0); } 35% { opacity: 1; transform: translateY(-2px); } }
 
       .approval-card {
+        min-width: 0;
+        max-width: 100%;
+        overflow: hidden;
         padding: 14px;
         border: 1px solid #5c4c2f;
         border-radius: 13px;
         background: #1d1912;
       }
-      .approval-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-      .approval-title { font-size: 13px; font-weight: 650; }
+      .approval-top { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
+      .approval-title { min-width: 0; overflow-wrap: anywhere; font-size: 13px; font-weight: 650; }
       .approval-card pre {
+        width: 100%;
+        min-width: 0;
+        max-width: 100%;
         margin: 10px 0;
         padding: 10px;
         max-height: 180px;
@@ -373,6 +383,7 @@
         color: #d7c9ad;
         white-space: pre-wrap;
         overflow-wrap: anywhere;
+        word-break: break-word;
         font-size: 11px;
       }
       .approval-actions { display: flex; justify-content: flex-end; gap: 7px; }
@@ -601,15 +612,19 @@
         font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
       }
       .artifact-results {
+        min-width: 0;
+        max-width: 100%;
+        overflow: hidden;
         padding: 13px;
         border: 1px solid var(--line);
         border-radius: 13px;
         background: #121212;
       }
       .artifact-results-title { margin-bottom: 9px; color: var(--quiet); font-size: 10px; }
-      .artifact-result-list { display: flex; flex-wrap: wrap; gap: 7px; }
+      .artifact-result-list { min-width: 0; max-width: 100%; display: flex; flex-wrap: wrap; gap: 7px; }
       .artifact-result {
         min-width: 170px;
+        max-width: 100%;
         flex: 1 1 190px;
         padding: 10px 11px;
         display: flex;

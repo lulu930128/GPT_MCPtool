@@ -47,6 +47,10 @@ export interface StagedTextArtifact extends TextArtifactSummary {
   content: string;
 }
 
+export interface MaterializedTextArtifact extends StagedTextArtifact {
+  localPath: string;
+}
+
 export type JobArtifactKind = "request" | "response" | "diff";
 
 export interface JobArtifactDescriptor {

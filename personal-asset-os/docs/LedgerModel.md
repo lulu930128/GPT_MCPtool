@@ -29,6 +29,7 @@ an existing posted transaction in place.
 | Valuation | `prices` | Provider, price, `price_at`, quality |
 | Reconciliation | `balance_observations` | External balance evidence and difference |
 | Period close | `snapshots` | Reproducible as-of metrics, not a balance override |
+| Daily valuation | `daily_valuation_snapshots` | Immutable aggregate chart evidence, not Ledger truth |
 
 ## Posting convention
 
@@ -93,11 +94,20 @@ captured -> pending_match / needs_review
          -> rejected  -> retained tombstone/audit state
 ```
 
-`先記著` creates or updates staging only. `直接入帳` is limited to sufficiently complete
-expense/income events with an explicit account decision. Finalization revalidates event version,
-account, currency, amount, status, and ledger invariants inside one transaction.
+`直接入帳` is limited to sufficiently complete expense/income events and uses the one eligible
+activity-fund account. Finalization revalidates event version, account, currency, amount, status,
+and ledger invariants inside one transaction.
 
-Mobile sync creates `source=mobile_sync` pending Financial Events. It never calls ledger finalize.
+Authenticated mobile sync atomically creates `source=mobile_sync` Financial Events and calls the
+same desktop finalize service with `approval_source=paired_mobile`. The service requires matching
+authenticated device identity; the phone itself never writes the ledger database.
+
+## Reporting annotations
+
+`transaction_reporting_annotations` is mutable presentation metadata for category and note cleanup.
+It references one immutable transaction, uses optimistic versions, and writes create/update audit
+rows. Dashboard grouping and recent-transaction presentation may use it, but transaction/posting
+amounts, descriptions, Financial Events, idempotency keys, and payload hashes remain unchanged.
 
 ## Investments
 
@@ -109,16 +119,33 @@ Trades are transaction details, not a separate ledger:
 - the latest authorized price at or before the requested cutoff provides valuation evidence.
 
 Missing price yields `null` market value and a warning. Cost or zero must not be presented as a
-live market value. Every price keeps provider, `price_at`, quality, and age.
+live market value. Every price keeps provider, `price_at`, quality, and age. A configured KGI
+Bridge may replace the valuation of an explicitly mapped investment account at read time, but it
+does not create or modify trade, posting, price, or snapshot rows. Broker-only positions remain
+external, unreconciled evidence even when their reported market value is included in provisional
+net worth.
+
+KGI overseas positions are also read-time evidence, not multi-currency Ledger entries. Their USD
+price/value remain explicit. A fresh official USD/TWD fact may project a TWD market value for the
+current read model. Raw positions and FX provider payloads are not persisted; a component-scheduled
+or explicitly captured daily aggregate snapshot may retain only applied rate/provider/quality timing as bounded chart
+evidence. Missing/expired FX excludes that position from TWD totals instead of substituting zero or
+a guessed rate.
 
 ## Reconciliation and snapshots
 
 A balance observation records external evidence. The system compares it with the ledger balance
 and reports the difference; it does not change postings to force agreement.
 
-A snapshot fixes an as-of time and a metrics payload for reproducible monthly/period review. A
-snapshot can be stale or incomplete if the underlying prices or reconciliation evidence were stale
+A period snapshot fixes an as-of time and a metrics payload for reproducible monthly/period review.
+A daily valuation snapshot stores only aggregate chart metrics plus bounded quality/provider timing;
+it does not persist broker accounts, raw positions, or Bridge payloads. Both snapshot types can be
+stale or incomplete if the underlying prices or reconciliation evidence were stale
 or incomplete, and that quality must remain visible.
+
+The PAOS component lifecycle owns the once-daily capture attempt. After the configured local wall
+time, the first ready process creates that reporting date's immutable row; an existing row prevents
+another broker/FX read. History reads never invoke this capture path, and missed dates remain gaps.
 
 ## First-version limitations
 

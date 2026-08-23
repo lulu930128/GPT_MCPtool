@@ -1770,6 +1770,18 @@ function Get-McpCcSafeActionMessage {
     }
 }
 
+function ConvertTo-McpCcUtcDateTimeOffset {
+    param([Parameter(Mandatory = $true)]$Value)
+
+    if ($Value -is [DateTimeOffset]) { return $Value.ToUniversalTime() }
+    if ($Value -is [DateTime]) { return ([DateTimeOffset]$Value).ToUniversalTime() }
+    return [DateTimeOffset]::Parse(
+        [string]$Value,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind
+    ).ToUniversalTime()
+}
+
 function ConvertTo-McpCcRemoteConnectivityEvidence {
     param(
         $Evidence,
@@ -1821,8 +1833,8 @@ function ConvertTo-McpCcRemoteConnectivityEvidence {
         $checkedAtResult = Get-McpCcObjectProperty -Object $Evidence -Name "checkedAt"
         $validUntilResult = Get-McpCcObjectProperty -Object $Evidence -Name "validUntil"
         if (-not $checkedAtResult.found -or -not $validUntilResult.found) { throw "missing timestamp" }
-        $checkedAt = [DateTimeOffset]::Parse([string]$checkedAtResult.value).ToUniversalTime()
-        $validUntil = [DateTimeOffset]::Parse([string]$validUntilResult.value).ToUniversalTime()
+        $checkedAt = ConvertTo-McpCcUtcDateTimeOffset -Value $checkedAtResult.value
+        $validUntil = ConvertTo-McpCcUtcDateTimeOffset -Value $validUntilResult.value
         if ($validUntil -lt $checkedAt) { throw "invalid TTL" }
     }
     catch {
@@ -2726,16 +2738,29 @@ function Invoke-McpCcBoundedPowerShell {
     $root = Assert-McpCcSafeRuntimeRoot -RuntimeRoot $RuntimeRoot
     $captureRoot = Join-Path $root "action-capture"
     New-Item -ItemType Directory -Force -Path $captureRoot | Out-Null
-    $captureId = "${PID}-$([Guid]::NewGuid().ToString('N'))"
-    $stdoutPath = Join-Path $captureRoot "$captureId.stdout"
-    $stderrPath = Join-Path $captureRoot "$captureId.stderr"
     $process = $null
-    $stdoutStream = $null
-    $stderrStream = $null
-    $stdoutTask = $null
-    $stderrTask = $null
+    $resultPipe = $null
+    $resultReader = $null
+    $resultLineTask = $null
     try {
-        $processArguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $ScriptPath) + @($Arguments)
+        # The wrapper receives this one purpose-built handle, marks it
+        # non-inheritable, and frames the controller result through it. Service
+        # descendants therefore cannot keep the manager capture channel open.
+        $resultPipe = New-Object IO.Pipes.AnonymousPipeServerStream(
+            [IO.Pipes.PipeDirection]::In,
+            [IO.HandleInheritability]::Inheritable
+        )
+        $resultReader = New-Object IO.StreamReader($resultPipe, [Text.Encoding]::UTF8, $true, 4096, $true)
+        $wrapperPath = Join-Path (Split-Path -Parent $PSScriptRoot) "scripts\invoke-component-controller.ps1"
+        if (-not (Test-Path -LiteralPath $wrapperPath -PathType Leaf)) { throw "Component controller wrapper is unavailable." }
+        $argumentDocument = [pscustomobject]@{ arguments = @($Arguments) } | ConvertTo-Json -Compress
+        $argumentsBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($argumentDocument))
+        $processArguments = @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $wrapperPath,
+            "-ControllerPath", $ScriptPath, "-ArgumentsBase64", $argumentsBase64,
+            "-ResultPipeHandle", $resultPipe.GetClientHandleAsString(),
+            "-MaxCapturedOutputBytes", [string]$MaxCapturedOutputBytes
+        )
         $argumentLine = (@($processArguments | ForEach-Object { ConvertTo-McpCcWindowsArgument -Value ([string]$_) }) -join " ")
         $startInfo = New-Object Diagnostics.ProcessStartInfo
         $startInfo.FileName = Join-Path $PSHOME "powershell.exe"
@@ -2743,23 +2768,13 @@ function Invoke-McpCcBoundedPowerShell {
         $startInfo.WorkingDirectory = $WorkingDirectory
         $startInfo.UseShellExecute = $false
         $startInfo.CreateNoWindow = $true
-        $startInfo.RedirectStandardOutput = $true
-        $startInfo.RedirectStandardError = $true
         $process = New-Object Diagnostics.Process
         $process.StartInfo = $startInfo
         if (-not $process.Start()) { throw "Unable to start the component lifecycle controller." }
-        $stdoutStream = New-Object IO.FileStream($stdoutPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
-        $stderrStream = New-Object IO.FileStream($stderrPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
-        $stdoutTask = $process.StandardOutput.BaseStream.CopyToAsync($stdoutStream)
-        $stderrTask = $process.StandardError.BaseStream.CopyToAsync($stderrStream)
+        $resultPipe.DisposeLocalCopyOfClientHandle()
+        $resultLineTask = $resultReader.ReadLineAsync()
         $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
         while (-not $process.WaitForExit(100)) {
-            $capturedBytes = $stdoutStream.Length + $stderrStream.Length
-            if ($capturedBytes -gt $MaxCapturedOutputBytes) {
-                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-                $null = $process.WaitForExit(5000)
-                throw "Component action exceeded the $MaxCapturedOutputBytes byte output limit; inspect the component-owned runtime log."
-            }
             if ([DateTime]::UtcNow -ge $deadline) {
                 Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
                 $null = $process.WaitForExit(5000)
@@ -2767,32 +2782,46 @@ function Invoke-McpCcBoundedPowerShell {
             }
         }
         $process.WaitForExit()
-        if ($null -ne $stdoutTask -and -not $stdoutTask.Wait(5000)) { throw "Timed out draining component controller stdout." }
-        if ($null -ne $stderrTask -and -not $stderrTask.Wait(5000)) { throw "Timed out draining component controller stderr." }
-        $stdoutStream.Flush()
-        $stderrStream.Flush()
-        $capturedBytes = $stdoutStream.Length + $stderrStream.Length
+        if ($null -eq $resultLineTask -or -not $resultLineTask.Wait(1000)) {
+            throw "Component controller did not return a complete framed result."
+        }
+        $frameLine = [string]$resultLineTask.Result
+        if ([string]::IsNullOrWhiteSpace($frameLine) -or -not $frameLine.StartsWith("MCPCC1:", [StringComparison]::Ordinal)) {
+            throw "Component controller did not return a valid framed result."
+        }
+        try {
+            $frameJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($frameLine.Substring(7)))
+            $frame = $frameJson | ConvertFrom-Json
+        }
+        catch { throw "Component controller returned a malformed framed result." }
+        if ([string]$frame.protocol -ne "mcpcc-controller-result-v1") {
+            throw "Component controller returned an unsupported framed result."
+        }
+        if ([bool]$frame.outputLimitExceeded) {
+            throw "Component action exceeded the $MaxCapturedOutputBytes byte output limit; inspect the component-owned runtime log."
+        }
+        $controllerExitCode = 0
+        if (-not [int]::TryParse([string]$frame.exitCode, [ref]$controllerExitCode) -or $controllerExitCode -notin @(0, 1)) {
+            throw "Component controller returned an invalid exit code."
+        }
+        try {
+            $controllerStdout = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$frame.stdoutBase64))
+            $controllerStderr = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$frame.stderrBase64))
+        }
+        catch { throw "Component controller returned malformed captured output." }
+        $capturedBytes = [Text.Encoding]::UTF8.GetByteCount($controllerStdout) + [Text.Encoding]::UTF8.GetByteCount($controllerStderr)
         if ($capturedBytes -gt $MaxCapturedOutputBytes) {
             throw "Component action exceeded the $MaxCapturedOutputBytes byte output limit; inspect the component-owned runtime log."
         }
-        $stdoutStream.Dispose()
-        $stdoutStream = $null
-        $stderrStream.Dispose()
-        $stderrStream = $null
         return [pscustomobject]@{
             processId = $process.Id
-            exitCode = $process.ExitCode
-            stdout = (Read-McpCcCapturedText -Path $stdoutPath)
+            exitCode = $controllerExitCode
+            stdout = $controllerStdout
         }
     }
     finally {
-        if ($null -ne $stdoutStream) { $stdoutStream.Dispose() }
-        if ($null -ne $stderrStream) { $stderrStream.Dispose() }
-        foreach ($path in @($stdoutPath, $stderrPath)) {
-            if (Test-Path -LiteralPath $path -PathType Leaf) {
-                Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
-            }
-        }
+        if ($null -ne $resultReader) { $resultReader.Dispose() }
+        if ($null -ne $resultPipe) { $resultPipe.Dispose() }
         if ($null -ne $process) { $process.Dispose() }
     }
 }

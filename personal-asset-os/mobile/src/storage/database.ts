@@ -1,7 +1,7 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 
 export const MOBILE_DATABASE_NAME = 'personal_asset_os_mobile.db';
-export const MOBILE_DATABASE_VERSION = 1;
+export const MOBILE_DATABASE_VERSION = 2;
 
 export async function migrateDatabase(db: SQLiteDatabase): Promise<void> {
   await db.execAsync('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
@@ -33,6 +33,7 @@ export async function migrateDatabase(db: SQLiteDatabase): Promise<void> {
           amount TEXT NOT NULL,
           currency TEXT NOT NULL CHECK (currency = 'TWD'),
           description TEXT NOT NULL,
+          category_hint TEXT,
           merchant TEXT,
           note TEXT,
           payment_hint TEXT,
@@ -56,7 +57,21 @@ export async function migrateDatabase(db: SQLiteDatabase): Promise<void> {
         CREATE INDEX ix_outbox_events_status_created
         ON outbox_events (status, created_at DESC);
 
-        PRAGMA user_version = 1;
+        PRAGMA user_version = 2;
+        COMMIT;
+      `);
+    } catch (error) {
+      await db.execAsync('ROLLBACK;').catch(() => undefined);
+      throw error;
+    }
+    return;
+  }
+  if (currentVersion === 1) {
+    try {
+      await db.execAsync(`
+        BEGIN IMMEDIATE;
+        ALTER TABLE outbox_events ADD COLUMN category_hint TEXT;
+        PRAGMA user_version = 2;
         COMMIT;
       `);
     } catch (error) {

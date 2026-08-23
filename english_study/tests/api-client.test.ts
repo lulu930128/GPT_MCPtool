@@ -64,3 +64,40 @@ test("item and practice writes map camelCase without losing partial or void", as
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });
+
+test("reference search and enrichment map only bounded Hub routes", async () => {
+  const requests: Array<{ method: string; url: string; body?: Record<string, unknown> }> = [];
+  const server = createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    requests.push({
+      method: req.method ?? "",
+      url: req.url ?? "",
+      body: chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : undefined,
+    });
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const client = new EnglishStudyHubClient({ hubBaseUrl: `http://127.0.0.1:${address.port}`, hubTimeoutMs: 2000 });
+  try {
+    await client.searchReferenceEntries({ query: "look forward", sourceId: "open-english-wordnet", partOfSpeech: "verb", limit: 5, offset: 2 });
+    await client.getReferenceEntry("ref-entry:123456789012345678901234");
+    await client.previewItemEnrichment({ itemId: "vocab:123456789012345678901234", referenceEntryIds: ["ref-entry:123456789012345678901234"] });
+    assert.equal(requests[0].method, "GET");
+    assert.match(requests[0].url, /^\/api\/v1\/reference\/entries\?/);
+    assert.match(requests[0].url, /query=look\+forward/);
+    assert.match(requests[0].url, /source_id=open-english-wordnet/);
+    assert.match(requests[0].url, /part_of_speech=verb/);
+    assert.equal(requests[1].url, "/api/v1/reference/entries/ref-entry%3A123456789012345678901234");
+    assert.equal(requests[2].method, "POST");
+    assert.deepEqual(requests[2].body, {
+      item_id: "vocab:123456789012345678901234",
+      reference_entry_ids: ["ref-entry:123456789012345678901234"],
+    });
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});

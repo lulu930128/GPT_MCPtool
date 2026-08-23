@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("copy_mcp_url", "copy_health_url", "copy_tunnel_id", "open_mcp_health", "open_tunnel_ui", "open_runtime_logs", "open_dashboard", "quick_capture", "create_verified_backup", "copy_app_url", "open_data_folder", "open_backup_folder")]
+    [ValidateSet("copy_mcp_url", "copy_health_url", "copy_tunnel_id", "open_mcp_health", "open_tunnel_ui", "open_runtime_logs", "open_dashboard", "create_verified_backup", "copy_app_url", "open_data_folder", "open_backup_folder")]
     [string]$Action,
     [switch]$SelfTest
 )
@@ -7,7 +7,7 @@ param(
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = "Stop"
 $menuContract = "component-menu-v1"
-$supportedActions = @("copy_mcp_url", "copy_health_url", "copy_tunnel_id", "open_mcp_health", "open_tunnel_ui", "open_runtime_logs", "open_dashboard", "quick_capture", "create_verified_backup", "copy_app_url", "open_data_folder", "open_backup_folder")
+$supportedActions = @("copy_mcp_url", "copy_health_url", "copy_tunnel_id", "open_mcp_health", "open_tunnel_ui", "open_runtime_logs", "open_dashboard", "create_verified_backup", "copy_app_url", "open_data_folder", "open_backup_folder")
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 if ($SelfTest) {
     [pscustomobject]@{ ok = $true; menuContract = $menuContract; actions = $supportedActions; managerDomainDataAccess = "none"; managerSecretAccess = "none"; formalDataPathExposed = $false } | ConvertTo-Json -Depth 4
@@ -15,7 +15,6 @@ if ($SelfTest) {
 }
 . (Join-Path $PSScriptRoot "local-env.ps1")
 $appUrl = "http://127.0.0.1:18876/"
-$quickCaptureUrl = "${appUrl}?view=capture"
 $mcpUrl = "http://127.0.0.1:18876/mcp/"
 $healthUrl = "http://127.0.0.1:18876/api/health"
 $tunnelUiUrl = "http://127.0.0.1:18877/ui"
@@ -51,7 +50,6 @@ try {
         "open_tunnel_ui" { Start-Process $tunnelUiUrl | Out-Null }
         "open_runtime_logs" { Open-Folder $runtimeDir }
         "open_dashboard" { Start-Process $appUrl | Out-Null }
-        "quick_capture" { Start-Process $quickCaptureUrl | Out-Null }
         "create_verified_backup" {
             $result = Invoke-RestMethod -UseBasicParsing -Method Post -Uri "${appUrl}api/backups" -ContentType "application/json" -Body "{}" -TimeoutSec 30
             Show-Message "Verified backup created: $([IO.Path]::GetFileName([string]$result.backup_path))" ([Windows.Forms.MessageBoxIcon]::Information)

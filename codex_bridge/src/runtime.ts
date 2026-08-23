@@ -15,7 +15,7 @@ export interface BridgeRuntime {
 }
 
 export async function createBridgeRuntime(config: BridgeConfig): Promise<BridgeRuntime> {
-  const store = new JobStore(config.jobsDir);
+  const store = new JobStore(config.jobsDir, config.handoffDir);
   await store.initialize();
   const textBundles = new TextBundleStore(config.stagingDir);
   await textBundles.initialize();

@@ -101,7 +101,6 @@
       { "id": "open_tunnel_ui", "label": "Open tunnel UI", "group": "connection", "confirmation": "none" },
       { "id": "open_runtime_logs", "label": "Open runtime logs", "group": "connection", "confirmation": "none" },
       { "id": "open_dashboard", "label": "Open dashboard", "group": "component", "confirmation": "none" },
-      { "id": "quick_capture", "label": "Quick capture", "group": "component", "confirmation": "none" },
       { "id": "create_verified_backup", "label": "Create verified backup", "group": "component", "confirmation": "required" },
       { "id": "copy_app_url", "label": "Copy app URL", "group": "component", "confirmation": "none" },
       { "id": "open_data_folder", "label": "Open data folder", "group": "component", "confirmation": "none" },

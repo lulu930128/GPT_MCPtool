@@ -1,7 +1,7 @@
 # Child Process Network Policy
 
 `MCP Control Center` 不修改 Windows 全域 proxy，也不把目前 PowerShell session 的 ambient
-proxy 當成各元件的正式 runtime 設定。六個 production component 的 controller 在建立
+proxy 當成各元件的正式 runtime 設定。七個 production component 的 controller 在建立
 server、Hub、backend 或 `tunnel-client` child process 時遵循同一個邊界：
 
 - 只在 child spawn 的短暫環境覆寫 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 與其小寫版本。
@@ -17,7 +17,7 @@ server、Hub、backend 或 `tunnel-client` child process 時遵循同一個邊�
 
 ## Tunnel binary inventory
 
-[`tunnel-runtime-inventory-v1`](../config/tunnel-runtime-inventory.json) 記錄六個元件目前採用的
+[`tunnel-runtime-inventory-v1`](../config/tunnel-runtime-inventory.json) 記錄七個元件目前採用的
 binary path、來源類型及唯一允許的 explicit `TunnelClientPath` override。下列命令只執行
 bounded `--version` 並計算檔案 metadata／SHA-256；不下載、複製、更新或切換 executable：
 

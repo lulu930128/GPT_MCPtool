@@ -137,7 +137,7 @@ def test_finalize_creates_one_balanced_transaction_and_is_retry_safe(client: Tes
     assert dashboard["capture"]["pending_count"] == 0
 
 
-def test_invalid_finalize_keeps_event_pending_and_paired_mobile_is_closed(
+def test_invalid_finalize_keeps_event_pending_and_paired_mobile_requires_matching_device(
     client: TestClient, session: Session
 ) -> None:
     event, _ = financial_events.capture_event(
@@ -166,7 +166,18 @@ def test_invalid_finalize_keeps_event_pending_and_paired_mobile_is_closed(
     except UnsafeOperationError:
         pass
     else:
-        raise AssertionError("paired-mobile verifier 未啟用時必須拒絕")
+        raise AssertionError("缺少已驗證裝置身分時必須拒絕 paired-mobile")
+
+    with pytest.raises(UnsafeOperationError, match="與事件相符"):
+        financial_events.finalize_event(
+            session,
+            event_id=event.id,
+            expected_version=1,
+            payment_account_id=bank.id,
+            approval_source=ApprovalSource.PAIRED_MOBILE,
+            actor="mobile_device:other-device",
+            authenticated_mobile_device_id="other-device",
+        )
 
     assert event.status.value == "pending_match"
     assert int(session.scalar(transaction_count) or 0) == before_transactions
@@ -220,7 +231,9 @@ def test_migration_round_trip_from_0001_expands_audit_contract(
 
     with database.session() as session:
         revision = session.scalar(text("SELECT version_num FROM alembic_version"))
-        assert revision == "0003_mobile_connection"
+        assert revision == "0005_reporting_annotations"
+        assert "daily_valuation_snapshots" in inspect(database.engine).get_table_names()
+        assert "transaction_reporting_annotations" in inspect(database.engine).get_table_names()
         event, _ = financial_events.capture_event(
             session,
             event_kind=FinancialEventKind.EXPENSE,

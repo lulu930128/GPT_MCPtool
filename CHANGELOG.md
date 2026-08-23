@@ -6,7 +6,37 @@ domain-contract versions remain independent and are not rewritten by a workspace
 
 ## Unreleased
 
-No changes yet.
+### Added
+
+- English Study 0.3.0 adds three bounded reference-catalog tools, a component-owned desktop
+  launcher, fixed local ports, and its own managed secure-tunnel lifecycle.
+- Personal Asset OS adds read-time Taiwan and US broker valuation overlays, traceable FX fallback,
+  immutable daily valuation snapshots, reporting annotations, and mobile activity-fund ingestion.
+- Codex Bridge adds server-generated read-only pasted-text handoff copies for approved Codex jobs.
+
+### Changed
+
+- MCP Control Center now adopts all seven production MCP components and uses a dedicated framed
+  result-pipe wrapper so inherited component child handles cannot keep bounded actions open.
+- Personal Asset OS removes the duplicated Quick Capture manager action and keeps daily capture in
+  the product-owned dashboard and authenticated mobile flow.
+- Japanese Study and English Study desktop launchers now target their component-owned fixed Hub
+  endpoints.
+
+### Fixed
+
+- Memory Core lifecycle recovery now distinguishes stale or reused managed PIDs from an active
+  owned listener before deciding whether a component is running.
+- Codex Bridge cancellation and startup recovery now settle stale pending approvals, and its MCP
+  Apps widget no longer overflows narrow containers.
+
+### Security
+
+- Project Reading denies Codex credential, capability, installation, global-state, and session-index
+  filenames when a reviewed `.codex` directory is configured as a named root.
+- Personal Asset OS keeps broker credentials, raw holdings, mobile device identifiers, and runtime
+  state outside the repository and outside its persisted ledger and valuation snapshots.
+- Workspace ignore rules also exclude transitional SQLite restore WAL and shared-memory sidecars.
 
 ## 1.1.0 - 2026-08-16
 

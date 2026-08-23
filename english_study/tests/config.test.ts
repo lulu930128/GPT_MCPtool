@@ -4,9 +4,9 @@ import { loadConfig } from "../src/config.js";
 
 test("defaults are isolated loopback endpoints", () => {
   const config = loadConfig({});
-  assert.equal(config.hubBaseUrl, "http://127.0.0.1:8831");
+  assert.equal(config.hubBaseUrl, "http://127.0.0.1:18887");
   assert.equal(config.host, "127.0.0.1");
-  assert.equal(config.port, 8830);
+  assert.equal(config.port, 18886);
 });
 
 test("non-loopback MCP bind requires a token", () => {

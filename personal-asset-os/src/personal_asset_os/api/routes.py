@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Generator
-from typing import Annotated, cast
+from typing import Annotated, Literal, cast
 
 from fastapi import APIRouter, Depends, Header, Query, Request
 from sqlalchemy import func, select, text
@@ -28,6 +28,7 @@ from personal_asset_os.api.schemas import (
     ReservedCashUpdate,
     ReversalRequest,
     TradeRequest,
+    TransactionReportingAnnotationUpsert,
     TransferRequest,
 )
 from personal_asset_os.build import source_build_id
@@ -48,10 +49,26 @@ from personal_asset_os.models import (
     MobileDevice,
     Snapshot,
 )
+from personal_asset_os.services import (
+    activity_fund,
+    financial_events,
+    ledger,
+    mobile_sync,
+    portfolio,
+    reporting,
+    reporting_annotations,
+    valuation_history,
+)
 from personal_asset_os.services import ai as ai_service
 from personal_asset_os.services import backup as backup_service
-from personal_asset_os.services import financial_events, ledger, mobile_sync, portfolio, reporting
+from personal_asset_os.services.broker_read import BrokerSnapshotProvider
+from personal_asset_os.services.daily_snapshot_scheduler import (
+    capture_current_daily_snapshot,
+)
+from personal_asset_os.services.fx_rates import FxRateProvider
+from personal_asset_os.services.mobile_usb_bridge import MobileUsbBridge
 from personal_asset_os.settings import Settings
+from personal_asset_os.temporal import utc_now
 
 router = APIRouter(prefix="/api")
 
@@ -62,6 +79,18 @@ def get_database(request: Request) -> Database:
 
 def get_settings(request: Request) -> Settings:
     return cast(Settings, request.app.state.settings)
+
+
+def get_broker_reader(request: Request) -> BrokerSnapshotProvider:
+    return cast(BrokerSnapshotProvider, request.app.state.broker_reader)
+
+
+def get_fx_reader(request: Request) -> FxRateProvider:
+    return cast(FxRateProvider, request.app.state.fx_reader)
+
+
+def get_mobile_usb_bridge(request: Request) -> MobileUsbBridge:
+    return cast(MobileUsbBridge, request.app.state.mobile_usb_bridge)
 
 
 def get_session(database: Database = Depends(get_database)) -> Generator[Session, None, None]:
@@ -160,7 +189,9 @@ def mobile_device_payload(device: MobileDevice) -> dict[str, object]:
 
 @router.get("/health")
 def health(
-    database: Database = Depends(get_database), settings: Settings = Depends(get_settings)
+    database: Database = Depends(get_database),
+    settings: Settings = Depends(get_settings),
+    mobile_usb_bridge: MobileUsbBridge = Depends(get_mobile_usb_bridge),
 ) -> dict[str, object]:
     database_ok = False
     schema_revision: str | None = None
@@ -181,6 +212,7 @@ def health(
         "database": "ready" if database_ok else "unavailable",
         "schemaRevision": schema_revision,
         "hostPolicy": "loopback-only",
+        "mobileUsbBridge": mobile_usb_bridge.snapshot(),
     }
 
 
@@ -212,8 +244,55 @@ def readiness(
 
 
 @router.get("/dashboard")
-def get_dashboard(session: Session = Depends(get_session)) -> dict[str, object]:
-    return reporting.dashboard(session)
+def get_dashboard(
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    broker_reader: BrokerSnapshotProvider = Depends(get_broker_reader),
+    fx_reader: FxRateProvider = Depends(get_fx_reader),
+) -> dict[str, object]:
+    return reporting.dashboard(
+        session,
+        broker_read=broker_reader.read(),
+        broker_investment_account_id=settings.broker_investment_account_id,
+        broker_us_investment_account_id=settings.broker_us_investment_account_id,
+        fx_provider=fx_reader,
+        reporting_timezone=settings.reporting_timezone,
+    )
+
+
+@router.post("/valuation-snapshots/daily", status_code=201)
+def capture_daily_valuation_snapshot(
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    broker_reader: BrokerSnapshotProvider = Depends(get_broker_reader),
+    fx_reader: FxRateProvider = Depends(get_fx_reader),
+) -> dict[str, object]:
+    captured_at = utc_now()
+    snapshot, created = capture_current_daily_snapshot(
+        session,
+        settings=settings,
+        broker_reader=broker_reader,
+        fx_reader=fx_reader,
+        captured_at=captured_at,
+    )
+    return {
+        "created": created,
+        "snapshot": valuation_history.snapshot_payload(snapshot),
+    }
+
+
+@router.get("/dashboard/history")
+def get_dashboard_history(
+    range_code: Literal["1m", "3m", "1y"] = Query(default="1m", alias="range"),
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    return valuation_history.history(
+        session,
+        range_code=range_code,
+        reporting_timezone=settings.reporting_timezone,
+        base_currency=settings.base_currency,
+    )
 
 
 @router.get("/accounts")
@@ -245,6 +324,18 @@ def add_account(
 ) -> dict[str, object]:
     account = ledger.create_account(session, **payload.model_dump())
     return {"id": account.id, "name": account.name, "kind": account.kind.value}
+
+
+@router.get("/activity-fund")
+def get_activity_fund(session: Session = Depends(get_session)) -> dict[str, object]:
+    return activity_fund.status(session)
+
+
+@router.get("/mobile/transport")
+def mobile_transport_status(
+    mobile_usb_bridge: MobileUsbBridge = Depends(get_mobile_usb_bridge),
+) -> dict[str, object]:
+    return mobile_usb_bridge.snapshot()
 
 
 @router.get("/financial-events")
@@ -343,8 +434,14 @@ def pair_mobile_device(
 
 
 @router.get("/mobile/session")
-def mobile_session(device: MobileDevice = Depends(get_mobile_device)) -> dict[str, object]:
-    return {"device": mobile_device_payload(device), "ingest_only": True}
+def mobile_session(
+    device: MobileDevice = Depends(get_mobile_device),
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return {
+        "device": mobile_device_payload(device),
+        "activity_fund": activity_fund.status(session),
+    }
 
 
 @router.post("/mobile/events", status_code=201)
@@ -355,16 +452,43 @@ def ingest_mobile_event(
 ) -> dict[str, object]:
     values = payload.model_dump()
     payload_hash = cast(str, values.pop("payload_hash"))
-    event, created = mobile_sync.capture_mobile_event(
+    schema_version = cast(int, values["schema_version"])
+    event, event_created = mobile_sync.capture_mobile_event(
         session,
         device=device,
         payload=values,
         payload_hash=payload_hash,
     )
+    if schema_version == 1:
+        return {
+            "event": financial_event_payload(event, created=event_created),
+            "accepted_payload_hash": payload_hash.lower(),
+            "write_mode": "legacy_staging",
+            "auto_finalized": False,
+            "ingest_only": True,
+        }
+
+    account = activity_fund.require_account(session)
+    account_arguments = (
+        {"payment_account_id": account.id}
+        if event.event_kind.value == "expense"
+        else {"destination_account_id": account.id}
+    )
+    event, transaction, transaction_created = financial_events.finalize_event(
+        session,
+        event_id=event.id,
+        expected_version=event.version,
+        approval_source=ApprovalSource.PAIRED_MOBILE,
+        actor=f"mobile_device:{device.id}",
+        authenticated_mobile_device_id=device.id,
+        **account_arguments,
+    )
     return {
-        "event": financial_event_payload(event, created=created),
+        "event": financial_event_payload(event, created=event_created),
+        "transaction": transaction_payload(transaction, created=transaction_created),
         "accepted_payload_hash": payload_hash.lower(),
-        "ingest_only": True,
+        "write_mode": activity_fund.WRITE_MODE,
+        "auto_finalized": True,
     }
 
 
@@ -380,6 +504,25 @@ def list_transactions(
         .limit(limit)
     )
     return [transaction_payload(item) for item in transactions]
+
+
+@router.put("/transactions/{transaction_id}/reporting-annotation")
+def put_transaction_reporting_annotation(
+    transaction_id: str,
+    payload: TransactionReportingAnnotationUpsert,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    annotation, changed = reporting_annotations.set_annotation(
+        session,
+        transaction_id=transaction_id,
+        actor="local_user",
+        **payload.model_dump(),
+    )
+    return {
+        "annotation": reporting_annotations.annotation_payload(annotation),
+        "changed": changed,
+        "ledger_mutated": False,
+    }
 
 
 @router.post("/transactions/opening-balance", status_code=201)
@@ -460,8 +603,19 @@ def add_instrument(
 
 
 @router.get("/portfolio")
-def get_portfolio(session: Session = Depends(get_session)) -> list[portfolio.PositionRow]:
-    return portfolio.portfolio(session)
+def get_portfolio(
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    broker_reader: BrokerSnapshotProvider = Depends(get_broker_reader),
+    fx_reader: FxRateProvider = Depends(get_fx_reader),
+) -> list[portfolio.PositionRow]:
+    return portfolio.portfolio_read_model(
+        session,
+        broker_read=broker_reader.read(),
+        broker_investment_account_id=settings.broker_investment_account_id,
+        broker_us_investment_account_id=settings.broker_us_investment_account_id,
+        fx_provider=fx_reader,
+    ).positions
 
 
 @router.post("/trades", status_code=201)

@@ -1,14 +1,16 @@
 import { CodexAppServerClient } from "../dist/src/app-server-client.js";
-import { fileURLToPath } from "node:url";
+import { loadBridgeConfig } from "../dist/src/config.js";
 
 const projectPath = process.argv[2] || process.cwd();
+const config = await loadBridgeConfig(process.env);
 const client = new CodexAppServerClient({
-  command: process.execPath,
-  args: [fileURLToPath(new URL("../node_modules/@openai/codex/bin/codex.js", import.meta.url)), "app-server"],
+  command: config.codexCommand,
+  args: config.codexArgs,
   requestTimeoutMs: 20_000,
 });
 
-client.on("stderr", () => undefined);
+const diagnostics = [];
+client.on("stderr", (line) => diagnostics.push(String(line).slice(0, 2_000)));
 
 try {
   await client.ensureStarted();
@@ -17,6 +19,13 @@ try {
     client.request("model/list", { limit: 100 }),
   ]);
   console.log(JSON.stringify({ ok: true, projectPath, profiles, models }, null, 2));
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    error: error instanceof Error ? error.message : String(error),
+    diagnostics: diagnostics.slice(-10),
+  }, null, 2));
+  throw error;
 } finally {
   await client.close();
 }

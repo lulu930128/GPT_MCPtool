@@ -144,8 +144,14 @@ export function TextField({
   label,
   error,
   prefix,
+  rightAccessory,
   ...props
-}: TextInputProps & { label: string; error?: string | null; prefix?: string }) {
+}: TextInputProps & {
+  label: string;
+  error?: string | null;
+  prefix?: string;
+  rightAccessory?: ReactNode;
+}) {
   return (
     <View style={styles.fieldGroup}>
       <Text style={styles.fieldLabel}>{label}</Text>
@@ -158,6 +164,7 @@ export function TextField({
           selectionColor={palette.caramel}
           style={[styles.input, props.multiline && styles.inputMultiline, props.style]}
         />
+        {rightAccessory ? <View style={styles.inputAccessory}>{rightAccessory}</View> : null}
       </View>
       {error ? <Text style={styles.fieldError}>{error}</Text> : null}
     </View>
@@ -300,6 +307,7 @@ const styles = StyleSheet.create({
   inputShellError: { borderColor: palette.danger },
   inputPrefix: { color: palette.cocoa, fontSize: 19, fontWeight: '700', marginRight: spacing.xs },
   input: { flex: 1, minHeight: 54, color: palette.cocoa, fontSize: 18, paddingVertical: spacing.sm },
+  inputAccessory: { marginLeft: spacing.xs },
   inputMultiline: { minHeight: 86, textAlignVertical: 'top' },
   fieldError: { color: palette.danger, fontSize: 13, fontWeight: '600' },
   segment: {

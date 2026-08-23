@@ -88,7 +88,11 @@ function Get-McOwnershipState {
     if ($PidState -eq 'owned' -and $null -ne $ManagedPid) {
         return $(if ($null -eq $ListenerPid) { 'OwnedNotListening' } else { 'OwnedReady' })
     }
-    if ($PidState -in @('missing', 'stale_missing_process') -and $null -eq $ListenerPid) { return 'Stopped' }
+    # A reboot can reuse a stale managed PID for an unrelated process. When the
+    # expected port has no listener, the stack can safely remove only that stale
+    # PID file without stopping the unrelated process.
+    $stoppedPidStates = @('missing', 'stale_missing_process', 'stale_process_name', 'stale_executable')
+    if ($PidState -in $stoppedPidStates -and $null -eq $ListenerPid) { return 'Stopped' }
     return 'OwnershipMismatch'
 }
 

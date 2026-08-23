@@ -62,8 +62,8 @@
                            "id":  "english_study",
                            "root":  "..\\..\\english_study",
                            "descriptor":  "control-center\\component.json",
-                           "enabled":  false,
-                           "autoStart":  false,
+                           "enabled":  true,
+                           "autoStart":  true,
                            "startupOrder":  70
                        }
                    ]

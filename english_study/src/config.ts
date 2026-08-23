@@ -10,11 +10,11 @@ export interface EnglishStudyMcpConfig {
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): EnglishStudyMcpConfig {
-  const hubBaseUrl = normalizeHubUrl(env.ESTUDY_HUB_BASE_URL || "http://127.0.0.1:8831");
+  const hubBaseUrl = normalizeHubUrl(env.ESTUDY_HUB_BASE_URL || "http://127.0.0.1:18887");
   const hubApiToken = env.ESTUDY_HUB_API_TOKEN?.trim() || undefined;
   const hubTimeoutMs = parsePositiveInt(env.ESTUDY_HUB_TIMEOUT_MS, 10_000);
   const host = env.ESTUDY_MCP_HOST?.trim() || "127.0.0.1";
-  const port = parsePort(env.ESTUDY_MCP_PORT, 8830);
+  const port = parsePort(env.ESTUDY_MCP_PORT, 18886);
   const httpToken = env.ESTUDY_MCP_HTTP_TOKEN?.trim() || undefined;
   if (!isLoopbackHost(host) && !httpToken) {
     throw new Error("ESTUDY_MCP_HTTP_TOKEN is required for a non-loopback MCP bind.");

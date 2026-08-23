@@ -41,3 +41,8 @@ class DataIntegrityError(PersonalAssetError):
 class UnsafeOperationError(PersonalAssetError):
     code = "UNSAFE_OPERATION"
     status_code = 409
+
+
+class ServiceUnavailableError(PersonalAssetError):
+    code = "SERVICE_UNAVAILABLE"
+    status_code = 503

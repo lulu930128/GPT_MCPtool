@@ -24,9 +24,9 @@ function Resolve-InventoryChildPath {
 try { $inventory = Get-Content -LiteralPath $inventoryFile -Encoding UTF8 -Raw | ConvertFrom-Json }
 catch { throw "Tunnel runtime inventory is invalid JSON." }
 if ([int]$inventory.schemaVersion -ne 1 -or [string]$inventory.contractVersion -ne "tunnel-runtime-inventory-v1") { throw "Unsupported tunnel runtime inventory contract." }
-if (@($inventory.components).Count -ne 6) { throw "Tunnel runtime inventory must declare six production components." }
+if (@($inventory.components).Count -ne 7) { throw "Tunnel runtime inventory must declare seven production components." }
 $ids = @($inventory.components | ForEach-Object { [string]$_.id })
-if (@($ids | Sort-Object -Unique).Count -ne 6 -or @($ids | Where-Object { $_ -notmatch '^[a-z][a-z0-9_]{0,63}$' }).Count -gt 0) { throw "Tunnel runtime inventory component ids are invalid or duplicated." }
+if (@($ids | Sort-Object -Unique).Count -ne 7 -or @($ids | Where-Object { $_ -notmatch '^[a-z][a-z0-9_]{0,63}$' }).Count -gt 0) { throw "Tunnel runtime inventory component ids are invalid or duplicated." }
 foreach ($entry in @($inventory.components)) {
     if ([string]$entry.source -notin @("legacy_shared_provider", "legacy_shared", "component_local", "shared", "override")) { throw "Tunnel runtime source label is invalid." }
     if ([string]$entry.override -ne "TunnelClientPath") { throw "Tunnel runtime override must remain the explicit TunnelClientPath parameter." }
@@ -39,7 +39,7 @@ if ($Action -eq "SelfTest") {
     [pscustomobject]@{
         ok = $true
         contractVersion = "tunnel-runtime-inventory-v1"
-        configuredComponentCount = 6
+        configuredComponentCount = 7
         boundedVersionTimeoutSeconds = $VersionTimeoutSeconds
         boundedVersionOutputBytes = $MaxVersionOutputBytes
         executesVersionOnly = $true

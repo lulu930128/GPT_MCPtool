@@ -12,6 +12,10 @@ its financial-data and user-interface authority inside this component.
 The controller starts server then tunnel and stops tunnel then server.
 `RestartCore` preserves the tunnel; `ReloadRuntime` replaces both roles.
 
+The optional Mobile USB Bridge runs as a component-owned task inside the server lifespan. Control
+Center neither invokes ADB nor reads its device identity; restarting the core naturally recreates
+the bounded monitor while preserving the shared ADB daemon.
+
 ## Data boundary
 
 The controller probes only `/api/health`, `/api/readyz` and tunnel `/readyz`.
@@ -26,11 +30,11 @@ database path, backup path, credentials and tunnel identifier.
 ## UI boundary
 
 The dashboard is the primary component-owned UI. The optional diagnostic tray
-may open dashboard, Quick Capture, health, logs, data/backup folders and the
+may open dashboard, health, logs, data/backup folders and the
 component-owned backup action. Closing the diagnostic tray only closes that UI
 and never stops runtime.
 
-`component-menu-v1` restores the original dashboard, Quick Capture, verified
+`component-menu-v1` restores the dashboard, verified
 backup, app URL, data-folder and backup-folder actions directly in the Control
 Center submenu. The manager delegates a fixed action ID to
 `scripts/control-center-ui.ps1` and requires confirmation before the backup

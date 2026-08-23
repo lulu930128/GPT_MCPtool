@@ -81,7 +81,7 @@ export default function ProfileScreen() {
 
       <InfoCallout
         title="手機不是正式帳本"
-        body="正式帳務真相仍由桌面端 transactions + postings 管理；手機同步只會建立待審核 Financial Event。"
+        body="正式帳務真相仍由桌面端 transactions + postings 管理；手機同步只送出已配對裝置的入帳意圖。"
       />
 
       <SectionTitle>桌面連線</SectionTitle>
@@ -100,7 +100,7 @@ export default function ProfileScreen() {
             </Text>
             <Text style={typeStyles.caption}>
               {connection?.paired
-                ? '同步前仍會逐筆驗證桌面端確認，不會直接入帳。'
+                ? '每筆都要收到桌面正式交易確認，才會從待同步狀態完成。'
                 : '先在桌面產生一次性配對碼，再回到這裡輸入。'}
             </Text>
           </View>
@@ -170,7 +170,7 @@ export default function ProfileScreen() {
       <SectionTitle>隱私邊界</SectionTitle>
       <PaperCard style={styles.privacyCard}>
         <PrivacyItem icon="usb" text="本版只使用 USB/ADB loopback，不建立公網 Relay。" />
-        <PrivacyItem icon="bank-off-outline" text="手機不會直接新增、修改或刪除正式帳本。" />
+        <PrivacyItem icon="bank-off-outline" text="手機不直接接觸資料庫；正式交易仍由桌面驗證並寫入。" />
         <PrivacyItem icon="robot-off-outline" text="App 不會背景呼叫 AI，也不會傳送資料給模型。" />
       </PaperCard>
 

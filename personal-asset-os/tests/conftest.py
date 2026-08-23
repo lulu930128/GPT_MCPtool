@@ -14,7 +14,12 @@ from personal_asset_os.settings import Settings
 
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
-    return Settings(data_dir=tmp_path / "paos-data")
+    return Settings(
+        _env_file=None,
+        data_dir=tmp_path / "paos-data",
+        broker_bridge_enabled=False,
+        daily_snapshot_enabled=False,
+    )
 
 
 @pytest.fixture

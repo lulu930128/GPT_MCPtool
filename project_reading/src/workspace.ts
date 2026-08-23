@@ -170,7 +170,20 @@ export async function getWorkspaceInfo(config: ServerConfig): Promise<unknown> {
     denyPolicy: {
       directories: Array.from(config.denyDirs).sort(),
       extensions: Array.from(config.denyExtensions).sort(),
-      fileNames: [".env", ".env.*", "credentials.json", "token.json", "id_rsa", "id_ed25519"],
+      fileNames: [
+        ".env",
+        ".env.*",
+        ".codex-global-state.json*",
+        "auth.json",
+        "cap_sid",
+        "credentials.json",
+        "installation_id",
+        "session_index.jsonl",
+        "token.json",
+        "transcription-history.jsonl",
+        "id_rsa",
+        "id_ed25519",
+      ],
     },
   };
 }

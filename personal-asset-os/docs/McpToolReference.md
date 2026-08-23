@@ -2,9 +2,10 @@
 
 ## Contract
 
-The MCP server exposes seven read-only tools. All monetary values are decimal strings in TWD.
-Callers must preserve as-of time, valuation quality, price age, missing/stale warnings, and
-reconciliation state. The server has no ledger mutation tool.
+The MCP server exposes seven read-only tools. Aggregate/accounting values are decimal strings in
+TWD. Broker positions may additionally carry USD `native_price` and `native_market_value` facts.
+Callers must preserve as-of time, valuation quality, price age, missing/stale warnings, broker
+read mode, account mapping, and reconciliation state. The server has no ledger mutation tool.
 
 ## Tools
 
@@ -15,7 +16,9 @@ Returns aggregate dashboard read models:
 - `as_of` and `base_currency`;
 - overall quality;
 - asset, liability, cash, investment, income/expense, and related metrics;
-- valuation detail and warnings.
+- valuation detail and warnings;
+- a `broker` block describing KGI status, read mode, source time, opaque account reference,
+  TWD market value, native-currency totals, FX fact, and reconciliation counts.
 
 This is a provisional view when prices or reconciliation evidence are missing/stale. Do not call it
 live net worth without checking the returned quality and warnings.
@@ -30,10 +33,18 @@ balance remains authoritative.
 
 ### `list_asset_positions`
 
-Lists trade-derived investment positions with quantity, average cost, realized/unrealized values,
-and the latest price evidence including provider, `price_at`, age, and quality.
+Lists the effective investment read model. Ledger-only rows remain trade-derived. When KGI is
+available, KGI rows include `position_source=kgi_broker`, broker source time, reported market value,
+and `reconciliation_status`; a mapped matching Ledger position contributes book cost but is not
+also counted as a second market value.
 
-Missing price keeps market value unavailable rather than substituting cost or zero.
+US rows preserve `native_currency=USD`, native price/value, settlement currency, and FX metadata.
+Only a traceable, sufficiently fresh USD/TWD fact creates `market_value` in TWD. If FX is missing,
+the native USD value remains visible while `valuation_included=false`; callers must not invent a
+conversion rate.
+
+Missing price keeps market value unavailable rather than substituting zero. `broker_unrealized_pnl`
+is broker reference evidence and never replaces PAOS book P/L.
 
 ### `list_recent_asset_transactions`
 
@@ -67,7 +78,7 @@ configuration/readiness status. It does not return credential values.
 - Decimal values remain strings to avoid binary floating-point loss.
 - Datetimes are serialized as timezone-aware UTC ISO 8601 values.
 - Enum values are stable strings.
-- `null`, missing-price, stale-price, partial, and unreconciled states remain explicit.
+- `null`, missing-price/rate, stale-price/rate, per-market partial, and unreconciled states remain explicit.
 - Read-only does not mean public: all results are private personal financial information.
 
 ## Tool selection

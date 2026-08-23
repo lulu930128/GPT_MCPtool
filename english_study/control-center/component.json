@@ -4,9 +4,9 @@
   "displayName": "English Study",
   "runtimeMode": "component-controller",
   "runtimeContract": "unified-lifecycle-v3",
-  "traits": ["multi-core", "diagnostic-ui"],
+  "traits": ["tunnel", "multi-core", "credential-sensitive", "primary-ui", "diagnostic-ui"],
   "contractScript": "scripts\\runtime-control.ps1",
-  "capabilities": ["ensure_running", "restart_core", "reload_runtime", "shutdown_runtime", "show_diagnostic_tray"],
+  "capabilities": ["ensure_running", "repair_connectivity", "restart_core", "reload_runtime", "shutdown_runtime", "show_diagnostic_tray"],
   "lifecycle": {
     "controller": { "kind": "powershell", "path": "scripts\\runtime-control.ps1" },
     "diagnosticLauncher": { "kind": "vbs", "path": "scripts\\show-diagnostic-tray.vbs" }
@@ -17,8 +17,8 @@
       "label": "English Study Hub",
       "role": "core",
       "kind": "json",
-      "url": "http://127.0.0.1:8831/health",
-      "port": 8831,
+      "url": "http://127.0.0.1:18887/health",
+      "port": 18887,
       "required": true,
       "expected": { "ok": true, "service": "english-study-hub" },
       "publicSummaryFields": ["service", "version"],
@@ -32,8 +32,8 @@
       "label": "English Study MCP",
       "role": "core",
       "kind": "json",
-      "url": "http://127.0.0.1:8830/health",
-      "port": 8830,
+      "url": "http://127.0.0.1:18886/health",
+      "port": 18886,
       "required": true,
       "expected": { "ok": true, "service": "english-study-mcp" },
       "publicSummaryFields": ["service", "version", "contractVersion", "buildId", "toolCount"],
@@ -41,19 +41,43 @@
         "managedPidFile": ".tmp\\english-study-mcp.pid",
         "managedCommandContains": ["english_study", "dist\\src\\http-main.js"]
       }
+    },
+    {
+      "id": "tunnel",
+      "label": "Secure MCP Tunnel",
+      "role": "connectivity",
+      "kind": "text",
+      "url": "http://127.0.0.1:18888/readyz",
+      "port": 18888,
+      "required": true,
+      "expectedText": ["ready", "ok"],
+      "ownership": {
+        "managedPidFile": ".tmp\\tunnel-client.pid",
+        "managedCommandContains": ["english_study", "tunnel-client", "english-study"]
+      }
     }
   ],
   "navigation": [
     { "id": "health", "label": "Open health", "kind": "probe", "target": "mcp" }
   ],
   "ui": {
+    "primaryLauncher": {
+      "kind": "vbs",
+      "path": "scripts\\start-english-study-desktop.vbs"
+    },
     "menuContract": "component-menu-v1",
     "actionEntrypoint": { "kind": "powershell", "path": "scripts\\control-center-ui.ps1" },
     "menuActions": [
       { "id": "copy_mcp_url", "label": "Copy MCP URL", "group": "connection", "confirmation": "none" },
       { "id": "copy_health_url", "label": "Copy health URL", "group": "connection", "confirmation": "none" },
+      { "id": "copy_tunnel_id", "label": "Copy tunnel ID", "group": "connection", "confirmation": "none" },
       { "id": "open_mcp_health", "label": "Open MCP health", "group": "connection", "confirmation": "none" },
-      { "id": "open_runtime_logs", "label": "Open runtime logs", "group": "connection", "confirmation": "none" }
+      { "id": "open_tunnel_ui", "label": "Open tunnel UI", "group": "connection", "confirmation": "none" },
+      { "id": "open_runtime_logs", "label": "Open runtime logs", "group": "connection", "confirmation": "none" },
+      { "id": "open_study_browser", "label": "Open English Study", "group": "component", "confirmation": "none" },
+      { "id": "open_hub_health", "label": "Open Hub health", "group": "component", "confirmation": "none" },
+      { "id": "save_tunnel_key", "label": "Save tunnel key...", "group": "component", "confirmation": "none" },
+      { "id": "show_key_status", "label": "Show key status", "group": "component", "confirmation": "none" }
     ]
   },
   "safety": {

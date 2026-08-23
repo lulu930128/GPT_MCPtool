@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { appendFile, copyFile, mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { extname, join } from "node:path";
 import type {
   BridgeProject,
   ConversationMessage,
@@ -17,6 +17,7 @@ import type {
   JobSummary,
   PendingApproval,
   ReasoningEffort,
+  MaterializedTextArtifact,
   StagedTextArtifact,
   TextArtifactSummary,
   WorkPackage,
@@ -25,6 +26,7 @@ import { renderRequestMarkdown } from "./work-package.js";
 import { sanitizeForStorage } from "./redaction.js";
 
 const ACTIVE_STATUSES = new Set<JobStatus>(["queued", "preparing", "running", "awaiting_approval"]);
+const HANDOFF_EXTENSIONS = new Set([".txt", ".md", ".log", ".json", ".yaml", ".yml", ".diff", ".patch"]);
 
 export interface CreateJobInput {
   project: BridgeProject;
@@ -58,10 +60,14 @@ export class JobStore {
   private readonly messageClientIds = new Map<string, Set<string>>();
   private lock: Promise<void> = Promise.resolve();
 
-  constructor(private readonly jobsDir: string) {}
+  constructor(
+    private readonly jobsDir: string,
+    private readonly handoffRoot: string = join(jobsDir, "codex-inbox"),
+  ) {}
 
   async initialize(): Promise<void> {
     await mkdir(this.jobsDir, { recursive: true });
+    await mkdir(this.handoffRoot, { recursive: true });
     const entries = await readdir(this.jobsDir, { withFileTypes: true });
     for (const entry of entries) {
       if (!entry.isDirectory() || !/^[0-9a-f-]{36}$/i.test(entry.name)) {
@@ -85,18 +91,20 @@ export class JobStore {
       }
     }
     for (const record of this.jobs.values()) {
+      const approvalState: PendingApproval["state"] = record.status === "cancelled" ? "cancelled" : "expired";
+      const settledApprovals = settlePendingApprovals(record, approvalState);
       if (ACTIVE_STATUSES.has(record.status)) {
-        for (const approval of record.approvals) {
-          if (approval.state === "pending") {
-            approval.state = "expired";
-            approval.resolvedAt = new Date().toISOString();
-          }
-        }
         await this.transition(
           record.id,
           "interrupted",
           "Controller restarted before the job reached a terminal state; the turn was not retried automatically.",
         );
+      } else if (settledApprovals > 0) {
+        await this.mutateUnlocked(record.id, () => ({
+          type: "codex.approval.recovered",
+          message: `Recovered ${settledApprovals} stale pending approval(s) as ${approvalState}.`,
+          data: { count: settledApprovals, state: approvalState },
+        }));
       }
     }
   }
@@ -353,6 +361,7 @@ export class JobStore {
         this.messageClientIds.set(jobId, ids);
       }
       return this.mutateUnlocked(jobId, (current) => {
+        settlePendingApprovals(current, result.status === "cancelled" ? "cancelled" : "expired");
         current.result = result;
         current.status = result.status;
         return { type: `codex.turn.${result.status}`, message: result.message };
@@ -423,15 +432,19 @@ export class JobStore {
     return { ...descriptor, cursor, nextCursor: end < full.length ? end : undefined, done: end >= full.length, content };
   }
 
-  async readInputArtifacts(jobId: string, bundleIds?: string[]): Promise<StagedTextArtifact[]> {
+  async readInputArtifacts(jobId: string, bundleIds?: string[]): Promise<MaterializedTextArtifact[]> {
     const record = this.requireJob(jobId);
     const wanted = new Set(bundleIds ?? (record.inputArtifacts ?? []).map((artifact) => artifact.id));
     const summaries = (record.inputArtifacts ?? []).filter((artifact) => wanted.has(artifact.id));
     if (summaries.length !== wanted.size) throw new Error("One or more staged text artifacts are not attached to this job.");
-    return Promise.all(summaries.map(async (artifact) => ({
-      ...artifact,
-      content: await readFile(this.inputArtifactPath(jobId, artifact.id), "utf8"),
-    })));
+    const artifacts = await Promise.all(summaries.map(async (artifact) => {
+      const content = await readFile(this.inputArtifactPath(jobId, artifact.id), "utf8");
+      assertArtifactDigest(artifact, content);
+      const localPath = await this.ensureHandoffCopy(jobId, artifact, content);
+      return { ...artifact, content, localPath };
+    }));
+    await this.writeHandoffManifest(jobId, record.inputArtifacts ?? []);
+    return artifacts;
   }
 
   jobDirectory(jobId: string): string {
@@ -599,6 +612,17 @@ export class JobStore {
     return join(this.jobDir(jobId), "inbox");
   }
 
+  private handoffJobDir(jobId: string): string {
+    assertUuid(jobId, "job id");
+    return join(this.handoffRoot, jobId);
+  }
+
+  private handoffArtifactPath(jobId: string, artifact: TextArtifactSummary): string {
+    assertUuid(artifact.id, "staged text artifact id");
+    const extension = allowedHandoffExtension(artifact.fileName);
+    return join(this.handoffJobDir(jobId), `${artifact.id}${extension}`);
+  }
+
   private inputArtifactPath(jobId: string, artifactId: string): string {
     if (!/^[0-9a-f-]{36}$/i.test(artifactId)) throw new Error("Invalid staged text artifact id.");
     return join(this.inboxDir(jobId), `${artifactId}.txt`);
@@ -607,14 +631,43 @@ export class JobStore {
   private async materializeInputArtifacts(jobId: string, artifacts: StagedTextArtifact[]): Promise<void> {
     if (artifacts.length === 0) return;
     await mkdir(this.inboxDir(jobId), { recursive: true });
+    await mkdir(this.handoffJobDir(jobId), { recursive: true });
     for (const artifact of artifacts) {
-      if (createHash("sha256").update(artifact.content, "utf8").digest("hex") !== artifact.sha256) {
-        throw new Error(`Staged text artifact '${artifact.fileName}' failed SHA-256 validation.`);
-      }
+      assertArtifactDigest(artifact, artifact.content);
       await writeFile(this.inputArtifactPath(jobId, artifact.id), artifact.content, "utf8");
+      await writeFile(this.handoffArtifactPath(jobId, artifact), artifact.content, "utf8");
     }
     const all = mergeArtifactSummaries(this.requireJobOrPending(jobId)?.inputArtifacts ?? [], summarizeArtifacts(artifacts));
     await writeFile(join(this.inboxDir(jobId), "manifest.json"), `${JSON.stringify({ schemaVersion: 1, artifacts: all }, null, 2)}\n`, "utf8");
+    await this.writeHandoffManifest(jobId, all);
+  }
+
+  private async ensureHandoffCopy(jobId: string, artifact: TextArtifactSummary, content: string): Promise<string> {
+    const path = this.handoffArtifactPath(jobId, artifact);
+    try {
+      const existing = await readFile(path, "utf8");
+      if (createHash("sha256").update(existing, "utf8").digest("hex") === artifact.sha256) return path;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    await mkdir(this.handoffJobDir(jobId), { recursive: true });
+    await writeFile(path, content, "utf8");
+    return path;
+  }
+
+  private async writeHandoffManifest(jobId: string, artifacts: TextArtifactSummary[]): Promise<void> {
+    if (artifacts.length === 0) return;
+    await mkdir(this.handoffJobDir(jobId), { recursive: true });
+    const manifest = {
+      schemaVersion: 1,
+      jobId,
+      access: "read-only",
+      artifacts: artifacts.map((artifact) => ({
+        ...artifact,
+        localPath: this.handoffArtifactPath(jobId, artifact),
+      })),
+    };
+    await writeFile(join(this.handoffJobDir(jobId), "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   }
 
   private requireJobOrPending(jobId: string): JobRecord | undefined {
@@ -630,6 +683,33 @@ function mergeArtifactSummaries(left: TextArtifactSummary[], right: TextArtifact
   const merged = new Map(left.map((artifact) => [artifact.id, artifact]));
   for (const artifact of right) merged.set(artifact.id, artifact);
   return Array.from(merged.values()).map((artifact) => structuredClone(artifact));
+}
+
+function assertArtifactDigest(artifact: TextArtifactSummary, content: string): void {
+  if (createHash("sha256").update(content, "utf8").digest("hex") !== artifact.sha256) {
+    throw new Error(`Staged text artifact '${artifact.fileName}' failed SHA-256 validation.`);
+  }
+}
+
+function settlePendingApprovals(record: JobRecord, state: PendingApproval["state"]): number {
+  const resolvedAt = new Date().toISOString();
+  let count = 0;
+  for (const approval of record.approvals) {
+    if (approval.state !== "pending") continue;
+    approval.state = state;
+    approval.resolvedAt = resolvedAt;
+    count += 1;
+  }
+  return count;
+}
+
+function assertUuid(value: string, field: string): void {
+  if (!/^[0-9a-f-]{36}$/i.test(value)) throw new Error(`Invalid ${field}.`);
+}
+
+function allowedHandoffExtension(fileName: string): string {
+  const extension = extname(fileName).toLowerCase();
+  return HANDOFF_EXTENSIONS.has(extension) ? extension : ".txt";
 }
 
 export function toSummary(record: JobRecord): JobSummary {

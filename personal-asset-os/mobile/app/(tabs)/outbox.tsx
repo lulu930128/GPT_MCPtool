@@ -31,6 +31,46 @@ function formatTime(value: string): string {
   }).format(new Date(value));
 }
 
+function eventLabel(event: OutboxEvent): string {
+  return event.categoryHint || event.description || '未分類';
+}
+
+function connectionCopy(connection: ConnectionState | null): {
+  title: string;
+  body: string;
+  icon: 'usb' | 'alert-circle-outline' | 'cellphone-key';
+} {
+  if (!connection) {
+    return { title: '正在檢查 USB 通道', body: '正在確認桌面服務與活動資金。', icon: 'usb' };
+  }
+  if (!connection.paired) {
+    return {
+      title: '先完成桌面配對',
+      body: connection.message,
+      icon: 'cellphone-key',
+    };
+  }
+  if (connection.transport === 'ready') {
+    return {
+      title: 'USB 同步通道已就緒',
+      body: '待同步記錄會自動送出並計入唯一活動資金；按鈕保留作為手動重送。',
+      icon: 'usb',
+    };
+  }
+  if (connection.transport === 'unreachable') {
+    return {
+      title: '等待 USB 連線',
+      body: '配對憑證仍有效；App 在前景時接上 USB 會自動重試，不會遺失手機記錄。',
+      icon: 'usb',
+    };
+  }
+  return {
+    title: '桌面設定尚未就緒',
+    body: connection.message,
+    icon: 'alert-circle-outline',
+  };
+}
+
 export default function OutboxScreen() {
   const db = useSQLiteContext();
   const [events, setEvents] = useState<OutboxEvent[]>([]);
@@ -72,13 +112,14 @@ export default function OutboxScreen() {
     setSyncNotice(null);
     try {
       const result = await syncOutbox(db);
-      if (result.attempted === 0) {
+      if (result.pairingInvalid) {
+        setSyncNotice('桌面端憑證已失效，請重新配對。');
+      } else if (result.attempted === 0) {
         setSyncNotice('目前沒有需要傳送的記錄。');
       } else {
         const details = [`已同步 ${result.synced} 筆`];
         if (result.needsReview) details.push(`${result.needsReview} 筆需要確認`);
         if (result.failed) details.push(`${result.failed} 筆傳送失敗`);
-        if (result.pairingInvalid) details.push('桌面端憑證已失效，請重新配對');
         setSyncNotice(details.join('，'));
       }
       await load();
@@ -92,23 +133,21 @@ export default function OutboxScreen() {
   const retryableCount = events.filter((event) =>
     ['pending', 'syncing', 'failed'].includes(event.status),
   ).length;
+  const connectionStatus = connectionCopy(connection);
+  const canSync = connection?.transport === 'ready' && retryableCount > 0;
 
   return (
     <PaperScreen refreshControl={{ refreshing, onRefresh: () => void refresh() }}>
       <BrandHeader
         eyebrow="LOCAL OUTBOX"
         title="待同步"
-        subtitle="透過 USB loopback 手動送到桌面待審核區；每筆成功都要收到相符確認。"
+        subtitle="透過 USB loopback 傳到桌面；收到正式交易確認後才算成功。"
       />
 
       <InfoCallout
-        title={connection?.paired ? 'USB 手動同步已可用' : '先完成桌面配對'}
-        body={
-          connection?.paired
-            ? '同步只會 staging Financial Event，不會直接建立 transactions 或 postings。'
-            : '到「我的手機」輸入桌面端一次性配對碼；未配對前資料仍只留在本機。'
-        }
-        icon={connection?.paired ? 'usb' : 'cloud-off-outline'}
+        title={connectionStatus.title}
+        body={connectionStatus.body}
+        icon={connectionStatus.icon}
       />
 
       <SectionTitle caption={`共 ${events.length} 筆本機記錄`}>手機記錄</SectionTitle>
@@ -125,7 +164,7 @@ export default function OutboxScreen() {
             <Pressable
               key={event.id}
               accessibilityRole="button"
-              accessibilityLabel={`查看 ${event.description} ${formatTwd(event.amount)}`}
+              accessibilityLabel={`查看 ${eventLabel(event)} ${formatTwd(event.amount)}`}
               onPress={() =>
                 router.push({ pathname: '/event/[id]', params: { id: event.id } })
               }>
@@ -139,8 +178,13 @@ export default function OutboxScreen() {
                 </View>
                 <View style={styles.eventCopy}>
                   <Text numberOfLines={1} style={styles.eventTitle}>
-                    {event.description}
+                    {eventLabel(event)}
                   </Text>
+                  {event.categoryHint && event.description ? (
+                    <Text numberOfLines={1} style={styles.eventDescription}>
+                      {event.description}
+                    </Text>
+                  ) : null}
                   <Text style={typeStyles.caption}>{formatTime(event.occurredAt)}</Text>
                   <StatusTag status={event.status} />
                   {event.lastError ? (
@@ -176,21 +220,37 @@ export default function OutboxScreen() {
           />
           <View style={styles.syncCopy}>
             <Text style={styles.syncTitle}>
-              {connection?.paired ? `${retryableCount} 筆可傳送` : '尚未保存桌面端憑證'}
+              {connection?.transport === 'ready'
+                ? `${retryableCount} 筆可傳送`
+                : connection?.paired
+                  ? `${retryableCount} 筆等待連線`
+                  : '尚未保存桌面端憑證'}
             </Text>
             <Text style={typeStyles.caption}>
               {connection?.paired
-                ? '失敗記錄可安全重送；contract 衝突會停在「需要確認」。'
+                ? connection.message
                 : '先完成一次性配對，token 會保存在 Android SecureStore。'}
             </Text>
           </View>
         </View>
         <AppButton
-          label={connection?.paired ? '立即同步到桌面' : '前往配對'}
+          label={
+            connection?.transport === 'ready'
+              ? '立即同步到桌面'
+              : connection?.paired
+                ? '重新檢查 USB'
+                : '前往配對'
+          }
           icon={connection?.paired ? 'usb' : 'cellphone-key'}
-          onPress={() => (connection?.paired ? void sync() : router.push('/profile'))}
+          onPress={() =>
+            connection?.transport === 'ready'
+              ? void sync()
+              : connection?.paired
+                ? void refresh()
+                : router.push('/profile')
+          }
           loading={syncing}
-          disabled={connection?.paired ? retryableCount === 0 : false}
+          disabled={connection?.transport === 'ready' ? !canSync : false}
         />
         {syncNotice ? <Text style={styles.syncNotice}>{syncNotice}</Text> : null}
       </PaperCard>
@@ -211,6 +271,7 @@ const styles = StyleSheet.create({
   },
   eventCopy: { flex: 1, gap: 3 },
   eventTitle: { color: palette.cocoa, fontSize: 17, fontWeight: '800' },
+  eventDescription: { color: palette.cocoaMuted, fontSize: 13, lineHeight: 18 },
   eventAmount: { color: palette.cocoa, fontSize: 16, fontWeight: '800' },
   eventError: { color: palette.danger, fontSize: 12, fontWeight: '600', lineHeight: 17 },
   emptyCard: { alignItems: 'center', gap: spacing.sm },

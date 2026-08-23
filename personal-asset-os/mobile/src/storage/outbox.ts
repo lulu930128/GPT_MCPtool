@@ -3,13 +3,18 @@ import type { SQLiteDatabase } from 'expo-sqlite';
 
 import {
   type CaptureInput,
+  type CategorySuggestion,
   type FinancialEventKind,
   type OutboxEvent,
+  type OutboxSchemaVersion,
   type OutboxStatus,
+  LEGACY_OUTBOX_SCHEMA_VERSION,
   OUTBOX_SCHEMA_VERSION,
+  PREVIOUS_OUTBOX_SCHEMA_VERSION,
   buildCaptureIdempotencyKey,
   buildMobileEventPayload,
   normalizeCaptureInput,
+  rankCategorySuggestions,
   serializeMobileEventPayload,
 } from '@/src/domain/financial-event';
 import { MOBILE_DATABASE_VERSION } from '@/src/storage/database';
@@ -23,6 +28,7 @@ interface OutboxRow {
   amount: string;
   currency: 'TWD';
   description: string;
+  category_hint: string | null;
   merchant: string | null;
   note: string | null;
   payment_hint: string | null;
@@ -54,17 +60,22 @@ export interface MobileDatabaseInfo extends OutboxSummary {
 }
 
 function rowToEvent(row: OutboxRow): OutboxEvent {
-  if (row.schema_version !== OUTBOX_SCHEMA_VERSION) {
+  if (
+    row.schema_version !== LEGACY_OUTBOX_SCHEMA_VERSION &&
+    row.schema_version !== PREVIOUS_OUTBOX_SCHEMA_VERSION &&
+    row.schema_version !== OUTBOX_SCHEMA_VERSION
+  ) {
     throw new Error(`不支援的手機事件 schema version：${row.schema_version}`);
   }
   return {
-    schemaVersion: OUTBOX_SCHEMA_VERSION,
+    schemaVersion: row.schema_version as OutboxSchemaVersion,
     id: row.id,
     eventKind: row.event_kind,
     occurredAt: row.occurred_at,
     capturedAt: row.captured_at,
     amount: row.amount,
     currency: row.currency,
+    categoryHint: row.category_hint ?? '',
     description: row.description,
     merchant: row.merchant,
     note: row.note,
@@ -90,6 +101,7 @@ function rowMatchesCaptureInput(row: OutboxRow, input: CaptureInput): boolean {
     row.event_kind === normalized.eventKind &&
     row.occurred_at === normalized.occurredAt &&
     row.amount === normalized.amount &&
+    row.category_hint === normalized.categoryHint &&
     row.description === normalized.description &&
     row.merchant === (normalized.merchant ?? null) &&
     row.note === (normalized.note ?? null) &&
@@ -187,9 +199,9 @@ export async function createOutboxEvent(
     await transaction.runAsync(
       `INSERT INTO outbox_events (
         id, schema_version, event_kind, occurred_at, captured_at, amount, currency,
-        description, merchant, note, payment_hint, source, device_id, local_sequence,
+        description, category_hint, merchant, note, payment_hint, source, device_id, local_sequence,
         idempotency_key, payload_hash, payload_json, status, attempts, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)`,
       payload.id,
       payload.schemaVersion,
       payload.eventKind,
@@ -198,6 +210,7 @@ export async function createOutboxEvent(
       payload.amount,
       payload.currency,
       payload.description,
+      payload.categoryHint,
       payload.merchant ?? null,
       payload.note ?? null,
       payload.paymentHint ?? null,
@@ -242,14 +255,45 @@ export async function listOutboxEvents(
   return rows.map(rowToEvent);
 }
 
+export async function listCaptureCategories(
+  db: SQLiteDatabase,
+  eventKind: FinancialEventKind,
+): Promise<CategorySuggestion[]> {
+  const rows = await db.getAllAsync<{
+    category_hint: string;
+    usage_count: number;
+    last_used_at: string | null;
+  }>(
+    `SELECT category_hint, COUNT(*) AS usage_count, MAX(created_at) AS last_used_at
+     FROM outbox_events
+     WHERE event_kind = ? AND category_hint IS NOT NULL AND TRIM(category_hint) <> ''
+     GROUP BY category_hint
+     ORDER BY usage_count DESC, last_used_at DESC
+     LIMIT 100`,
+    eventKind,
+  );
+  return rankCategorySuggestions(
+    eventKind,
+    rows.map((row) => ({
+      value: row.category_hint,
+      usageCount: row.usage_count,
+      lastUsedAt: row.last_used_at,
+    })),
+  );
+}
+
 export async function listSyncCandidates(
   db: SQLiteDatabase,
   limit = 50,
+  includeFailed = true,
 ): Promise<OutboxEvent[]> {
   const safeLimit = Math.max(1, Math.min(limit, 100));
+  const statuses = includeFailed
+    ? "('pending', 'syncing', 'failed')"
+    : "('pending', 'syncing')";
   const rows = await db.getAllAsync<OutboxRow>(
     `SELECT * FROM outbox_events
-     WHERE status IN ('pending', 'syncing', 'failed')
+     WHERE status IN ${statuses}
      ORDER BY local_sequence ASC
      LIMIT ?`,
     safeLimit,

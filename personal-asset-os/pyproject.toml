@@ -11,6 +11,7 @@ requires-python = ">=3.12,<3.14"
 dependencies = [
     "alembic>=1.16,<2",
     "fastapi>=0.116,<1",
+    "httpx>=0.28,<1",
     "mcp>=2,<3",
     "openai>=2,<3",
     "pydantic-settings>=2.10,<3",
@@ -21,7 +22,6 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "httpx>=0.28,<1",
     "mypy>=1.17,<2",
     "pytest>=8.4,<9",
     "ruff>=0.14,<1",

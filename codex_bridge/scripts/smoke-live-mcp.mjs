@@ -16,9 +16,9 @@ try {
   const tools = (await client.listTools()).tools;
   assert.equal(tools.length, 15);
   const resources = await client.listResources();
-  assert.ok(resources.resources.some((resource) => resource.uri === "ui://codex-bridge/chat-workspace-v3.html"));
-  const resource = await client.readResource({ uri: "ui://codex-bridge/chat-workspace-v3.html" });
-  const widgetHtml = resource.contents.find((content) => content.uri === "ui://codex-bridge/chat-workspace-v3.html")?.text;
+  assert.ok(resources.resources.some((resource) => resource.uri === "ui://codex-bridge/chat-workspace-v4.html"));
+  const resource = await client.readResource({ uri: "ui://codex-bridge/chat-workspace-v4.html" });
+  const widgetHtml = resource.contents.find((content) => content.uri === "ui://codex-bridge/chat-workspace-v4.html")?.text;
   assert.equal(typeof widgetHtml, "string");
   assert.match(widgetHtml, /aria-label="專案與對話"/);
   assert.match(widgetHtml, /id="model"/);

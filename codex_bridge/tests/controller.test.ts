@@ -31,8 +31,8 @@ class FakeTransport extends EventEmitter implements AppServerTransport {
     if (method === "permissionProfile/list") {
       return {
         data: [
-          { id: ":read-only", allowed: true },
-          { id: ":workspace", allowed: true },
+          { id: "codex-bridge-read-only", allowed: true },
+          { id: "codex-bridge-workspace", allowed: true },
         ],
         nextCursor: null,
       } as T;
@@ -72,7 +72,7 @@ test("controller starts an allowlisted sandboxed turn and gates one approval", a
   const projectPath = join(root, "project");
   const jobsDir = join(root, "jobs");
   await mkdir(projectPath);
-  const store = new JobStore(jobsDir);
+  const store = new JobStore(jobsDir, join(root, ".local", "codex-inbox"));
   await store.initialize();
   const fake = new FakeTransport();
   const config = testConfig(root, jobsDir, projectPath);
@@ -90,7 +90,7 @@ test("controller starts an allowlisted sandboxed turn and gates one approval", a
 
   const turnStart = fake.requests.find((request) => request.method === "turn/start");
   const threadStart = fake.requests.find((request) => request.method === "thread/start");
-  assert.equal(threadStart?.params?.permissions, ":read-only");
+  assert.equal(threadStart?.params?.permissions, "codex-bridge-read-only");
   assert.equal(turnStart?.params?.sandboxPolicy, undefined);
   assert.equal(turnStart?.params?.approvalPolicy, "on-request");
   assert.match(String((turnStart?.params?.input as Array<{ text: string }>)[0]?.text), /# Controller test/);
@@ -131,7 +131,7 @@ test("plan mode refuses file-change acceptance", async (context) => {
   const projectPath = join(root, "project");
   const jobsDir = join(root, "jobs");
   await mkdir(projectPath);
-  const store = new JobStore(jobsDir);
+  const store = new JobStore(jobsDir, join(root, ".local", "codex-inbox"));
   await store.initialize();
   const fake = new FakeTransport();
   const config = testConfig(root, jobsDir, projectPath);
@@ -154,7 +154,7 @@ test("controller suppresses lifecycle noise and bounds App Server diagnostics", 
   const projectPath = join(root, "project");
   const jobsDir = join(root, "jobs");
   await mkdir(projectPath);
-  const store = new JobStore(jobsDir);
+  const store = new JobStore(jobsDir, join(root, ".local", "codex-inbox"));
   await store.initialize();
   const fake = new FakeTransport();
   const config = testConfig(root, jobsDir, projectPath);
@@ -215,7 +215,7 @@ test("controller resumes a completed conversation with the selected model and de
   const projectPath = join(root, "project");
   const jobsDir = join(root, "jobs");
   await mkdir(projectPath);
-  const store = new JobStore(jobsDir);
+  const store = new JobStore(jobsDir, join(root, ".local", "codex-inbox"));
   await store.initialize();
   const fake = new FakeTransport();
   const config = testConfig(root, jobsDir, projectPath);
@@ -260,7 +260,7 @@ test("controller resumes a completed conversation with the selected model and de
   await waitFor(() => store.get(dispatched.record.id)?.status === "running");
   const resume = fake.requests.find((request) => request.method === "thread/resume");
   assert.equal(resume?.params?.threadId, "thread-1");
-  assert.equal(resume?.params?.permissions, ":workspace");
+  assert.equal(resume?.params?.permissions, "codex-bridge-workspace");
   const secondTurn = fake.requests.filter((request) => request.method === "turn/start")[1];
   assert.equal(secondTurn?.params?.threadId, "thread-1");
   assert.equal(secondTurn?.params?.model, "gpt-test");
@@ -305,7 +305,7 @@ test("controller injects verified staged text without granting the staging direc
   const jobsDir = join(root, "jobs");
   await mkdir(projectPath);
   const config = testConfig(root, jobsDir, projectPath);
-  const store = new JobStore(jobsDir);
+  const store = new JobStore(jobsDir, join(root, ".local", "codex-inbox"));
   await store.initialize();
   const textBundles = new TextBundleStore(config.stagingDir);
   await textBundles.initialize();
@@ -344,8 +344,10 @@ test("controller injects verified staged text without granting the staging direc
   assert.match(instruction, /engineering_spec\.txt/);
   assert.match(instruction, /請依這份工程稿檢查 MCP 回傳格式/);
   assert.match(instruction, new RegExp(sha256));
+  assert.match(instruction, /Local read-only handoff path:/);
+  assert.match(instruction, new RegExp(escapeRegExp(join(config.handoffDir, dispatched.record.id, `${begun.bundle.id}.txt`))));
   assert.deepEqual(turnStart?.params?.runtimeWorkspaceRoots, [projectPath]);
-  assert.doesNotMatch(instruction, /staging[\\/]/i);
+  assert.doesNotMatch(instruction, new RegExp(escapeRegExp(config.stagingDir), "i"));
 });
 
 function testConfig(root: string, jobsDir: string, projectPath: string): BridgeConfig {
@@ -356,6 +358,7 @@ function testConfig(root: string, jobsDir: string, projectPath: string): BridgeC
     dataDir: root,
     jobsDir,
     stagingDir: join(root, "staging"),
+    handoffDir: join(root, ".local", "codex-inbox"),
     widgetPath: join(root, "widget.html"),
     codexCommand: "codex",
     codexArgs: ["app-server"],
@@ -364,6 +367,10 @@ function testConfig(root: string, jobsDir: string, projectPath: string): BridgeC
     maxRecentJobs: 20,
     buildId: "test-build",
   };
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {

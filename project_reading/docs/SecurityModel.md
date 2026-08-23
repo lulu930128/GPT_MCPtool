@@ -93,6 +93,9 @@ rule.
 
 - Secret-like filenames, local env files, VCS internals, dependency folders, caches,
   virtualenvs, local databases, archives, model weights, and build output are denied by default.
+- Codex credential and runtime-identity files such as `auth.json`, `cap_sid`,
+  `installation_id`, global state, and session indexes are denied even when a reviewed `.codex`
+  directory is configured as its own named root.
 - Spreadsheet hyperlink targets are suppressed.
 - Word external relationships, tracked deletions, media, comments, headers, footers, and embedded
   objects are not returned.

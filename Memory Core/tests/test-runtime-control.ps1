@@ -141,10 +141,35 @@ if($Action -eq "Start" -and (Test-Path (Join-Path $PSScriptRoot "..\inherit-stac
     Remove-Item -LiteralPath (Join-Path $testRoot 'inherit-stack-handles.flag') -Force -ErrorAction SilentlyContinue
 
     $statePath = Join-Path $testRoot 'fake-state.json'
+    $actionLogPath = Join-Path $testRoot 'fake-actions.log'
+    $state = [IO.File]::ReadAllText($statePath) | ConvertFrom-Json
+    $state.mcp.healthy=$false; $state.mcp.pid=$null; $state.mcp.pidState='stale_process_name'; $state.mcp.listenerPids=@()
+    [IO.File]::WriteAllText($statePath,($state|ConvertTo-Json -Depth 6),$utf8)
+    $startCountBefore = @(Get-Content $actionLogPath | Where-Object { $_ -eq 'Start' }).Count
+    $stalePidEnsure = Invoke-TestController EnsureRunning
+    Assert-Equal $stalePidEnsure.document.before.mcp.ownership 'Stopped' 'reused stale PID without a listener is treated as stopped'
+    Assert-Equal $stalePidEnsure.document.after.status 'Ready' 'ensure recovers from a PID reused by another process'
+    $startCountAfter = @(Get-Content $actionLogPath | Where-Object { $_ -eq 'Start' }).Count
+    Assert-Equal $startCountAfter ($startCountBefore + 1) 'stale PID recovery delegates one bounded Start to the stack'
+
+    $state = [IO.File]::ReadAllText($statePath) | ConvertFrom-Json
+    $state.mcp.healthy=$false; $state.mcp.pid=$null; $state.mcp.pidState='stale_executable'; $state.mcp.listenerPids=@()
+    [IO.File]::WriteAllText($statePath,($state|ConvertTo-Json -Depth 6),$utf8)
+    $staleExecutable = Invoke-TestController Status
+    Assert-Equal $staleExecutable.document.after.mcp.ownership 'Stopped' 'stale executable without a listener is treated as stopped'
+
+    $state.mcp.pidState='stale_process_name'; $state.mcp.listenerPids=@(9999)
+    [IO.File]::WriteAllText($statePath,($state|ConvertTo-Json -Depth 6),$utf8)
+    $stopCountBefore = @(Get-Content $actionLogPath | Where-Object { $_ -eq 'Stop' }).Count
+    $staleWithListener = Invoke-TestController ShutdownRuntime $false
+    Assert-Equal $staleWithListener.document.errorCode 'OWNERSHIP_MISMATCH' 'stale PID with an unexpected listener still blocks shutdown'
+    $stopCountAfter = @(Get-Content $actionLogPath | Where-Object { $_ -eq 'Stop' }).Count
+    Assert-Equal $stopCountAfter $stopCountBefore 'stale PID with a listener is not delegated to the stack'
+
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $fakeStackPath -Action Start | Out-Null
     $state = [IO.File]::ReadAllText($statePath) | ConvertFrom-Json
     $state.backend.healthy=$true; $state.backend.pid=$null; $state.backend.pidState='ownership_unverified'; $state.backend.listenerPids=@(9999)
     [IO.File]::WriteAllText($statePath,($state|ConvertTo-Json -Depth 6),$utf8)
-    $actionLogPath = Join-Path $testRoot 'fake-actions.log'
     $stopCountBefore = @(Get-Content $actionLogPath | Where-Object { $_ -eq 'Stop' }).Count
     $foreign = Invoke-TestController ShutdownRuntime $false
     Assert-Equal $foreign.document.errorCode 'OWNERSHIP_MISMATCH' 'unverified owner blocks shutdown'

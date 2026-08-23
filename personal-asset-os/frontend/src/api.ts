@@ -2,8 +2,11 @@ import type {
   Account,
   ApiErrorEnvelope,
   Dashboard,
+  DashboardHistory,
+  DashboardHistoryRange,
   FinancialEvent,
   Instrument,
+  MobileUsbTransportStatus,
   Snapshot,
 } from "./types";
 
@@ -45,6 +48,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   dashboard: () => request<Dashboard>("/api/dashboard"),
+  dashboardHistory: (range: DashboardHistoryRange) =>
+    request<DashboardHistory>(`/api/dashboard/history?range=${range}`),
   accounts: () => request<Account[]>("/api/accounts"),
   instruments: () => request<Instrument[]>("/api/instruments"),
   snapshots: () => request<Snapshot[]>("/api/snapshots"),
@@ -52,6 +57,7 @@ export const api = {
     request<FinancialEvent[]>(
       "/api/financial-events?status=pending_match&status=needs_review&limit=100",
     ),
+  mobileTransport: () => request<MobileUsbTransportStatus>("/api/mobile/transport"),
   post: <T>(path: string, body: unknown) =>
     request<T>(path, { method: "POST", body: JSON.stringify(body) }),
   put: <T>(path: string, body: unknown) =>

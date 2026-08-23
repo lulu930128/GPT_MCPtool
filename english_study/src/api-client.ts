@@ -78,6 +78,23 @@ export class EnglishStudyHubClient {
   }
 
   getItem(itemId: string) { return this.request("GET", `/api/v1/items/${encodeURIComponent(itemId)}`); }
+  searchReferenceEntries(input: { query: string; sourceId?: string; partOfSpeech?: string; limit?: number; offset?: number }) {
+    const query = new URLSearchParams({ query: input.query });
+    if (input.sourceId) query.set("source_id", input.sourceId);
+    if (input.partOfSpeech) query.set("part_of_speech", input.partOfSpeech);
+    query.set("limit", String(input.limit ?? 20));
+    query.set("offset", String(input.offset ?? 0));
+    return this.request("GET", `/api/v1/reference/entries?${query}`);
+  }
+  getReferenceEntry(entryId: string) {
+    return this.request("GET", `/api/v1/reference/entries/${encodeURIComponent(entryId)}`);
+  }
+  previewItemEnrichment(input: { itemId: string; referenceEntryIds?: string[] }) {
+    return this.request("POST", "/api/v1/reference/enrichment/preview", {
+      item_id: input.itemId,
+      reference_entry_ids: input.referenceEntryIds ?? [],
+    });
+  }
   previewItemCreation(draft: ItemDraftInput) {
     return this.request("POST", "/api/v1/items/creation/preview", mapDraft(draft));
   }
