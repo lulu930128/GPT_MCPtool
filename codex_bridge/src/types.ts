@@ -1,5 +1,7 @@
 export type ExecutionMode = "plan" | "workspace_write";
 
+export type ApprovalReviewer = "user" | "auto_review";
+
 export type DataClassification = "personal" | "public" | "company_approved";
 
 export type ReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
@@ -28,6 +30,7 @@ export interface WorkPackage {
   acceptanceCriteria: string[];
   constraints: string[];
   executionMode: ExecutionMode;
+  approvalReviewer: ApprovalReviewer;
   dataClassification: DataClassification;
   model?: string;
   effort?: ReasoningEffort;
@@ -91,11 +94,89 @@ export interface ConversationMessage {
   at: string;
   turnId?: string;
   executionMode?: ExecutionMode;
+  approvalReviewer?: ApprovalReviewer;
   dataClassification?: DataClassification;
   model?: string;
   effort?: ReasoningEffort;
   resultStatus?: JobResult["status"];
   inputArtifacts?: TextArtifactSummary[];
+}
+
+export type ConversationProjectionItemType =
+  | "userMessage"
+  | "agentMessage"
+  | "plan"
+  | "reasoningSummary"
+  | "commandExecution"
+  | "fileChange"
+  | "mcpToolCall"
+  | "diff"
+  | "approval"
+  | "error"
+  | "activity";
+
+export interface ConversationFileChangeProjection {
+  path: string;
+  kind: string;
+  diffPreview?: string;
+  diffTruncated?: boolean;
+}
+
+export interface ConversationItemProjection {
+  id: string;
+  turnId: string;
+  type: ConversationProjectionItemType;
+  status: string;
+  isStreaming: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+  text?: string;
+  context?: string;
+  clientMessageId?: string;
+  inputArtifacts?: TextArtifactSummary[];
+  command?: string;
+  cwd?: string;
+  output?: string;
+  outputTruncated?: boolean;
+  exitCode?: number;
+  durationMs?: number;
+  changes?: ConversationFileChangeProjection[];
+  server?: string;
+  tool?: string;
+  progress?: string;
+  error?: string;
+  activityType?: string;
+  approvalId?: string;
+  approvalState?: ApprovalState;
+  lastDelta?: string;
+}
+
+export interface ConversationTurnProjection {
+  turnId: string;
+  status: string;
+  items: ConversationItemProjection[];
+  startedAt?: string;
+  completedAt?: string;
+  durationMs?: number;
+}
+
+export interface ConversationThreadProjection {
+  schemaVersion: 1;
+  threadId?: string;
+  status: "unknown" | "notLoaded" | "idle" | "active" | "systemError";
+  turns: ConversationTurnProjection[];
+  revision: number;
+  updatedAt: string;
+  hydratedAt?: string;
+}
+
+export interface ConversationProjectionPatch {
+  revision: number;
+  at: string;
+  threadId?: string;
+  status?: ConversationThreadProjection["status"];
+  hydratedAt?: string;
+  turns: ConversationTurnProjection[];
 }
 
 export interface JobEvent {
@@ -143,6 +224,7 @@ export interface JobRecord {
   threadId?: string;
   turnId?: string;
   currentExecutionMode?: ExecutionMode;
+  currentApprovalReviewer?: ApprovalReviewer;
   currentDataClassification?: DataClassification;
   model?: string;
   effort?: ReasoningEffort;
@@ -158,6 +240,7 @@ export interface JobSummary {
   title: string;
   objective: string;
   executionMode: ExecutionMode;
+  approvalReviewer: ApprovalReviewer;
   dataClassification: DataClassification;
   status: JobStatus;
   stateVersion: number;
@@ -171,15 +254,54 @@ export interface JobSummary {
   result?: JobResult;
 }
 
+export interface ConversationListPage {
+  data: JobSummary[];
+  nextCursor?: string;
+}
+
+export interface LocalThreadSummary {
+  source: "local";
+  threadId: string;
+  projectId: string;
+  projectName: string;
+  title: string;
+  preview: string;
+  createdAt: string;
+  updatedAt: string;
+  threadStatus: string;
+  isPinned: boolean;
+  historyOnly: boolean;
+}
+
+export interface LocalThreadListPage {
+  threads: LocalThreadSummary[];
+  nextCursor?: string;
+  complete: boolean;
+}
+
 export interface JobSnapshot extends JobSummary {
   messages: ConversationMessage[];
+  conversation?: ConversationThreadProjection;
+  conversationChanges: ConversationProjectionPatch[];
+  nextConversationRevision: number;
+  serverConversationRevision: number;
+  conversationHasMore: boolean;
   events: JobEvent[];
   nextEventSeq: number;
+  serverLastEventSeq: number;
+  hasMore: boolean;
   approvals: PendingApproval[];
   hasDiff: boolean;
   hasResult: boolean;
   inputArtifacts: TextArtifactSummary[];
   artifacts: JobArtifactDescriptor[];
+}
+
+export interface LocalThreadSnapshot extends JobSnapshot {
+  source: "local";
+  readOnly: boolean;
+  localThreadId: string;
+  threadStatus: string;
 }
 
 export interface BridgeStatus {
@@ -191,5 +313,6 @@ export interface BridgeStatus {
   projects: Array<Pick<BridgeProject, "id" | "name">>;
   models: CodexModelOption[];
   recentJobs: JobSummary[];
+  conversationNextCursor?: string;
   stateVersion: number;
 }

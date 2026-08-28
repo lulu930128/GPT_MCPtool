@@ -71,9 +71,9 @@ $McpBuildArtifacts = @(
   (Join-Path $ProjectRoot "dist\src\http-server.js"),
   $McpServerEntry
 )
-$ExpectedMcpVersion = "1.1.0"
-$ExpectedMcpContractVersion = "learning-content-v7.0"
-$ExpectedMcpToolCount = 33
+$ExpectedMcpVersion = "1.2.1"
+$ExpectedMcpContractVersion = "learning-content-v8.1"
+$ExpectedMcpToolCount = 34
 $HubPyproject = Join-Path $HubRoot "pyproject.toml"
 $McpUrl = "http://${HostName}:${McpPort}/mcp"
 $McpHealthUrl = "http://${HostName}:${McpPort}/health"

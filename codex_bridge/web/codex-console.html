@@ -8,6 +8,10 @@
       :root {
         color-scheme: dark;
         --workspace-height: 720px;
+        --safe-top: 0px;
+        --safe-right: 0px;
+        --safe-bottom: 0px;
+        --safe-left: 0px;
         --bg: #0d0d0d;
         --panel: #151515;
         --panel-raised: #1d1d1d;
@@ -36,6 +40,10 @@
         color: var(--text);
       }
       body { padding: 14px; }
+      body[data-display-mode="inline"] { padding: 0; }
+      body[data-display-mode="fullscreen"] {
+        padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
+      }
       button, textarea, select { font: inherit; }
       button, select { color: inherit; }
       button { cursor: pointer; }
@@ -53,6 +61,38 @@
         border: 1px solid var(--line);
         border-radius: 18px;
         background: var(--panel);
+      }
+      body[data-display-mode="inline"] .workspace {
+        width: 100%;
+        margin: 0;
+        grid-template-columns: 1fr;
+        grid-template-rows: auto minmax(0, 1fr);
+      }
+      body[data-display-mode="inline"] .sidebar {
+        max-height: 220px;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+      body[data-display-mode="inline"] .project-tree {
+        display: block;
+        padding: 4px 10px 10px;
+        overflow-x: hidden;
+        overflow-y: auto;
+      }
+      body[data-display-mode="inline"] .project-group { min-width: 0; max-width: none; }
+      body[data-display-mode="inline"] .sidebar-foot { display: none; }
+      body[data-display-mode="inline"] .chat { min-height: 0; }
+      body[data-display-mode="inline"] .transcript { padding: 22px 15px 18px; }
+      body[data-display-mode="inline"] .composer-wrap { padding: 0 10px 10px; }
+      body[data-display-mode="inline"] .composer-bar { flex-wrap: wrap; }
+      body[data-display-mode="inline"] .send { margin-left: auto; }
+      body[data-display-mode="fullscreen"] .workspace {
+        width: 100%;
+        margin: 0;
+        grid-template-columns: 248px minmax(0, 1fr);
+        grid-template-rows: minmax(0, 1fr);
+        border: 0;
+        border-radius: 0;
       }
 
       .sidebar {
@@ -140,6 +180,12 @@
         color: var(--quiet);
         font-size: 17px;
       }
+      .project-access {
+        justify-self: center;
+        color: var(--quiet);
+        font-size: 9px;
+        letter-spacing: .06em;
+      }
       .conversation-list { padding: 1px 0 4px 19px; }
       .project-group.collapsed .conversation-list { display: none; }
       .conversation-item {
@@ -162,6 +208,28 @@
       .conversation-dot.failed { background: var(--danger); }
       .conversation-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .empty-project { padding: 7px 9px; color: #5f5f5f; font-size: 12px; }
+      .show-all-conversations {
+        margin: 3px 0 2px 16px;
+        padding: 5px 8px;
+        border: 0;
+        border-radius: 6px;
+        background: transparent;
+        color: var(--quiet);
+        font-size: 11px;
+        text-align: left;
+      }
+      .show-all-conversations:hover { background: var(--panel-soft); color: var(--text); }
+      .load-conversations {
+        width: calc(100% - 12px);
+        margin: 8px 6px 0;
+        padding: 8px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: transparent;
+        color: var(--quiet);
+        font-size: 11px;
+      }
+      .load-conversations:hover { color: var(--text); border-color: var(--line-strong); }
 
       .sidebar-foot {
         padding: 11px 14px;
@@ -228,6 +296,7 @@
       }
       .head-button:hover { border-color: var(--line-strong); color: var(--text); }
       .head-button.danger { color: var(--danger); }
+      .display-mode-icon { margin-right: 5px; font-size: 14px; line-height: 1; }
       .more { position: relative; }
       .more > summary {
         width: 32px;
@@ -266,6 +335,7 @@
       .more-menu button:hover { background: var(--panel-soft); }
 
       .transcript {
+        position: relative;
         min-height: 0;
         overflow: auto;
         padding: 28px 22px 22px;
@@ -323,6 +393,17 @@
         border-radius: 0;
       }
       .message.failed .message-body { color: #f0b0b0; }
+      .message.streaming .message-body::after {
+        content: "";
+        display: inline-block;
+        width: 6px;
+        height: 14px;
+        margin-left: 4px;
+        vertical-align: -2px;
+        border-radius: 2px;
+        background: var(--muted);
+        animation: pulse 1s infinite ease-in-out;
+      }
       .message-context {
         max-width: min(680px, 92%);
         color: var(--quiet);
@@ -358,6 +439,77 @@
       .typing i:nth-child(2) { animation-delay: .15s; }
       .typing i:nth-child(3) { animation-delay: .3s; }
       @keyframes pulse { 0%, 70%, 100% { opacity: .25; transform: translateY(0); } 35% { opacity: 1; transform: translateY(-2px); } }
+
+      .turn-marker {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        color: var(--quiet);
+        font-size: 10px;
+      }
+      .turn-marker::before, .turn-marker::after { content: ""; height: 1px; flex: 1; background: var(--line); }
+      .activity-card {
+        min-width: 0;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: #121212;
+        overflow: hidden;
+      }
+      .activity-card.error { border-color: #603737; background: #181111; }
+      .activity-card > summary {
+        min-width: 0;
+        padding: 10px 12px;
+        display: grid;
+        grid-template-columns: 20px minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 9px;
+        cursor: pointer;
+        list-style: none;
+      }
+      .activity-card > summary::-webkit-details-marker { display: none; }
+      .activity-icon { color: var(--quiet); text-align: center; }
+      .activity-heading { min-width: 0; }
+      .activity-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #d8d8d8; font-size: 12px; font-weight: 600; }
+      .activity-subtitle { margin-top: 2px; color: var(--quiet); font-size: 10px; }
+      .activity-status { color: var(--quiet); font-size: 10px; white-space: nowrap; }
+      .activity-status.running { color: var(--warning); }
+      .activity-status.completed { color: var(--success); }
+      .activity-status.failed, .activity-status.declined, .activity-status.interrupted { color: var(--danger); }
+      .activity-body { padding: 0 12px 12px 41px; color: var(--muted); font-size: 11px; }
+      .activity-body pre {
+        max-width: 100%;
+        max-height: 260px;
+        margin: 7px 0 0;
+        padding: 10px;
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #0d0d0d;
+        color: #c9c9c9;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      .activity-files { display: grid; gap: 6px; margin-top: 7px; }
+      .activity-file { padding: 8px; border: 1px solid var(--line); border-radius: 8px; overflow-wrap: anywhere; }
+      .activity-file strong { color: #d7d7d7; }
+      .activity-card .approval-card { margin-top: 10px; }
+      .new-content {
+        position: sticky;
+        z-index: 10;
+        bottom: 10px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: block;
+        margin: 0 auto;
+        padding: 7px 11px;
+        border: 1px solid var(--line-strong);
+        border-radius: 999px;
+        background: var(--panel-raised);
+        color: var(--text);
+        box-shadow: 0 8px 24px rgba(0,0,0,.34);
+        font-size: 11px;
+      }
+      .new-content[hidden] { display: none; }
 
       .approval-card {
         min-width: 0;
@@ -522,6 +674,7 @@
       }
       .composer-select {
         min-width: 0;
+        max-width: 100%;
         height: 32px;
         padding: 0 26px 0 9px;
         border: 0;
@@ -532,6 +685,7 @@
       }
       .composer-select:hover { background: var(--panel-soft); color: var(--text); }
       #model { max-width: 170px; }
+      #reviewer { max-width: 132px; }
       .send {
         width: 34px;
         height: 34px;
@@ -659,6 +813,9 @@
 
       @media (max-width: 760px) {
         body { padding: 0; }
+        body[data-display-mode="fullscreen"] {
+          padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
+        }
         .workspace {
           height: var(--workspace-height);
           min-height: 0;
@@ -668,8 +825,8 @@
           border-radius: 0;
         }
         .sidebar { max-height: 230px; border-right: 0; border-bottom: 1px solid var(--line); }
-        .project-tree { display: flex; gap: 8px; padding: 4px 10px 10px; overflow-x: auto; overflow-y: hidden; }
-        .project-group { min-width: 210px; max-width: 250px; }
+        .project-tree { display: block; padding: 4px 10px 10px; overflow-x: hidden; overflow-y: auto; }
+        .project-group { min-width: 0; max-width: none; }
         .sidebar-foot { display: none; }
         .chat { min-height: 0; }
         .transcript { padding: 22px 15px 18px; }
@@ -678,20 +835,897 @@
         .send { margin-left: auto; }
       }
 
+      @media (max-width: 440px) {
+        .chat-head { padding-inline: 12px; }
+        .display-mode-label { display: none; }
+        .display-mode-icon { margin-right: 0; }
+      }
+
       @media (prefers-reduced-motion: reduce) {
         *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
       }
+
+      /* Project Ledger: a compact conversation dock and a full project workspace. */
+      body[data-ledger="project-ledger"] {
+        --ledger-rail: #101820;
+        --ledger-rail-soft: #19242e;
+        --ledger-canvas: #f3f5f7;
+        --ledger-surface: #ffffff;
+        --ledger-inspector: #e9edf1;
+        --ledger-ink: #18222d;
+        --ledger-muted: #66727e;
+        --ledger-line: #d5dbe1;
+        --ledger-line-strong: #bfc8d1;
+        --ledger-blue: #315bff;
+        --ledger-blue-soft: #e7ecff;
+        --ledger-green: #287c60;
+        --ledger-amber: #c76d24;
+        --ledger-red: #b54242;
+        --ledger-mono: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+        margin: 0;
+        min-width: 0;
+        background: transparent;
+        color: var(--ledger-ink);
+        font-family: "Segoe UI Variable Text", "Segoe UI", sans-serif;
+      }
+
+      body[data-ledger="project-ledger"] button,
+      body[data-ledger="project-ledger"] select,
+      body[data-ledger="project-ledger"] textarea,
+      body[data-ledger="project-ledger"] input { font: inherit; }
+
+      body[data-ledger="project-ledger"] .workspace {
+        position: relative;
+        height: var(--workspace-height);
+        min-height: 0;
+        overflow: hidden;
+        background: var(--ledger-canvas);
+        color: var(--ledger-ink);
+      }
+
+      body[data-ledger="project-ledger"] .sidebar {
+        min-width: 0;
+        color: #dbe3ea;
+        background: var(--ledger-rail);
+        border: 0;
+      }
+
+      body[data-ledger="project-ledger"] .sidebar-head {
+        height: auto;
+        padding: 20px 18px 13px;
+        border: 0;
+      }
+
+      body[data-ledger="project-ledger"] .brand-row,
+      body[data-ledger="project-ledger"] .sidebar-head-actions,
+      body[data-ledger="project-ledger"] .brand { display: flex; align-items: center; }
+      body[data-ledger="project-ledger"] .brand-row { justify-content: space-between; gap: 12px; }
+      body[data-ledger="project-ledger"] .brand { gap: 11px; min-width: 0; }
+      body[data-ledger="project-ledger"] .brand > span:last-child { display: grid; gap: 1px; }
+      body[data-ledger="project-ledger"] .brand strong {
+        color: #f7f9fb;
+        font-family: Bahnschrift, "Segoe UI Variable Display", sans-serif;
+        font-size: 14px;
+        font-weight: 600;
+        letter-spacing: .02em;
+      }
+      body[data-ledger="project-ledger"] .brand small {
+        color: #81909d;
+        font: 9px/1.2 var(--ledger-mono);
+        letter-spacing: .12em;
+        text-transform: uppercase;
+      }
+      body[data-ledger="project-ledger"] .brand-mark,
+      body[data-ledger="project-ledger"] .dock-mark {
+        display: grid;
+        place-items: center;
+        flex: 0 0 auto;
+        width: 30px;
+        height: 30px;
+        background: var(--ledger-blue);
+        color: white;
+        border-radius: 7px;
+        font: 700 10px/1 var(--ledger-mono);
+        letter-spacing: .04em;
+      }
+      body[data-ledger="project-ledger"] .sidebar-head-actions { gap: 5px; }
+      body[data-ledger="project-ledger"] .new-chat,
+      body[data-ledger="project-ledger"] .close-rail,
+      body[data-ledger="project-ledger"] .close-inspector {
+        display: grid;
+        place-items: center;
+        width: 30px;
+        height: 30px;
+        margin: 0;
+        border: 1px solid #30404d;
+        border-radius: 6px;
+        background: transparent;
+        color: #b7c3cc;
+        cursor: pointer;
+      }
+      body[data-ledger="project-ledger"] .new-chat:hover,
+      body[data-ledger="project-ledger"] .close-rail:hover { background: var(--ledger-rail-soft); color: white; }
+      body[data-ledger="project-ledger"] .rail-label {
+        padding: 8px 18px 6px;
+        color: #6e7e8b;
+        font: 10px/1 var(--ledger-mono);
+        letter-spacing: .12em;
+        text-transform: uppercase;
+      }
+      body[data-ledger="project-ledger"] .project-tree {
+        min-width: 0;
+        padding: 4px 10px 16px;
+        overflow-x: hidden;
+        overflow-y: auto;
+      }
+      body[data-ledger="project-ledger"] .project-group { margin: 0 0 10px; }
+      body[data-ledger="project-ledger"] .project-row { gap: 4px; }
+      body[data-ledger="project-ledger"] .project-toggle,
+      body[data-ledger="project-ledger"] .project-add,
+      body[data-ledger="project-ledger"] .conversation-item,
+      body[data-ledger="project-ledger"] .load-conversations {
+        color: #aebbc5;
+        border-radius: 7px;
+      }
+      body[data-ledger="project-ledger"] .project-toggle:hover,
+      body[data-ledger="project-ledger"] .project-add:hover,
+      body[data-ledger="project-ledger"] .conversation-item:hover { color: #eef3f6; background: #17232c; }
+      body[data-ledger="project-ledger"] .project-name {
+        overflow: hidden;
+        color: #d9e1e7;
+        font-weight: 600;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      body[data-ledger="project-ledger"] .project-count {
+        color: #73828e;
+        font: 10px/1 var(--ledger-mono);
+      }
+      body[data-ledger="project-ledger"] .conversation-item {
+        position: relative;
+        min-height: 34px;
+        margin-left: 0;
+        padding: 7px 10px 7px 16px;
+      }
+      body[data-ledger="project-ledger"] .conversation-list {
+        margin: 2px 0 7px 17px;
+        padding: 0;
+      }
+      body[data-ledger="project-ledger"] .conversation-item::before {
+        position: absolute;
+        left: 5px;
+        top: 10px;
+        width: 2px;
+        height: 14px;
+        border-radius: 2px;
+        background: transparent;
+        content: "";
+      }
+      body[data-ledger="project-ledger"] .conversation-item[aria-current="true"] {
+        color: white;
+        background: rgba(107, 140, 255, .12);
+        box-shadow: inset 0 0 0 1px rgba(107, 140, 255, .1);
+      }
+      body[data-ledger="project-ledger"] .conversation-item[aria-current="true"]::before {
+        background: var(--ledger-blue);
+      }
+      body[data-ledger="project-ledger"] .project-access {
+        color: #64737f;
+        font: 9px/1 var(--ledger-mono);
+      }
+      body[data-ledger="project-ledger"] .show-all-conversations {
+        color: #71808c;
+        font: 10px/1.2 var(--ledger-mono);
+      }
+      body[data-ledger="project-ledger"] .sidebar-foot {
+        border-color: #25323c;
+        color: #8997a2;
+      }
+
+      body[data-ledger="project-ledger"] .chat {
+        min-width: 0;
+        min-height: 0;
+        background: var(--ledger-canvas);
+        color: var(--ledger-ink);
+      }
+      body[data-ledger="project-ledger"] .chat-head {
+        min-width: 0;
+        height: 64px;
+        padding: 0 22px;
+        border: 0;
+        border-bottom: 1px solid var(--ledger-line);
+        background: rgba(255, 255, 255, .88);
+        color: var(--ledger-ink);
+        backdrop-filter: blur(12px);
+      }
+      body[data-ledger="project-ledger"] .dock-mark { display: none; width: 28px; height: 28px; }
+      body[data-ledger="project-ledger"] .chat-heading { min-width: 0; margin-right: auto; }
+      body[data-ledger="project-ledger"] .chat-title {
+        overflow: hidden;
+        color: var(--ledger-ink);
+        font-family: Bahnschrift, "Segoe UI Variable Display", sans-serif;
+        font-size: 17px;
+        font-weight: 600;
+        letter-spacing: -.01em;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      body[data-ledger="project-ledger"] .chat-subtitle {
+        color: var(--ledger-muted);
+        font-size: 11px;
+      }
+      body[data-ledger="project-ledger"] .chat-actions { gap: 6px; }
+      body[data-ledger="project-ledger"] .head-button,
+      body[data-ledger="project-ledger"] .more > summary {
+        min-height: 30px;
+        padding: 0 10px;
+        border: 1px solid var(--ledger-line);
+        border-radius: 2px;
+        background: var(--ledger-surface);
+        color: #465361;
+        box-shadow: none;
+        cursor: pointer;
+      }
+      body[data-ledger="project-ledger"] .head-button:hover,
+      body[data-ledger="project-ledger"] .more > summary:hover { border-color: var(--ledger-line-strong); color: var(--ledger-ink); }
+      body[data-ledger="project-ledger"] .head-button.danger { color: var(--ledger-red); border-color: #e6c4c4; }
+      body[data-ledger="project-ledger"] .more-menu {
+        border: 1px solid var(--ledger-line);
+        border-radius: 2px;
+        background: white;
+        color: var(--ledger-ink);
+        box-shadow: 0 14px 36px rgba(20, 30, 40, .14);
+      }
+      body[data-ledger="project-ledger"] .more-menu button { color: var(--ledger-ink); }
+      body[data-ledger="project-ledger"] .more-menu button:hover { background: var(--ledger-canvas); }
+
+      body[data-ledger="project-ledger"] .transcript {
+        min-height: 0;
+        padding: 24px clamp(18px, 4vw, 56px) 28px;
+        background: var(--ledger-canvas);
+        scrollbar-gutter: stable;
+      }
+      body[data-ledger="project-ledger"] .thread { position: relative; max-width: 780px; margin: 0 auto; }
+      body[data-ledger="project-ledger"] .thread::before {
+        content: none;
+        display: none;
+      }
+      body[data-ledger="project-ledger"] .message,
+      body[data-ledger="project-ledger"] .activity-card,
+      body[data-ledger="project-ledger"] .approval-card,
+      body[data-ledger="project-ledger"] .artifact-results {
+        position: relative;
+        margin: 0 0 18px;
+        border: 0;
+        border-radius: 2px;
+        box-shadow: none;
+      }
+      body[data-ledger="project-ledger"] .message::before,
+      body[data-ledger="project-ledger"] .approval-card::before,
+      body[data-ledger="project-ledger"] .activity-card::before {
+        content: "";
+        position: absolute;
+        top: 13px;
+        left: -25px;
+        width: 7px;
+        height: 7px;
+        border: 2px solid var(--ledger-canvas);
+        border-radius: 50%;
+        background: #97a3ae;
+      }
+      body[data-ledger="project-ledger"] .message {
+        padding: 0;
+        background: transparent;
+        color: var(--ledger-ink);
+      }
+      body[data-ledger="project-ledger"] .message.user {
+        padding: 14px 16px;
+        background: #e8edf2;
+      }
+      body[data-ledger="project-ledger"] .message.user::before { background: var(--ledger-blue); }
+      body[data-ledger="project-ledger"] .message-meta {
+        margin-bottom: 7px;
+        color: var(--ledger-muted);
+        font: 10px/1.3 var(--ledger-mono);
+        letter-spacing: .02em;
+      }
+      body[data-ledger="project-ledger"] .message-body {
+        color: var(--ledger-ink);
+        font-size: 14px;
+        line-height: 1.7;
+        white-space: pre-wrap;
+      }
+      body[data-ledger="project-ledger"] .message-context,
+      body[data-ledger="project-ledger"] .activity-card {
+        border: 1px solid var(--ledger-line);
+        background: var(--ledger-surface);
+      }
+      body[data-ledger="project-ledger"] .message-context summary,
+      body[data-ledger="project-ledger"] .activity-card summary { color: var(--ledger-muted); }
+      body[data-ledger="project-ledger"] pre {
+        border-color: var(--ledger-line);
+        background: #f6f8fa;
+        color: #293642;
+        font-family: var(--ledger-mono);
+      }
+      body[data-ledger="project-ledger"] .turn-marker {
+        width: fit-content;
+        margin: 8px 0 18px -7px;
+        padding: 4px 7px;
+        border: 1px solid var(--ledger-line);
+        border-radius: 2px;
+        background: var(--ledger-canvas);
+        color: var(--ledger-muted);
+        font: 9px/1.2 var(--ledger-mono);
+        letter-spacing: .06em;
+        text-transform: uppercase;
+      }
+      body[data-ledger="project-ledger"] .approval-card {
+        padding: 16px;
+        border: 1px solid #e2b986;
+        border-left: 3px solid var(--ledger-amber);
+        background: #fff9f1;
+        color: var(--ledger-ink);
+      }
+      body[data-ledger="project-ledger"] .approval-card::before { background: var(--ledger-amber); }
+      body[data-ledger="project-ledger"] .approval-title { color: #8c4a17; }
+      body[data-ledger="project-ledger"] .approval-actions button {
+        border: 1px solid #dfc6a7;
+        border-radius: 2px;
+        background: white;
+        color: #68462d;
+      }
+      body[data-ledger="project-ledger"] .approval-actions .accept { border-color: var(--ledger-blue); background: var(--ledger-blue); color: white; }
+      body[data-ledger="project-ledger"] .empty-chat { color: var(--ledger-muted); }
+      body[data-ledger="project-ledger"] .empty-chat strong { color: var(--ledger-ink); font-family: Bahnschrift, sans-serif; }
+
+      body[data-ledger="project-ledger"] .composer-wrap {
+        padding: 0 clamp(18px, 4vw, 56px) 18px;
+        border: 0;
+        background: linear-gradient(to bottom, rgba(243, 245, 247, 0), var(--ledger-canvas) 18px);
+      }
+      body[data-ledger="project-ledger"] .composer {
+        max-width: 780px;
+        margin: 0 auto;
+        border: 1px solid var(--ledger-line-strong);
+        border-radius: 3px;
+        background: white;
+        box-shadow: 0 12px 32px rgba(25, 36, 48, .08);
+      }
+      body[data-ledger="project-ledger"] .composer:focus-within { border-color: #91a5ff; box-shadow: 0 0 0 3px rgba(49, 91, 255, .09); }
+      body[data-ledger="project-ledger"] .composer > textarea {
+        min-height: 58px;
+        padding: 14px 15px 8px;
+        color: var(--ledger-ink);
+      }
+      body[data-ledger="project-ledger"] .composer > textarea::placeholder { color: #8a96a1; }
+      body[data-ledger="project-ledger"] .context-panel { margin: 0 12px; border-color: var(--ledger-line); color: var(--ledger-muted); }
+      body[data-ledger="project-ledger"] .context-fields { background: #f7f9fa; border-color: var(--ledger-line); }
+      body[data-ledger="project-ledger"] .context-fields textarea,
+      body[data-ledger="project-ledger"] .context-fields select,
+      body[data-ledger="project-ledger"] .text-entry-fields input,
+      body[data-ledger="project-ledger"] .text-entry-fields textarea {
+        border-color: var(--ledger-line);
+        background: white;
+        color: var(--ledger-ink);
+      }
+      body[data-ledger="project-ledger"] .composer-bar {
+        min-height: 44px;
+        padding: 6px 7px 7px 12px;
+        gap: 8px;
+      }
+      body[data-ledger="project-ledger"] .compact-settings-summary { display: none; }
+      body[data-ledger="project-ledger"] .run-settings { position: relative; min-width: 0; margin-right: auto; }
+      body[data-ledger="project-ledger"] .run-settings > summary {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        max-width: 360px;
+        padding: 6px 8px;
+        color: var(--ledger-muted);
+        font: 10px/1.2 var(--ledger-mono);
+        cursor: pointer;
+        list-style: none;
+      }
+      body[data-ledger="project-ledger"] .run-settings > summary::-webkit-details-marker { display: none; }
+      body[data-ledger="project-ledger"] .settings-popover {
+        position: absolute;
+        z-index: 30;
+        left: -12px;
+        bottom: calc(100% + 10px);
+        display: grid;
+        grid-template-columns: repeat(2, minmax(160px, 1fr));
+        gap: 12px;
+        width: min(430px, calc(100vw - 70px));
+        padding: 14px;
+        border: 1px solid var(--ledger-line-strong);
+        border-radius: 3px;
+        background: white;
+        box-shadow: 0 18px 45px rgba(16, 28, 39, .18);
+      }
+      body[data-ledger="project-ledger"] .settings-popover label {
+        display: grid;
+        gap: 5px;
+        color: var(--ledger-muted);
+        font: 10px/1.2 var(--ledger-mono);
+      }
+      body[data-ledger="project-ledger"] .settings-popover select {
+        width: 100%;
+        min-width: 0;
+        height: 34px;
+        border: 1px solid var(--ledger-line);
+        border-radius: 2px;
+        background: #f7f9fa;
+        color: var(--ledger-ink);
+        font-family: "Segoe UI Variable Text", "Segoe UI", sans-serif;
+        font-size: 12px;
+      }
+      body[data-ledger="project-ledger"] .send {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        min-width: 76px;
+        height: 34px;
+        padding: 0 11px;
+        margin: 0;
+        border: 1px solid var(--ledger-blue);
+        border-radius: 2px;
+        background: var(--ledger-blue);
+        color: white;
+        font-size: 12px;
+        font-weight: 650;
+      }
+      body[data-ledger="project-ledger"] .send b { font: 10px/1 var(--ledger-mono); opacity: .7; }
+      body[data-ledger="project-ledger"] .send:disabled { border-color: #b7c0c8; background: #b7c0c8; }
+
+      body[data-ledger="project-ledger"] .inspector {
+        min-width: 0;
+        min-height: 0;
+        overflow: hidden;
+        background: var(--ledger-inspector);
+        color: var(--ledger-ink);
+        border-left: 1px solid #c7d0d8;
+      }
+      body[data-ledger="project-ledger"] .inspector-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        min-height: 64px;
+        padding: 0 16px;
+        border-bottom: 1px solid #cbd3da;
+      }
+      body[data-ledger="project-ledger"] .inspector-head > div { display: grid; gap: 2px; }
+      body[data-ledger="project-ledger"] .inspector-head strong { font-family: Bahnschrift, sans-serif; font-size: 14px; }
+      body[data-ledger="project-ledger"] .inspector-kicker {
+        color: #73808c;
+        font: 8px/1 var(--ledger-mono);
+        letter-spacing: .14em;
+      }
+      body[data-ledger="project-ledger"] .close-inspector { display: none; border-color: #b9c3cc; color: #667581; }
+      body[data-ledger="project-ledger"] .inspector-summary {
+        min-height: 42px;
+        padding: 12px 16px;
+        border-bottom: 1px solid #cbd3da;
+        color: #61707d;
+        font: 10px/1.5 var(--ledger-mono);
+      }
+      body[data-ledger="project-ledger"] .workstream {
+        height: calc(100% - 107px);
+        overflow: auto;
+        padding: 14px 12px 28px;
+      }
+      body[data-ledger="project-ledger"] .workstream .activity-card,
+      body[data-ledger="project-ledger"] .workstream .artifact-results {
+        margin-bottom: 8px;
+        border: 1px solid #cbd3da;
+        background: rgba(255, 255, 255, .72);
+      }
+      body[data-ledger="project-ledger"] .workstream .activity-card::before { display: none; }
+      body[data-ledger="project-ledger"] .workstream .activity-card summary { padding: 10px; }
+      body[data-ledger="project-ledger"] .workstream .activity-title { color: var(--ledger-ink); font-size: 11px; }
+      body[data-ledger="project-ledger"] .workstream .activity-subtitle { color: var(--ledger-muted); font: 9px/1.4 var(--ledger-mono); }
+      body[data-ledger="project-ledger"] .workstream .activity-body { border-color: #d2d9df; background: #f7f9fa; }
+      body[data-ledger="project-ledger"] .workstream .artifact-results { padding: 10px; }
+      body[data-ledger="project-ledger"] .artifact-result {
+        border-color: var(--ledger-line);
+        border-radius: 2px;
+        background: white;
+        color: var(--ledger-ink);
+      }
+      body[data-ledger="project-ledger"] .artifact-result:hover { border-color: #93a6b7; background: #f8fafb; }
+      body[data-ledger="project-ledger"] .artifact,
+      body[data-ledger="project-ledger"] .artifact-dialog { color: var(--ledger-ink); }
+      body[data-ledger="project-ledger"] .artifact-dialog {
+        border: 1px solid var(--ledger-line-strong);
+        border-radius: 3px;
+        background: white;
+        box-shadow: 0 24px 70px rgba(14, 24, 34, .24);
+      }
+      body[data-ledger="project-ledger"] .artifact-head { border-color: var(--ledger-line); background: #f7f9fa; }
+      body[data-ledger="project-ledger"] .artifact-actions button,
+      body[data-ledger="project-ledger"] .add-text-artifact { border-color: var(--ledger-line); border-radius: 2px; background: white; color: var(--ledger-ink); }
+
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .workspace {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: minmax(0, 1fr);
+        width: 100%;
+        max-width: none;
+        border: 1px solid #c9d2da;
+        border-radius: 4px;
+        background: var(--ledger-surface);
+        box-shadow: 0 12px 34px rgba(17, 29, 40, .12);
+      }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .sidebar,
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .inspector { display: none; }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .chat {
+        display: grid;
+        grid-template-rows: 56px minmax(0, 1fr) auto;
+        height: 100%;
+        background: white;
+      }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .chat-head {
+        height: 56px;
+        padding: 0 10px 0 12px;
+        gap: 9px;
+        background: white;
+      }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .dock-mark { display: grid; }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .chat-title { font-size: 13px; }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .chat-subtitle { font-size: 9px; }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .transcript {
+        padding: 13px 14px 7px;
+        background: #f7f9fa;
+      }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .thread { max-width: none; }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .message,
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .approval-card,
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .dock-work { margin: 0 0 9px; }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .message::before,
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .approval-card::before { left: -10px; width: 5px; height: 5px; }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .message.user { padding: 9px 10px; }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .message-meta { margin-bottom: 4px; font-size: 8px; }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .message-body {
+        display: -webkit-box;
+        overflow: hidden;
+        font-size: 11px;
+        line-height: 1.55;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 3;
+      }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .message-context,
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .message-artifacts { display: none; }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .approval-card { padding: 10px; font-size: 10px; }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .approval-card pre { max-height: 42px; margin: 7px 0; font-size: 8px; }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .dock-work {
+        display: grid;
+        grid-template-columns: 8px minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 10px;
+        border: 1px solid var(--ledger-line);
+        border-left: 2px solid var(--ledger-blue);
+        border-radius: 2px;
+        background: white;
+      }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .dock-work-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ledger-blue); }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .dock-work-copy { display: grid; min-width: 0; gap: 2px; }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .dock-work-copy strong { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .dock-work-copy small,
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .dock-work em { color: var(--ledger-muted); font: 8px/1.2 var(--ledger-mono); font-style: normal; }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .composer-wrap {
+        padding: 6px 8px 8px;
+        border-top: 1px solid var(--ledger-line);
+        background: white;
+      }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .composer { border-color: var(--ledger-line-strong); box-shadow: none; }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .composer > textarea { min-height: 39px; max-height: 62px; padding: 9px 10px 4px; font-size: 11px; }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .context-panel,
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .run-settings { display: none; }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .compact-settings-summary {
+        display: block;
+        overflow: hidden;
+        min-width: 0;
+        margin-right: auto;
+        color: var(--ledger-muted);
+        font: 8px/1.2 var(--ledger-mono);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .composer-bar { min-height: 34px; padding: 3px 4px 4px 10px; }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .send { min-width: 56px; height: 28px; padding: 0 8px; font-size: 10px; }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .send b { display: none; }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .display-mode-label { display: none; }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .head-button { min-width: 30px; padding: 0 8px; }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .only-narrow { display: inline-flex; }
+
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .workspace.rail-open .sidebar {
+        position: absolute;
+        z-index: 50;
+        inset: 0;
+        display: grid;
+        grid-template-rows: auto auto minmax(0, 1fr) auto;
+        height: auto;
+        max-height: none;
+      }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .workspace.rail-open .close-rail { display: grid; }
+
+      body[data-ledger="project-ledger"][data-display-mode="fullscreen"] .workspace {
+        grid-template-columns: 260px minmax(0, 1fr) 320px;
+        grid-template-rows: minmax(0, 1fr);
+        width: 100%;
+        border: 0;
+        border-radius: 0;
+      }
+      body[data-ledger="project-ledger"][data-display-mode="fullscreen"] .sidebar {
+        display: grid;
+        grid-template-rows: auto auto minmax(0, 1fr) auto;
+      }
+      body[data-ledger="project-ledger"][data-display-mode="fullscreen"] .inspector {
+        display: grid;
+        grid-template-rows: auto auto minmax(0, 1fr);
+      }
+      body[data-ledger="project-ledger"][data-display-mode="fullscreen"] .workstream { height: auto; }
+      body[data-ledger="project-ledger"][data-display-mode="fullscreen"] .close-rail { display: none; }
+      body[data-ledger="project-ledger"] .only-narrow { display: none; }
+
+      @media (max-width: 1080px) {
+        body[data-ledger="project-ledger"][data-display-mode="fullscreen"] .workspace { grid-template-columns: 238px minmax(0, 1fr); }
+        body[data-ledger="project-ledger"][data-display-mode="fullscreen"] .inspector { display: none; }
+        body[data-ledger="project-ledger"][data-display-mode="fullscreen"] .workspace.inspector-open .inspector {
+          position: absolute;
+          z-index: 45;
+          top: 0;
+          right: 0;
+          bottom: 0;
+          display: grid;
+          width: min(360px, 88%);
+          box-shadow: -18px 0 50px rgba(18, 29, 39, .18);
+        }
+        body[data-ledger="project-ledger"][data-display-mode="fullscreen"] .workspace.inspector-open .close-inspector { display: grid; }
+        body[data-ledger="project-ledger"][data-display-mode="fullscreen"] .only-narrow { display: inline-flex; }
+      }
+
+      @media (max-width: 760px) {
+        body[data-ledger="project-ledger"][data-display-mode="fullscreen"] .workspace { grid-template-columns: minmax(0, 1fr); }
+        body[data-ledger="project-ledger"][data-display-mode="fullscreen"] .sidebar { display: none; }
+        body[data-ledger="project-ledger"][data-display-mode="fullscreen"] .workspace.rail-open .sidebar {
+          position: absolute;
+          z-index: 50;
+          inset: 0 auto 0 0;
+          display: grid;
+          grid-template-rows: auto auto minmax(0, 1fr) auto;
+          width: min(300px, 88%);
+          height: auto;
+          max-height: none;
+          box-shadow: 18px 0 50px rgba(18, 29, 39, .20);
+        }
+        body[data-ledger="project-ledger"][data-display-mode="fullscreen"] .workspace.rail-open .close-rail { display: grid; }
+        body[data-ledger="project-ledger"] .chat-head { padding-inline: 12px; }
+        body[data-ledger="project-ledger"] .transcript { padding-inline: 22px 14px; }
+        body[data-ledger="project-ledger"] .composer-wrap { padding-inline: 10px; }
+        body[data-ledger="project-ledger"] .settings-popover { grid-template-columns: 1fr; width: min(300px, calc(100vw - 35px)); }
+      }
+
+      @media (max-width: 420px) {
+        body[data-ledger="project-ledger"][data-display-mode="inline"] .workspace { max-width: none; border-inline: 0; border-radius: 0; }
+        body[data-ledger="project-ledger"][data-display-mode="inline"] .dock-mark { display: none; }
+        body[data-ledger="project-ledger"][data-display-mode="inline"] .chat-head { gap: 5px; padding-left: 10px; }
+        body[data-ledger="project-ledger"][data-display-mode="inline"] .chat-title { font-size: 12px; }
+      }
+
+      /* Night Shift: tuned to sit inside ChatGPT's dark canvas without a white flash. */
+      body[data-ledger="project-ledger"][data-theme="night-shift"] {
+        --ledger-rail: #090f15;
+        --ledger-rail-soft: #131d26;
+        --ledger-canvas: #111820;
+        --ledger-surface: #18212a;
+        --ledger-inspector: #0e151c;
+        --ledger-ink: #e6edf3;
+        --ledger-muted: #8d9aa6;
+        --ledger-line: #2b3742;
+        --ledger-line-strong: #3a4854;
+        --ledger-blue: #6b8cff;
+        --ledger-blue-soft: #1a2850;
+        --ledger-green: #51aa84;
+        --ledger-amber: #d19a62;
+        --ledger-red: #e07171;
+        color-scheme: dark;
+      }
+
+      body[data-theme="night-shift"] .workspace,
+      body[data-theme="night-shift"] .chat { background: var(--ledger-canvas); }
+      body[data-theme="night-shift"] .sidebar { background: var(--ledger-rail); }
+      body[data-theme="night-shift"] .brand strong { color: #f1f5f8; }
+      body[data-theme="night-shift"] .brand small,
+      body[data-theme="night-shift"] .rail-label { color: #71808d; }
+      body[data-theme="night-shift"] .new-chat,
+      body[data-theme="night-shift"] .close-rail { border-color: #2b3945; color: #a9b6c1; }
+      body[data-theme="night-shift"] .project-toggle:hover,
+      body[data-theme="night-shift"] .project-add:hover,
+      body[data-theme="night-shift"] .conversation-item:hover { background: #131d26; }
+      body[data-theme="night-shift"] .conversation-item[aria-current="true"] {
+        background: rgba(107, 140, 255, .13);
+        box-shadow: inset 0 0 0 1px rgba(107, 140, 255, .12);
+      }
+      body[data-theme="night-shift"] .sidebar-foot { border-color: #202c35; }
+
+      body[data-theme="night-shift"] .chat-head {
+        border-color: rgba(141, 154, 166, .14);
+        background: rgba(17, 24, 32, .91);
+      }
+      body[data-theme="night-shift"] .head-button,
+      body[data-theme="night-shift"] .more > summary {
+        border-color: var(--ledger-line);
+        background: #151e27;
+        color: #aab6c0;
+      }
+      body[data-theme="night-shift"] .head-button:hover,
+      body[data-theme="night-shift"] .more > summary:hover { border-color: #4a5a68; color: #eef3f7; background: #1b2630; }
+      body[data-theme="night-shift"] .head-button.danger { color: #e88a8a; border-color: #5e363b; }
+      body[data-theme="night-shift"] .more-menu {
+        border-color: var(--ledger-line-strong);
+        background: #18212a;
+        color: var(--ledger-ink);
+        box-shadow: 0 16px 42px rgba(0, 0, 0, .42);
+      }
+      body[data-theme="night-shift"] .more-menu button { color: var(--ledger-ink); }
+      body[data-theme="night-shift"] .more-menu button:hover { background: #202b35; }
+
+      body[data-theme="night-shift"] .transcript {
+        background: var(--ledger-canvas);
+      }
+      body[data-theme="night-shift"] .message::before,
+      body[data-theme="night-shift"] .approval-card::before,
+      body[data-theme="night-shift"] .activity-card::before { border-color: var(--ledger-canvas); background: #63717d; }
+      body[data-theme="night-shift"] .message.user {
+        background: #1b2732;
+        box-shadow: inset 2px 0 0 #34485c;
+      }
+      body[data-theme="night-shift"] .message.user::before {
+        background: var(--ledger-blue);
+        box-shadow: 0 0 14px rgba(107, 140, 255, .68);
+      }
+      body[data-theme="night-shift"] .message-context,
+      body[data-theme="night-shift"] .activity-card { border-color: var(--ledger-line); background: var(--ledger-surface); }
+      body[data-theme="night-shift"] .message-artifact {
+        border-color: #33414d;
+        background: #111921;
+        color: #c9d4dc;
+      }
+      body[data-theme="night-shift"] pre {
+        border-color: #2c3944;
+        background: #0d141b;
+        color: #cbd6de;
+      }
+      body[data-theme="night-shift"] .turn-marker { border-color: #34414d; background: var(--ledger-canvas); }
+      body[data-theme="night-shift"] .approval-card {
+        border-color: #6b4d31;
+        border-left-color: var(--ledger-amber);
+        background: #251e18;
+      }
+      body[data-theme="night-shift"] .approval-card::before { background: var(--ledger-amber); }
+      body[data-theme="night-shift"] .approval-title { color: #e7b27d; }
+      body[data-theme="night-shift"] .approval-actions button {
+        border-color: #594531;
+        background: #171a1d;
+        color: #d8b895;
+      }
+      body[data-theme="night-shift"] .approval-actions .accept {
+        border-color: var(--ledger-blue);
+        background: var(--ledger-blue);
+        color: #08111b;
+      }
+
+      body[data-theme="night-shift"] .composer-wrap {
+        background: linear-gradient(to bottom, rgba(17, 24, 32, 0), var(--ledger-canvas) 18px);
+      }
+      body[data-theme="night-shift"] .composer {
+        border-color: var(--ledger-line-strong);
+        background: #151e27;
+        box-shadow: 0 14px 38px rgba(0, 0, 0, .22);
+      }
+      body[data-theme="night-shift"] .composer:focus-within {
+        border-color: #647fdd;
+        box-shadow: 0 0 0 3px rgba(107, 140, 255, .11), 0 14px 38px rgba(0, 0, 0, .22);
+      }
+      body[data-theme="night-shift"] .composer > textarea { color: var(--ledger-ink); }
+      body[data-theme="night-shift"] .composer > textarea::placeholder { color: #6f7e8a; }
+      body[data-theme="night-shift"] .context-panel { border-color: var(--ledger-line); }
+      body[data-theme="night-shift"] .context-fields { border-color: var(--ledger-line); background: #10171e; }
+      body[data-theme="night-shift"] .context-fields textarea,
+      body[data-theme="night-shift"] .context-fields select,
+      body[data-theme="night-shift"] .text-entry-fields input,
+      body[data-theme="night-shift"] .text-entry-fields textarea {
+        border-color: var(--ledger-line);
+        background: #151e27;
+        color: var(--ledger-ink);
+      }
+      body[data-theme="night-shift"] .settings-popover {
+        border-color: var(--ledger-line-strong);
+        background: #18212a;
+        box-shadow: 0 20px 52px rgba(0, 0, 0, .48);
+      }
+      body[data-theme="night-shift"] .settings-popover select {
+        border-color: var(--ledger-line);
+        background: #111920;
+        color: var(--ledger-ink);
+      }
+      body[data-theme="night-shift"] .send { color: #07101a; }
+      body[data-theme="night-shift"] .send:disabled { border-color: #3a4650; background: #3a4650; color: #83909a; }
+
+      body[data-theme="night-shift"] .inspector {
+        border-color: rgba(141, 154, 166, .12);
+        background: var(--ledger-inspector);
+      }
+      body[data-theme="night-shift"] .inspector-head,
+      body[data-theme="night-shift"] .inspector-summary { border-color: rgba(141, 154, 166, .12); }
+      body[data-theme="night-shift"] .close-inspector { border-color: #35434e; color: #96a4af; }
+      body[data-theme="night-shift"] .workstream .activity-card,
+      body[data-theme="night-shift"] .workstream .artifact-results {
+        border-color: rgba(141, 154, 166, .14);
+        background: #151e26;
+      }
+      body[data-theme="night-shift"] .workstream .activity-body { border-color: #2b3843; background: #0f171e; }
+      body[data-theme="night-shift"] .activity-status.running { color: #9bb0ff; }
+      body[data-theme="night-shift"] .activity-status.completed { color: #66bd96; }
+      body[data-theme="night-shift"] .artifact-result {
+        border-color: #2f3c47;
+        background: #10181f;
+        color: var(--ledger-ink);
+      }
+      body[data-theme="night-shift"] .artifact-result:hover { border-color: #506374; background: #16212a; }
+      body[data-theme="night-shift"] .artifact { background: rgba(3, 7, 11, .76); }
+      body[data-theme="night-shift"] .artifact-dialog {
+        border-color: var(--ledger-line-strong);
+        background: #151e27;
+        box-shadow: 0 26px 80px rgba(0, 0, 0, .56);
+      }
+      body[data-theme="night-shift"] .artifact-head { border-color: var(--ledger-line); background: #101820; }
+      body[data-theme="night-shift"] .artifact-actions button,
+      body[data-theme="night-shift"] .add-text-artifact {
+        border-color: var(--ledger-line);
+        background: #18212a;
+        color: var(--ledger-ink);
+      }
+
+      body[data-theme="night-shift"][data-display-mode="inline"] .workspace {
+        border-color: #303d48;
+        background: #111820;
+        box-shadow: 0 14px 38px rgba(0, 0, 0, .32);
+      }
+      body[data-theme="night-shift"][data-display-mode="inline"] .chat,
+      body[data-theme="night-shift"][data-display-mode="inline"] .chat-head { background: #111820; }
+      body[data-theme="night-shift"][data-display-mode="inline"] .transcript { background: #0e151c; }
+      body[data-theme="night-shift"][data-display-mode="inline"] .composer-wrap {
+        border-color: #2a3640;
+        background: #111820;
+      }
+      body[data-theme="night-shift"][data-display-mode="inline"] .composer {
+        border-color: #34424d;
+        background: #151e27;
+      }
+      body[data-theme="night-shift"][data-display-mode="inline"] .dock-work {
+        border-color: #2e3a45;
+        border-left-color: var(--ledger-blue);
+        background: #151e27;
+      }
+      body[data-theme="night-shift"] * { scrollbar-color: #40505d transparent; }
     </style>
   </head>
-  <body>
-    <div class="workspace" id="console">
+  <body data-display-mode="inline" data-ledger="project-ledger" data-theme="night-shift">
+    <div class="workspace" id="console" data-shell="conversation-dock">
       <aside class="sidebar" aria-label="專案與對話">
         <div class="sidebar-head">
           <div class="brand-row">
-            <div class="brand"><span class="brand-mark">C</span><span>家用 Codex</span></div>
-            <button class="new-chat" id="new-chat" type="button" aria-label="新增對話" title="新增對話">＋</button>
+            <div class="brand"><span class="brand-mark">CB</span><span><strong>Codex Bridge</strong><small>Project ledger</small></span></div>
+            <div class="sidebar-head-actions">
+              <button class="new-chat" id="new-chat" type="button" aria-label="新增對話" title="新增對話">＋</button>
+              <button class="close-rail" id="close-rail" type="button" aria-label="關閉對話清單">×</button>
+            </div>
           </div>
         </div>
+        <div class="rail-label">專案與對話</div>
         <nav class="project-tree" id="project-tree"></nav>
         <div class="sidebar-foot">
           <span class="presence" id="presence"></span>
@@ -702,6 +1736,7 @@
 
       <main class="chat">
         <header class="chat-head">
+          <div class="dock-mark" aria-hidden="true">CB</div>
           <div class="chat-heading">
             <h1 class="chat-title" id="chat-title">新對話</h1>
             <div class="chat-subtitle" id="chat-subtitle">選擇專案後開始</div>
@@ -711,6 +1746,7 @@
 
         <section class="transcript" id="transcript" aria-live="polite">
           <div class="thread" id="thread"></div>
+          <button class="new-content" id="new-content" type="button" hidden>有新內容 ↓</button>
         </section>
 
         <div class="composer-wrap">
@@ -741,21 +1777,40 @@
               </div>
             </details>
             <div class="composer-bar">
-              <select class="composer-select" id="mode" aria-label="執行模式">
-                <option value="plan">Plan · 唯讀</option>
-                <option value="workspace_write">Agent · 可修改</option>
-              </select>
-              <select class="composer-select" id="model" aria-label="模型">
-                <option value="">Codex 預設模型</option>
-              </select>
-              <select class="composer-select" id="effort" aria-label="推理強度">
-                <option value="">預設推理</option>
-              </select>
-              <button class="send" id="send" type="submit" aria-label="送出">↑</button>
+              <span class="compact-settings-summary" id="compact-settings-summary">可修改 · 自動審核</span>
+              <details class="run-settings" id="run-settings">
+                <summary><span id="run-settings-summary">可修改 · 自動審核 · Codex 預設</span><span aria-hidden="true">⌄</span></summary>
+                <div class="settings-popover">
+                  <label>執行模式<select class="composer-select" id="mode" aria-label="執行模式">
+                    <option value="plan">Plan · 唯讀</option>
+                    <option value="workspace_write" selected>Agent · 可修改</option>
+                  </select></label>
+                  <label>權限審核<select class="composer-select" id="reviewer" aria-label="權限審核" title="自動審核不會放大 sandbox 或檔案權限">
+                    <option value="auto_review">自動審核</option>
+                    <option value="user">每次詢問</option>
+                  </select></label>
+                  <label>模型<select class="composer-select" id="model" aria-label="模型">
+                    <option value="">Codex 預設模型</option>
+                  </select></label>
+                  <label>推理強度<select class="composer-select" id="effort" aria-label="推理強度">
+                    <option value="">預設推理</option>
+                  </select></label>
+                </div>
+              </details>
+              <button class="send" id="send" type="submit" aria-label="送出"><span>送出</span><b aria-hidden="true">↵</b></button>
             </div>
           </form>
         </div>
       </main>
+
+      <aside class="inspector" aria-label="工作紀錄">
+        <div class="inspector-head">
+          <div><span class="inspector-kicker">WORKSTREAM</span><strong>工作紀錄</strong></div>
+          <button class="close-inspector" id="close-inspector" type="button" aria-label="關閉工作紀錄">×</button>
+        </div>
+        <div class="inspector-summary" id="inspector-summary"></div>
+        <div class="workstream" id="workstream"></div>
+      </aside>
     </div>
 
     <section class="artifact" id="artifact" hidden>
@@ -801,13 +1856,24 @@
           pollTimer: null,
           cancelArmedUntil: 0,
           expandedProjects: new Set(),
+          expandedConversationProjects: new Set(),
           treeSignature: "",
           messageSignature: "",
+          workstreamSignature: "",
+          timelineKeys: [],
+          timelineSignatures: new Map(),
+          newContentAvailable: false,
           headerSignature: "",
           modelSignature: "",
           draftArtifacts: [],
           hostCapabilities: {},
+          hostContext: {},
+          displayMode: "inline",
           openedArtifact: null,
+          conversationCursor: null,
+          localThreads: [],
+          localHistoryCursor: null,
+          localHistoryComplete: false,
         };
         let rpcId = 0;
         const pendingRequests = new Map();
@@ -836,17 +1902,89 @@
             return;
           }
           if (message.method === "ui/notifications/tool-result") updateFromResponse(message.params);
+          if (message.method === "ui/notifications/host-context-changed") applyHostContext(message.params);
         }, { passive: true });
 
         const bridgeReady = rpcRequest("ui/initialize", {
           appInfo: { name: "codex-chat-workspace", version: "1.1.0" },
-          appCapabilities: {},
+          appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },
           protocolVersion: "2026-01-26",
         }).then((response) => {
           state.hostCapabilities = response && response.hostCapabilities || {};
+          applyHostContext(response && response.hostContext || {});
           rpcNotify("ui/notifications/initialized", {});
           return response || {};
         });
+
+        function applyHostContext(context) {
+          state.hostContext = Object.assign({}, state.hostContext, context || {});
+          state.displayMode = state.hostContext.displayMode === "fullscreen" ? "fullscreen" : "inline";
+          document.body.dataset.displayMode = state.displayMode;
+          $("#console").dataset.shell = state.displayMode === "fullscreen" ? "project-ledger" : "conversation-dock";
+          $("#console").classList.remove("rail-open", "inspector-open");
+          const insets = state.hostContext.safeAreaInsets || {};
+          const safeTop = finitePixels(insets.top);
+          const safeRight = finitePixels(insets.right);
+          const safeBottom = finitePixels(insets.bottom);
+          const safeLeft = finitePixels(insets.left);
+          document.documentElement.style.setProperty("--safe-top", safeTop + "px");
+          document.documentElement.style.setProperty("--safe-right", safeRight + "px");
+          document.documentElement.style.setProperty("--safe-bottom", safeBottom + "px");
+          document.documentElement.style.setProperty("--safe-left", safeLeft + "px");
+          if (state.displayMode === "fullscreen") {
+            const dimensions = state.hostContext.containerDimensions || {};
+            const availableHeight = finitePixels(dimensions.height || dimensions.maxHeight || window.innerHeight);
+            const workspaceHeight = Math.max(280, availableHeight - safeTop - safeBottom);
+            document.documentElement.style.setProperty("--workspace-height", Math.floor(workspaceHeight) + "px");
+          } else {
+            const dimensions = state.hostContext.containerDimensions || {};
+            const availableWidth = finitePixels(dimensions.width || dimensions.maxWidth || window.innerWidth);
+            document.documentElement.style.setProperty("--workspace-height", inlineWorkspaceHeight(availableWidth) + "px");
+          }
+          state.headerSignature = "";
+          state.messageSignature = "";
+          state.workstreamSignature = "";
+          renderHeader();
+          renderMessages();
+          renderWorkstream();
+        }
+
+        function finitePixels(value) {
+          const number = Number(value);
+          return Number.isFinite(number) && number > 0 ? number : 0;
+        }
+
+        function inlineWorkspaceHeight(availableWidth) {
+          const proportionalHeight = availableWidth > 0 ? Math.round(availableWidth * 1.12) : 720;
+          return Math.max(640, Math.min(960, proportionalHeight));
+        }
+
+        function focusWithoutScroll(element) {
+          if (!element) return;
+          try {
+            element.focus({ preventScroll: true });
+          } catch {
+            // Older embedded browsers may not support FocusOptions.
+          }
+        }
+
+        async function toggleDisplayMode() {
+          const requestedMode = state.displayMode === "fullscreen" ? "inline" : "fullscreen";
+          const button = $("#toggle-display");
+          if (button) button.disabled = true;
+          try {
+            await bridgeReady;
+            const result = await rpcRequest("ui/request-display-mode", { mode: requestedMode });
+            const actualMode = result && (result.mode || result.displayMode) || requestedMode;
+            applyHostContext(Object.assign({}, result || {}, { displayMode: actualMode }));
+            if (actualMode !== requestedMode) showNotice("目前的 ChatGPT host 沒有切換顯示模式。");
+          } catch (error) {
+            showError("無法切換顯示模式：" + (error && error.message || String(error)));
+          } finally {
+            state.headerSignature = "";
+            renderHeader();
+          }
+        }
 
         async function callTool(name, args, options) {
           await bridgeReady;
@@ -869,12 +2007,35 @@
             applyStatus(data);
           }
           if (data.job) mergeJob(data.job);
+          if (Array.isArray(data.conversations)) {
+            if (state.status) {
+              const known = new Map((state.status.recentJobs || []).map((job) => [job.id, job]));
+              data.conversations.forEach((job) => known.set(job.id, Object.assign({}, known.get(job.id) || {}, job)));
+              state.status.recentJobs = Array.from(known.values()).sort((left, right) =>
+                String(right.createdAt || "").localeCompare(String(left.createdAt || ""))
+              );
+            }
+            state.conversationCursor = data.nextCursor || null;
+            state.treeSignature = "";
+          }
+          if (Array.isArray(data.localThreads)) {
+            const known = new Map(state.localThreads.map((thread) => [thread.threadId, thread]));
+            data.localThreads.forEach((thread) => known.set(thread.threadId, Object.assign({}, known.get(thread.threadId) || {}, thread)));
+            state.localThreads = Array.from(known.values()).sort((left, right) =>
+              String(right.updatedAt || "").localeCompare(String(left.updatedAt || ""))
+            );
+            state.localHistoryCursor = data.nextCursor || null;
+            state.localHistoryComplete = data.complete === true;
+            state.treeSignature = "";
+          }
+          if (data.localThread) selectLocalThread(data.localThread);
           if (data.id && data.status && Array.isArray(data.messages)) mergeJob(data);
           render();
         }
 
         function applyStatus(status) {
           state.status = status;
+          state.conversationCursor = status.conversationNextCursor || null;
           (status.projects || []).forEach((project) => state.expandedProjects.add(project.id));
           if (!state.selectedProjectId) {
             state.selectedProjectId = state.draft.projectId || status.projects && status.projects[0] && status.projects[0].id || "";
@@ -883,15 +2044,82 @@
 
         function mergeJob(job) {
           const changed = !state.selectedJob || state.selectedJob.id !== job.id;
-          state.selectedJob = job;
-          state.selectedProjectId = job.projectId;
-          upsertRecentJob(job);
+          let merged = job;
+          if (!changed) {
+            const previous = state.selectedJob;
+            merged = Object.assign({}, previous, job);
+            if (!job.conversation && previous.conversation) merged.conversation = cloneValue(previous.conversation);
+            if (merged.conversation && Array.isArray(job.conversationChanges) && job.conversationChanges.length) {
+              applyConversationChanges(merged.conversation, job.conversationChanges);
+            }
+          }
+          state.selectedJob = merged;
+          state.selectedProjectId = merged.projectId;
+          upsertRecentJob(merged);
           if (changed) {
             state.messageSignature = "";
+            state.workstreamSignature = "";
+            state.timelineKeys = [];
+            state.timelineSignatures.clear();
+            state.newContentAvailable = false;
             state.headerSignature = "";
-            syncSettingsFromJob(job);
+            syncSettingsFromJob(merged);
           }
           schedulePoll();
+        }
+
+        function selectLocalThread(thread) {
+          const changed = !state.selectedJob || state.selectedJob.id !== thread.id;
+          state.selectedJob = thread;
+          state.selectedProjectId = thread.projectId;
+          state.expandedProjects.add(thread.projectId);
+          if (changed) {
+            state.messageSignature = "";
+            state.workstreamSignature = "";
+            state.timelineKeys = [];
+            state.timelineSignatures.clear();
+            state.newContentAvailable = false;
+            state.headerSignature = "";
+            syncSettingsFromJob(thread);
+          }
+          clearTimeout(state.pollTimer);
+          state.treeSignature = "";
+        }
+
+        function applyConversationChanges(conversation, changes) {
+          for (const change of changes) {
+            if (change.threadId) conversation.threadId = change.threadId;
+            if (change.status) conversation.status = change.status;
+            if (change.hydratedAt) conversation.hydratedAt = change.hydratedAt;
+            for (const turnPatch of change.turns || []) {
+              let turn = (conversation.turns || []).find((candidate) => candidate.turnId === turnPatch.turnId);
+              if (!turn) {
+                turn = Object.assign({}, turnPatch, { items: [] });
+                conversation.turns = conversation.turns || [];
+                conversation.turns.push(turn);
+              }
+              ["status", "startedAt", "completedAt", "durationMs"].forEach((key) => {
+                if (turnPatch[key] !== undefined) turn[key] = turnPatch[key];
+              });
+              for (const itemPatch of turnPatch.items || []) {
+                if (itemPatch.clientMessageId) {
+                  turn.items = (turn.items || []).filter((candidate) => !(
+                    candidate.id && candidate.id.startsWith("bridge-message:") &&
+                    candidate.clientMessageId === itemPatch.clientMessageId
+                  ));
+                }
+                const index = (turn.items || []).findIndex((candidate) => candidate.id === itemPatch.id);
+                if (index < 0) turn.items.push(cloneValue(itemPatch));
+                else turn.items[index] = Object.assign({}, turn.items[index], cloneValue(itemPatch));
+              }
+            }
+            conversation.revision = change.revision;
+            conversation.updatedAt = change.at;
+          }
+        }
+
+        function cloneValue(value) {
+          return typeof structuredClone === "function" ? structuredClone(value) : JSON.parse(JSON.stringify(value));
         }
 
         function upsertRecentJob(job) {
@@ -904,6 +2132,7 @@
 
         function syncSettingsFromJob(job) {
           $("#mode").value = job.executionMode || "plan";
+          $("#reviewer").value = job.approvalReviewer || "user";
           $("#classification").value = job.dataClassification || "personal";
           renderModelOptions(job.model || "", job.effort || "");
           renderCompanyConfirmation();
@@ -924,23 +2153,44 @@
         }
 
         function startNewConversation(projectId) {
+          const operableProjectId = isOperableProjectId(projectId) ? projectId : firstProjectId();
           state.selectedJob = null;
-          state.selectedProjectId = projectId || state.selectedProjectId || firstProjectId();
+          state.selectedProjectId = operableProjectId || firstProjectId();
           state.messageSignature = "";
+          state.workstreamSignature = "";
+          state.timelineKeys = [];
+          state.timelineSignatures.clear();
+          state.newContentAvailable = false;
           state.headerSignature = "";
           state.cancelArmedUntil = 0;
           state.draftArtifacts = [];
           $("#message").value = state.draft.objective || "";
           $("#context").value = state.draft.context || "";
-          $("#mode").value = state.draft.executionMode || "plan";
+          $("#mode").value = state.draft.executionMode || "workspace_write";
+          $("#reviewer").value = state.draft.approvalReviewer || "auto_review";
           $("#classification").value = "personal";
           renderModelOptions(state.draft.model || "", state.draft.effort || "");
           state.draft = {};
+          $("#console").classList.remove("rail-open", "inspector-open");
           render();
-          $("#message").focus();
+          focusWithoutScroll($("#message"));
         }
 
         $("#new-chat").addEventListener("click", () => startNewConversation());
+        $("#close-rail").addEventListener("click", () => $("#console").classList.remove("rail-open"));
+        $("#close-inspector").addEventListener("click", () => $("#console").classList.remove("inspector-open"));
+        $("#new-content").addEventListener("click", () => {
+          state.newContentAvailable = false;
+          $("#transcript").scrollTo({ top: $("#transcript").scrollHeight, behavior: "smooth" });
+          updateNewContentButton();
+        });
+        $("#transcript").addEventListener("scroll", () => {
+          const transcript = $("#transcript");
+          if (transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 120 && state.newContentAvailable) {
+            state.newContentAvailable = false;
+            updateNewContentButton();
+          }
+        }, { passive: true });
         $("#refresh-status").addEventListener("click", () => withBusy(refreshStatus));
         $("#classification").addEventListener("change", () => {
           state.draftArtifacts.forEach((artifact) => {
@@ -951,7 +2201,10 @@
           renderCompanyConfirmation();
           renderDraftArtifacts();
         });
-        $("#model").addEventListener("change", () => renderEffortOptions("", true));
+        $("#mode").addEventListener("change", renderSettingsSummary);
+        $("#reviewer").addEventListener("change", renderSettingsSummary);
+        $("#model").addEventListener("change", () => { renderEffortOptions("", true); renderSettingsSummary(); });
+        $("#effort").addEventListener("change", renderSettingsSummary);
         $("#add-text-artifact").addEventListener("click", openTextEntry);
         $("#close-text-entry").addEventListener("click", closeTextEntry);
         $("#text-entry").addEventListener("click", (event) => { if (event.target === $("#text-entry")) closeTextEntry(); });
@@ -979,7 +2232,9 @@
           const message = $("#message").value.trim();
           const context = $("#context").value.trim();
           if (!message) throw new Error("請先輸入要交給 Codex 的內容。");
-          if (!state.selectedProjectId) throw new Error("目前沒有可用專案。");
+          if (!isOperableProjectId(state.selectedProjectId) || state.selectedJob && state.selectedJob.readOnly) {
+            throw new Error("這個專案位置受到保護，只能查看本機歷史。");
+          }
           const classification = $("#classification").value;
           const companyAuthorizationConfirmed = classification === "company_approved"
             ? $("#company-confirm-checkbox").checked
@@ -995,6 +2250,7 @@
           const common = {
             context: context,
             executionMode: $("#mode").value,
+            approvalReviewer: $("#reviewer").value,
             dataClassification: classification,
             model: $("#model").value || undefined,
             effort: $("#effort").value || undefined,
@@ -1015,8 +2271,10 @@
               companyAuthorizationConfirmed: companyAuthorizationConfirmed,
             }));
           } else {
-            await callTool("codex_conversation_send", Object.assign({}, common, {
-              jobId: state.selectedJob.id,
+            const conversationTarget = state.selectedJob.source === "local"
+              ? { localThreadId: state.selectedJob.localThreadId }
+              : { jobId: state.selectedJob.id };
+            await callTool("codex_conversation_send", Object.assign({}, common, conversationTarget, {
               clientMessageId: makeId(),
               message: message,
               companyAuthorizationConfirmed: companyAuthorizationConfirmed,
@@ -1034,15 +2292,30 @@
           await callTool("codex_bridge_status", {});
         }
 
+        async function loadMoreConversations() {
+          if (!state.conversationCursor) return;
+          await callTool("codex_conversation_list", { cursor: state.conversationCursor, limit: 50 });
+        }
+
+        async function loadLocalHistory(cursor) {
+          await callTool("codex_local_thread_list", {
+            cursor: cursor || undefined,
+            maxThreads: 2000,
+          });
+        }
+
         function schedulePoll() {
           clearTimeout(state.pollTimer);
-          if (!state.selectedJob || terminal.has(state.selectedJob.status) || document.hidden) return;
-          state.pollTimer = setTimeout(pollSelectedJob, 2500);
+          if (!state.selectedJob || document.hidden) return;
+          const catchUp = state.selectedJob.hasMore || state.selectedJob.conversationHasMore;
+          if (terminal.has(state.selectedJob.status) && !catchUp) return;
+          state.pollTimer = setTimeout(pollSelectedJob, catchUp ? 25 : 900);
         }
 
         async function pollSelectedJob() {
           const job = state.selectedJob;
-          if (!job || terminal.has(job.status) || state.pollInFlight || document.hidden) {
+          const catchUp = job && (job.hasMore || job.conversationHasMore);
+          if (!job || (terminal.has(job.status) && !catchUp) || state.pollInFlight || document.hidden) {
             schedulePoll();
             return;
           }
@@ -1052,6 +2325,7 @@
               jobId: job.id,
               afterSeq: Number(job.nextEventSeq || 0),
               maxEvents: 20,
+              afterConversationRevision: Number(job.nextConversationRevision || 0),
             });
           } catch (error) {
             showError(error && error.message || String(error));
@@ -1062,16 +2336,24 @@
         }
 
         document.addEventListener("visibilitychange", schedulePoll, { passive: true });
+        window.addEventListener("resize", () => {
+          if (state.displayMode !== "fullscreen") return;
+          applyHostContext({
+            containerDimensions: Object.assign({}, state.hostContext.containerDimensions || {}, { height: window.innerHeight }),
+          });
+        }, { passive: true });
 
         function render() {
           renderPresence();
           renderProjectTree();
           renderHeader();
           renderMessages();
+          renderWorkstream();
           renderModelOptions();
           renderCompanyConfirmation();
           renderDraftArtifacts();
           renderComposerState();
+          renderSettingsSummary();
         }
 
         function renderPresence() {
@@ -1083,36 +2365,65 @@
         }
 
         function renderProjectTree() {
-          const projects = state.status && state.status.projects || [];
+          const projects = ledgerProjects();
           const jobs = state.status && state.status.recentJobs || [];
           const signature = JSON.stringify([
-            projects,
+            projects.map((project) => [project.id, project.name, project.historyOnly, project.updatedAt]),
             jobs.map((job) => [job.id, job.projectId, job.title, job.status, job.stateVersion]),
+            state.localThreads.map((thread) => [thread.threadId, thread.projectId, thread.title, thread.updatedAt]),
             state.selectedJob && state.selectedJob.id,
             Array.from(state.expandedProjects),
+            Array.from(state.expandedConversationProjects),
+            state.conversationCursor,
+            state.localHistoryCursor,
+            state.localHistoryComplete,
           ]);
           if (signature === state.treeSignature) return;
           state.treeSignature = signature;
           $("#project-tree").innerHTML = projects.map((project) => {
             const projectJobs = jobs.filter((job) => job.projectId === project.id);
+            const bridgeThreadIds = new Set(projectJobs.map((job) => job.threadId).filter(Boolean));
+            const allConversations = projectJobs.map((job) => ({ kind: "job", value: job }))
+              .concat(state.localThreads
+                .filter((thread) => thread.projectId === project.id && !bridgeThreadIds.has(thread.threadId))
+                .map((thread) => ({ kind: "local", value: thread })))
+              .sort((left, right) => String(right.value.updatedAt || right.value.createdAt || "").localeCompare(String(left.value.updatedAt || left.value.createdAt || "")));
             const expanded = state.expandedProjects.has(project.id);
-            const conversations = projectJobs.length
-              ? projectJobs.map((job) => {
-                  const selected = state.selectedJob && state.selectedJob.id === job.id;
-                  return '<button class="conversation-item" type="button" data-job-id="' + escapeAttr(job.id) + '" aria-current="' + String(Boolean(selected)) + '">' +
-                    '<span class="conversation-dot ' + conversationDotClass(job.status) + '"></span>' +
-                    '<span class="conversation-title">' + escapeHtml(job.title) + '</span></button>';
+            const showAll = state.expandedConversationProjects.has(project.id);
+            const visibleConversations = showAll ? allConversations : allConversations.slice(0, 8);
+            const conversations = visibleConversations.length
+              ? visibleConversations.map((conversation) => {
+                  const item = conversation.value;
+                  const selected = conversation.kind === "job"
+                    ? state.selectedJob && state.selectedJob.id === item.id
+                    : state.selectedJob && state.selectedJob.localThreadId === item.threadId;
+                  const dataAttribute = conversation.kind === "job"
+                    ? 'data-job-id="' + escapeAttr(item.id) + '"'
+                    : 'data-local-thread-id="' + escapeAttr(item.threadId) + '"';
+                  return '<button class="conversation-item" type="button" ' + dataAttribute + ' aria-current="' + String(Boolean(selected)) + '">' +
+                    '<span class="conversation-dot ' + conversationDotClass(item.status || item.threadStatus) + '"></span>' +
+                    '<span class="conversation-title">' + escapeHtml(item.title) + '</span></button>';
                 }).join("")
               : '<div class="empty-project">尚無對話</div>';
+            const reveal = allConversations.length > 8
+              ? '<button class="show-all-conversations" type="button" data-project-show-all="' + escapeAttr(project.id) + '">' +
+                (showAll ? "收合對話" : "顯示全部 " + allConversations.length) + '</button>'
+              : "";
             return '<section class="project-group ' + (expanded ? "" : "collapsed") + '" data-project-group="' + escapeAttr(project.id) + '">' +
               '<div class="project-row">' +
                 '<button class="project-toggle" type="button" data-project-toggle="' + escapeAttr(project.id) + '">' +
                   '<span class="chevron">⌄</span><span class="project-name">' + escapeHtml(project.name) + '</span>' +
-                  '<span class="project-count">' + projectJobs.length + '</span>' +
+                  '<span class="project-count">' + allConversations.length + '</span>' +
                 '</button>' +
-                '<button class="project-add" type="button" data-project-new="' + escapeAttr(project.id) + '" aria-label="在此專案新增對話">＋</button>' +
-              '</div><div class="conversation-list">' + conversations + '</div></section>';
-          }).join("") || '<div class="empty-project">沒有 allowlisted 專案</div>';
+                (project.historyOnly
+                  ? '<span class="project-access" title="這個位置屬於系統或敏感範圍，只能讀取本機歷史">受保護</span>'
+                  : '<button class="project-add" type="button" data-project-new="' + escapeAttr(project.id) + '" aria-label="在此專案新增對話">＋</button>') +
+              '</div><div class="conversation-list">' + conversations + reveal + '</div></section>';
+          }).join("") + (state.conversationCursor
+            ? '<button class="load-conversations" type="button" data-load-conversations>載入更早 Bridge 對話</button>'
+            : "") + (state.localHistoryCursor
+              ? '<button class="load-conversations" type="button" data-load-local-history>載入更多本機歷史</button>'
+              : "") || '<div class="empty-project">尚未找到本機 Codex 對話</div>';
 
           document.querySelectorAll("[data-project-toggle]").forEach((button) => button.addEventListener("click", () => {
             const id = button.dataset.projectToggle;
@@ -1122,30 +2433,79 @@
             renderProjectTree();
           }));
           document.querySelectorAll("[data-project-new]").forEach((button) => button.addEventListener("click", () => startNewConversation(button.dataset.projectNew)));
+          document.querySelectorAll("[data-project-show-all]").forEach((button) => button.addEventListener("click", () => {
+            const id = button.dataset.projectShowAll;
+            if (state.expandedConversationProjects.has(id)) state.expandedConversationProjects.delete(id);
+            else state.expandedConversationProjects.add(id);
+            state.treeSignature = "";
+            renderProjectTree();
+          }));
           document.querySelectorAll("[data-job-id]").forEach((button) => button.addEventListener("click", () => withBusy(async () => {
             await callTool("codex_job_get", { jobId: button.dataset.jobId, afterSeq: 0, maxEvents: 20 });
+            $("#console").classList.remove("rail-open");
           })));
+          document.querySelectorAll("[data-local-thread-id]").forEach((button) => button.addEventListener("click", () => withBusy(async () => {
+            await callTool("codex_local_thread_read", { threadId: button.dataset.localThreadId });
+            $("#console").classList.remove("rail-open");
+          })));
+          const loadMore = document.querySelector("[data-load-conversations]");
+          if (loadMore) loadMore.addEventListener("click", () => withBusy(loadMoreConversations));
+          const loadMoreLocal = document.querySelector("[data-load-local-history]");
+          if (loadMoreLocal) loadMoreLocal.addEventListener("click", () => withBusy(() => loadLocalHistory(state.localHistoryCursor)));
+        }
+
+        function ledgerProjects() {
+          const configured = state.status && state.status.projects || [];
+          const configuredIds = new Set(configured.map((project) => project.id));
+          const localProjects = new Map();
+          state.localThreads.forEach((thread) => {
+            const previous = localProjects.get(thread.projectId);
+            if (!previous || String(thread.updatedAt || "") > String(previous.updatedAt || "")) {
+              localProjects.set(thread.projectId, {
+                id: thread.projectId,
+                name: thread.projectName,
+                historyOnly: thread.historyOnly === true,
+                updatedAt: thread.updatedAt,
+              });
+            }
+          });
+          const allowlisted = configured.map((project) => Object.assign({}, localProjects.get(project.id) || {}, project, { historyOnly: false }));
+          const historyOnly = Array.from(localProjects.values())
+            .filter((project) => !configuredIds.has(project.id))
+            .sort((left, right) => String(right.updatedAt || "").localeCompare(String(left.updatedAt || "")));
+          return allowlisted.concat(historyOnly);
         }
 
         function renderHeader() {
           const job = state.selectedJob;
           const project = currentProject();
           const signature = JSON.stringify(job
-            ? [job.id, job.title, job.status, job.hasDiff, job.hasResult, (job.artifacts || []).map((item) => [item.id, item.sha256]), state.cancelArmedUntil > Date.now()]
-            : ["new", state.selectedProjectId]);
+            ? [job.id, job.title, job.status, job.hasDiff, job.hasResult, (job.artifacts || []).map((item) => [item.id, item.sha256]), state.cancelArmedUntil > Date.now(), state.displayMode]
+            : ["new", state.selectedProjectId, state.displayMode]);
           if (signature === state.headerSignature) return;
           state.headerSignature = signature;
           $("#chat-title").textContent = job ? job.title : "新對話";
           $("#chat-subtitle").textContent = job
-            ? (project && project.name || job.projectName) + " · " + statusLabel(job.status)
+            ? (project && project.name || job.projectName) + (job.source === "local"
+              ? (job.readOnly ? " · 本機歷史 · 受保護" : " · 本機歷史 · 可續作")
+              : " · " + statusLabel(job.status))
             : (project ? project.name + " · 新對話" : "選擇專案後開始");
           const active = job && !terminal.has(job.status);
           const actions = [];
+          actions.push('<button class="head-button only-narrow" id="open-conversations" type="button" aria-label="開啟對話清單" title="對話清單">對話</button>');
+          if (state.displayMode === "fullscreen") {
+            actions.push('<button class="head-button only-narrow" id="toggle-inspector" type="button" aria-label="開啟工作紀錄" title="工作紀錄">工作紀錄</button>');
+          }
+          actions.push('<button class="head-button" id="toggle-display" type="button" aria-label="' +
+            (state.displayMode === "fullscreen" ? "縮回對話" : "放大工作區") + '" title="' +
+            (state.displayMode === "fullscreen" ? "縮回對話" : "放大工作區") + '"><span class="display-mode-icon" aria-hidden="true">' +
+            (state.displayMode === "fullscreen" ? "↙" : "↗") + '</span><span class="display-mode-label">' +
+            (state.displayMode === "fullscreen" ? "縮回對話" : "放大") + '</span></button>');
           if (active) {
             actions.push('<button class="head-button danger" id="cancel-chat" type="button">' +
               (state.cancelArmedUntil > Date.now() ? "再按一次取消" : "停止") + '</button>');
           }
-          if (job) {
+          if (job && job.source !== "local" && !job.readOnly) {
             actions.push('<details class="more"><summary aria-label="更多">•••</summary><div class="more-menu">' +
               '<button type="button" data-artifact="request">查看工作包</button>' +
               '<button type="button" data-artifact="response" ' + (job.artifacts && job.artifacts.some((item) => item.id === "response") ? "" : "disabled") + '>查看回覆</button>' +
@@ -1153,6 +2513,12 @@
               '</div></details>');
           }
           $("#chat-actions").innerHTML = actions.join("");
+          const displayToggle = $("#toggle-display");
+          if (displayToggle) displayToggle.addEventListener("click", toggleDisplayMode);
+          const openConversations = $("#open-conversations");
+          if (openConversations) openConversations.addEventListener("click", () => $("#console").classList.add("rail-open"));
+          const toggleInspector = $("#toggle-inspector");
+          if (toggleInspector) toggleInspector.addEventListener("click", () => $("#console").classList.toggle("inspector-open"));
           const cancel = $("#cancel-chat");
           if (cancel) cancel.addEventListener("click", cancelConversation);
           document.querySelectorAll("[data-artifact]").forEach((button) => button.addEventListener("click", () => loadArtifact(button.dataset.artifact)));
@@ -1165,55 +2531,304 @@
             const signature = "empty:" + state.selectedProjectId;
             if (signature === state.messageSignature) return;
             state.messageSignature = signature;
+            state.timelineKeys = [];
+            state.timelineSignatures.clear();
+            state.newContentAvailable = false;
+            updateNewContentButton();
             $("#thread").innerHTML = '<div class="empty-chat"><div><strong>' +
               escapeHtml(project ? "在 " + project.name + " 開始" : "開始一個 Codex 對話") +
               '</strong><span>輸入任務、問題或要續作的背景；選項都在輸入框下方。</span></div></div>';
             return;
           }
-          const messages = Array.isArray(job.messages) ? job.messages : [];
-          const approvals = Array.isArray(job.approvals) ? job.approvals.filter((approval) => approval.state === "pending") : [];
-          const active = !terminal.has(job.status);
-          const signature = JSON.stringify([
-            messages.map((message) => [message.id, message.content, message.context, message.resultStatus, message.inputArtifacts]),
-            approvals.map((approval) => [approval.id, approval.state]),
-            job.status,
-            (job.artifacts || []).map((artifact) => [artifact.id, artifact.sha256]),
-          ]);
-          if (signature === state.messageSignature) return;
           const transcript = $("#transcript");
           const nearBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 120;
-          state.messageSignature = signature;
-          const content = messages.map(renderMessage).join("") +
-            approvals.map(renderApproval).join("") +
-            renderArtifactResults(job.artifacts || []) +
-            (active ? '<article class="message assistant"><div class="message-meta">Codex · ' + escapeHtml(statusLabel(job.status)) + '</div><div class="typing"><i></i><i></i><i></i><span>Codex 正在處理</span></div></article>' : "");
-          $("#thread").innerHTML = content || '<div class="empty-chat"><div><strong>對話尚未留下訊息</strong></div></div>';
+          const entries = conversationEntries(job);
+          const keys = entries.map((entry) => entry.key);
+          const thread = $("#thread");
+          const existing = Array.from(thread.children);
+          const sameStructure = keys.length === state.timelineKeys.length && keys.every((key, index) => state.timelineKeys[index] === key);
+          let changed = !sameStructure;
+          if (!entries.length) {
+            const emptySignature = "empty:" + job.id;
+            if (state.messageSignature !== emptySignature) {
+              thread.innerHTML = '<div class="empty-chat"><div><strong>對話尚未留下訊息</strong></div></div>';
+              changed = true;
+            }
+            state.messageSignature = emptySignature;
+            state.timelineKeys = [];
+            state.timelineSignatures.clear();
+          } else if (!sameStructure || existing.length !== entries.length) {
+            thread.innerHTML = entries.map((entry) => entry.html).join("");
+            state.timelineKeys = keys;
+            state.timelineSignatures = new Map(entries.map((entry) => [entry.key, entry.signature]));
+            state.messageSignature = JSON.stringify(keys);
+          } else {
+            entries.forEach((entry, index) => {
+              if (state.timelineSignatures.get(entry.key) === entry.signature) return;
+              const previous = existing[index];
+              const replacement = htmlElement(entry.html);
+              if (previous && previous.tagName === "DETAILS" && replacement.tagName === "DETAILS") replacement.open = previous.open;
+              previous.replaceWith(replacement);
+              state.timelineSignatures.set(entry.key, entry.signature);
+              changed = true;
+            });
+          }
           document.querySelectorAll("[data-approval]").forEach((button) => button.addEventListener("click", () => {
             decideApproval(button.dataset.approval, button.dataset.decision);
           }));
           document.querySelectorAll("[data-result-artifact]").forEach((button) => button.addEventListener("click", () => {
             loadArtifact(button.dataset.resultArtifact);
           }));
-          if (nearBottom || !messages.length) requestAnimationFrame(() => { transcript.scrollTop = transcript.scrollHeight; });
+          if (changed && nearBottom) {
+            state.newContentAvailable = false;
+            requestAnimationFrame(() => { transcript.scrollTop = transcript.scrollHeight; updateNewContentButton(); });
+          } else if (changed) {
+            state.newContentAvailable = true;
+          }
+          updateNewContentButton();
         }
 
-        function renderMessage(message) {
-          const failed = message.resultStatus && message.resultStatus !== "completed";
-          const meta = message.role === "user"
-            ? "你 · " + formatTime(message.at)
-            : "Codex · " + formatTime(message.at);
-          const context = message.context
-            ? '<details class="message-context"><summary>附加背景與檔案內容</summary><pre>' + escapeHtml(message.context) + '</pre></details>'
+        function conversationEntries(job) {
+          const conversation = job.conversation || legacyConversation(job.messages || []);
+          const turns = Array.isArray(conversation.turns) ? conversation.turns : [];
+          const approvals = Array.isArray(job.approvals) ? job.approvals.filter((approval) => approval.state === "pending") : [];
+          if (state.displayMode === "inline") return compactConversationEntries(job, turns, approvals);
+          const approvalsById = new Map(approvals.map((approval) => [approval.id, approval]));
+          const renderedApprovals = new Set();
+          const entries = [];
+          turns.forEach((turn, turnIndex) => {
+            const visibleItems = (turn.items || []).filter((item) =>
+              item.type === "userMessage" || item.type === "agentMessage" || item.type === "error" ||
+              (item.type === "approval" && item.approvalId && approvalsById.has(item.approvalId))
+            );
+            if (!visibleItems.length) return;
+            if (turns.length > 1) {
+              const key = "turn:" + turn.turnId;
+              const label = "回合 " + (turnIndex + 1) + " · " + projectionStatusLabel(turn.status);
+              entries.push({ key: key, signature: label, html: '<div class="turn-marker" data-timeline-key="' + escapeAttr(key) + '">' + escapeHtml(label) + '</div>' });
+            }
+            visibleItems.forEach((item) => {
+              const approval = item.approvalId && approvalsById.get(item.approvalId);
+              if (approval) renderedApprovals.add(approval.id);
+              const key = "item:" + turn.turnId + ":" + item.id;
+              const signature = JSON.stringify([item, approval && [approval.id, approval.state, approval.summary]]);
+              entries.push({ key: key, signature: signature, html: renderConversationItem(item, approval, key) });
+            });
+          });
+          approvals.filter((approval) => !renderedApprovals.has(approval.id)).forEach((approval) => {
+            const key = "approval:" + approval.id;
+            entries.push({ key: key, signature: JSON.stringify(approval), html: renderApproval(approval, key) });
+          });
+          const hasStreamingAssistant = turns.some((turn) => (turn.items || []).some((item) => item.type === "agentMessage" && item.isStreaming));
+          if (!terminal.has(job.status) && !hasStreamingAssistant) {
+            const key = "active-placeholder";
+            entries.push({
+              key: key,
+              signature: job.status,
+              html: '<article class="message assistant" data-timeline-key="active-placeholder"><div class="message-meta">Codex · ' +
+                escapeHtml(statusLabel(job.status)) + '</div><div class="typing"><i></i><i></i><i></i><span>Codex 正在處理</span></div></article>',
+            });
+          }
+          return entries;
+        }
+
+        function compactConversationEntries(job, turns, approvals) {
+          const flattened = turns.flatMap((turn) => (turn.items || []).map((item) => ({ turn: turn, item: item })));
+          const narrative = flattened.filter(({ item }) => item.type === "userMessage" || item.type === "agentMessage").slice(-2);
+          const entries = narrative.map(({ turn, item }) => {
+            const key = "dock:" + turn.turnId + ":" + item.id;
+            return { key: key, signature: JSON.stringify(item), html: renderProjectedMessage(item, key) };
+          });
+          approvals.forEach((approval) => {
+            const key = "dock-approval:" + approval.id;
+            entries.push({ key: key, signature: JSON.stringify(approval), html: renderApproval(approval, key) });
+          });
+          const technical = flattened.filter(({ item }) =>
+            item.type !== "userMessage" && item.type !== "agentMessage" && item.type !== "approval"
+          );
+          const latestWork = technical.slice().reverse().find(({ item }) => item.status === "inProgress" || item.status === "pending")
+            || technical.at(-1);
+          if (latestWork) {
+            const key = "dock-work:" + latestWork.turn.turnId + ":" + latestWork.item.id;
+            entries.push({ key: key, signature: JSON.stringify(latestWork.item), html: renderDockWork(latestWork.item, key) });
+          } else if (!terminal.has(job.status)) {
+            const key = "dock-active";
+            const item = { type: "activity", status: "inProgress", progress: "Codex 正在處理" };
+            entries.push({ key: key, signature: job.status, html: renderDockWork(item, key) });
+          }
+          return entries;
+        }
+
+        function renderDockWork(item, key) {
+          const title = item.type === "activity" ? (item.progress || "Codex 正在處理") : activityTitle(item);
+          const subtitle = activitySubtitle(item) || item.progress || projectionStatusLabel(item.status);
+          return '<article class="dock-work" data-timeline-key="' + escapeAttr(key) + '"><span class="dock-work-dot"></span>' +
+            '<span class="dock-work-copy"><strong>' + escapeHtml(title) + '</strong><small>' + escapeHtml(subtitle) + '</small></span>' +
+            '<em>' + escapeHtml(projectionStatusLabel(item.status)) + '</em></article>';
+        }
+
+        function renderWorkstream() {
+          const workstream = $("#workstream");
+          const summary = $("#inspector-summary");
+          if (state.displayMode !== "fullscreen") {
+            workstream.innerHTML = "";
+            summary.textContent = "";
+            state.workstreamSignature = "inline";
+            return;
+          }
+          const job = state.selectedJob;
+          if (!job) {
+            const signature = "empty:" + state.selectedProjectId;
+            if (state.workstreamSignature === signature) return;
+            state.workstreamSignature = signature;
+            summary.textContent = "選擇對話後顯示命令、檔案與成品";
+            workstream.innerHTML = '<div class="empty-project">尚無工作紀錄</div>';
+            return;
+          }
+          const conversation = job.conversation || legacyConversation(job.messages || []);
+          const technicalItems = (conversation.turns || []).flatMap((turn) => (turn.items || [])
+            .filter((item) => item.type !== "userMessage" && item.type !== "agentMessage" && item.type !== "approval")
+            .map((item) => ({ turnId: turn.turnId, item: item })));
+          const artifacts = job.artifacts || [];
+          const signature = JSON.stringify([
+            job.id,
+            technicalItems.map(({ turnId, item }) => [turnId, item]),
+            artifacts.map((artifact) => [artifact.id, artifact.sha256]),
+          ]);
+          if (state.workstreamSignature === signature) return;
+          state.workstreamSignature = signature;
+          const activeCount = technicalItems.filter(({ item }) => item.status === "inProgress" || item.status === "pending").length;
+          summary.textContent = (activeCount ? activeCount + " 項進行中 · " : "") + technicalItems.length + " 筆紀錄 · " + artifacts.length + " 份成品";
+          const itemHtml = technicalItems.map(({ turnId, item }) =>
+            renderConversationItem(item, null, "work:" + turnId + ":" + item.id)
+          ).join("");
+          const artifactHtml = renderArtifactResults(artifacts);
+          workstream.innerHTML = itemHtml + artifactHtml || '<div class="empty-project">這個對話還沒有工作紀錄</div>';
+          workstream.querySelectorAll("[data-result-artifact]").forEach((button) => button.addEventListener("click", () => {
+            loadArtifact(button.dataset.resultArtifact);
+          }));
+        }
+
+        function legacyConversation(messages) {
+          return {
+            turns: (messages || []).map((message) => ({
+              turnId: message.turnId || "legacy:" + message.id,
+              status: message.resultStatus || "completed",
+              items: [{
+                id: "legacy:" + message.id,
+                turnId: message.turnId || "legacy:" + message.id,
+                type: message.role === "user" ? "userMessage" : "agentMessage",
+                status: message.resultStatus || "completed",
+                isStreaming: false,
+                text: message.content,
+                context: message.context,
+                inputArtifacts: message.inputArtifacts,
+                createdAt: message.at,
+              }],
+            })),
+          };
+        }
+
+        function renderConversationItem(item, approval, key) {
+          if (item.type === "userMessage" || item.type === "agentMessage") return renderProjectedMessage(item, key);
+          if (item.type === "approval" && approval) return renderApproval(approval, key);
+          const detailsClass = "activity-card " + (item.type === "error" ? "error" : "");
+          const open = item.type === "error" || item.type === "plan" ? " open" : "";
+          return '<details class="' + detailsClass + '" data-timeline-key="' + escapeAttr(key) + '"' + open + '>' +
+            '<summary><span class="activity-icon">' + escapeHtml(activityIcon(item.type)) + '</span>' +
+            '<span class="activity-heading"><span class="activity-title">' + escapeHtml(activityTitle(item)) + '</span>' +
+            '<span class="activity-subtitle">' + escapeHtml(activitySubtitle(item)) + '</span></span>' +
+            '<span class="activity-status ' + escapeAttr(activityStatusClass(item.status)) + '">' + escapeHtml(projectionStatusLabel(item.status)) + '</span></summary>' +
+            '<div class="activity-body">' + activityBody(item, approval) + '</div></details>';
+        }
+
+        function renderProjectedMessage(item, key) {
+          const role = item.type === "userMessage" ? "user" : "assistant";
+          const failed = ["failed", "interrupted", "declined"].includes(item.status);
+          const meta = role === "user" ? "你" : "Codex";
+          const time = item.updatedAt || item.createdAt;
+          const context = item.context
+            ? '<details class="message-context"><summary>附加背景</summary><pre>' + escapeHtml(item.context) + '</pre></details>'
             : "";
-          const inputArtifacts = Array.isArray(message.inputArtifacts) && message.inputArtifacts.length
-            ? '<div class="message-artifacts">' + message.inputArtifacts.map((artifact) =>
+          const inputArtifacts = Array.isArray(item.inputArtifacts) && item.inputArtifacts.length
+            ? '<div class="message-artifacts">' + item.inputArtifacts.map((artifact) =>
                 '<span class="message-artifact"><span>▧</span><strong>' + escapeHtml(artifact.fileName) + '</strong><span>' +
                 escapeHtml(formatBytes(artifact.bytes)) + '</span></span>'
               ).join("") + '</div>'
             : "";
-          return '<article class="message ' + escapeAttr(message.role) + (failed ? " failed" : "") + '">' +
-            '<div class="message-meta">' + escapeHtml(meta) + '</div>' +
-            '<div class="message-body">' + escapeHtml(message.content) + '</div>' + inputArtifacts + context + '</article>';
+          const body = item.text || (item.isStreaming ? "" : projectionStatusLabel(item.status));
+          return '<article class="message ' + role + (failed ? " failed" : "") + (item.isStreaming ? " streaming" : "") +
+            '" data-timeline-key="' + escapeAttr(key) + '"><div class="message-meta">' + escapeHtml(meta + (time ? " · " + formatTime(time) : "")) +
+            (item.isStreaming ? " · 正在輸出" : "") + '</div><div class="message-body">' + escapeHtml(body) + '</div>' + inputArtifacts + context + '</article>';
+        }
+
+        function activityBody(item, approval) {
+          const parts = [];
+          if (item.type === "commandExecution") {
+            if (item.command) parts.push('<pre>' + escapeHtml(item.command) + '</pre>');
+            if (item.output) parts.push('<pre>' + escapeHtml(item.output) + '</pre>');
+          } else if (item.type === "fileChange") {
+            parts.push('<div class="activity-files">' + (item.changes || []).map((change) =>
+              '<div class="activity-file"><strong>' + escapeHtml(change.path) + '</strong> · ' + escapeHtml(change.kind) +
+              (change.diffPreview ? '<details><summary>查看 patch</summary><pre>' + escapeHtml(change.diffPreview) + '</pre></details>' : "") + '</div>'
+            ).join("") + '</div>');
+          } else if (item.text) {
+            parts.push('<pre>' + escapeHtml(item.text) + '</pre>');
+          }
+          if (item.progress) parts.push('<pre>' + escapeHtml(item.progress) + '</pre>');
+          if (item.error) parts.push('<pre>' + escapeHtml(item.error) + '</pre>');
+          if (approval) parts.push(renderApproval(approval));
+          return parts.join("") || '<span>沒有額外公開內容。</span>';
+        }
+
+        function activityTitle(item) {
+          if (item.type === "commandExecution") return item.command || "Command execution";
+          if (item.type === "fileChange") return "檔案變更";
+          if (item.type === "mcpToolCall") return [item.server, item.tool].filter(Boolean).join(" / ") || "MCP tool call";
+          if (item.type === "plan") return "Codex 計畫";
+          if (item.type === "reasoningSummary") return "推理摘要";
+          if (item.type === "diff") return "工作區 Diff 更新";
+          if (item.type === "error") return "Codex 錯誤";
+          return item.activityType || "Codex activity";
+        }
+
+        function activitySubtitle(item) {
+          if (item.type === "commandExecution") return [item.cwd, formatDuration(item.durationMs), item.exitCode !== undefined ? "exit " + item.exitCode : ""].filter(Boolean).join(" · ");
+          if (item.type === "fileChange") return (item.changes || []).length + " 個檔案";
+          if (item.type === "mcpToolCall") return [item.progress, formatDuration(item.durationMs)].filter(Boolean).join(" · ");
+          return formatDuration(item.durationMs);
+        }
+
+        function activityIcon(type) {
+          return ({ commandExecution: ">_", fileChange: "±", mcpToolCall: "◇", plan: "≡", reasoningSummary: "·", diff: "Δ", error: "!", activity: "•" })[type] || "•";
+        }
+
+        function projectionStatusLabel(status) {
+          return ({
+            inProgress: "進行中", pending: "等待核准", completed: "完成", failed: "失敗", declined: "已拒絕",
+            interrupted: "已中斷", accepted: "已核准", cancelled: "已取消", expired: "已失效", unknown: "狀態未知",
+          })[status] || status || "狀態未知";
+        }
+
+        function activityStatusClass(status) {
+          if (status === "inProgress" || status === "pending") return "running";
+          return String(status || "unknown").toLowerCase();
+        }
+
+        function formatDuration(value) {
+          const duration = Number(value);
+          if (!Number.isFinite(duration) || duration < 0) return "";
+          return duration < 1000 ? Math.round(duration) + " ms" : (duration / 1000).toFixed(duration < 10000 ? 1 : 0) + " s";
+        }
+
+        function htmlElement(html) {
+          const template = document.createElement("template");
+          template.innerHTML = html.trim();
+          return template.content.firstElementChild;
+        }
+
+        function updateNewContentButton() {
+          $("#new-content").hidden = !state.newContentAvailable;
         }
 
         function renderArtifactResults(artifacts) {
@@ -1225,9 +2840,9 @@
             '</div></article>';
         }
 
-        function renderApproval(approval) {
+        function renderApproval(approval, timelineKey) {
           const title = approval.kind === "command" ? "Codex 要求執行命令" : "Codex 要求套用檔案變更";
-          return '<article class="approval-card"><div class="approval-top"><div class="approval-title">' +
+          return '<article class="approval-card"' + (timelineKey ? ' data-timeline-key="' + escapeAttr(timelineKey) + '"' : "") + '><div class="approval-top"><div class="approval-title">' +
             escapeHtml(title) + '</div><span class="chat-subtitle">只核准這一次</span></div>' +
             '<pre>' + escapeHtml(JSON.stringify(approval.summary || {}, null, 2)) + '</pre>' +
             '<div class="approval-actions"><button type="button" data-approval="' + escapeAttr(approval.id) +
@@ -1258,6 +2873,7 @@
             modelSelect.value = currentModel || "";
           }
           renderEffortOptions(preferredEffort, false);
+          renderSettingsSummary();
         }
 
         function renderEffortOptions(preferredEffort, preserveCurrent) {
@@ -1273,6 +2889,16 @@
             '</option>' + efforts.map((option) => '<option value="' + escapeAttr(option.reasoningEffort) + '">' +
               escapeHtml(effortLabel(option.reasoningEffort)) + '</option>').join("");
           effortSelect.value = Array.from(effortSelect.options).some((option) => option.value === (current || "")) ? (current || "") : "";
+          renderSettingsSummary();
+        }
+
+        function renderSettingsSummary() {
+          const mode = $("#mode").value === "workspace_write" ? "可修改" : "唯讀";
+          const reviewer = $("#reviewer").value === "auto_review" ? "自動審核" : "每次詢問";
+          const model = $("#model").selectedOptions[0] && $("#model").selectedOptions[0].textContent || "Codex 預設";
+          const effort = $("#effort").selectedOptions[0] && $("#effort").selectedOptions[0].textContent || "預設推理";
+          $("#compact-settings-summary").textContent = mode + " · " + reviewer;
+          $("#run-settings-summary").textContent = mode + " · " + reviewer + " · " + model + " · " + effort;
         }
 
         function renderCompanyConfirmation() {
@@ -1289,7 +2915,7 @@
           $("#text-entry-name").value = "engineering_spec.txt";
           $("#text-entry-content").value = "";
           $("#text-entry").hidden = false;
-          requestAnimationFrame(() => $("#text-entry-content").focus());
+          requestAnimationFrame(() => focusWithoutScroll($("#text-entry-content")));
         }
 
         function closeTextEntry() {
@@ -1419,18 +3045,24 @@
         function renderComposerState() {
           const job = state.selectedJob;
           const active = job && !terminal.has(job.status);
-          const hasProject = Boolean(state.selectedProjectId);
-          $("#send").disabled = state.busy || !hasProject;
+          const readOnly = Boolean(job && job.readOnly);
+          const hasProject = isOperableProjectId(state.selectedProjectId);
+          $("#send").disabled = state.busy || !hasProject || readOnly;
           $("#send").classList.toggle("busy", state.busy);
-          $("#send").textContent = state.busy ? "…" : "↑";
-          $("#mode").disabled = state.busy || Boolean(active);
-          $("#model").disabled = state.busy || Boolean(active);
-          $("#effort").disabled = state.busy || Boolean(active);
-          $("#classification").disabled = state.busy;
-          $("#message").disabled = state.busy || !hasProject;
-          $("#context").disabled = state.busy || !hasProject;
-          $("#add-text-artifact").disabled = state.busy || !hasProject || state.draftArtifacts.length >= 8;
-          $("#message").placeholder = active ? "補充方向給正在執行的 Codex" : "傳訊息給 Codex";
+          $("#send").innerHTML = state.busy ? '<span>處理中</span>' : '<span>送出</span><b aria-hidden="true">↵</b>';
+          $("#mode").disabled = state.busy || Boolean(active) || readOnly;
+          $("#reviewer").disabled = state.busy || Boolean(active) || readOnly;
+          $("#model").disabled = state.busy || Boolean(active) || readOnly;
+          $("#effort").disabled = state.busy || Boolean(active) || readOnly;
+          $("#classification").disabled = state.busy || readOnly;
+          $("#message").disabled = state.busy || !hasProject || readOnly;
+          $("#context").disabled = state.busy || !hasProject || readOnly;
+          $("#add-text-artifact").disabled = state.busy || !hasProject || readOnly || state.draftArtifacts.length >= 8;
+          $("#message").placeholder = readOnly
+            ? "這個專案位置受到保護，本機歷史僅供查看"
+            : job && job.source === "local"
+              ? "接續這段本機 Codex 對話"
+              : active ? "補充方向給正在執行的 Codex" : "傳訊息給 Codex";
         }
 
         function decideApproval(approvalId, decision) {
@@ -1563,8 +3195,13 @@
         }
 
         function currentProject() {
-          const projects = state.status && state.status.projects || [];
+          const projects = ledgerProjects();
           return projects.find((project) => project.id === state.selectedProjectId);
+        }
+
+        function isOperableProjectId(projectId) {
+          const project = ledgerProjects().find((candidate) => candidate.id === projectId);
+          return Boolean(project && !project.historyOnly);
         }
 
         function firstProjectId() {
@@ -1662,6 +3299,7 @@
         bridgeReady.then(async () => {
           updateFromResponse({ structuredContent: window.openai && window.openai.toolOutput });
           await refreshStatus();
+          await loadLocalHistory();
           if (!state.selectedJob) startNewConversation(state.draft.projectId || state.selectedProjectId);
         }).catch((error) => showError("無法連接 MCP Apps host：" + (error && error.message || String(error))));
       })();

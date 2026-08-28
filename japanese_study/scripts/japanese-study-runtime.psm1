@@ -546,7 +546,7 @@ function New-JapaneseStudyRuntimeContext {
     [string]$TunnelClientPath, [string]$TunnelProfileDir, [string]$TunnelProfile = 'japanese-study', [string]$TunnelHealthUrl = 'http://127.0.0.1:18792',
     [string]$TunnelArguments, [string]$TunnelIdentity,
     [string]$KeyStorePath, [string]$SecretPath, [string]$ExpectedBuildId,
-    [string]$ExpectedMcpVersion = '1.1.0', [string]$ExpectedContractVersion = 'learning-content-v7.0', [int]$ExpectedToolCount = 33,
+    [string]$ExpectedMcpVersion = '1.2.1', [string]$ExpectedContractVersion = 'learning-content-v8.1', [int]$ExpectedToolCount = 34,
     [int]$CoreReadyTimeoutSeconds = 20, [int[]]$TunnelRecoveryDelaysSeconds = @(15, 30, 60)
   )
   $root = (Resolve-Path -LiteralPath $ProjectRoot -ErrorAction Stop).Path

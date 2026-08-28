@@ -5,7 +5,7 @@ import type { BridgeRuntime } from "./runtime.js";
 import type { BridgeStatus, JobSnapshot } from "./types.js";
 import { previewWorkPackage } from "./work-package.js";
 
-const WIDGET_URI = "ui://codex-bridge/chat-workspace-v4.html";
+const WIDGET_URI = "ui://codex-bridge/chat-workspace-v11.html";
 
 const workPackageInput = {
   projectId: z.string().min(2).max(32),
@@ -15,6 +15,7 @@ const workPackageInput = {
   acceptanceCriteria: z.array(z.string().min(1).max(2_000)).max(20).optional(),
   constraints: z.array(z.string().min(1).max(2_000)).max(20).optional(),
   executionMode: z.enum(["plan", "workspace_write"]).optional(),
+  approvalReviewer: z.enum(["user", "auto_review"]).optional(),
   dataClassification: z.enum(["personal", "public", "company_approved"]).optional(),
   model: z.string().min(1).max(120).optional(),
   effort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]).optional(),
@@ -70,7 +71,7 @@ export function createCodexBridgeMcpServer(runtime: BridgeRuntime): McpServer {
       inputSchema: workPackageInput,
     },
     async (args) => safeResult(async () => {
-      requireAllowedProject(runtime, args.projectId);
+      runtime.controller.requireOperableProject(args.projectId);
       const preview = previewWorkPackage(args);
       return result(preview, `Prepared a preview for ${preview.workPackage.title}. No job was started.`);
     }),
@@ -91,6 +92,7 @@ export function createCodexBridgeMcpServer(runtime: BridgeRuntime): McpServer {
         objective: z.string().max(4_000).optional(),
         context: z.string().max(60_000).optional(),
         executionMode: z.enum(["plan", "workspace_write"]).optional(),
+        approvalReviewer: z.enum(["user", "auto_review"]).optional(),
         model: z.string().min(1).max(120).optional(),
         effort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]).optional(),
       },
@@ -100,6 +102,7 @@ export function createCodexBridgeMcpServer(runtime: BridgeRuntime): McpServer {
       },
     },
     async (args) => safeResult(async () => {
+      if (args.jobId) await runtime.controller.hydrateConversation(args.jobId);
       const selectedJob = args.jobId ? await runtime.store.snapshot(args.jobId, 0) : undefined;
       return result(
         {
@@ -111,6 +114,7 @@ export function createCodexBridgeMcpServer(runtime: BridgeRuntime): McpServer {
             objective: args.objective,
             context: args.context,
             executionMode: args.executionMode,
+            approvalReviewer: args.approvalReviewer,
             model: args.model,
             effort: args.effort,
           },
@@ -130,11 +134,80 @@ export function createCodexBridgeMcpServer(runtime: BridgeRuntime): McpServer {
         jobId: z.string().uuid(),
         afterSeq: z.number().int().min(0).optional(),
         maxEvents: z.number().int().min(1).max(200).optional(),
+        afterConversationRevision: z.number().int().min(0).optional(),
       },
     },
     async (args) => safeResult(async () => {
-      const snapshot = await runtime.store.snapshot(args.jobId, args.afterSeq ?? 0, args.maxEvents ?? 80);
+      await runtime.controller.hydrateConversation(args.jobId);
+      const snapshot = await runtime.store.snapshot(
+        args.jobId,
+        args.afterSeq ?? 0,
+        args.maxEvents ?? 80,
+        args.afterConversationRevision,
+      );
       return result(snapshot, describeSnapshot(snapshot));
+    }),
+  );
+
+  server.registerTool(
+    "codex_conversation_list",
+    {
+      title: "List Codex conversations",
+      description: "Page through saved Codex Bridge conversations without widening the configured project allowlist.",
+      annotations: readAnnotations(),
+      inputSchema: {
+        projectId: z.string().min(2).max(32).optional(),
+        cursor: z.string().min(8).max(512).optional(),
+        limit: z.number().int().min(1).max(100).optional(),
+      },
+    },
+    async (args) => safeResult(async () => {
+      if (args.projectId) requireAllowedProject(runtime, args.projectId);
+      const page = runtime.store.listPage(args.limit ?? 50, args.cursor, args.projectId);
+      return result(
+        { conversations: page.data, nextCursor: page.nextCursor },
+        `Loaded ${page.data.length} saved Codex conversation(s).`,
+      );
+    }),
+  );
+
+  registerAppTool(
+    server,
+    "codex_local_thread_list",
+    {
+      title: "List local Codex history",
+      description:
+        "Load persisted Codex App Server thread metadata for the interactive project ledger. Exact safe workspaces are operable only in the app; protected paths remain read-only.",
+      annotations: readAnnotations(),
+      inputSchema: {
+        cursor: z.string().min(1).max(512).optional(),
+        maxThreads: z.number().int().min(1).max(2_000).optional(),
+      },
+      _meta: { ui: { visibility: ["app"] } },
+    },
+    async (args) => safeResult(async () => {
+      const page = await runtime.controller.listLocalThreads(args.cursor, args.maxThreads ?? 2_000);
+      return result(
+        { localThreads: page.threads, nextCursor: page.nextCursor, complete: page.complete },
+        `Loaded ${page.threads.length} local Codex conversation(s).`,
+      );
+    }),
+  );
+
+  registerAppTool(
+    server,
+    "codex_local_thread_read",
+    {
+      title: "Read local Codex conversation",
+      description:
+        "Read one persisted Codex App Server thread through the bounded conversation projection. Reading is non-mutating; the server separately reports whether its exact workspace is operable.",
+      annotations: readAnnotations(),
+      inputSchema: { threadId: z.string().uuid() },
+      _meta: { ui: { visibility: ["app"] } },
+    },
+    async (args) => safeResult(async () => {
+      const localThread = await runtime.controller.readLocalThread(args.threadId);
+      return result({ localThread }, `Loaded local Codex conversation ${args.threadId}.`);
     }),
   );
 
@@ -192,7 +265,7 @@ export function createCodexBridgeMcpServer(runtime: BridgeRuntime): McpServer {
       _meta: { ui: { visibility: ["app"] } },
     },
     async (args) => safeResult(async () => {
-      requireAllowedProject(runtime, args.projectId);
+      runtime.controller.requireOperableProject(args.projectId);
       if (args.dataClassification === "company_approved" && args.companyAuthorizationConfirmed !== true) {
         throw new Error("Company-approved data requires an explicit authorization confirmation in the app.");
       }
@@ -289,7 +362,7 @@ export function createCodexBridgeMcpServer(runtime: BridgeRuntime): McpServer {
       _meta: { ui: { visibility: ["app"] } },
     },
     async (args) => safeResult(async () => {
-      requireAllowedProject(runtime, args.projectId);
+      runtime.controller.requireOperableProject(args.projectId);
       const preview = previewWorkPackage(args);
       if (preview.workPackage.dataClassification === "company_approved" && args.companyAuthorizationConfirmed !== true) {
         throw new Error("Company-approved data requires an explicit authorization confirmation in the app.");
@@ -316,11 +389,13 @@ export function createCodexBridgeMcpServer(runtime: BridgeRuntime): McpServer {
         "Send a message in an existing Codex conversation. It steers the active turn or resumes the same Codex thread for a new turn. This action is available only from the interactive app.",
       annotations: actionAnnotations(false),
       inputSchema: {
-        jobId: z.string().uuid(),
+        jobId: z.string().uuid().optional(),
+        localThreadId: z.string().uuid().optional(),
         clientMessageId: z.string().min(8).max(128),
         message: z.string().min(1).max(4_000),
         context: z.string().max(60_000).optional(),
         executionMode: z.enum(["plan", "workspace_write"]),
+        approvalReviewer: z.enum(["user", "auto_review"]),
         dataClassification: z.enum(["personal", "public", "company_approved"]),
         model: z.string().min(1).max(120).optional(),
         effort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]).optional(),
@@ -330,20 +405,26 @@ export function createCodexBridgeMcpServer(runtime: BridgeRuntime): McpServer {
       _meta: { ui: { visibility: ["app"] } },
     },
     async (args) => safeResult(async () => {
+      if (Boolean(args.jobId) === Boolean(args.localThreadId)) {
+        throw new Error("Provide exactly one of jobId or localThreadId.");
+      }
       if (args.dataClassification === "company_approved" && args.companyAuthorizationConfirmed !== true) {
         throw new Error("Company-approved data requires an explicit authorization confirmation in the app.");
       }
-      const sent = await runtime.controller.sendMessage({
-        jobId: args.jobId,
+      const common = {
         clientMessageId: args.clientMessageId,
         content: args.message,
         context: args.context,
         executionMode: args.executionMode,
+        approvalReviewer: args.approvalReviewer,
         dataClassification: args.dataClassification,
         model: args.model,
         effort: args.effort,
         inputBundleIds: args.inputBundleIds,
-      });
+      };
+      const sent = args.localThreadId
+        ? await runtime.controller.sendLocalThreadMessage({ ...common, localThreadId: args.localThreadId })
+        : await runtime.controller.sendMessage({ ...common, jobId: args.jobId! });
       const snapshot = await runtime.store.snapshot(sent.record.id, 0);
       return result(
         { job: snapshot, accepted: sent.accepted, delivery: sent.delivery },
@@ -416,7 +497,8 @@ export function createCodexBridgeMcpServer(runtime: BridgeRuntime): McpServer {
 }
 
 async function bridgeStatus(runtime: BridgeRuntime): Promise<BridgeStatus> {
-  const recentJobs = runtime.store.list(runtime.config.maxRecentJobs);
+  const conversationPage = runtime.store.listPage(runtime.config.maxRecentJobs);
+  const recentJobs = conversationPage.data;
   const models = await runtime.controller.listModels().catch(() => []);
   return {
     ok: true,
@@ -427,6 +509,7 @@ async function bridgeStatus(runtime: BridgeRuntime): Promise<BridgeStatus> {
     projects: Array.from(runtime.config.projects.values()).map(({ id, name }) => ({ id, name })),
     models,
     recentJobs,
+    conversationNextCursor: conversationPage.nextCursor,
     stateVersion: recentJobs.reduce((max, job) => Math.max(max, job.stateVersion), 0),
   };
 }

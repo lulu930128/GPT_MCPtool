@@ -24,6 +24,7 @@ The adapter is not a second study system and must not copy Hub domain rules or p
 | Vocabulary/grammar/question data | Japanese Study Hub |
 | Stable item ids and search semantics | Japanese Study Hub |
 | Practice scoring, atomic submission, idempotency | Japanese Study Hub |
+| Diagnosis taxonomy, polarity, skill weakness score and trend | Japanese Study Hub |
 | Learner policy, learning context and question-selection evidence | Japanese Study Hub |
 | Practice target evidence and fingerprint | Japanese Study Hub |
 | Practice revision linkage and SRS projection rebuild | Japanese Study Hub |
@@ -76,6 +77,11 @@ operations:
 
 The bounded learning-context read may guide an AI-generated exercise, but generation remains in
 the client. Context retrieval does not authorize recording and never exposes the full catalog.
+Practice profiles and catalog JLPT levels remain separate fields. The Hub expands known profile
+defaults when explicit levels are omitted; the adapter never derives one from the other.
+
+The bounded diagnosis catalog is also read-only. It reduces AI taxonomy drift while keeping code,
+skill, polarity, and planning ownership in the Hub. It exposes no taxonomy administration surface.
 
 Search and resolution previews return candidates only. They never authorize a mutation.
 

@@ -67,7 +67,7 @@ const submission = {
   ],
 };
 
-const client = new Client({ name: "japanese-study-practice-smoke", version: "1.1.0" });
+const client = new Client({ name: "japanese-study-practice-smoke", version: "1.2.1" });
 const transport = new StreamableHTTPClientTransport(url);
 
 try {

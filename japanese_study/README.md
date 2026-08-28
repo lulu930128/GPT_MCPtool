@@ -4,7 +4,7 @@ Private, tool-only MCP adapter for the authoritative Japanese Study Hub at
 `C:\project\japanese-study-hub`. ChatGPT and Kuro can use the same bounded tool
 contract without reading source files or legacy progress data directly.
 
-目前 application release 為 `1.1.0`；`learning-content-v7.0` 是獨立的 Hub/MCP contract 版本。讀取結果會明確區分 canonical `meaning_tc`、待審 `meaning_tc_proposal`，並提供 bounded alias/component 投影。
+目前 application release 為 `1.2.1`；`learning-content-v8.1` 是獨立的 Hub/MCP contract 版本。除了既有 canonical/proposal 與 bounded alias/component 投影，v8.1 也提供 server-owned practice profile fallback、可直接解析的 typed diagnosis schema，以及 bounded canonical diagnosis catalog read。
 
 ## Documentation
 
@@ -42,6 +42,7 @@ contract without reading source files or legacy progress data directly.
 | `study_get_learner_policy` | Read the learner-owned generation and recording policy |
 | `study_set_learner_policy` | Replace that policy only after an explicit user request |
 | `study_get_learning_context` | Read bounded weak/recent context for question generation |
+| `study_get_diagnosis_catalog` | Search bounded canonical diagnosis definitions without taxonomy mutation |
 | `study_set_manual_labels` | Retry-safe upsert of known/unknown/uncertain/suspended labels |
 | `study_record_attempt` | Append one retry-safe attempt using a caller event id |
 | `study_preview_practice_record` | Validate a complete practice session without writing |
@@ -54,7 +55,7 @@ contract without reading source files or legacy progress data directly.
 | `study_supersede_practice_session` | Link an immutable corrected session as the current revision |
 | `study_get_practice_session` | Read immutable questions, answers, targets, evidence, and score |
 
-There are 33 tools. There are intentionally no file browser, SQL, delete, reset, bulk import, shell,
+There are 34 tools. There are intentionally no file browser, SQL, delete, reset, bulk import, shell,
 Anki write, general batch resolver, evidence rebuild, catalog admin, or
 legacy-migration MCP tools. Search selectors return candidates only. Target
 repair writes require exact stable item ids from a prior fingerprinted preview.

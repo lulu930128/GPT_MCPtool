@@ -7,6 +7,28 @@ export type PracticeTargetKind = "vocab" | "grammar";
 export type PracticeTargetRole = "primary" | "secondary" | "context";
 export type PracticeQuestionValidity = "valid" | "void" | "unscored";
 export type PracticeAnswerResult = "correct" | "partial" | "wrong" | "skipped";
+export type PracticeTargetAssessmentResult =
+  | "correct"
+  | "partial"
+  | "wrong"
+  | "skipped"
+  | "unassessed";
+export interface PracticeDiagnosisInput {
+  code: string;
+  occurrenceKey?: string;
+  severity?: number;
+  confidence?: number;
+  componentKey?: string;
+  sourceType?: "ai_grading" | "deterministic" | "manual";
+  metadata?: Record<string, unknown>;
+}
+export interface PracticeTargetAssessmentInput {
+  result: PracticeTargetAssessmentResult;
+  confidence?: number;
+  affectsPlanning?: boolean;
+  diagnoses?: PracticeDiagnosisInput[];
+  grading?: Record<string, unknown>;
+}
 export type PracticeTargetSelector =
   | { type: "item_id"; itemId: string }
   | { type: "grammar_identity"; pattern: string; senseKey?: string }
@@ -170,6 +192,7 @@ export interface PracticeTargetInput {
   weight?: number;
   affectsPlanning?: boolean;
   metadata?: Record<string, unknown>;
+  assessment?: PracticeTargetAssessmentInput;
 }
 
 export interface PracticeResponseInput {
@@ -180,6 +203,7 @@ export interface PracticeResponseInput {
   durationMs?: number;
   learnerNote?: string;
   diagnoses?: string[];
+  diagnosisEvents?: PracticeDiagnosisInput[];
   grading?: Record<string, unknown>;
   gradingOverrideReason?: string;
 }
@@ -199,6 +223,7 @@ export interface PracticeQuestionInput {
 export interface PracticeSubmissionInput {
   submissionId: string;
   schemaVersion?: number;
+  practiceContractVersion?: 1 | 2;
   session: PracticeSessionInput;
   questions: PracticeQuestionInput[];
 }
@@ -266,10 +291,19 @@ export interface SetLearnerPolicyInput {
 export interface LearningContextInput {
   practiceType?: string;
   requestedLevel?: string;
+  targetLevels?: string[];
   kind?: "vocab" | "grammar";
   targetLimit?: number;
   recentSessionLimit?: number;
   diagnosisLimit?: number;
+}
+
+export interface DiagnosisCatalogInput {
+  query?: string;
+  skillKey?: string;
+  polarity?: "weakness" | "strength" | "observation" | "blocker";
+  active?: boolean;
+  limit?: number;
 }
 
 export interface RecordPracticeRevisionInput {
@@ -475,9 +509,10 @@ export class JapaneseStudyHubClient {
     });
   }
 
-  studyPlan(input: { kind?: StudyKind; limit?: number }): Promise<unknown> {
+  studyPlan(input: { kind?: StudyKind; targetLevels?: string[]; limit?: number }): Promise<unknown> {
     const query = new URLSearchParams();
     if (input.kind) query.set("kind", input.kind);
+    for (const level of input.targetLevels ?? []) query.append("target_levels", level);
     if (input.limit !== undefined) query.set("limit", String(input.limit));
     const suffix = query.size ? `?${query.toString()}` : "";
     return this.request(`/api/v1/study/plan${suffix}`);
@@ -502,6 +537,7 @@ export class JapaneseStudyHubClient {
     const query = new URLSearchParams();
     if (input.practiceType) query.set("practice_type", input.practiceType);
     if (input.requestedLevel) query.set("requested_level", input.requestedLevel);
+    for (const level of input.targetLevels ?? []) query.append("target_levels", level);
     if (input.kind) query.set("kind", input.kind);
     if (input.targetLimit !== undefined) query.set("target_limit", String(input.targetLimit));
     if (input.recentSessionLimit !== undefined) {
@@ -512,6 +548,17 @@ export class JapaneseStudyHubClient {
     }
     const suffix = query.size ? `?${query.toString()}` : "";
     return this.request(`/api/v1/learning-context${suffix}`);
+  }
+
+  diagnosisCatalog(input: DiagnosisCatalogInput): Promise<unknown> {
+    const query = new URLSearchParams();
+    if (input.query) query.set("query", input.query);
+    if (input.skillKey) query.set("skill_key", input.skillKey);
+    if (input.polarity) query.set("polarity", input.polarity);
+    if (input.active !== undefined) query.set("active", String(input.active));
+    if (input.limit !== undefined) query.set("limit", String(input.limit));
+    const suffix = query.size ? `?${query.toString()}` : "";
+    return this.request(`/api/v1/diagnosis-definitions${suffix}`);
   }
 
   setManualLabels(labels: SetManualLabelInput[]): Promise<unknown> {
@@ -704,6 +751,7 @@ function toHubPracticePayload(input: PracticeSubmissionInput): Record<string, un
   return {
     submission_id: input.submissionId,
     schema_version: input.schemaVersion ?? 1,
+    practice_contract_version: input.practiceContractVersion ?? 1,
     session: {
       session_id: input.session.sessionId,
       schema_version: input.session.schemaVersion ?? 1,
@@ -738,6 +786,7 @@ function toHubPracticePayload(input: PracticeSubmissionInput): Record<string, un
         duration_ms: question.response.durationMs,
         learner_note: question.response.learnerNote ?? "",
         diagnoses: question.response.diagnoses ?? [],
+        diagnosis_events: (question.response.diagnosisEvents ?? []).map(toHubDiagnosis),
         grading: question.response.grading ?? {},
         grading_override_reason: question.response.gradingOverrideReason ?? "",
       },
@@ -806,6 +855,27 @@ function toHubPracticeTarget(target: PracticeTargetInput): Record<string, unknow
     weight: target.weight ?? 1,
     affects_planning: target.affectsPlanning,
     metadata: target.metadata ?? {},
+    assessment: target.assessment
+      ? {
+          result: target.assessment.result,
+          confidence: target.assessment.confidence,
+          affects_planning: target.assessment.affectsPlanning ?? true,
+          diagnoses: (target.assessment.diagnoses ?? []).map(toHubDiagnosis),
+          grading: target.assessment.grading ?? {},
+        }
+      : undefined,
+  };
+}
+
+function toHubDiagnosis(diagnosis: PracticeDiagnosisInput): Record<string, unknown> {
+  return {
+    code: diagnosis.code,
+    occurrence_key: diagnosis.occurrenceKey,
+    severity: diagnosis.severity,
+    confidence: diagnosis.confidence,
+    component_key: diagnosis.componentKey ?? "",
+    source_type: diagnosis.sourceType ?? "ai_grading",
+    metadata: diagnosis.metadata ?? {},
   };
 }
 

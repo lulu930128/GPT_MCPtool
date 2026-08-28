@@ -13,6 +13,7 @@ const expectedToolNames = [
   "study_create_item",
   "study_create_study_list",
   "study_get_due_reviews",
+  "study_get_diagnosis_catalog",
   "study_get_item",
   "study_get_learner_policy",
   "study_get_learning_context",
@@ -41,14 +42,14 @@ const expectedToolNames = [
   "study_supersede_practice_session",
 ].sort();
 
-test("published MCP contract exposes the complete learning-content v7.0 surface", async () => {
+test("published MCP contract exposes the complete learning-content v8.1 surface", async () => {
   const handle = await startJapaneseStudyHttpServer({
     hubBaseUrl: "http://127.0.0.1:1",
     hubTimeoutMs: 2_000,
     host: "127.0.0.1",
     port: 0,
   });
-  const client = new Client({ name: "contract-test", version: "1.1.0" });
+  const client = new Client({ name: "contract-test", version: "1.2.1" });
   const transport = new StreamableHTTPClientTransport(new URL(handle.url));
 
   try {
@@ -56,9 +57,9 @@ test("published MCP contract exposes the complete learning-content v7.0 surface"
     assert.equal(healthResponse.status, 200);
     const health = (await healthResponse.json()) as Record<string, unknown>;
     assert.equal(health.service, "japanese-study-mcp");
-    assert.equal(health.version, "1.1.0");
-    assert.equal(health.contractVersion, "learning-content-v7.0");
-    assert.equal(health.toolCount, 33);
+    assert.equal(health.version, "1.2.1");
+    assert.equal(health.contractVersion, "learning-content-v8.1");
+    assert.equal(health.toolCount, 34);
     assert.match(String(health.buildId), /^[0-9a-f]{16}$/);
 
     await client.connect(transport);
@@ -82,6 +83,19 @@ test("published MCP contract exposes the complete learning-content v7.0 surface"
         .sort(),
       ["grammar_identity", "item_id", "search", "vocab_identity"],
     );
+    assert.ok(inputSchema.properties.practiceContractVersion);
+    assert.ok(
+      inputSchema.properties.questions.items.properties.targets.items.properties.assessment,
+    );
+    const responseDiagnosisEvents =
+      inputSchema.properties.questions.items.properties.response.properties.diagnosisEvents;
+    assert.equal(responseDiagnosisEvents.items.type, "object");
+    assert.equal(responseDiagnosisEvents.items.properties.code.type, "string");
+    assert.deepEqual(responseDiagnosisEvents.items.properties.sourceType.enum, [
+      "ai_grading",
+      "deterministic",
+      "manual",
+    ]);
 
     const retrySafeWrites = [
       "study_add_study_list_items",
@@ -124,10 +138,15 @@ test("published MCP contract exposes the complete learning-content v7.0 surface"
       study_set_learner_policy: ["policy", "version", "operation_id"],
       study_get_learning_context: [
         "recommended_targets",
+        "active_weaknesses",
+        "recent_strengths",
+        "recent_observations",
         "recent_diagnoses",
         "recent_practice",
+        "level_scope",
         "limits",
       ],
+      study_get_diagnosis_catalog: ["contract_version", "count", "limit", "items"],
       study_record_practice_revision: [
         "replacement_session_id",
         "affected_item_ids",
@@ -141,6 +160,63 @@ test("published MCP contract exposes the complete learning-content v7.0 surface"
       for (const field of fields) {
         assert.ok(properties[field], `${name} declares ${field}`);
       }
+    }
+  } finally {
+    await client.close().catch(() => undefined);
+    await handle.close();
+  }
+});
+
+test("practice tools enforce contract-version invariants before Hub I/O", async () => {
+  const handle = await startJapaneseStudyHttpServer({
+    hubBaseUrl: "http://127.0.0.1:1",
+    hubTimeoutMs: 2_000,
+    host: "127.0.0.1",
+    port: 0,
+  });
+  const client = new Client({ name: "practice-contract-test", version: "1.2.1" });
+  const transport = new StreamableHTTPClientTransport(new URL(handle.url));
+  const invalidV2Submission = {
+    submissionId: "submission-contract-0001",
+    practiceContractVersion: 2,
+    session: {
+      sessionId: "session-contract-0001",
+      title: "Contract validation",
+      practiceType: "multiple_choice",
+      startedAt: "2026-08-28T10:00:00+08:00",
+      completedAt: "2026-08-28T10:01:00+08:00",
+    },
+    questions: [{
+      questionKey: "question-1",
+      position: 1,
+      snapshot: { prompt: "test" },
+      targets: [{ targetKey: "target-1", targetKind: "vocab", itemId: "vocab:test" }],
+      response: {
+        answer: { value: "test" },
+        answerResult: "wrong",
+        submittedAt: "2026-08-28T10:01:00+08:00",
+      },
+    }],
+  };
+
+  try {
+    await client.connect(transport);
+    for (const name of ["study_preview_practice_record", "study_record_practice"]) {
+      const response = await client.callTool({
+        name,
+        arguments: invalidV2Submission,
+      });
+      assert.equal(response.isError, true, name);
+      assert.equal(
+        (response.structuredContent as Record<string, any>)?.error?.code,
+        "INVALID_PRACTICE_CONTRACT",
+        name,
+      );
+      assert.equal(
+        (response.structuredContent as Record<string, any>)?.error?.status,
+        400,
+        name,
+      );
     }
   } finally {
     await client.close().catch(() => undefined);
@@ -167,7 +243,7 @@ test("learning-workbench projections satisfy their published output schemas", as
     if (req.url === "/api/v1/items/creation/preview" && req.method === "POST") {
       res.end(JSON.stringify({
         ok: true,
-        contract_version: "learning-content-v7.0",
+        contract_version: "learning-content-v8.0",
         candidate: { item_id: "vocab:test" },
         can_create: true,
         exact_duplicate_item_id: null,
@@ -191,7 +267,7 @@ test("learning-workbench projections satisfy their published output schemas", as
     host: "127.0.0.1",
     port: 0,
   });
-  const client = new Client({ name: "projection-schema-test", version: "1.1.0" });
+  const client = new Client({ name: "projection-schema-test", version: "1.2.1" });
   const transport = new StreamableHTTPClientTransport(new URL(handle.url));
 
   try {
@@ -247,7 +323,7 @@ test("Hub domain errors remain typed across the MCP boundary", async () => {
     host: "127.0.0.1",
     port: 0,
   });
-  const client = new Client({ name: "typed-error-test", version: "1.1.0" });
+  const client = new Client({ name: "typed-error-test", version: "1.2.1" });
   const transport = new StreamableHTTPClientTransport(new URL(handle.url));
 
   try {

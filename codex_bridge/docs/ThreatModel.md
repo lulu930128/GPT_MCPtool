@@ -25,14 +25,15 @@ Runtime assets live under `CODEX_BRIDGE_DATA_DIR` and are not source archive con
 ChatGPT host
   -> MCP Apps widget
   -> Bridge HTTP MCP :18828
-  -> project allowlist + job/staging stores + ignored codex-inbox
+  -> project capability gate + job/staging stores + ignored codex-inbox
   -> local controller
   -> Codex App Server over stdio
-  -> one allowlisted project workspace + exact read-only codex-inbox path
+  -> one server-resolved exact project workspace + exact read-only codex-inbox path
 ```
 
 - ChatGPT and the widget are outside the local filesystem trust boundary.
-- The Bridge accepts a configured `project_id`, never a caller-supplied path.
+- Public tools accept a configured `project_id`; the app-only widget may use an opaque project id
+  resolved from Codex App Server history. Neither surface accepts a caller-supplied path.
 - Codex App Server is local and stdio-only; it is not exposed through a public WebSocket.
 - The Secure MCP Tunnel reaches the Bridge MCP endpoint, not the App Server or job directory.
 

@@ -4,6 +4,10 @@ import { extname, join } from "node:path";
 import type {
   BridgeProject,
   ConversationMessage,
+  ConversationProjectionPatch,
+  ConversationListPage,
+  ConversationThreadProjection,
+  ApprovalReviewer,
   DataClassification,
   ExecutionMode,
   JobEvent,
@@ -22,6 +26,13 @@ import type {
   TextArtifactSummary,
   WorkPackage,
 } from "./types.js";
+import {
+  createConversationProjection,
+  hydrateConversationProjection,
+  mergeConversationMessages,
+  reduceConversationNotification,
+  type ConversationNotification,
+} from "./conversation-projection.js";
 import { renderRequestMarkdown } from "./work-package.js";
 import { sanitizeForStorage } from "./redaction.js";
 
@@ -41,6 +52,7 @@ export interface AppendUserMessageInput {
   content: string;
   context?: string;
   executionMode: ExecutionMode;
+  approvalReviewer: ApprovalReviewer;
   dataClassification: DataClassification;
   model?: string;
   effort?: ReasoningEffort;
@@ -49,15 +61,25 @@ export interface AppendUserMessageInput {
 
 export interface PrepareTurnInput {
   executionMode: ExecutionMode;
+  approvalReviewer: ApprovalReviewer;
   dataClassification: DataClassification;
   model?: string;
   effort?: ReasoningEffort;
+}
+
+export interface ImportLocalThreadInput {
+  project: BridgeProject;
+  workPackage: WorkPackage;
+  previewDigest: string;
+  threadId: string;
+  threadResponse: Record<string, unknown>;
 }
 
 export class JobStore {
   private readonly jobs = new Map<string, JobRecord>();
   private readonly idempotencyIndex = new Map<string, string>();
   private readonly messageClientIds = new Map<string, Set<string>>();
+  private readonly conversations = new Map<string, ConversationThreadProjection>();
   private lock: Promise<void> = Promise.resolve();
 
   constructor(
@@ -82,6 +104,7 @@ export class JobStore {
         this.idempotencyIndex.set(record.idempotencyKey, record.id);
         await this.ensureMessagesFile(record);
         const messages = await this.readMessages(record.id);
+        this.conversations.set(record.id, await this.readConversation(record));
         this.messageClientIds.set(
           record.id,
           new Set(messages.flatMap((message) => message.clientMessageId ? [message.clientMessageId] : [])),
@@ -135,6 +158,7 @@ export class JobStore {
         createdAt: now,
         updatedAt: now,
         currentExecutionMode: input.workPackage.executionMode,
+        currentApprovalReviewer: input.workPackage.approvalReviewer,
         currentDataClassification: input.workPackage.dataClassification,
         model: input.workPackage.model,
         effort: input.workPackage.effort,
@@ -156,6 +180,7 @@ export class JobStore {
         context: input.workPackage.context || undefined,
         at: now,
         executionMode: input.workPackage.executionMode,
+        approvalReviewer: input.workPackage.approvalReviewer,
         dataClassification: input.workPackage.dataClassification,
         model: input.workPackage.model,
         effort: input.workPackage.effort,
@@ -164,10 +189,69 @@ export class JobStore {
       await writeFile(this.messagesPath(id), `${JSON.stringify(initialMessage)}\n`, "utf8");
       const event: JobEvent = { seq: 1, at: now, type: "job.queued", message: "Work package queued." };
       await writeFile(this.eventsPath(id), `${JSON.stringify(event)}\n`, "utf8");
+      const conversation = createConversationProjection(undefined, now);
+      await writeFile(this.conversationPath(id), `${JSON.stringify(conversation, null, 2)}\n`, "utf8");
+      await writeFile(this.conversationEventsPath(id), "", "utf8");
       await this.writeManifest(record);
       this.jobs.set(id, record);
       this.idempotencyIndex.set(input.idempotencyKey, id);
       this.messageClientIds.set(id, new Set([initialMessage.clientMessageId!]));
+      this.conversations.set(id, conversation);
+      return { record: structuredClone(record), created: true };
+    });
+  }
+
+  async importLocalThread(input: ImportLocalThreadInput): Promise<{ record: JobRecord; created: boolean }> {
+    return this.exclusive(async () => {
+      const existing = Array.from(this.jobs.values()).find((record) => record.threadId === input.threadId);
+      if (existing) return { record: structuredClone(existing), created: false };
+
+      const id = randomUUID();
+      const now = new Date().toISOString();
+      const idempotencyKey = `local-thread:${input.threadId}`;
+      const record: JobRecord = {
+        schemaVersion: 1,
+        id,
+        idempotencyKey,
+        previewDigest: input.previewDigest,
+        project: input.project,
+        workPackage: input.workPackage,
+        status: "completed",
+        stateVersion: 1,
+        lastEventSeq: 1,
+        createdAt: now,
+        updatedAt: now,
+        threadId: input.threadId,
+        currentExecutionMode: input.workPackage.executionMode,
+        currentApprovalReviewer: input.workPackage.approvalReviewer,
+        currentDataClassification: input.workPackage.dataClassification,
+        model: input.workPackage.model,
+        effort: input.workPackage.effort,
+        approvals: [],
+        inputArtifacts: [],
+      };
+      await mkdir(this.jobDir(id), { recursive: false });
+      await writeFile(this.requestPath(id), renderRequestMarkdown(input.workPackage, id, []), "utf8");
+      await writeFile(this.messagesPath(id), "", "utf8");
+      const event: JobEvent = {
+        seq: 1,
+        at: now,
+        type: "conversation.local_thread.imported",
+        message: "Imported an existing local Codex conversation for operator continuation.",
+      };
+      await writeFile(this.eventsPath(id), `${JSON.stringify(event)}\n`, "utf8");
+      const conversation = hydrateConversationProjection(
+        createConversationProjection(input.threadId, now),
+        input.threadResponse,
+        now,
+      );
+      await writeFile(this.conversationPath(id), `${JSON.stringify(conversation, null, 2)}\n`, "utf8");
+      await writeFile(this.conversationEventsPath(id), "", "utf8");
+      await this.writeManifest(record);
+      this.jobs.set(id, record);
+      this.idempotencyIndex.set(idempotencyKey, id);
+      this.messageClientIds.set(id, new Set());
+      this.conversations.set(id, conversation);
       return { record: structuredClone(record), created: true };
     });
   }
@@ -178,20 +262,69 @@ export class JobStore {
   }
 
   list(limit = 20): JobSummary[] {
-    return Array.from(this.jobs.values())
-      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
-      .slice(0, Math.max(1, Math.min(limit, 100)))
-      .map(toSummary);
+    return this.listPage(limit).data;
   }
 
-  async snapshot(jobId: string, afterSeq = 0, maxEvents = 80): Promise<JobSnapshot> {
+  listPage(limit = 50, cursor?: string, projectId?: string): ConversationListPage {
+    const boundedLimit = Math.max(1, Math.min(limit, 100));
+    const decodedCursor = cursor ? decodeConversationCursor(cursor) : undefined;
+    const records = Array.from(this.jobs.values())
+      .filter((record) => !projectId || record.project.id === projectId)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id))
+      .filter((record) => !decodedCursor || record.createdAt < decodedCursor.createdAt || (
+        record.createdAt === decodedCursor.createdAt && record.id < decodedCursor.id
+      ));
+    const page = records.slice(0, boundedLimit);
+    const last = page.at(-1);
+    return {
+      data: page.map(toSummary),
+      nextCursor: records.length > page.length && last ? encodeConversationCursor(last.createdAt, last.id) : undefined,
+    };
+  }
+
+  async snapshot(
+    jobId: string,
+    afterSeq = 0,
+    maxEvents = 80,
+    afterConversationRevision?: number,
+  ): Promise<JobSnapshot> {
     const record = this.requireJob(jobId);
     const events = await this.readEvents(jobId, afterSeq, maxEvents);
+    const messages = await this.readMessages(jobId);
+    const nextEventSeq = events.at(-1)?.seq ?? Math.max(0, afterSeq);
+    const storedConversation = this.conversations.get(jobId) ?? createConversationProjection(record.threadId, record.updatedAt);
+    let conversation = afterConversationRevision === undefined
+      ? mergeConversationMessages(storedConversation, messages)
+      : undefined;
+    let conversationChanges = afterConversationRevision === undefined
+      ? []
+      : await this.readConversationChanges(jobId, afterConversationRevision, 40);
+    let nextConversationRevision = afterConversationRevision ?? storedConversation.revision;
+    if (conversationChanges.length > 0) {
+      const expectedFirst = Math.max(0, afterConversationRevision ?? 0) + 1;
+      if (conversationChanges[0]?.revision !== expectedFirst) {
+        conversation = mergeConversationMessages(storedConversation, messages);
+        conversationChanges = [];
+        nextConversationRevision = storedConversation.revision;
+      } else {
+        nextConversationRevision = conversationChanges.at(-1)?.revision ?? nextConversationRevision;
+      }
+    } else if (afterConversationRevision !== undefined && afterConversationRevision !== storedConversation.revision) {
+      conversation = mergeConversationMessages(storedConversation, messages);
+      nextConversationRevision = storedConversation.revision;
+    }
     return {
       ...toSummary(record),
-      messages: await this.readMessages(jobId),
+      messages,
+      conversation,
+      conversationChanges,
+      nextConversationRevision,
+      serverConversationRevision: storedConversation.revision,
+      conversationHasMore: nextConversationRevision < storedConversation.revision,
       events,
-      nextEventSeq: record.lastEventSeq,
+      nextEventSeq,
+      serverLastEventSeq: record.lastEventSeq,
+      hasMore: nextEventSeq < record.lastEventSeq,
       approvals: structuredClone(record.approvals),
       hasDiff: await fileExists(this.diffPath(jobId)),
       hasResult: await fileExists(this.resultPath(jobId)),
@@ -218,6 +351,7 @@ export class JobStore {
         context: input.context || undefined,
         at: new Date().toISOString(),
         executionMode: input.executionMode,
+        approvalReviewer: input.approvalReviewer,
         dataClassification: input.dataClassification,
         model: input.model,
         effort: input.effort,
@@ -249,13 +383,14 @@ export class JobStore {
       record.status = "preparing";
       record.turnId = undefined;
       record.currentExecutionMode = input.executionMode;
+      record.currentApprovalReviewer = input.approvalReviewer;
       record.currentDataClassification = input.dataClassification;
       record.model = input.model;
       record.effort = input.effort;
       return {
         type: "conversation.turn.preparing",
         message: "Preparing the next Codex turn.",
-        data: { executionMode: input.executionMode, model: input.model, effort: input.effort },
+        data: { executionMode: input.executionMode, approvalReviewer: input.approvalReviewer, model: input.model, effort: input.effort },
       };
     });
   }
@@ -282,10 +417,12 @@ export class JobStore {
   }
 
   async setThread(jobId: string, threadId: string): Promise<JobRecord> {
-    return this.mutate(jobId, (record) => {
+    const record = await this.mutate(jobId, (record) => {
       record.threadId = threadId;
       return { type: "codex.thread.started", message: "Codex thread started.", data: { threadId } };
     });
+    await this.updateConversation(jobId, (current) => ({ ...current, threadId }));
+    return record;
   }
 
   async setTurn(jobId: string, turnId: string): Promise<JobRecord> {
@@ -335,6 +472,22 @@ export class JobStore {
       bytes: Buffer.byteLength(bounded),
       truncated: bounded !== diff,
     });
+  }
+
+  async applyConversationNotification(
+    jobId: string,
+    notification: ConversationNotification,
+    at = new Date().toISOString(),
+  ): Promise<ConversationThreadProjection> {
+    return this.updateConversation(jobId, (current) => reduceConversationNotification(current, notification, at));
+  }
+
+  async hydrateConversation(
+    jobId: string,
+    response: Record<string, unknown>,
+    at = new Date().toISOString(),
+  ): Promise<ConversationThreadProjection> {
+    return this.updateConversation(jobId, (current) => hydrateConversationProjection(current, response, at));
   }
 
   async complete(jobId: string, result: JobResult): Promise<JobRecord> {
@@ -505,6 +658,71 @@ export class JobStore {
       .slice(-Math.max(1, Math.min(maxMessages, 500)));
   }
 
+  private async readConversation(record: JobRecord): Promise<ConversationThreadProjection> {
+    try {
+      const parsed = JSON.parse(await readFile(this.conversationPath(record.id), "utf8")) as ConversationThreadProjection;
+      if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.turns)) throw new Error("Invalid conversation projection.");
+      return parsed;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
+      const projection = createConversationProjection(record.threadId, record.updatedAt);
+      await writeFile(this.conversationPath(record.id), `${JSON.stringify(projection, null, 2)}\n`, "utf8");
+      return projection;
+    }
+  }
+
+  private async updateConversation(
+    jobId: string,
+    update: (current: ConversationThreadProjection) => ConversationThreadProjection,
+  ): Promise<ConversationThreadProjection> {
+    return this.exclusive(async () => {
+      const record = this.requireJob(jobId);
+      const current = this.conversations.get(jobId) ?? createConversationProjection(record.threadId, record.updatedAt);
+      let next = update(structuredClone(current));
+      if (next.revision <= current.revision) {
+        next = { ...next, revision: current.revision + 1, updatedAt: new Date().toISOString() };
+      }
+      const patch = conversationPatch(current, next);
+      this.conversations.set(jobId, structuredClone(next));
+      await appendFile(this.conversationEventsPath(jobId), `${JSON.stringify(patch)}\n`, "utf8");
+      await this.writeConversation(jobId, next);
+      return structuredClone(next);
+    });
+  }
+
+  private async writeConversation(jobId: string, projection: ConversationThreadProjection): Promise<void> {
+    const path = this.conversationPath(jobId);
+    const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    await writeFile(temp, `${JSON.stringify(projection, null, 2)}\n`, "utf8");
+    try {
+      await rename(temp, path);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EPERM" && code !== "EEXIST") throw error;
+      await copyFile(temp, path);
+      await unlink(temp).catch(() => undefined);
+    }
+  }
+
+  private async readConversationChanges(
+    jobId: string,
+    afterRevision: number,
+    maxChanges: number,
+  ): Promise<ConversationProjectionPatch[]> {
+    try {
+      const content = await readFile(this.conversationEventsPath(jobId), "utf8");
+      return content
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as ConversationProjectionPatch)
+        .filter((change) => change.revision > Math.max(0, afterRevision))
+        .slice(0, Math.max(1, Math.min(maxChanges, 100)));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
+  }
+
   private async ensureMessagesFile(record: JobRecord): Promise<void> {
     if (await fileExists(this.messagesPath(record.id))) {
       return;
@@ -518,6 +736,7 @@ export class JobStore {
         context: record.workPackage.context || undefined,
         at: record.createdAt,
         executionMode: record.workPackage.executionMode,
+        approvalReviewer: record.workPackage.approvalReviewer ?? "user",
         dataClassification: record.workPackage.dataClassification,
         model: record.workPackage.model,
         effort: record.workPackage.effort,
@@ -594,6 +813,14 @@ export class JobStore {
 
   private messagesPath(jobId: string): string {
     return join(this.jobDir(jobId), "messages.jsonl");
+  }
+
+  private conversationPath(jobId: string): string {
+    return join(this.jobDir(jobId), "conversation.json");
+  }
+
+  private conversationEventsPath(jobId: string): string {
+    return join(this.jobDir(jobId), "conversation-events.jsonl");
   }
 
   private diffPath(jobId: string): string {
@@ -703,6 +930,46 @@ function settlePendingApprovals(record: JobRecord, state: PendingApproval["state
   return count;
 }
 
+function conversationPatch(
+  previous: ConversationThreadProjection,
+  next: ConversationThreadProjection,
+): ConversationProjectionPatch {
+  const turns: ConversationProjectionPatch["turns"] = [];
+  for (const nextTurn of next.turns) {
+    const previousTurn = previous.turns.find((turn) => turn.turnId === nextTurn.turnId);
+    if (!previousTurn) {
+      turns.push(structuredClone(nextTurn));
+      continue;
+    }
+    const items = nextTurn.items.filter((item) => {
+      const previousItem = previousTurn.items.find((candidate) => candidate.id === item.id);
+      return !previousItem || JSON.stringify(previousItem) !== JSON.stringify(item);
+    });
+    const metadataChanged = JSON.stringify({
+      status: previousTurn.status,
+      startedAt: previousTurn.startedAt,
+      completedAt: previousTurn.completedAt,
+      durationMs: previousTurn.durationMs,
+    }) !== JSON.stringify({
+      status: nextTurn.status,
+      startedAt: nextTurn.startedAt,
+      completedAt: nextTurn.completedAt,
+      durationMs: nextTurn.durationMs,
+    });
+    if (items.length || metadataChanged) {
+      turns.push({ ...structuredClone(nextTurn), items: structuredClone(items) });
+    }
+  }
+  return {
+    revision: next.revision,
+    at: next.updatedAt,
+    threadId: previous.threadId !== next.threadId ? next.threadId : undefined,
+    status: previous.status !== next.status ? next.status : undefined,
+    hydratedAt: previous.hydratedAt !== next.hydratedAt ? next.hydratedAt : undefined,
+    turns,
+  };
+}
+
 function assertUuid(value: string, field: string): void {
   if (!/^[0-9a-f-]{36}$/i.test(value)) throw new Error(`Invalid ${field}.`);
 }
@@ -710,6 +977,23 @@ function assertUuid(value: string, field: string): void {
 function allowedHandoffExtension(fileName: string): string {
   const extension = extname(fileName).toLowerCase();
   return HANDOFF_EXTENSIONS.has(extension) ? extension : ".txt";
+}
+
+function encodeConversationCursor(createdAt: string, id: string): string {
+  return Buffer.from(JSON.stringify({ createdAt, id }), "utf8").toString("base64url");
+}
+
+function decodeConversationCursor(cursor: string): { createdAt: string; id: string } {
+  if (!/^[A-Za-z0-9_-]{8,512}$/.test(cursor)) throw new Error("Invalid conversation cursor.");
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as Record<string, unknown>;
+    if (typeof parsed.createdAt !== "string" || typeof parsed.id !== "string" || !/^[0-9a-f-]{36}$/i.test(parsed.id)) {
+      throw new Error("Invalid conversation cursor.");
+    }
+    return { createdAt: parsed.createdAt, id: parsed.id };
+  } catch {
+    throw new Error("Invalid conversation cursor.");
+  }
 }
 
 export function toSummary(record: JobRecord): JobSummary {
@@ -720,6 +1004,7 @@ export function toSummary(record: JobRecord): JobSummary {
     title: record.workPackage.title,
     objective: record.workPackage.objective,
     executionMode: record.currentExecutionMode ?? record.workPackage.executionMode,
+    approvalReviewer: record.currentApprovalReviewer ?? record.workPackage.approvalReviewer ?? "user",
     dataClassification: record.currentDataClassification ?? record.workPackage.dataClassification,
     status: record.status,
     stateVersion: record.stateVersion,

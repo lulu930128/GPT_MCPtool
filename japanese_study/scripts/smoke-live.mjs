@@ -16,6 +16,7 @@ const expectedTools = [
   "study_create_item",
   "study_create_study_list",
   "study_get_due_reviews",
+  "study_get_diagnosis_catalog",
   "study_get_item",
   "study_get_learner_policy",
   "study_get_learning_context",
@@ -44,7 +45,7 @@ const expectedTools = [
   "study_supersede_practice_session",
 ].sort();
 
-const client = new Client({ name: "japanese-study-live-smoke", version: "1.1.0" });
+const client = new Client({ name: "japanese-study-live-smoke", version: "1.2.1" });
 const transport = new StreamableHTTPClientTransport(url);
 
 try {
@@ -52,6 +53,12 @@ try {
   const tools = await client.listTools();
   const names = tools.tools.map((tool) => tool.name).sort();
   assert.deepEqual(names, expectedTools);
+  const practiceTool = tools.tools.find((tool) => tool.name === "study_record_practice");
+  const diagnosisEvents = practiceTool?.inputSchema?.properties?.questions?.items
+    ?.properties?.response?.properties?.diagnosisEvents;
+  assert.equal(diagnosisEvents?.items?.type, "object");
+  assert.equal(diagnosisEvents?.items?.properties?.code?.type, "string");
+  assert.equal(diagnosisEvents?.items?.$ref, undefined);
 
   const summary = await client.callTool({ name: "study_get_summary", arguments: {} });
   assert.notEqual(summary.isError, true, JSON.stringify(summary.content));
@@ -74,14 +81,28 @@ try {
 
   const context = await client.callTool({
     name: "study_get_learning_context",
-    arguments: { targetLimit: 3, recentSessionLimit: 2, diagnosisLimit: 3 },
+    arguments: {
+      requestedLevel: "N4_N3_BRIDGE",
+      targetLevels: ["N4", "N3"],
+      targetLimit: 3,
+      recentSessionLimit: 2,
+      diagnosisLimit: 3,
+    },
   });
   assert.notEqual(context.isError, true, JSON.stringify(context.content));
   assert.equal(context.structuredContent?.ok, true);
-  assert.equal(context.structuredContent?.contract_version, "learning-context-v2");
+  assert.equal(context.structuredContent?.contract_version, "learning-context-v3");
   assert.ok((context.structuredContent?.recommended_targets?.length ?? 0) <= 3);
   assert.ok((context.structuredContent?.recent_practice?.length ?? 0) <= 2);
   assert.ok((context.structuredContent?.recent_diagnoses?.length ?? 0) <= 3);
+  assert.ok(Array.isArray(context.structuredContent?.active_weaknesses));
+  assert.ok(Array.isArray(context.structuredContent?.recent_strengths));
+  assert.ok(Array.isArray(context.structuredContent?.recent_observations));
+  assert.deepEqual(context.structuredContent?.level_scope, {
+    practice_profile: "N4_N3_BRIDGE",
+    target_levels: ["N4", "N3"],
+    source: "explicit",
+  });
   assert.equal(context.structuredContent?.generation_guidance?.generator, "ai");
   for (const target of context.structuredContent?.recommended_targets ?? []) {
     assert.ok(
@@ -89,6 +110,40 @@ try {
     );
     assert.ok(Array.isArray(target.components));
   }
+
+  const defaultContext = await client.callTool({
+    name: "study_get_learning_context",
+    arguments: {
+      requestedLevel: "N4_N3_BRIDGE",
+      targetLimit: 20,
+      recentSessionLimit: 1,
+      diagnosisLimit: 1,
+    },
+  });
+  assert.notEqual(defaultContext.isError, true, JSON.stringify(defaultContext.content));
+  assert.deepEqual(defaultContext.structuredContent?.level_scope, {
+    practice_profile: "N4_N3_BRIDGE",
+    target_levels: ["N4", "N3"],
+    source: "profile_default",
+  });
+  assert.ok(
+    (defaultContext.structuredContent?.recommended_targets ?? []).every((target) =>
+      ["N4", "N3"].includes(target.jlpt_level),
+    ),
+  );
+
+  const diagnosisCatalog = await client.callTool({
+    name: "study_get_diagnosis_catalog",
+    arguments: { query: "particle", active: true, limit: 10 },
+  });
+  assert.notEqual(diagnosisCatalog.isError, true, JSON.stringify(diagnosisCatalog.content));
+  assert.equal(diagnosisCatalog.structuredContent?.contract_version, "diagnosis-catalog-v1");
+  assert.ok((diagnosisCatalog.structuredContent?.items?.length ?? 0) <= 10);
+  assert.ok(
+    diagnosisCatalog.structuredContent?.items?.some(
+      (definition) => definition.code === "particle_ga_wo_confusion",
+    ),
+  );
 
   const componentItem = await client.callTool({
     name: "study_get_item",
@@ -176,6 +231,9 @@ try {
     policyVersion: policy.structuredContent.version,
     contextTargets: context.structuredContent.recommended_targets.length,
     contextDiagnoses: context.structuredContent.recent_diagnoses.length,
+    activeWeaknesses: context.structuredContent.active_weaknesses.length,
+    defaultProfileTargets: defaultContext.structuredContent.recommended_targets.length,
+    diagnosisDefinitions: diagnosisCatalog.structuredContent.items.length,
     dueReturned: due.structuredContent.count,
     qualityTotal: quality.structuredContent.total,
     listsReturned: lists.structuredContent.count,

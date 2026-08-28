@@ -25,7 +25,7 @@ environment-variable reference, never the runtime key.
    report Ready.
 6. Confirm `npm run tunnel:health` or open the local tunnel admin UI.
 7. Confirm `http://127.0.0.1:18790/health` reports
-   `contractVersion=learning-content-v7.0`, `toolCount=33`, and a
+   `contractVersion=learning-content-v8.1`, `toolCount=34`, and a
    16-character `buildId`.
 8. Only after the chain is stable, run `npm run startup:install`.
 
@@ -37,12 +37,12 @@ environment-variable reference, never the runtime key.
    Study tunnel.
 4. Suggested name: `Japanese Study Hub`.
 5. Suggested description: `Practice and manage my Japanese vocabulary, study plans, mastery labels, and answer history.`
-6. Verify discovery shows exactly 33 tools.
+6. Verify discovery shows exactly 34 tools.
 7. Test one read call first, then use `study_preview_practice_record` with a
    small completed session. Preview is read-only; save only when the user
    explicitly asks to record the completed practice.
 
-If local `npm run smoke:live` reports 33 tools but ChatGPT still shows an
+If local `npm run smoke:live` reports 34 tools but ChatGPT still shows an
 older count, rebuild and use `scripts\\Restart-Tray.cmd`, then refresh or
 reconnect the ChatGPT connector. Do not rewrite the Hub resolver to work around
 a stale connector schema.

@@ -2,8 +2,10 @@
 
 ## Principle
 
-The model may request work and Codex App Server may request permission, but only the user may decide
-an approval through the interactive MCP Apps UI. There is no session-wide accept.
+The model may request work and Codex App Server may request permission. Each Bridge conversation
+selects one App Server reviewer: `user` routes actual approval requests to the interactive MCP Apps
+UI, while `auto_review` asks Codex's native reviewer to evaluate requests at the same sandbox
+boundary. There is no session-wide accept or blanket allow.
 
 ## Tool separation
 
@@ -18,13 +20,14 @@ artifacts. Actions that can start, alter, interrupt, or authorize work are app-o
 - text-bundle begin/append/finalize and artifact chunk reads used by the widget
 
 The host integration must not expose app-only actions as autonomous model tools. A textual request
-from the model is not an approval decision.
+from the model is not an approval decision. The Bridge never converts `auto_review` into a
+`codex_approval_decide` call and never accepts an approval on the user's behalf.
 
 ## Dispatch approval
 
 Before dispatch, `codex_job_preview` normalizes the work package and produces a digest without
 creating a job. The widget shows the project, objective, context, constraints, acceptance criteria,
-execution mode, model/effort, and attached bundle metadata.
+execution mode, approval reviewer, model/effort, and attached bundle metadata.
 
 Dispatch requires the reviewed preview and a retry-stable idempotency key. If the form changes,
 preview again. Do not dispatch a digest produced for earlier content.
@@ -36,10 +39,23 @@ preview again. Do not dispatch a digest produced for earlier content.
 | `plan` | Read-only | File-change approval cannot be accepted |
 | `workspace_write` | Workspace-scoped | Exact command/file-change requests may be accepted individually |
 
-Both modes use the allowlisted project path. Network access remains disabled by default. The Bridge
-never selects a full-access profile.
+Both modes use one server-resolved exact project path: either a configured allowlist entry or an
+app-only App Server discovery that passed the protected-path gate. Network access remains disabled
+by default. The Bridge never selects a full-access profile.
 
-## Per-request approval lifecycle
+## Approval reviewers
+
+| Reviewer | Behavior | Permission effect |
+| --- | --- | --- |
+| `auto_review` | Codex's native reviewer evaluates approval requests | None; sandbox, network, filesystem, workspace roots, and `approvalPolicy=on-request` stay unchanged |
+| `user` | Bridge displays each App Server request for an explicit Widget decision | None; each accepted decision is bound to one request |
+
+New conversations default to `auto_review`. The reviewer is sticky for that thread and can be
+changed only between turns. Historical jobs without the field fall back to `user` so an upgrade
+cannot silently change their approval behavior. Auto-review can deny a high-risk operation; it is
+not a promise that every turn will finish without intervention.
+
+## Per-request user-review lifecycle
 
 ```text
 Codex App Server requests permission
@@ -51,8 +67,9 @@ Codex App Server requests permission
   -> controller replies to that exact App Server request
 ```
 
-The decision is bound to one `jobId` and one UUID `approvalId`. Unknown, already resolved, expired,
-or wrong-job ids are rejected.
+This lifecycle applies when reviewer is `user` and App Server emits a request. The decision is bound
+to one `jobId` and one UUID `approvalId`. Unknown, already resolved, expired, or wrong-job ids are
+rejected.
 
 ## Decision meanings
 
@@ -86,7 +103,7 @@ turn.
 
 ## Review checklist
 
-Before accepting a command or file-change request:
+When using `user` review, before accepting a command or file-change request:
 
 1. Confirm the selected project and job.
 2. Read the exact command or change summary and affected path.
@@ -99,5 +116,7 @@ Before accepting a command or file-change request:
 ## Known limitation
 
 In `workspace_write`, Codex's workspace permission profile determines which file operations require
-App Server approval. The Bridge displays requests that App Server actually emits; it cannot promise
-that every file edit receives a separate prompt. Strict staged-patch review is not implemented.
+App Server approval. With `user` review, the Bridge displays requests that App Server actually
+emits; it cannot promise that every file edit receives a separate prompt. With `auto_review`, the
+native reviewer may reject operations without presenting an accept button. Strict staged-patch
+review is not implemented.

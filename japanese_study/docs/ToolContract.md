@@ -31,10 +31,11 @@
 | `study_save_question_candidate` | Idempotent write | Save a candidate in pending state |
 | `study_promote_question_candidate` | Idempotent write | Promote one manually reviewed candidate |
 | `study_retire_question_candidate` | Idempotent write | Retire a rejected candidate while preserving audit |
-| `study_get_plan` | Read | Return prioritized study items; limit 1–50, default 20 |
+| `study_get_plan` | Read | Return prioritized study items with optional explicit catalog `targetLevels`; limit 1–50, default 20 |
 | `study_get_learner_policy` | Read | Read the current learner-owned generation and recording policy |
 | `study_set_learner_policy` | Idempotent write | Replace that policy after an explicit user request and stable `operationId` |
-| `study_get_learning_context` | Read | Return bounded policy, recent evidence, diagnoses, canonical/proposed content, verified components, and recommended targets |
+| `study_get_learning_context` | Read | Return bounded item targets, skill weaknesses, strengths, observations, recent practice, and explicit level scope |
+| `study_get_diagnosis_catalog` | Read | Search up to 100 Hub-owned canonical diagnosis definitions without mutation |
 | `study_set_manual_labels` | Idempotent write | Upsert known/unknown/uncertain/suspended labels for exact item ids |
 | `study_record_attempt` | Idempotent write | Append one attempt using a caller-stable event id |
 | `study_preview_practice_record` | Read | Validate and score a complete practice submission without writing |
@@ -55,7 +56,7 @@ or pagination fields instead of increasing output without limit.
 
 `study_get_item` and `study_get_practice_session` are the exact readback tools after a write.
 
-Under `learning-content-v7.0`, `meaning_tc` remains canonical. A
+Under `learning-content-v8.1`, `meaning_tc` remains canonical. A
 `meaning_tc_proposal` is always accompanied by proposal status and must not be
 presented as accepted content. Verified aliases may resolve exact grammar
 identities; proposed aliases and all search matches remain candidate-only.
@@ -98,9 +99,18 @@ automatic-recording preferences. `study_set_learner_policy` requires an explicit
 the adapter must not infer a policy change from one answer, score, or generated exercise.
 
 `study_get_learning_context` is the bounded input for AI question generation. It returns policy,
-recommended targets, explicit canonical/proposal status, verified components, active recent diagnoses, and active recent practice evidence. It does not
+item-level recommended targets, Hub-calculated cross-item skill weaknesses, strengths,
+observations, explicit canonical/proposal status, verified components, and active recent practice.
+`requestedLevel` remains a practice profile. Explicit `targetLevels` override it; when omitted, the Hub
+expands a known profile such as `N4_N3_BRIDGE` to canonical catalog levels. Unknown planning profiles
+fail explicitly instead of becoming an unrestricted catalog. The context read does not
 dump the full catalog, generate questions inside the Hub, or authorize a later write. Generated
 practice is recorded only when the returned policy and the current user instruction allow it.
+
+`study_get_diagnosis_catalog` is an optional bounded lookup for canonical diagnosis codes. The Hub
+returns code, skill, polarity, severity, planning default, title, and active state. The adapter only
+forwards filters and never creates aliases or decides diagnosis semantics. Unknown submitted codes
+remain safe non-planning observations when a client skips the lookup.
 
 ## Attempts
 
@@ -113,6 +123,12 @@ manual labels.
 Use `study_preview_practice_record` before `study_record_practice`. Preserve the complete question
 set, void/partial outcomes, answers, targets, scoring evidence, and the same `submissionId` on
 retry.
+
+For practice contract v2, set `practiceContractVersion=2`, use question-scoped
+`diagnosisEvents`, and provide an `assessment` for every target, including an explicit
+`unassessed` result when no target judgment exists. Only target-specific, planning-eligible
+assessments create item evidence or reach SRS. Legacy v1 remains readable but multi-target v1
+questions do not fan one overall result across every item.
 
 If `answerResult` and `awardedPoints` disagree with the default score policy, recording requires a
 non-empty per-question `gradingOverrideReason`. The adapter must not synthesize that reason.

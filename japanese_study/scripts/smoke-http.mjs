@@ -16,7 +16,7 @@ const config = loadConfig({
   JSTUDY_MCP_HTTP_TOKEN: "",
 });
 const handle = await startJapaneseStudyHttpServer(config);
-const client = new Client({ name: "japanese-study-http-smoke", version: "1.1.0" });
+const client = new Client({ name: "japanese-study-http-smoke", version: "1.2.1" });
 const transport = new StreamableHTTPClientTransport(new URL(handle.url));
 
 try {
@@ -38,6 +38,7 @@ try {
     "study_apply_practice_target_overrides",
     "study_create_item",
     "study_create_study_list",
+    "study_get_diagnosis_catalog",
     "study_get_due_reviews",
     "study_get_item",
     "study_get_learner_policy",

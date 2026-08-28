@@ -32,6 +32,148 @@ test("job store is idempotent and persists bounded job artifacts", async (contex
   assert.match(await readFile(join(root, first.record.id, "manifest.json"), "utf8"), /"schemaVersion": 1/);
 });
 
+test("job store durably adopts one existing local thread without inventing a user message", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-bridge-local-import-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const store = new JobStore(root);
+  await store.initialize();
+  const threadId = randomUUID();
+  const preview = previewWorkPackage({
+    projectId: "local:fixture",
+    title: "Adopt existing thread",
+    objective: "Continue the persisted conversation.",
+    executionMode: "workspace_write",
+  });
+  const input = {
+    project: { id: "local:fixture", name: "Fixture project", path: join(root, "project") },
+    workPackage: preview.workPackage,
+    previewDigest: preview.previewDigest,
+    threadId,
+    threadResponse: {
+      thread: {
+        id: threadId,
+        status: { type: "notLoaded" },
+        turns: [{
+          id: "turn-existing",
+          status: "completed",
+          items: [
+            { id: "user-existing", type: "userMessage", content: [{ type: "text", text: "Existing question." }] },
+            { id: "agent-existing", type: "agentMessage", text: "Existing answer." },
+          ],
+        }],
+      },
+    },
+  };
+
+  const imported = await store.importLocalThread(input);
+  const duplicate = await store.importLocalThread(input);
+  assert.equal(imported.created, true);
+  assert.equal(duplicate.created, false);
+  assert.equal(duplicate.record.id, imported.record.id);
+  const snapshot = await store.snapshot(imported.record.id);
+  assert.equal(snapshot.status, "completed");
+  assert.equal(snapshot.threadId, threadId);
+  assert.deepEqual(snapshot.messages, []);
+  assert.deepEqual(snapshot.conversation?.turns[0]?.items.map((item) => item.text), ["Existing question.", "Existing answer."]);
+
+  const restarted = new JobStore(root);
+  await restarted.initialize();
+  const recovered = await restarted.snapshot(imported.record.id);
+  assert.equal(recovered.status, "completed");
+  assert.equal(recovered.threadId, threadId);
+  assert.deepEqual(recovered.conversation?.turns[0]?.items.map((item) => item.text), ["Existing question.", "Existing answer."]);
+});
+
+test("event cursor advances only through delivered pages", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-bridge-cursor-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const store = new JobStore(root);
+  await store.initialize();
+  const preview = previewWorkPackage({ projectId: "omi", title: "Cursor", objective: "Verify event paging." });
+  const created = await store.create({
+    project: { id: "omi", name: "OMI", path: join(root, "project") },
+    workPackage: preview.workPackage,
+    previewDigest: preview.previewDigest,
+    idempotencyKey: "cursor-test-12345",
+  });
+  for (let index = 2; index <= 96; index += 1) {
+    await store.appendEvent(created.record.id, "test.event", `Event ${index}.`, { index });
+  }
+
+  const delivered: number[] = [];
+  let afterSeq = 0;
+  let hasMore = true;
+  while (hasMore) {
+    const page = await store.snapshot(created.record.id, afterSeq, 20);
+    delivered.push(...page.events.map((event) => event.seq));
+    assert.equal(page.serverLastEventSeq, 96);
+    assert.equal(page.nextEventSeq, page.events.at(-1)?.seq ?? afterSeq);
+    afterSeq = page.nextEventSeq;
+    hasMore = page.hasMore;
+  }
+
+  assert.deepEqual(delivered, Array.from({ length: 96 }, (_, index) => index + 1));
+  assert.equal(new Set(delivered).size, 96);
+  assert.equal(afterSeq, 96);
+});
+
+test("conversation polling returns bounded revision patches after initial hydration", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-bridge-conversation-patch-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const store = new JobStore(root);
+  await store.initialize();
+  const preview = previewWorkPackage({ projectId: "omi", title: "Projection", objective: "Stream the answer." });
+  const created = await store.create({
+    project: { id: "omi", name: "OMI", path: join(root, "project") },
+    workPackage: preview.workPackage,
+    previewDigest: preview.previewDigest,
+    idempotencyKey: "conversation-patch-12345",
+  });
+  const initial = await store.snapshot(created.record.id);
+  assert.ok(initial.conversation);
+  assert.equal(initial.serverConversationRevision, 0);
+
+  await store.applyConversationNotification(created.record.id, {
+    method: "item/agentMessage/delta",
+    params: { threadId: "thread-1", turnId: "turn-1", itemId: "agent-1", delta: "Hello" },
+  });
+  const delta = await store.snapshot(created.record.id, 0, 20, initial.nextConversationRevision);
+  assert.equal(delta.conversation, undefined);
+  assert.equal(delta.conversationChanges.length, 1);
+  assert.equal(delta.conversationChanges[0]?.turns[0]?.items[0]?.text, "Hello");
+  assert.equal(delta.nextConversationRevision, 1);
+  assert.equal(delta.serverConversationRevision, 1);
+  assert.equal(delta.conversationHasMore, false);
+});
+
+test("conversation listing pages through every saved allowlisted job", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-bridge-list-page-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const store = new JobStore(root);
+  await store.initialize();
+  for (let index = 1; index <= 5; index += 1) {
+    const preview = previewWorkPackage({ projectId: index % 2 ? "omi" : "mcp", title: `Job ${index}`, objective: `Task ${index}.` });
+    await store.create({
+      project: { id: preview.workPackage.projectId, name: preview.workPackage.projectId.toUpperCase(), path: join(root, preview.workPackage.projectId) },
+      workPackage: preview.workPackage,
+      previewDigest: preview.previewDigest,
+      idempotencyKey: `list-page-test-${index}`,
+    });
+  }
+
+  const first = store.listPage(2);
+  const second = store.listPage(2, first.nextCursor);
+  const third = store.listPage(2, second.nextCursor);
+  const ids = [...first.data, ...second.data, ...third.data].map((job) => job.id);
+  assert.equal(first.data.length, 2);
+  assert.equal(second.data.length, 2);
+  assert.equal(third.data.length, 1);
+  assert.equal(third.nextCursor, undefined);
+  assert.deepEqual(ids, store.list(100).map((job) => job.id));
+  assert.equal(store.listPage(100, undefined, "omi").data.length, 3);
+  assert.throws(() => store.listPage(20, "invalid cursor"), /Invalid conversation cursor/);
+});
+
 test("restart marks active jobs interrupted and expires live approvals", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "codex-bridge-recovery-"));
   context.after(() => rm(root, { recursive: true, force: true }));

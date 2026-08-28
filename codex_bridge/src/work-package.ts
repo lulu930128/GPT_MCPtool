@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { DataClassification, ExecutionMode, ReasoningEffort, TextArtifactSummary, WorkPackage } from "./types.js";
+import type { ApprovalReviewer, DataClassification, ExecutionMode, ReasoningEffort, TextArtifactSummary, WorkPackage } from "./types.js";
 
 export interface WorkPackageInput {
   projectId: string;
@@ -9,6 +9,7 @@ export interface WorkPackageInput {
   acceptanceCriteria?: string[];
   constraints?: string[];
   executionMode?: ExecutionMode;
+  approvalReviewer?: ApprovalReviewer;
   dataClassification?: DataClassification;
   model?: string;
   effort?: ReasoningEffort;
@@ -30,6 +31,7 @@ export function previewWorkPackage(input: WorkPackageInput): WorkPackagePreview 
     acceptanceCriteria: normalizeList(input.acceptanceCriteria, "acceptanceCriteria", 20, 2_000),
     constraints: normalizeList(input.constraints, "constraints", 20, 2_000),
     executionMode: input.executionMode ?? "plan",
+    approvalReviewer: input.approvalReviewer ?? "auto_review",
     dataClassification: input.dataClassification ?? "personal",
     model: normalizeOptional(input.model, "model", 120) || undefined,
     effort: input.effort,
@@ -37,6 +39,9 @@ export function previewWorkPackage(input: WorkPackageInput): WorkPackagePreview 
   };
   if (!(["plan", "workspace_write"] as string[]).includes(workPackage.executionMode)) {
     throw new Error(`Unsupported executionMode '${workPackage.executionMode}'.`);
+  }
+  if (!(["user", "auto_review"] as string[]).includes(workPackage.approvalReviewer)) {
+    throw new Error(`Unsupported approvalReviewer '${workPackage.approvalReviewer}'.`);
   }
   if (!(["personal", "public", "company_approved"] as string[]).includes(workPackage.dataClassification)) {
     throw new Error(`Unsupported dataClassification '${workPackage.dataClassification}'.`);
@@ -50,7 +55,7 @@ export function previewWorkPackage(input: WorkPackageInput): WorkPackagePreview 
     warnings.push("Confirm that sending this exact payload to the private home controller is permitted by company policy.");
   }
   if (workPackage.executionMode === "workspace_write") {
-    warnings.push("This mode may modify allowlisted project files after Codex approval requests are accepted.");
+    warnings.push("This mode may modify files in the selected exact project after Codex approval requests are accepted.");
   }
 
   return {
@@ -99,6 +104,7 @@ export function renderRequestMarkdown(
     "",
     `Job ID: \`${jobId}\``,
     `Execution mode: \`${workPackage.executionMode}\``,
+    `Approval reviewer: \`${workPackage.approvalReviewer}\``,
     `Data classification: \`${workPackage.dataClassification}\``,
     `Model: \`${workPackage.model || "Codex default"}\``,
     `Reasoning effort: \`${workPackage.effort || "model default"}\``,

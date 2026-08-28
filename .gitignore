@@ -1,6 +1,7 @@
 # Codex / local repository migration metadata
 /.agents/
 /.codex/
+/.codex-remote-attachments/
 /.repo-metadata-backup/
 **/.local/
 **/docs/agent-runs/

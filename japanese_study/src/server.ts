@@ -7,6 +7,7 @@ import {
   type ApplyItemRevisionInput,
   type ApplyPracticeResolutionInput,
   type CreateItemInput,
+  type DiagnosisCatalogInput,
   type ItemDraftInput,
   type ItemLifecycleInput,
   type LearningContextInput,
@@ -29,9 +30,9 @@ import {
 } from "./api-client.js";
 import type { JapaneseStudyMcpConfig } from "./config.js";
 
-export const JAPANESE_STUDY_MCP_VERSION = "1.1.0";
-export const JAPANESE_STUDY_CONTRACT_VERSION = "learning-content-v7.0";
-export const JAPANESE_STUDY_TOOL_COUNT = 33;
+export const JAPANESE_STUDY_MCP_VERSION = "1.2.1";
+export const JAPANESE_STUDY_CONTRACT_VERSION = "learning-content-v8.1";
+export const JAPANESE_STUDY_TOOL_COUNT = 34;
 
 const kindSchema = z.enum(["vocab", "grammar", "question"]);
 const labelSchema = z.enum(["known", "unknown", "uncertain", "suspended"]);
@@ -40,6 +41,32 @@ const targetKindSchema = z.enum(["vocab", "grammar"]);
 const targetRoleSchema = z.enum(["primary", "secondary", "context"]);
 const questionValiditySchema = z.enum(["valid", "void", "unscored"]);
 const answerResultSchema = z.enum(["correct", "partial", "wrong", "skipped"]);
+const targetAssessmentResultSchema = z.enum([
+  "correct",
+  "partial",
+  "wrong",
+  "skipped",
+  "unassessed",
+]);
+const createPracticeDiagnosisSchema = () =>
+  z.object({
+    code: z.string().min(1).max(100),
+    occurrenceKey: z.string().min(1).max(100).optional(),
+    severity: z.number().gt(0).max(10).optional(),
+    confidence: z.number().min(0).max(1).optional(),
+    componentKey: z.string().max(100).optional(),
+    sourceType: z.enum(["ai_grading", "deterministic", "manual"]).optional(),
+    metadata: z.record(z.unknown()).optional(),
+  }).strict();
+const practiceTargetAssessmentSchema = z
+  .object({
+    result: targetAssessmentResultSchema,
+    confidence: z.number().min(0).max(1).optional(),
+    affectsPlanning: z.boolean().optional(),
+    diagnoses: z.array(createPracticeDiagnosisSchema()).max(20).optional(),
+    grading: z.record(z.unknown()).optional(),
+  })
+  .strict();
 const itemDraftSchema = z
   .object({
     kind: z.enum(["vocab", "grammar"]),
@@ -133,6 +160,7 @@ const practiceTargetSchema = z
     weight: z.number().gt(0).max(1).optional(),
     affectsPlanning: z.boolean().optional(),
     metadata: z.record(z.unknown()).optional(),
+    assessment: practiceTargetAssessmentSchema.optional(),
   })
   .strict()
   .refine(
@@ -174,6 +202,7 @@ const practiceResponseSchema = z
     durationMs: z.number().int().min(0).max(86_400_000).optional(),
     learnerNote: z.string().max(2000).optional(),
     diagnoses: z.array(z.string().min(1).max(100)).max(20).optional(),
+    diagnosisEvents: z.array(createPracticeDiagnosisSchema()).max(20).optional(),
     grading: z.record(z.unknown()).optional(),
     gradingOverrideReason: z
       .string()
@@ -197,10 +226,34 @@ const practiceQuestionSchema = z
     response: practiceResponseSchema,
   })
   .strict();
-const practiceSubmissionSchema = z
+
+const levelScopeSchema = z
+  .object({
+    practice_profile: z.string().nullable(),
+    target_levels: z.array(z.enum(["N1", "N2", "N3", "N4", "N5"])).nullable(),
+    source: z.enum(["explicit", "profile_default", "unrestricted"]),
+  })
+  .strict();
+
+const diagnosisCatalogItemSchema = z
+  .object({
+    code: z.string(),
+    skill_key: z.string().nullable(),
+    skill_title: z.string().nullable(),
+    polarity: z.enum(["weakness", "strength", "observation", "blocker"]),
+    default_severity: z.number().gt(0).max(10),
+    affects_planning: z.boolean(),
+    title: z.string(),
+    description_tc: z.string(),
+    active: z.boolean(),
+    definition_version: z.string(),
+  })
+  .strict();
+const practiceSubmissionObjectSchema = z
   .object({
     submissionId: z.string().min(8).max(128),
     schemaVersion: z.literal(1).optional(),
+    practiceContractVersion: z.union([z.literal(1), z.literal(2)]).optional(),
     session: z
       .object({
         sessionId: z.string().min(8).max(128),
@@ -220,6 +273,40 @@ const practiceSubmissionSchema = z
     questions: z.array(practiceQuestionSchema).min(1).max(100),
   })
   .strict();
+const practiceSubmissionSchema = practiceSubmissionObjectSchema.superRefine(
+  (value, context) => {
+    const contractVersion = value.practiceContractVersion ?? 1;
+    for (const [questionIndex, question] of value.questions.entries()) {
+      if (contractVersion === 2) {
+        if ((question.response.diagnoses ?? []).length > 0) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["questions", questionIndex, "response", "diagnoses"],
+            message: "Contract v2 requires diagnosisEvents instead of legacy diagnoses.",
+          });
+        }
+        for (const [targetIndex, target] of (question.targets ?? []).entries()) {
+          if (!target.assessment) {
+            context.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["questions", questionIndex, "targets", targetIndex, "assessment"],
+              message: "Contract v2 requires an assessment for every target.",
+            });
+          }
+        }
+      } else if (
+        (question.response.diagnosisEvents ?? []).length > 0 ||
+        (question.targets ?? []).some((target) => target.assessment)
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["practiceContractVersion"],
+          message: "Structured diagnoses and target assessments require contract v2.",
+        });
+      }
+    }
+  },
+);
 const learnerPolicySchema = z
   .object({
     schemaVersion: z.literal(1),
@@ -346,11 +433,12 @@ export function createJapaneseStudyMcpServer(config: JapaneseStudyMcpConfig): Mc
     {
       title: "取得個人化出題脈絡",
       description:
-        "Use this before generating personalized Japanese practice. It returns bounded policy, recommended targets, clearly separated canonical/proposed meanings, verified components, active-revision diagnoses, and recent practice; it never generates questions or returns the full catalog.",
+        "Use this before generating personalized Japanese practice. It returns bounded item targets, cross-item skill weaknesses, strengths, observations, active-revision diagnoses, and recent practice; it never generates questions or returns the full catalog.",
       annotations: readOnlyAnnotations,
       inputSchema: {
         practiceType: z.string().min(1).max(50).optional(),
         requestedLevel: z.string().min(1).max(50).optional(),
+        targetLevels: z.array(z.enum(["N1", "N2", "N3", "N4", "N5"])).min(1).max(5).optional(),
         kind: z.enum(["vocab", "grammar"]).optional(),
         targetLimit: z.number().int().min(1).max(50).optional(),
         recentSessionLimit: z.number().int().min(1).max(20).optional(),
@@ -363,8 +451,12 @@ export function createJapaneseStudyMcpServer(config: JapaneseStudyMcpConfig): Mc
         policy_version: z.number().int().nonnegative().optional(),
         policy_persisted: z.boolean().optional(),
         recommended_targets: z.array(z.record(z.unknown())).optional(),
+        active_weaknesses: z.array(z.record(z.unknown())).optional(),
+        recent_strengths: z.array(z.record(z.unknown())).optional(),
+        recent_observations: z.array(z.record(z.unknown())).optional(),
         recent_diagnoses: z.array(z.record(z.unknown())).optional(),
         recent_practice: z.array(z.record(z.unknown())).optional(),
+        level_scope: levelScopeSchema.optional(),
         generation_guidance: z.record(z.unknown()).optional(),
         limits: z.record(z.unknown()).optional(),
       },
@@ -373,6 +465,36 @@ export function createJapaneseStudyMcpServer(config: JapaneseStudyMcpConfig): Mc
       safeResult(
         () => client.learningContext(args as LearningContextInput),
         "已取得 bounded 個人化日文學習脈絡；尚未生成或寫入題目。",
+      ),
+  );
+
+  server.registerTool(
+    "study_get_diagnosis_catalog",
+    {
+      title: "查詢診斷代碼目錄",
+      description:
+        "Use this bounded read-only tool when canonical diagnosis codes would reduce grading taxonomy drift. The Hub owns code-to-skill, polarity, and planning semantics; this tool cannot mutate definitions and is not required before every practice.",
+      annotations: readOnlyAnnotations,
+      inputSchema: {
+        query: z.string().max(100).optional(),
+        skillKey: z.string().max(100).optional(),
+        polarity: z.enum(["weakness", "strength", "observation", "blocker"]).optional(),
+        active: z.boolean().optional(),
+        limit: z.number().int().min(1).max(100).optional(),
+      },
+      outputSchema: {
+        ...baseOutputSchema,
+        contract_version: z.string().optional(),
+        count: z.number().int().nonnegative().optional(),
+        limit: z.number().int().min(1).max(100).optional(),
+        filters: z.record(z.unknown()).optional(),
+        items: z.array(diagnosisCatalogItemSchema).optional(),
+      },
+    },
+    async (args) =>
+      safeResult(
+        () => client.diagnosisCatalog(args as DiagnosisCatalogInput),
+        "已取得 bounded canonical 診斷代碼目錄；未修改 taxonomy 或學習資料。",
       ),
   );
 
@@ -862,6 +984,12 @@ export function createJapaneseStudyMcpServer(config: JapaneseStudyMcpConfig): Mc
       annotations: readOnlyAnnotations,
       inputSchema: {
         kind: kindSchema.optional().describe("Optional item type filter."),
+        targetLevels: z
+          .array(z.enum(["N1", "N2", "N3", "N4", "N5"]))
+          .min(1)
+          .max(5)
+          .optional()
+          .describe("Explicit catalog JLPT levels; never pass a practice profile here."),
         limit: z.number().int().min(1).max(50).optional().describe("Maximum items. Defaults to 20."),
       },
       outputSchema: {
@@ -938,7 +1066,7 @@ export function createJapaneseStudyMcpServer(config: JapaneseStudyMcpConfig): Mc
       description:
         "Use this before recording a completed multi-question practice session. It validates targets, scoring, and unresolved references without writing progress.",
       annotations: readOnlyAnnotations,
-      inputSchema: practiceSubmissionSchema.shape,
+      inputSchema: practiceSubmissionObjectSchema.shape,
       outputSchema: {
         ...baseOutputSchema,
         preview: z.record(z.unknown()).optional(),
@@ -946,7 +1074,7 @@ export function createJapaneseStudyMcpServer(config: JapaneseStudyMcpConfig): Mc
     },
     async (args) =>
       safeResult(
-        () => client.previewPractice(args as PracticeSubmissionInput),
+        () => client.previewPractice(parsePracticeSubmission(args)),
         "已預覽練習寫入；尚未修改學習資料。",
       ),
   );
@@ -958,7 +1086,7 @@ export function createJapaneseStudyMcpServer(config: JapaneseStudyMcpConfig): Mc
       description:
         "Use this only for a new completed multi-question practice session after the user or persisted learner policy authorizes saving. Preview first, preserve void or partial results, and reuse the same submissionId on retry. For a known correction, use study_record_practice_revision instead.",
       annotations: retrySafeWriteAnnotations,
-      inputSchema: practiceSubmissionSchema.shape,
+      inputSchema: practiceSubmissionObjectSchema.shape,
       outputSchema: {
         ...baseOutputSchema,
         duplicate: z.boolean().optional(),
@@ -973,7 +1101,7 @@ export function createJapaneseStudyMcpServer(config: JapaneseStudyMcpConfig): Mc
     },
     async (args) =>
       safeResult(
-        () => client.recordPractice(args as PracticeSubmissionInput),
+        () => client.recordPractice(parsePracticeSubmission(args)),
         "已寫入完整練習紀錄；相同 submissionId 的相同內容重試不會重複計入。",
       ),
   );
@@ -1198,6 +1326,24 @@ export function createJapaneseStudyMcpServer(config: JapaneseStudyMcpConfig): Mc
   );
 
   return server;
+}
+
+function parsePracticeSubmission(input: unknown): PracticeSubmissionInput {
+  const parsed = practiceSubmissionSchema.safeParse(input);
+  if (parsed.success) return parsed.data;
+  throw new HubApiError("Invalid practice submission contract.", 400, {
+    error: {
+      code: "INVALID_PRACTICE_CONTRACT",
+      message: "The practice submission does not satisfy the selected contract version.",
+      retryable: false,
+      details: {
+        issues: parsed.error.issues.map((issue) => ({
+          path: issue.path,
+          message: issue.message,
+        })),
+      },
+    },
+  });
 }
 
 async function safeResult(read: () => Promise<unknown>, message: string) {

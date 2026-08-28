@@ -1,6 +1,6 @@
 {
   "name": "japanese-study-mcp",
-  "version": "1.1.0",
+  "version": "1.2.1",
   "description": "Private MCP adapter for the Japanese Study Hub.",
   "type": "module",
   "private": true,

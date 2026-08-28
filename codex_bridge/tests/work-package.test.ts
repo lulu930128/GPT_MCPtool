@@ -21,7 +21,17 @@ test("preview normalizes work packages and produces a stable digest", () => {
 
   assert.equal(first.previewDigest, second.previewDigest);
   assert.equal(first.workPackage.title, "Check breadth");
+  assert.equal(first.workPackage.approvalReviewer, "auto_review");
   assert.equal(first.warnings.length, 2);
+});
+
+test("preview rejects an unsupported approval reviewer", () => {
+  assert.throws(() => previewWorkPackage({
+    projectId: "omi",
+    title: "Reviewer",
+    objective: "Validate reviewer selection.",
+    approvalReviewer: "always_allow" as "user",
+  }), /Unsupported approvalReviewer/);
 });
 
 test("redaction hides secret-bearing keys and values", () => {

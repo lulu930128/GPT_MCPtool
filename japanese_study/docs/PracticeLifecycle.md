@@ -38,6 +38,16 @@ must be shown to the user.
 Do not retry by generating a new id until the existing submission has been queried; otherwise the
 same practice may be counted twice.
 
+### Practice contract v2
+
+Use `practiceContractVersion=2` for new structured grading. Question-wide signals belong in
+`response.diagnosisEvents`; every target carries its own `assessment.result`, diagnoses, confidence,
+and planning flag. `unassessed` is explicit and never creates item evidence. The Hub owns diagnosis
+code mapping and weakness scoring; the adapter only maps field names.
+
+Contract v1 remains compatible. Its overall result may act as a fallback only for one resolved
+primary target. A legacy multi-target question is preserved without blindly duplicating evidence.
+
 ### Score provenance
 
 `answerResult` and `awardedPoints` normally follow the Hub score policy. When they differ, the
@@ -63,6 +73,10 @@ the session changes, preview again. The adapter must not ignore a stale fingerpr
 
 An override can fill an unresolved target; it cannot replace an already resolved target, perform a
 catalog search during apply, or guess from the highest-ranked candidate.
+
+Late resolution creates evidence only from a stored target assessment or the narrow legacy outcome
+fallback. It never duplicates diagnosis events or promotes a question-scoped diagnosis into target
+scope.
 
 ## Correct an immutable session
 

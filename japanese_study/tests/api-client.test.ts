@@ -213,11 +213,19 @@ test("learner policy, learning context, and atomic revision map bounded contract
     await client.setLearnerPolicy({ operationId: "policy-operation-0001", policy });
     await client.learningContext({
       practiceType: "grammar",
-      requestedLevel: "N3",
+      requestedLevel: "N4_N3_BRIDGE",
+      targetLevels: ["N4", "N3"],
       kind: "grammar",
       targetLimit: 12,
       recentSessionLimit: 3,
       diagnosisLimit: 7,
+    });
+    await client.diagnosisCatalog({
+      query: "particle",
+      skillKey: "particle.ga_wo_selection",
+      polarity: "weakness",
+      active: true,
+      limit: 25,
     });
     await client.recordPracticeRevision({
       originalSessionId: "session-original-0001",
@@ -234,7 +242,11 @@ test("learner policy, learning context, and atomic revision map bounded contract
         ["PUT", "/api/v1/learner-policy"],
         [
           "GET",
-          "/api/v1/learning-context?practice_type=grammar&requested_level=N3&kind=grammar&target_limit=12&recent_session_limit=3&diagnosis_limit=7",
+          "/api/v1/learning-context?practice_type=grammar&requested_level=N4_N3_BRIDGE&target_levels=N4&target_levels=N3&kind=grammar&target_limit=12&recent_session_limit=3&diagnosis_limit=7",
+        ],
+        [
+          "GET",
+          "/api/v1/diagnosis-definitions?query=particle&skill_key=particle.ga_wo_selection&polarity=weakness&active=true&limit=25",
         ],
         ["POST", "/api/v1/practice/sessions/session-original-0001/revisions"],
       ],
@@ -262,9 +274,9 @@ test("learner policy, learning context, and atomic revision map bounded contract
       },
       actor: "chatgpt_mcp",
     });
-    assert.equal(requests[3].body?.revision_id, "practice-revision-0001");
+    assert.equal(requests[4].body?.revision_id, "practice-revision-0001");
     assert.equal(
-      (requests[3].body?.submission as Record<string, any>).session.session_id,
+      (requests[4].body?.submission as Record<string, any>).session.session_id,
       "session-revision-0001",
     );
   } finally {
@@ -298,6 +310,7 @@ test("practice payload maps only contract fields and preserves snapshots", async
   try {
     await client.previewPractice({
       submissionId: "submission-0001",
+      practiceContractVersion: 2,
       session: {
         sessionId: "session-0001",
         title: "N3 文法練習",
@@ -319,6 +332,11 @@ test("practice payload maps only contract fields and preserves snapshots", async
               targetKind: "grammar",
               pattern: "にしては",
               senseKey: "unexpected_degree",
+              assessment: {
+                result: "wrong",
+                confidence: 0.8,
+                diagnoses: [{ code: "dictionary_form_before_koto" }],
+              },
             },
           ],
           response: {
@@ -327,6 +345,7 @@ test("practice payload maps only contract fields and preserves snapshots", async
             awardedPoints: 1,
             submittedAt: "2026-07-27T10:01:00+08:00",
             gradingOverrideReason: "Manual rubric exception.",
+            diagnosisEvents: [{ code: "tense_nuance", sourceType: "deterministic" }],
           },
         },
       ],
@@ -335,6 +354,7 @@ test("practice payload maps only contract fields and preserves snapshots", async
     assert.equal(receivedUrl, "/api/v1/practice/submissions/preview");
     const parsed = JSON.parse(body);
     assert.equal(parsed.submission_id, "submission-0001");
+    assert.equal(parsed.practice_contract_version, 2);
     assert.equal(parsed.session.session_id, "session-0001");
     assert.equal(parsed.session.practice_type, "multiple_choice");
     assert.deepEqual(parsed.questions[0].snapshot, {
@@ -348,6 +368,16 @@ test("practice payload maps only contract fields and preserves snapshots", async
     );
     assert.equal(parsed.questions[0].targets[0].pattern, "にしては");
     assert.equal(parsed.questions[0].targets[0].sense_key, "unexpected_degree");
+    assert.equal(parsed.questions[0].targets[0].assessment.result, "wrong");
+    assert.deepEqual(parsed.questions[0].targets[0].assessment.diagnoses, [
+      {
+        code: "dictionary_form_before_koto",
+        component_key: "",
+        source_type: "ai_grading",
+        metadata: {},
+      },
+    ]);
+    assert.equal(parsed.questions[0].response.diagnosis_events[0].code, "tense_nuance");
   } finally {
     await new Promise<void>((resolve, reject) =>
       server.close((error) => (error ? reject(error) : resolve())),

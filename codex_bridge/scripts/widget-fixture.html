@@ -20,6 +20,7 @@
           title: "修正市場廣度異常值",
           objective: "檢查今天早上的負值是否正常。",
           executionMode: "plan",
+          approvalReviewer: "auto_review",
           dataClassification: "personal",
           model: "gpt-5.6-sol",
           effort: "high",
@@ -39,6 +40,7 @@
               inputArtifacts: [{ id: "38936c39-710e-4c58-8acb-5309f03e996f", fileName: "engineering_spec.txt", mimeType: "text/plain", chars: 1280, bytes: 1660, sha256: "1".repeat(64) }],
               at: now,
               executionMode: "plan",
+              approvalReviewer: "auto_review",
               dataClassification: "personal",
               model: "gpt-5.6-sol",
               effort: "high"
@@ -58,13 +60,104 @@
               content: "可以，先準備最小修改。",
               at: now,
               executionMode: "plan",
+              approvalReviewer: "auto_review",
               dataClassification: "personal",
               model: "gpt-5.6-sol",
               effort: "high"
             }
           ],
+          conversation: {
+            schemaVersion: 1,
+            threadId: "thread-fixture",
+            status: "active",
+            revision: 8,
+            updatedAt: now,
+            turns: [{
+              turnId: "turn-fixture",
+              status: "inProgress",
+              startedAt: now,
+              items: [
+                {
+                  id: "user-fixture",
+                  turnId: "turn-fixture",
+                  type: "userMessage",
+                  status: "completed",
+                  isStreaming: false,
+                  text: "幫我檢查今天早上「-」值是否正常，先找出來源與影響範圍。",
+                  context: "provider_router.py 顯示來源切換；請一併檢查 market_breadth.py。",
+                  inputArtifacts: [{ id: "38936c39-710e-4c58-8acb-5309f03e996f", fileName: "engineering_spec.txt", mimeType: "text/plain", chars: 1280, bytes: 1660, sha256: "1".repeat(64) }],
+                  createdAt: now,
+                  updatedAt: now
+                },
+                {
+                  id: "agent-fixture",
+                  turnId: "turn-fixture",
+                  type: "agentMessage",
+                  status: "completed",
+                  isStreaming: false,
+                  text: "我先檢查 provider 路由與 session 語意，再確認是否需要修改。",
+                  createdAt: now,
+                  updatedAt: now
+                },
+                {
+                  id: "command-fixture",
+                  turnId: "turn-fixture",
+                  type: "commandExecution",
+                  status: "inProgress",
+                  isStreaming: true,
+                  command: "npm test",
+                  cwd: "C:\\project\\Open Market Intelligence",
+                  output: "等待核准後執行",
+                  approvalId: "78936c39-710e-4c58-8acb-5309f03e996f",
+                  approvalState: "pending",
+                  createdAt: now,
+                  updatedAt: now
+                },
+                {
+                  id: "file-fixture",
+                  turnId: "turn-fixture",
+                  type: "fileChange",
+                  status: "completed",
+                  isStreaming: false,
+                  changes: [
+                    {
+                      path: "src/services/market_breadth.py",
+                      kind: "modified",
+                      diffPreview: "+ classify preopen missing values before presentation"
+                    },
+                    {
+                      path: "tests/test_market_breadth.py",
+                      kind: "modified",
+                      diffPreview: "+ cover preopen and regular session semantics"
+                    }
+                  ],
+                  createdAt: now,
+                  updatedAt: now
+                },
+                {
+                  id: "mcp-fixture",
+                  turnId: "turn-fixture",
+                  type: "mcpToolCall",
+                  status: "completed",
+                  isStreaming: false,
+                  server: "project-reading",
+                  tool: "project_map",
+                  progress: "已確認資料來源與測試邊界",
+                  durationMs: 842,
+                  createdAt: now,
+                  updatedAt: now
+                }
+              ]
+            }]
+          },
+          conversationChanges: [],
+          nextConversationRevision: 8,
+          serverConversationRevision: 8,
+          conversationHasMore: false,
           events: [],
           nextEventSeq: 12,
+          serverLastEventSeq: 12,
+          hasMore: false,
           approvals: [{
             id: "78936c39-710e-4c58-8acb-5309f03e996f",
             kind: "command",
@@ -130,6 +223,7 @@
               updatedAt: now,
               pendingApprovalCount: 0,
               executionMode: "plan",
+              approvalReviewer: "auto_review",
               dataClassification: "personal"
             },
             {
@@ -143,11 +237,115 @@
               updatedAt: now,
               pendingApprovalCount: 0,
               executionMode: "workspace_write",
+              approvalReviewer: "user",
               dataClassification: "personal"
             }
           ],
+          conversationNextCursor: "fixture-page-2",
           stateVersion: 12
         };
+
+        const olderConversation = {
+          id: "38936c39-710e-4c58-8acb-5309f03e996f",
+          projectId: "mcp",
+          projectName: "GPT MCP Tool",
+          title: "追查舊版 Bridge 重連紀錄",
+          status: "completed",
+          stateVersion: 3,
+          createdAt: "2026-08-20T08:00:00.000Z",
+          updatedAt: "2026-08-20T08:15:00.000Z",
+          pendingApprovalCount: 0,
+          executionMode: "plan",
+          approvalReviewer: "auto_review",
+          dataClassification: "personal"
+        };
+
+        const localThreads = [
+          { threadId: "thread-fixture", projectId: "omi", projectName: "Open Market Intelligence", title: "修正市場廣度異常值", preview: "Bridge duplicate", historyOnly: false },
+          { threadId: "44936c39-710e-4c58-8acb-5309f03e996f", projectId: "omi", projectName: "Open Market Intelligence", title: "重構台股資料整合架構", preview: "Architecture", historyOnly: false },
+          { threadId: "45936c39-710e-4c58-8acb-5309f03e996f", projectId: "omi", projectName: "Open Market Intelligence", title: "盤點美股架構地圖", preview: "Map", historyOnly: false },
+          { threadId: "46936c39-710e-4c58-8acb-5309f03e996f", projectId: "local:atlasfixture0001", projectName: "Open Intel Atlas", title: "確認最新計畫可行性", preview: "Review the latest plan", historyOnly: false },
+          { threadId: "47936c39-710e-4c58-8acb-5309f03e996f", projectId: "local:atlasfixture0001", projectName: "Open Intel Atlas", title: "規劃 OMI 後端清洗架構", preview: "Plan cleanup", historyOnly: false },
+          { threadId: "48936c39-710e-4c58-8acb-5309f03e996f", projectId: "local:kurofixture00001", projectName: "kuro", title: "檢查 Live2D 桌寵互動", preview: "Inspect interaction", historyOnly: false },
+          { threadId: "49936c39-710e-4c58-8acb-5309f03e996f", projectId: "local:kurofixture00001", projectName: "kuro", title: "整理 README 並升級大版本", preview: "Update README", historyOnly: false },
+          { threadId: "50936c39-710e-4c58-8acb-5309f03e996f", projectId: "local:japanfixture0001", projectName: "日文", title: "確認日文學習新架構", preview: "Learning design", historyOnly: false },
+          { threadId: "51936c39-710e-4c58-8acb-5309f03e996f", projectId: "local:imagefixture0001", projectName: "Image recognition", title: "檢查 OCR 管線", preview: "OCR pipeline", historyOnly: false },
+          { threadId: "52936c39-710e-4c58-8acb-5309f03e996f", projectId: "local:protectedroot001", projectName: "C:\\", title: "磁碟根目錄歷史", preview: "Protected root", historyOnly: true }
+        ].map((thread, index) => Object.assign({
+          source: "local",
+          createdAt: new Date(Date.now() - index * 3600000).toISOString(),
+          updatedAt: new Date(Date.now() - index * 3600000).toISOString(),
+          threadStatus: "notLoaded",
+          isPinned: false
+        }, thread));
+
+        const localThreadSnapshot = {
+          id: "local:46936c39-710e-4c58-8acb-5309f03e996f",
+          source: "local",
+          readOnly: false,
+          localThreadId: "46936c39-710e-4c58-8acb-5309f03e996f",
+          threadId: "46936c39-710e-4c58-8acb-5309f03e996f",
+          projectId: "local:atlasfixture0001",
+          projectName: "Open Intel Atlas",
+          title: "確認最新計畫可行性",
+          objective: "Review the latest plan",
+          executionMode: "workspace_write",
+          approvalReviewer: "user",
+          dataClassification: "personal",
+          status: "completed",
+          threadStatus: "notLoaded",
+          stateVersion: 1,
+          createdAt: now,
+          updatedAt: now,
+          pendingApprovalCount: 0,
+          messages: [],
+          conversation: {
+            schemaVersion: 1,
+            threadId: "46936c39-710e-4c58-8acb-5309f03e996f",
+            status: "notLoaded",
+            revision: 2,
+            updatedAt: now,
+            turns: [{
+              turnId: "local-turn-1",
+              status: "completed",
+              items: [
+                { id: "local-user-1", turnId: "local-turn-1", type: "userMessage", status: "completed", isStreaming: false, text: "請確認這份計畫是否可行。", createdAt: now, updatedAt: now },
+                { id: "local-agent-1", turnId: "local-turn-1", type: "agentMessage", status: "completed", isStreaming: false, text: "已完成架構邊界與風險檢查，下一步是補齊驗收條件。", createdAt: now, updatedAt: now }
+              ]
+            }]
+          },
+          conversationChanges: [], nextConversationRevision: 2, serverConversationRevision: 2, conversationHasMore: false,
+          events: [], nextEventSeq: 0, serverLastEventSeq: 0, hasMore: false, approvals: [], hasDiff: false, hasResult: false, inputArtifacts: [], artifacts: []
+        };
+        const protectedThreadSnapshot = Object.assign({}, localThreadSnapshot, {
+          id: "local:52936c39-710e-4c58-8acb-5309f03e996f",
+          readOnly: true,
+          localThreadId: "52936c39-710e-4c58-8acb-5309f03e996f",
+          threadId: "52936c39-710e-4c58-8acb-5309f03e996f",
+          projectId: "local:protectedroot001",
+          projectName: "C:\\",
+          title: "磁碟根目錄歷史",
+          objective: "Protected root",
+          executionMode: "plan",
+          conversation: {
+            schemaVersion: 1,
+            threadId: "52936c39-710e-4c58-8acb-5309f03e996f",
+            status: "notLoaded",
+            revision: 1,
+            updatedAt: now,
+            turns: [],
+          },
+          nextConversationRevision: 1,
+          serverConversationRevision: 1,
+        });
+
+        let displayMode = "inline";
+        const hostContext = () => ({
+          displayMode: displayMode,
+          containerDimensions: { width: window.innerWidth, height: window.innerHeight },
+          safeAreaInsets: { top: 0, right: 0, bottom: 0, left: 0 },
+          platform: "web",
+        });
 
         window.addEventListener("message", (event) => {
           if (!event.data || event.data.jsonrpc !== "2.0" || !event.data.method || event.source !== document.querySelector("#widget").contentWindow) return;
@@ -156,12 +354,49 @@
           let structuredContent = {};
           let meta = undefined;
           if (request.method === "ui/initialize") {
-            event.source.postMessage({ jsonrpc: "2.0", id: request.id, result: { hostCapabilities: { downloadFile: {} } } }, "*");
+            event.source.postMessage({
+              jsonrpc: "2.0",
+              id: request.id,
+              result: {
+                protocolVersion: "2026-01-26",
+                hostInfo: { name: "codex-bridge-fixture", version: "1.1.0" },
+                hostCapabilities: { downloadFile: {} },
+                hostContext: hostContext(),
+              },
+            }, "*");
+            return;
+          } else if (request.method === "ui/request-display-mode") {
+            displayMode = request.params && request.params.mode === "fullscreen" ? "fullscreen" : "inline";
+            const context = hostContext();
+            event.source.postMessage({ jsonrpc: "2.0", id: request.id, result: { mode: displayMode } }, "*");
+            event.source.postMessage({ jsonrpc: "2.0", method: "ui/notifications/host-context-changed", params: context }, "*");
             return;
           } else if (request.method === "tools/call") {
             const name = request.params && request.params.name;
             if (name === "codex_bridge_status") structuredContent = Object.assign({ job: job }, status);
             else if (name === "codex_job_get") structuredContent = job;
+            else if (name === "codex_conversation_list") structuredContent = { conversations: [olderConversation], nextCursor: null };
+            else if (name === "codex_local_thread_list") structuredContent = { localThreads: localThreads, nextCursor: null, complete: true };
+            else if (name === "codex_local_thread_read") structuredContent = {
+              localThread: request.params.arguments.threadId === protectedThreadSnapshot.localThreadId
+                ? protectedThreadSnapshot
+                : localThreadSnapshot,
+            };
+            else if (name === "codex_conversation_send" && request.params.arguments.localThreadId) {
+              structuredContent = {
+                accepted: true,
+                delivery: "turn",
+                job: Object.assign({}, job, {
+                  id: "62936c39-710e-4c58-8acb-5309f03e996f",
+                  projectId: localThreadSnapshot.projectId,
+                  projectName: localThreadSnapshot.projectName,
+                  title: localThreadSnapshot.title,
+                  threadId: localThreadSnapshot.threadId,
+                  status: "running",
+                  conversation: localThreadSnapshot.conversation,
+                }),
+              };
+            }
             else if (name === "codex_artifact_read_chunk") {
               const artifact = request.params.arguments.artifact;
               const sample = artifact === "response" ? "Codex 完成了工程稿審核，並提出三項可執行修改。" : artifact === "diff" ? "diff --git a/market_breadth.py b/market_breadth.py\n+ # fixture" : "# 修正市場廣度異常值";
@@ -186,6 +421,15 @@
             result: { content: [], structuredContent: structuredContent, _meta: meta }
           }, "*");
         });
+
+        window.addEventListener("resize", () => {
+          if (displayMode !== "fullscreen") return;
+          document.querySelector("#widget").contentWindow.postMessage({
+            jsonrpc: "2.0",
+            method: "ui/notifications/host-context-changed",
+            params: hostContext(),
+          }, "*");
+        }, { passive: true });
       })();
     </script>
   </body>

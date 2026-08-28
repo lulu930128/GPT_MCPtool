@@ -16,34 +16,56 @@ Codex Handoff Bridge 是私人、allowlist-first 的 MCP Apps 對話工作區。
   exact approval 與 restart expiry。
 - [Job Recovery](docs/JobRecovery.md)：持久化狀態、interrupted job、artifact、重啟與保留原則。
 - [Architecture v1](docs/design/architecture-v1.md)：第一版產品決策、state model 與 non-goals。
+- [Conversation Model](docs/ConversationModel.md)：App Server history、live item 投影、cursor、reconnect 與 prompt-neutral input 契約。
 
 ## 第一版能力
 
 - MCP Apps 內嵌對話工作區，使用標準 `ui/initialize`、`tools/call` 與 tool-result bridge。
-- 左側依 allowlisted project 分組對話，右側顯示使用者與 Codex 的持久化聊天紀錄。
+- Fullscreen 使用 Project Ledger 三區工作區：左側依 Codex App Server 的本機歷史分組所有專案與對話，中間保留 user／assistant
+  與 approval 敘事，右側集中 plan、command、file change、MCP tool、diff、error 與成品。Opaque cursor 仍可
+  分頁載入所有 Bridge conversations。Codex 已保存且通過路徑安全檢查的實際專案可新增、續接與選擇執行模式；
+  磁碟根目錄、使用者家目錄、AppData、`.codex`、Downloads 與系統目錄只提供受保護的唯讀歷史。
+- Inline 使用 host 提供的完整對話寬度，只顯示目前對話、最近訊息、待核准與最新工作狀態；專案清單改為
+  按需覆蓋層，不會持續擠壓 ChatGPT 畫面。Raw reasoning chain-of-thought 不會投影或保存。
+- 首次開啟既有 thread 時以 `thread/read(includeTurns=true)` hydrate；之後只接收 durable conversation
+  revision patch。Active job 以 900 ms poll 更新，若有分頁待補則以 25 ms catch-up，完成後再回到一般節奏。
+- Assistant／plan delta 會更新同一個 item；`item/completed` 是 authoritative final state，不會另外產生
+  第二個回覆 bubble。中斷或失敗仍保留已收到的 partial output。
 - 同一個 job 可透過 `thread/resume` 與 `turn/start` 繼續既有 Codex thread；執行中的補充訊息使用
   `turn/steer`。
+- Initial turn、follow-up 與 steer 只由使用者明確輸入和純資料標記區段組成。Bridge 仍產生
+  `request.md` 供稽核，但不再把稽核模板或行為提示送進模型輸入。
 - 模型與推理強度由 App Server `model/list` 動態提供，並與執行模式一起放在輸入框下方。
 - `plan` 唯讀與 `workspace_write` 兩種執行模式。
+- 權限 reviewer 可依對話選擇 `auto_review` 或 `user`；預設自動審核，但 `approvalPolicy`、sandbox、
+  network 與目前選定的 exact workspace 不會因此放寬。
+- Widget 可透過 MCP Apps 標準 display-mode request 在 inline 與 fullscreen 間切換；inline 寬度跟隨
+  host 對話容器，高度以寬度的 1.12 倍等比例計算並限制在 640 至 960 px，只有 host 確認 fullscreen 後才顯示
+  Project Ledger 三區工作區。低於 1080 px 時工作紀錄改為抽屜，低於 760 px 時專案清單也改為覆蓋層。
+  `night-shift` 暗色主題以黑藍、石墨與低亮度層級銜接 ChatGPT 暗色畫布；Inline 高度不使用 viewport 高度，
+  避免 iframe 自動尺寸回授。
 - 輸入框可加入最多 8 份命名純文字文件；Widget 會分段傳送，Bridge 驗證每段與整體 SHA-256、
   UTF-8 大小、MIME、專案及資料分類後，才將內容交給 Codex。
 - Bridge 會把驗證後文字複製到 ignored 的 `.local/codex-inbox/<job_id>/`，用 server-generated path
   唯讀交給 Codex，並在 turn 保留相同內容的 verified inline fallback。
-- Codex 不會取得 staging 或 job 目錄權限；runtime workspace roots 仍只有 allowlisted project，
+- Codex 不會取得 staging 或 job 目錄權限；runtime workspace roots 只有目前明確選定且再次驗證的 exact project，
   `codex-inbox` 也不會成為可寫 workspace root。
-- request、final response 與 aggregated diff 會顯示為聊天內成品卡。Widget 按需分段讀取，內容放在
+- request、final response 與 aggregated diff 會顯示在 fullscreen 工作紀錄區。Widget 按需分段讀取，內容放在
   app-only tool result `_meta`，不會因預覽而自動灌入 ChatGPT transcript。
 - 成品可複製；host 支援 MCP Apps `ui/download-file` 時可下載，否則自動改為複製。也可明確送出
   `ui/message`，請 ChatGPT 透過公開讀取工具審核指定成品。
-- 只接受 `.local/projects.json` 內的專案 id，不接受 caller 指定任意路徑。
+- 公開 MCP caller 只接受 `.local/projects.json` 內的專案 id，不接受任意路徑。Widget 可使用 App Server
+  thread metadata 發現的 exact project；client 只持有 opaque project id，不能自行提供或改寫 cwd。
 - 每個 job 使用 UUID 目錄，保存 `request.md`、`response.md`、`manifest.json`、`messages.jsonl`、
-  `events.jsonl`、`inbox/`、`diff.patch` 與 `result.json`。
+  `events.jsonl`、`conversation.json`、`conversation-events.jsonl`、`inbox/`、`diff.patch` 與 `result.json`。
 - preview digest 與 idempotency key 防止表單變更後誤送或重複建立。
-- Codex App Server 提出的 command 與 file change request 逐次核准；不提供 session-wide accept。
+- 人工模式下，Codex App Server 提出的 command 與 file change request 逐次核准；自動模式改由
+  Codex 原生 reviewer 在相同 sandbox 邊界判斷，不提供 session-wide accept 或 blanket allow。
 - 重啟後不自動重送未完成 turn，舊核准會標成 expired。
 - Windows tray、Startup shortcut 與 Secure MCP Tunnel lifecycle。
 
-第一版不接受 caller 指定任意本機路徑，也不提供二進位附件、專案檔案瀏覽或雙向目錄同步；只有經過
+第一版不接受 caller 指定任意本機路徑，也不提供二進位附件、專案檔案瀏覽或雙向目錄同步。App Server
+發現的 project 必須是存在的實際目錄並通過敏感路徑 deny rules；只有經過
 Widget 驗證的純文字文件會取得固定、唯讀的 `codex-inbox` 路徑。Bridge 也沒有 commit、push、發布、
 刪除資料、背景網路存取或自動接受核准的工具。
 
@@ -53,10 +75,10 @@ Widget 驗證的純文字文件會取得固定、唯讀的 `codex-inbox` 路徑�
 flowchart TD
     A["ChatGPT 對話"] --> B["MCP Apps 內嵌控制台"]
     B --> C["Streamable HTTP MCP :18828"]
-    C --> D["Project allowlist 與 Job Store"]
+    C --> D["Project capability gate 與 Job Store"]
     D --> E["Codex Controller"]
     E --> F["Codex App Server stdio"]
-    F --> G["Allowlisted project sandbox"]
+    F --> G["Exact selected project sandbox"]
     F --> H["Events、Diff、Approval、Result"]
     H --> D
     D --> B
@@ -227,6 +249,9 @@ Control Center Status 讀取限額 8192 bytes，驗證固定 contract／allowlis
 | `codex_job_preview` | read | 正規化工作包並產生 digest，不建立 job |
 | `render_codex_console` | read/render | 顯示 MCP Apps 對話工作區 |
 | `codex_job_get` | read | 讀取 job snapshot 與 bounded events |
+| `codex_conversation_list` | read | 以 opaque cursor 分頁列出 allowlisted projects 內保存的 Bridge conversations |
+| `codex_local_thread_list` | app-only read | 透過 Codex App Server 分頁列出本機 thread metadata；不掃描 `.codex` 檔案 |
+| `codex_local_thread_read` | app-only read | 透過 bounded、redacted projection 讀取一筆本機 thread；讀取本身不採用或修改 thread |
 | `codex_artifact_get` | read | 讓 ChatGPT 讀取 bounded request、response、diff 或 result |
 | `codex_artifact_list` | read | 列出 request、response 與 diff metadata |
 | `codex_text_bundle_begin` | app-only action | 建立 server-owned 文字暫存槽 |
@@ -234,12 +259,14 @@ Control Center Status 讀取限額 8192 bytes，驗證固定 contract／allowlis
 | `codex_text_bundle_finalize` | app-only action | 驗證整體大小、SHA-256 與 secret policy |
 | `codex_artifact_read_chunk` | app-only read | 把 bounded 成品 chunk 只送到 Widget `_meta` |
 | `codex_job_dispatch` | app-only action | 送出已預覽的工作包 |
-| `codex_conversation_send` | app-only action | 對執行中的 turn 補充方向，或續接同一個 Codex thread |
+| `codex_conversation_send` | app-only action | 對執行中的 turn 補充方向、續接 Bridge thread，或在明確送出時採用安全的本機 thread 後續作 |
 | `codex_job_steer` | app-only action | 對 running turn 補充方向 |
 | `codex_job_cancel` | app-only action | 中斷 running turn |
 | `codex_approval_decide` | app-only action | 決定單次 command 或 file change 核准 |
 
 `plan` 模式即使收到 file change request 也不能核准。公司資料分類另外要求控制台中的明確授權勾選。
+Bridge 對所有 turn 保持 `approvalPolicy=on-request`。`auto_review` 只替換 App Server reviewer，
+不是提高權限，也可能拒絕高風險操作；`user` 則把實際提出的 request 送回 Widget 逐次決定。
 Bridge 啟動 App Server 時會在既有 profile 上加入兩個狹窄的 inline permission profiles：
 `plan` 使用繼承 `:read-only` 的 `codex-bridge-read-only`，`workspace_write` 使用繼承 `:workspace`
 的 `codex-bridge-workspace`。兩者只額外允許讀取固定的 `.local/codex-inbox`；Bridge 會先用
@@ -268,7 +295,7 @@ npm run doctor:app-server -- "C:\GPT_MCPtool"
 npm run smoke:codex -- --confirm-live-codex
 ```
 
-`smoke:http` 會驗證 15 個工具、9 個 app-only actions、MCP Apps MIME、resource 內容、HTTP bearer
+`smoke:http` 會驗證 18 個工具、11 個 app-only actions／reads、MCP Apps MIME、resource 內容、HTTP bearer
 拒絕、文字 staging 完整週期與 preview 不建立 job。它不會啟動實際 Codex turn。
 
 ## Runtime 資料
@@ -282,6 +309,8 @@ C:\CodexBridge\jobs\<job_id>\
   manifest.json
   messages.jsonl
   events.jsonl
+  conversation.json
+  conversation-events.jsonl
   inbox\
     manifest.json
     <server_generated_artifact_id>.txt
@@ -311,8 +340,10 @@ C:\GPT_MCPtool\codex_bridge\.local\codex-inbox\<job_id>\
 - `workspace_write` 中 allowlisted workspace 內的寫入遵循 Codex `:workspace` profile；UI 只會顯示
   App Server 實際提出的核准 request，不保證每個檔案修改前都逐檔停下。需要嚴格 diff-before-apply
   時先用 `plan`，待後續 staged patch workflow 完成後再開放寫入。
-- 對話會保存使用者訊息與完成後的 Codex 回覆，但不保存完整 reasoning／token 串流；技術事件仍只保留
-  bounded 摘要並寫入後台 log，不在主要聊天介面逐筆顯示。
+- 目前 live transport 是 MCP tool polling 與 revision cursor，不是 SSE／WebSocket；因此是近即時投影，
+  不宣稱與 Codex Desktop 的 frame cadence 或所有私有 UI 完全一致。
+- Raw reasoning chain-of-thought 不會保存或顯示；只投影 App Server 明確提供的 user-visible
+  reasoning summary。Command output、diff、error 與其他活動內容仍受 bounded storage、redaction 與 UI preview 上限。
 - 文字文件允許副檔名為 `.txt`、`.md`、`.log`、`.json`、`.yaml`、`.yml`、`.diff`、`.patch`；
   單份最多 500,000 字元／2,000,000 UTF-8 bytes，同一次最多 8 份且合計不超過 2,000,000 bytes。
 - 目前不提供跨主機檔案同步、二進位附件上傳、任意輸出檔案掃描，亦不會自動清除歷史 staging、
