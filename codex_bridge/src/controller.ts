@@ -12,6 +12,7 @@ import type { AppendUserMessageInput, JobStore } from "./job-store.js";
 import type { TextBundleStore } from "./text-bundle-store.js";
 import { buildCodexUserInput, buildInitialTurnUserInput } from "./conversation-input.js";
 import { createConversationProjection, hydrateConversationProjection } from "./conversation-projection.js";
+import { ThreadHistoryReader } from "./thread-history-reader.js";
 import { redactString, sanitizeForStorage } from "./redaction.js";
 import type {
   ApprovalKind,
@@ -20,6 +21,7 @@ import type {
   CodexModelOption,
   JobRecord,
   JobResult,
+  LocalThreadFreshRead,
   LocalThreadListPage,
   LocalThreadSnapshot,
   LocalThreadSummary,
@@ -28,6 +30,8 @@ import type {
   WorkPackage,
 } from "./types.js";
 import { digestWorkPackage, type WorkPackagePreview } from "./work-package.js";
+
+const MAX_LOCAL_THREAD_INVENTORY = 10_000;
 
 export interface DispatchInput {
   preview: WorkPackagePreview;
@@ -67,7 +71,12 @@ export class CodexBridgeController {
   private readonly finalOutputByJob = new Map<string, string>();
   private readonly diagnosticSignaturesByJob = new Map<string, Set<string>>();
   private readonly jobLocks = new Map<string, Promise<void>>();
-  private readonly hydratedThreads = new Set<string>();
+  private readonly historyReader: ThreadHistoryReader;
+  private readonly threadSyncStates = new Map<string, {
+    fingerprint: string;
+    lastFullReadAt: number;
+    historyMode: "legacy" | "paginated";
+  }>();
   private readonly hydrationRetryAfter = new Map<string, number>();
   private readonly discoveredProjects = new Map<string, BridgeProject>();
   private modelCache?: { expiresAt: number; models: CodexModelOption[] };
@@ -78,6 +87,7 @@ export class CodexBridgeController {
     private readonly textBundles: TextBundleStore,
     private readonly appServer: AppServerTransport,
   ) {
+    this.historyReader = new ThreadHistoryReader(appServer);
     this.appServer.on("notification", (message) => void this.handleNotification(message));
     this.appServer.on("serverRequest", (message) => void this.handleServerRequest(message));
     this.appServer.on("stderr", (line) => void this.handleStderr(line));
@@ -93,30 +103,57 @@ export class CodexBridgeController {
   }
 
   async hydrateConversation(jobId: string, force = false): Promise<boolean> {
-    const job = requireJob(this.store, jobId);
-    if (!job.threadId) return false;
-    if (!force && this.jobsByThread.get(job.threadId) === jobId && ["preparing", "running", "awaiting_approval"].includes(job.status)) {
-      return false;
-    }
-    if (!force && this.hydratedThreads.has(job.threadId)) return false;
-    if (!force && (this.hydrationRetryAfter.get(job.threadId) ?? 0) > Date.now()) return false;
-    try {
-      const response = await this.appServer.request<Record<string, unknown>>("thread/read", {
-        threadId: job.threadId,
-        includeTurns: true,
-      });
-      if (!isObject(response.thread)) throw new Error("Codex App Server did not return a thread history.");
-      await this.store.hydrateConversation(jobId, response);
-      this.hydratedThreads.add(job.threadId);
-      this.hydrationRetryAfter.delete(job.threadId);
-      return true;
-    } catch (error) {
-      this.hydrationRetryAfter.set(job.threadId, Date.now() + 30_000);
-      await this.store.appendEvent(jobId, "conversation.hydration.failed", "Codex thread history hydration failed; local projection remains available.", {
-        error: errorMessage(error),
-      }).catch(() => undefined);
-      return false;
-    }
+    return this.withJobLock(jobId, async () => {
+      const job = requireJob(this.store, jobId);
+      if (!job.threadId) return false;
+      if (!force && this.jobsByThread.get(job.threadId) === jobId && ["preparing", "running", "awaiting_approval"].includes(job.status)) {
+        return false;
+      }
+      if (!force && (this.hydrationRetryAfter.get(job.threadId) ?? 0) > Date.now()) return false;
+      const checkedAt = new Date().toISOString();
+      try {
+        const metadata = await this.historyReader.readMetadata(job.threadId);
+        const fingerprint = await this.historyReader.freshnessFingerprint(metadata);
+        const previous = this.threadSyncStates.get(job.threadId);
+        const periodicFullReadDue = !previous || Date.now() - previous.lastFullReadAt >= 60_000;
+        if (!force && previous?.fingerprint === fingerprint && !periodicFullReadDue) {
+          return false;
+        }
+        const history = await this.historyReader.read(job.threadId, metadata, fingerprint);
+        await this.store.hydrateConversation(jobId, history.response, checkedAt, {
+          historyMode: history.metadata.historyMode,
+          synchronized: true,
+          sourceAvailability: "available",
+          lastMetadataCheckedAt: checkedAt,
+          lastHydratedAt: checkedAt,
+          sourceUpdatedAt: history.metadata.updatedAt,
+          sourceRecencyAt: history.metadata.recencyAt,
+          sourceFingerprint: history.sourceFingerprint,
+        });
+        this.threadSyncStates.set(job.threadId, {
+          fingerprint,
+          lastFullReadAt: Date.now(),
+          historyMode: history.metadata.historyMode,
+        });
+        this.hydrationRetryAfter.delete(job.threadId);
+        return true;
+      } catch (error) {
+        this.hydrationRetryAfter.set(job.threadId, Date.now() + 30_000);
+        const previous = this.threadSyncStates.get(job.threadId);
+        await this.store.markConversationFreshness(jobId, {
+          historyMode: previous?.historyMode ?? "legacy",
+          synchronized: false,
+          sourceAvailability: "unavailable",
+          lastMetadataCheckedAt: checkedAt,
+          sourceFingerprint: previous?.fingerprint,
+          staleReason: errorMessage(error).slice(0, 2_000),
+        }).catch(() => undefined);
+        await this.store.appendEvent(jobId, "conversation.hydration.failed", "Codex thread history synchronization failed; the last verified projection remains available.", {
+          error: errorMessage(error),
+        }).catch(() => undefined);
+        return false;
+      }
+    });
   }
 
   async listModels(force = false): Promise<CodexModelOption[]> {
@@ -154,10 +191,10 @@ export class CodexBridgeController {
     return structuredClone(models);
   }
 
-  async listLocalThreads(cursor?: string, maxThreads = 2_000): Promise<LocalThreadListPage> {
+  async listLocalThreads(cursor?: string, maxThreads = MAX_LOCAL_THREAD_INVENTORY): Promise<LocalThreadListPage> {
     const boundedLimit = Number.isFinite(maxThreads)
-      ? Math.max(1, Math.min(2_000, Math.trunc(maxThreads)))
-      : 2_000;
+      ? Math.max(1, Math.min(MAX_LOCAL_THREAD_INVENTORY, Math.trunc(maxThreads)))
+      : MAX_LOCAL_THREAD_INVENTORY;
     const threads: LocalThreadSummary[] = [];
     const seenThreadIds = new Set<string>();
     const seenCursors = new Set<string>();
@@ -201,19 +238,53 @@ export class CodexBridgeController {
   }
 
   async readLocalThread(threadId: string): Promise<LocalThreadSnapshot> {
-    const response = await this.appServer.request<Record<string, unknown>>("thread/read", {
-      threadId,
-      includeTurns: true,
-    });
+    const result = await this.readLocalThreadFresh(threadId);
+    if (!result.snapshot) throw new Error("Codex App Server did not return a refreshed local thread snapshot.");
+    return result.snapshot;
+  }
+
+  async readLocalThreadSummary(threadId: string): Promise<LocalThreadSummary> {
+    const metadata = await this.historyReader.readMetadata(threadId);
+    const summary = await this.normalizeLocalThread(metadata.rawThread);
+    if (!summary) throw new Error("The requested Codex thread is not a persisted local conversation.");
+    return summary;
+  }
+
+  async readLocalThreadFresh(threadId: string, knownFingerprint?: string): Promise<LocalThreadFreshRead> {
+    const metadata = await this.historyReader.readMetadata(threadId);
+    const summary = await this.normalizeLocalThread(metadata.rawThread);
+    if (!summary) throw new Error("The requested Codex thread is not a persisted local conversation.");
+    const sourceFingerprint = await this.historyReader.freshnessFingerprint(metadata);
+    if (knownFingerprint === sourceFingerprint) return { summary, sourceFingerprint };
+    const history = await this.historyReader.read(threadId, metadata, sourceFingerprint);
+    return {
+      summary,
+      sourceFingerprint,
+      snapshot: this.localThreadSnapshot(summary, history),
+    };
+  }
+
+  private localThreadSnapshot(
+    summary: LocalThreadSummary,
+    history: Awaited<ReturnType<ThreadHistoryReader["read"]>>,
+  ): LocalThreadSnapshot {
+    const threadId = summary.threadId;
+    const response = history.response;
     const rawThread = isObject(response.thread) ? response.thread : undefined;
     if (!rawThread || stringValue(rawThread.id) !== threadId) {
       throw new Error("Codex App Server did not return the requested local thread.");
     }
-    const summary = await this.normalizeLocalThread(rawThread);
-    if (!summary) {
-      throw new Error("The requested Codex thread is not a persisted local conversation.");
-    }
-    const conversation = hydrateConversationProjection(createConversationProjection(threadId), response);
+    const checkedAt = new Date().toISOString();
+    const conversation = hydrateConversationProjection(createConversationProjection(threadId), response, checkedAt, {
+      historyMode: history.metadata.historyMode,
+      synchronized: true,
+      sourceAvailability: "available",
+      lastMetadataCheckedAt: checkedAt,
+      lastHydratedAt: checkedAt,
+      sourceUpdatedAt: history.metadata.updatedAt,
+      sourceRecencyAt: history.metadata.recencyAt,
+      sourceFingerprint: history.sourceFingerprint,
+    });
     return {
       id: `local:${threadId}`,
       source: "local",
@@ -239,6 +310,7 @@ export class CodexBridgeController {
       nextConversationRevision: conversation.revision,
       serverConversationRevision: conversation.revision,
       conversationHasMore: false,
+      conversationDiagnostics: [],
       events: [],
       nextEventSeq: 0,
       serverLastEventSeq: 0,
@@ -274,6 +346,7 @@ export class CodexBridgeController {
       createdAt: timestampValue(rawThread.createdAt),
       updatedAt: timestampValue(rawThread.recencyAt ?? rawThread.updatedAt ?? rawThread.createdAt),
       threadStatus: localThreadStatus(rawThread.status),
+      historyMode: stringValue(rawThread.historyMode) === "paginated" ? "paginated" : "legacy",
       isPinned: rawThread.isPinned === true,
       historyOnly: project.historyOnly,
     };
@@ -400,10 +473,8 @@ export class CodexBridgeController {
   }
 
   async sendLocalThreadMessage(input: LocalConversationSendInput): Promise<ConversationSendResult> {
-    const response = await this.appServer.request<Record<string, unknown>>("thread/read", {
-      threadId: input.localThreadId,
-      includeTurns: true,
-    });
+    const history = await this.historyReader.read(input.localThreadId);
+    const response = history.response;
     const rawThread = isObject(response.thread) ? response.thread : undefined;
     if (!rawThread || stringValue(rawThread.id) !== input.localThreadId) {
       throw new Error("Codex App Server did not return the requested local thread.");
@@ -428,15 +499,30 @@ export class CodexBridgeController {
       effort: input.effort,
       inputBundleIds: [],
     } satisfies WorkPackage;
+    const synchronizedAt = new Date().toISOString();
     const imported = await this.store.importLocalThread({
       project,
       workPackage,
       previewDigest: digestWorkPackage(workPackage),
       threadId: input.localThreadId,
       threadResponse: response,
+      freshness: {
+        historyMode: history.metadata.historyMode,
+        synchronized: true,
+        sourceAvailability: "available",
+        lastMetadataCheckedAt: synchronizedAt,
+        lastHydratedAt: synchronizedAt,
+        sourceUpdatedAt: history.metadata.updatedAt,
+        sourceRecencyAt: history.metadata.recencyAt,
+        sourceFingerprint: history.sourceFingerprint,
+      },
     });
     this.jobsByThread.set(input.localThreadId, imported.record.id);
-    this.hydratedThreads.add(input.localThreadId);
+    this.threadSyncStates.set(input.localThreadId, {
+      fingerprint: history.sourceFingerprint,
+      lastFullReadAt: Date.now(),
+      historyMode: history.metadata.historyMode,
+    });
     return this.sendMessage({
       ...input,
       jobId: imported.record.id,
@@ -594,7 +680,7 @@ export class CodexBridgeController {
       if (!threadId) {
         throw new Error("Codex App Server did not return a resumed thread id.");
       }
-      this.hydratedThreads.delete(threadId);
+      this.threadSyncStates.delete(threadId);
       this.jobsByThread.set(threadId, jobId);
       const turnResponse = await this.appServer.request<Record<string, unknown>>("turn/start", {
         threadId,
@@ -942,7 +1028,8 @@ function errorDiagnostic(line: string): { signature: string; data: Record<string
 
 function completionStatus(params: Record<string, unknown>): JobResult["status"] {
   const raw = stringValue(params.status) ?? (isObject(params.turn) ? stringValue(params.turn.status) : undefined);
-  if (raw === "cancelled" || raw === "canceled" || raw === "interrupted") return "cancelled";
+  if (raw === "cancelled" || raw === "canceled") return "cancelled";
+  if (raw === "interrupted") return "interrupted";
   if (raw === "failed" || raw === "error") return "failed";
   return "completed";
 }
@@ -952,6 +1039,7 @@ function completionMessage(params: Record<string, unknown>, status: JobResult["s
   if (direct) return direct.slice(0, 2_000);
   if (status === "completed") return "Codex turn completed.";
   if (status === "cancelled") return "Codex turn was cancelled.";
+  if (status === "interrupted") return "Codex turn was interrupted.";
   return "Codex turn failed.";
 }
 

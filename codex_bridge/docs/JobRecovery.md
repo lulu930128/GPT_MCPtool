@@ -11,6 +11,9 @@ jobs/<job_id>/
   manifest.json
   messages.jsonl
   events.jsonl
+  conversation.json
+  conversation.json.bak
+  conversation-events.jsonl
   inbox/
   diff.patch
   result.json
@@ -42,6 +45,12 @@ When the Bridge starts and finds an active job from an earlier process:
 This avoids duplicate side effects after an uncertain shutdown. It also means restart recovery
 requires a user decision.
 
+Conversation projection recovery is separate from retrying a Codex turn. Startup validates the
+active checkpoint and one bounded backup, repairs only an incomplete final journal tail, and replays
+only contiguous committed revisions. It never resends a user message, command, or approval. Middle
+journal corruption and revision gaps remain visible structured failures and do not authorize an empty
+checkpoint reset.
+
 ## Recovery workflow
 
 1. Open the job with `codex_job_get` or the interactive console.
@@ -67,6 +76,8 @@ state, not filesystem reversal.
 | Duplicate user message | `clientMessageId` history | Reuse the same id for identical retry; changed content needs a new id |
 | Staged bundle incomplete | Bundle manifest, chunk count, size, SHA-256 | Re-upload/finalize; never dispatch incomplete text |
 | App Server unavailable | `doctor:app-server`, same-user Codex login | Repair local App Server launch; do not expose a public listener |
+| Conversation checkpoint malformed | `conversationDiagnostics`, checkpoint/journal revisions | Recover from validated backup plus contiguous journal; never replace with an empty projection |
+| Journal gap or middle corruption | Structured persistence error code | Fail closed, preserve files, and diagnose exact revision metadata without exposing transcript content |
 
 ## Runtime validation
 

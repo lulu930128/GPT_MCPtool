@@ -136,6 +136,29 @@ test("controller starts an allowlisted sandboxed turn and gates one approval", a
   assert.equal(store.get(dispatched.record.id)?.result?.output, "Final result with [redacted] redacted.");
 });
 
+test("controller preserves interrupted as distinct from cancelled", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-bridge-interrupted-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const projectPath = join(root, "project");
+  const jobsDir = join(root, "jobs");
+  await mkdir(projectPath);
+  const store = new JobStore(jobsDir, join(root, ".local", "codex-inbox"));
+  await store.initialize();
+  const config = testConfig(root, jobsDir, projectPath);
+  const textBundles = new TextBundleStore(config.stagingDir);
+  await textBundles.initialize();
+  const fake = new FakeTransport();
+  const controller = new CodexBridgeController(config, store, textBundles, fake);
+  const preview = previewWorkPackage({ projectId: "omi", title: "Interrupted", objective: "Preserve status." });
+  const dispatched = await controller.dispatch({ preview, previewDigest: preview.previewDigest, idempotencyKey: "controller-interrupted-1" });
+  await waitFor(() => store.get(dispatched.record.id)?.status === "running");
+
+  fake.emitNotification({ method: "turn/completed", params: { threadId: "thread-1", turnId: "turn-1", status: "interrupted" } });
+  await waitFor(() => store.get(dispatched.record.id)?.status === "interrupted");
+  assert.equal(store.get(dispatched.record.id)?.result?.status, "interrupted");
+  assert.equal(store.get(dispatched.record.id)?.result?.message, "Codex turn was interrupted.");
+});
+
 test("plan mode refuses file-change acceptance", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "codex-bridge-plan-"));
   context.after(() => rm(root, { recursive: true, force: true }));
@@ -152,8 +175,10 @@ test("plan mode refuses file-change acceptance", async (context) => {
   const preview = previewWorkPackage({ projectId: "omi", title: "Plan", objective: "Plan only." });
   const dispatched = await controller.dispatch({ preview, previewDigest: preview.previewDigest, idempotencyKey: "controller-test-2" });
   await waitFor(() => store.get(dispatched.record.id)?.status === "running");
+  const conversationRevision = (await store.snapshot(dispatched.record.id)).serverConversationRevision;
   fake.emitRequest({ id: 18, method: "item/fileChange/requestApproval", params: { turnId: "turn-1", changes: ["a.ts"] } });
   await waitFor(() => store.get(dispatched.record.id)?.status === "awaiting_approval");
+  await waitForConversationRevision(store, dispatched.record.id, conversationRevision + 1);
   const approval = store.get(dispatched.record.id)!.approvals[0];
   await assert.rejects(controller.decideApproval(dispatched.record.id, approval.id, "accept"), /plan mode/);
   assert.equal(fake.responses.length, 0);
@@ -354,6 +379,7 @@ test("controller injects verified staged text without granting the staging direc
     idempotencyKey: "staged-controller-test",
   });
   await waitFor(() => store.get(dispatched.record.id)?.status === "running");
+  await waitForConversationRevision(store, dispatched.record.id, 1);
   const turnStart = fake.requests.find((request) => request.method === "turn/start");
   const instruction = String((turnStart?.params?.input as Array<{ text: string }>)[0]?.text);
   assert.match(instruction, /engineering_spec\.txt/);
@@ -366,7 +392,7 @@ test("controller injects verified staged text without granting the staging direc
   assert.doesNotMatch(instruction, new RegExp(escapeRegExp(config.stagingDir), "i"));
 });
 
-test("controller hydrates persisted multi-turn history once per process", async (context) => {
+test("controller refreshes persisted history when the source fingerprint changes", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "codex-bridge-hydration-controller-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   const projectPath = join(root, "project");
@@ -390,6 +416,7 @@ test("controller hydrates persisted multi-turn history once per process", async 
   fake.threadReadResponse = {
     thread: {
       id: "thread-1",
+      updatedAt: 100,
       status: { type: "notLoaded" },
       turns: [1, 2, 3].map((number) => ({
         id: `turn-${number}`,
@@ -404,10 +431,17 @@ test("controller hydrates persisted multi-turn history once per process", async 
 
   assert.equal(await controller.hydrateConversation(dispatched.record.id), true);
   assert.equal(await controller.hydrateConversation(dispatched.record.id), false);
-  assert.equal(fake.requests.filter((request) => request.method === "thread/read").length, 1);
-  const snapshot = await store.snapshot(dispatched.record.id);
-  assert.deepEqual(snapshot.conversation?.turns.map((turn) => turn.turnId), ["turn-1", "turn-2", "turn-3"]);
-  assert.deepEqual(snapshot.conversation?.turns[2]?.items.map((item) => item.text), ["User 3", "Assistant 3"]);
+  assert.equal(fake.requests.filter((request) => request.method === "thread/read").length, 3);
+  const priorRevision = (await store.snapshot(dispatched.record.id)).conversation?.revision ?? 0;
+  (fake.threadReadResponse.thread as Record<string, unknown>).updatedAt = 101;
+  (fake.threadReadResponse.thread as Record<string, unknown>).turns = (
+    (fake.threadReadResponse.thread as Record<string, unknown>).turns as Record<string, unknown>[]
+  ).slice(0, 2);
+  assert.equal(await controller.hydrateConversation(dispatched.record.id), true);
+  const snapshot = await store.snapshot(dispatched.record.id, 0, 80, priorRevision);
+  const current = await store.snapshot(dispatched.record.id);
+  assert.deepEqual(current.conversation?.turns.map((turn) => turn.turnId), ["turn-1", "turn-2"]);
+  assert.equal(snapshot.conversationChanges.at(-1)?.replaceAll, true);
 });
 
 test("controller lists complete local Codex history and discovers only safe workspaces", async (context) => {
@@ -463,6 +497,44 @@ test("controller lists complete local Codex history and discovers only safe work
   assert.equal(isSafeDiscoveredProjectPath(discoveredPath, config), true);
   assert.equal(isSafeDiscoveredProjectPath(parse(discoveredPath).root, config), false);
   assert.equal(fake.requests.filter((request) => request.method === "thread/list").length, 2);
+});
+
+test("controller follows the App Server cursor chain beyond two thousand native threads", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-bridge-large-local-list-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const projectPath = join(root, "project");
+  const jobsDir = join(root, "jobs");
+  await mkdir(projectPath);
+  const config = testConfig(root, jobsDir, projectPath);
+  const store = new JobStore(jobsDir, join(root, ".local", "codex-inbox"));
+  await store.initialize();
+  const textBundles = new TextBundleStore(config.stagingDir);
+  await textBundles.initialize();
+  const fake = new FakeTransport();
+  const total = 2_001;
+  for (let offset = 0; offset < total; offset += 100) {
+    const cursor = offset === 0 ? "" : `page-${offset / 100}`;
+    const nextOffset = offset + 100;
+    fake.threadListResponses.set(cursor, {
+      data: Array.from({ length: Math.min(100, total - offset) }, (_, index) => ({
+        id: randomUUID(),
+        cwd: projectPath,
+        name: `Thread ${offset + index}`,
+        createdAt: total - offset - index,
+        recencyAt: total - offset - index,
+        status: { type: "notLoaded" },
+      })),
+      nextCursor: nextOffset < total ? `page-${nextOffset / 100}` : null,
+    });
+  }
+
+  const controller = new CodexBridgeController(config, store, textBundles, fake);
+  const page = await controller.listLocalThreads(undefined, total);
+
+  assert.equal(page.threads.length, total);
+  assert.equal(page.complete, true);
+  assert.equal(page.nextCursor, undefined);
+  assert.equal(fake.requests.filter((request) => request.method === "thread/list").length, 21);
 });
 
 test("controller reads local Codex history through the bounded conversation projection", async (context) => {
@@ -596,6 +668,7 @@ function testConfig(root: string, jobsDir: string, projectPath: string): BridgeC
     httpPort: 0,
     maxRecentJobs: 20,
     buildId: "test-build",
+    codexHome: join(root, ".codex"),
   };
 }
 
@@ -607,6 +680,19 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<voi
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() > deadline) throw new Error("Timed out waiting for controller state.");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+async function waitForConversationRevision(
+  store: JobStore,
+  jobId: string,
+  minimumRevision: number,
+  timeoutMs = 2_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while ((await store.snapshot(jobId)).serverConversationRevision < minimumRevision) {
+    if (Date.now() > deadline) throw new Error("Timed out waiting for conversation persistence.");
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }

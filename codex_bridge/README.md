@@ -21,14 +21,19 @@ Codex Handoff Bridge 是私人、allowlist-first 的 MCP Apps 對話工作區。
 ## 第一版能力
 
 - MCP Apps 內嵌對話工作區，使用標準 `ui/initialize`、`tools/call` 與 tool-result bridge。
-- Fullscreen 使用 Project Ledger 三區工作區：左側依 Codex App Server 的本機歷史分組所有專案與對話，中間保留 user／assistant
-  與 approval 敘事，右側集中 plan、command、file change、MCP tool、diff、error 與成品。Opaque cursor 仍可
-  分頁載入所有 Bridge conversations。Codex 已保存且通過路徑安全檢查的實際專案可新增、續接與選擇執行模式；
+- Fullscreen 使用 Project Ledger 三區工作區：左側由 server-side unified registry 將 Codex App Server thread、
+  Bridge job 與 bounded automation metadata 依 `threadId` 合併為一筆對話，中間保留 user／assistant 與 approval
+  敘事，右側集中 plan、command、file change、MCP tool、diff、error 與成品。Codex 已保存且通過路徑安全檢查的實際專案可新增、續接與選擇執行模式；
   磁碟根目錄、使用者家目錄、AppData、`.codex`、Downloads 與系統目錄只提供受保護的唯讀歷史。
 - Inline 使用 host 提供的完整對話寬度，只顯示目前對話、最近訊息、待核准與最新工作狀態；專案清單改為
   按需覆蓋層，不會持續擠壓 ChatGPT 畫面。Raw reasoning chain-of-thought 不會投影或保存。
-- 首次開啟既有 thread 時以 `thread/read(includeTurns=true)` hydrate；之後只接收 durable conversation
-  revision patch。Active job 以 900 ms poll 更新，若有分頁待補則以 25 ms catch-up，完成後再回到一般節奏。
+- History reader 先讀 metadata，再依 `historyMode` 選擇 legacy `thread/read(includeTurns=true)` 或 paginated
+  `thread/turns/list(itemsView="full")`。Paginated snapshot 讀取前後必須有相同 fingerprint；若中途新增 turn 會完整
+  重試一次，仍不一致則保留上一份已驗證 projection。Active job 以 900 ms poll，待補頁以 25 ms catch-up；terminal
+  thread 每 20 秒、active automation target 每 4 秒只先核對 metadata fingerprint，只有來源變更才抓完整 history。
+- App Server user message text 是對話內容權威；Bridge 只以 exact `clientId`／`clientMessageId` 加回 context 與驗證後文字
+  文件 metadata，不按訊息位置覆寫文字。Native、Bridge JobStore 與 automation registry 可獨立降級，缺失來源與孤兒排程
+  以 bounded diagnostic 顯示，不讓單一 adapter 故障清空整個 Project Ledger。
 - Assistant／plan delta 會更新同一個 item；`item/completed` 是 authoritative final state，不會另外產生
   第二個回覆 bubble。中斷或失敗仍保留已收到的 partial output。
 - 同一個 job 可透過 `thread/resume` 與 `turn/start` 繼續既有 Codex thread；執行中的補充訊息使用
@@ -249,7 +254,10 @@ Control Center Status 讀取限額 8192 bytes，驗證固定 contract／allowlis
 | `codex_job_preview` | read | 正規化工作包並產生 digest，不建立 job |
 | `render_codex_console` | read/render | 顯示 MCP Apps 對話工作區 |
 | `codex_job_get` | read | 讀取 job snapshot 與 bounded events |
-| `codex_conversation_list` | read | 以 opaque cursor 分頁列出 allowlisted projects 內保存的 Bridge conversations |
+| `codex_conversation_list` | read | 分頁列出 allowlisted projects 內的 unified conversations |
+| `codex_conversation_get` | read | 先驗證 current thread metadata 仍屬 allowlist，再讀取 unified conversation |
+| `codex_unified_conversation_list` | app-only read | 合併 native thread、Bridge job 與安全 automation metadata；回傳來源 diagnostics |
+| `codex_unified_conversation_get` | app-only read | 以 native history 為基底讀取對話，並加上 Bridge／automation overlay |
 | `codex_local_thread_list` | app-only read | 透過 Codex App Server 分頁列出本機 thread metadata；不掃描 `.codex` 檔案 |
 | `codex_local_thread_read` | app-only read | 透過 bounded、redacted projection 讀取一筆本機 thread；讀取本身不採用或修改 thread |
 | `codex_artifact_get` | read | 讓 ChatGPT 讀取 bounded request、response、diff 或 result |
@@ -295,7 +303,7 @@ npm run doctor:app-server -- "C:\GPT_MCPtool"
 npm run smoke:codex -- --confirm-live-codex
 ```
 
-`smoke:http` 會驗證 18 個工具、11 個 app-only actions／reads、MCP Apps MIME、resource 內容、HTTP bearer
+`smoke:http` 會驗證 21 個工具、13 個 app-only actions／reads、MCP Apps MIME、resource 內容、HTTP bearer
 拒絕、文字 staging 完整週期與 preview 不建立 job。它不會啟動實際 Codex turn。
 
 ## Runtime 資料
@@ -310,6 +318,7 @@ C:\CodexBridge\jobs\<job_id>\
   messages.jsonl
   events.jsonl
   conversation.json
+  conversation.json.bak
   conversation-events.jsonl
   inbox\
     manifest.json
@@ -331,6 +340,13 @@ C:\GPT_MCPtool\codex_bridge\.local\codex-inbox\<job_id>\
 根目錄 `.gitignore` 保護。若 server 在 job 未完成時重啟，該 job 會標為 `interrupted`，不會自動再送
 一次可能有 side effect 的 turn。
 
+`conversation.json` 是目前已驗證的 bounded UI checkpoint，`conversation.json.bak` 只保留上一份可驗證
+checkpoint；兩者都不是 native transcript source。每次 revision 先以 durable append 寫入
+`conversation-events.jsonl`，再以同目錄 temp + rename/swap promotion 更新 checkpoint，不會用 copy 覆寫 active
+checkpoint。啟動時若 journal 比 checkpoint 新，Bridge 只依連續 revision 重播缺少的 patch；不完整 final tail
+可截回最後完整 boundary，但 middle corruption、conflicting duplicate 或 revision gap 會以 structured error fail closed，
+不會建立空 conversation 覆寫既有證據。
+
 ## 已知限制
 
 - ChatGPT host 可能快取 tool schema；本機 Restart 後仍可能需要 Refresh Actions 或重新連線。
@@ -342,6 +358,11 @@ C:\GPT_MCPtool\codex_bridge\.local\codex-inbox\<job_id>\
   時先用 `plan`，待後續 staged patch workflow 完成後再開放寫入。
 - 目前 live transport 是 MCP tool polling 與 revision cursor，不是 SSE／WebSocket；因此是近即時投影，
   不宣稱與 Codex Desktop 的 frame cadence 或所有私有 UI 完全一致。
+- Unified inventory 會跟隨 App Server cursor chain，顯式安全上限為 10,000 筆；超過時回傳
+  `native_inventory_truncated`，不會把不完整結果宣稱為 complete。
+- `conversation-events.jsonl` 仍是 append-only；checkpoint 已是 restart baseline，但 verified-checkpoint-aware
+  compaction／rotation 尚未實作。大型 journal 的 polling 與 retention 成本列為獨立 P2 debt，不影響 native
+  App Server transcript ownership。
 - Raw reasoning chain-of-thought 不會保存或顯示；只投影 App Server 明確提供的 user-visible
   reasoning summary。Command output、diff、error 與其他活動內容仍受 bounded storage、redaction 與 UI preview 上限。
 - 文字文件允許副檔名為 `.txt`、`.md`、`.log`、`.json`、`.yaml`、`.yml`、`.diff`、`.patch`；

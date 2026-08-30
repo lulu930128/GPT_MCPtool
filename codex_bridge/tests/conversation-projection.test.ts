@@ -3,8 +3,35 @@ import test from "node:test";
 import {
   createConversationProjection,
   hydrateConversationProjection,
+  mergeConversationMessages,
   reduceConversationNotification,
 } from "../src/conversation-projection.js";
+
+test("Bridge message metadata joins by exact client id without overwriting App Server text", () => {
+  const native = hydrateConversationProjection(createConversationProjection("thread-1"), {
+    thread: {
+      id: "thread-1",
+      turns: [
+        { id: "turn-a", items: [{ id: "user-a", type: "userMessage", clientId: "client-a", content: [{ type: "text", text: "Native A" }] }] },
+        { id: "turn-b", items: [{ id: "user-b", type: "userMessage", clientId: "client-b", content: [{ type: "text", text: "Native B" }] }] },
+      ],
+    },
+  }, "2026-08-29T00:00:00.000Z", {
+    historyMode: "legacy",
+    synchronized: true,
+    sourceAvailability: "available",
+    lastMetadataCheckedAt: "2026-08-29T00:00:00.000Z",
+  });
+  const merged = mergeConversationMessages(native, [
+    { id: "message-b", clientMessageId: "client-b", role: "user", content: "Stale B", context: "Context B", at: "2026-08-29T00:00:02.000Z" },
+    { id: "message-a", clientMessageId: "client-a", role: "user", content: "Stale A", context: "Context A", at: "2026-08-29T00:00:01.000Z" },
+    { id: "message-missing", role: "user", content: "Must not be positionally appended", at: "2026-08-29T00:00:03.000Z" },
+  ]);
+
+  const users = merged.turns.flatMap((turn) => turn.items).filter((item) => item.type === "userMessage");
+  assert.deepEqual(users.map((item) => item.text), ["Native A", "Native B"]);
+  assert.deepEqual(users.map((item) => item.context), ["Context A", "Context B"]);
+});
 
 test("thread/read hydrates ordered multi-turn history without raw reasoning", () => {
   const hydrated = hydrateConversationProjection(createConversationProjection(), {
@@ -30,6 +57,32 @@ test("thread/read hydrates ordered multi-turn history without raw reasoning", ()
   assert.deepEqual(hydrated.turns[0]?.items.map((item) => item.type), ["userMessage", "reasoningSummary", "agentMessage"]);
   assert.equal(hydrated.turns[0]?.items[1]?.text, "Summary 1");
   assert.doesNotMatch(JSON.stringify(hydrated), /hidden thought/);
+});
+
+test("authoritative hydration removes turns and items deleted at the source", () => {
+  const initial = hydrateConversationProjection(createConversationProjection("thread-1"), {
+    thread: {
+      id: "thread-1",
+      turns: [
+        { id: "turn-1", status: "completed", items: [
+          { id: "user-1", type: "userMessage", content: [{ type: "text", text: "Keep" }] },
+          { id: "agent-1", type: "agentMessage", text: "Remove" },
+        ] },
+        { id: "turn-2", status: "completed", items: [] },
+      ],
+    },
+  });
+  const refreshed = hydrateConversationProjection(initial, {
+    thread: {
+      id: "thread-1",
+      turns: [{ id: "turn-1", status: "completed", items: [
+        { id: "user-1", type: "userMessage", content: [{ type: "text", text: "Keep" }] },
+      ] }],
+    },
+  });
+
+  assert.deepEqual(refreshed.turns.map((turn) => turn.turnId), ["turn-1"]);
+  assert.deepEqual(refreshed.turns[0]?.items.map((item) => item.id), ["user-1"]);
 });
 
 test("agent deltas reconcile to one authoritative completed message", () => {

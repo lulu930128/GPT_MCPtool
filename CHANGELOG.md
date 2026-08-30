@@ -13,8 +13,9 @@ domain-contract versions remain independent and are not rewritten by a workspace
 - Personal Asset OS adds read-time Taiwan and US broker valuation overlays, traceable FX fallback,
   immutable daily valuation snapshots, reporting annotations, and mobile activity-fund ingestion.
 - Codex Bridge adds server-generated read-only pasted-text handoff copies for approved Codex jobs.
-- Codex Bridge adds durable redacted multi-turn conversation projections, reconnectable progress,
-  app-only local history reads, and explicit continuation of safe App Server-discovered workspaces.
+- Codex Bridge adds a unified native-thread, Bridge-job, and bounded automation conversation registry,
+  consistent paginated history refresh, durable journal/checkpoint recovery, reconnectable progress,
+  and explicit continuation of safe App Server-discovered workspaces.
 - Japanese Study 1.2.1 adopts `learning-content-v8.1` with bounded diagnosis catalog reads,
   profile-aware level scope, and structured practice-v2 target assessments.
 

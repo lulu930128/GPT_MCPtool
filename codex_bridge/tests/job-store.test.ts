@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { JobStore } from "../src/job-store.js";
+import { ConversationPersistenceError, JobStore } from "../src/job-store.js";
 import { previewWorkPackage } from "../src/work-package.js";
 
 test("job store is idempotent and persists bounded job artifacts", async (context) => {
@@ -291,3 +291,209 @@ test("job store materializes staged text and exposes bounded result artifacts", 
   assert.equal(chunk.done, false);
   assert.equal(chunk.nextCursor, 5);
 });
+
+test("conversation persistence commits the journal and checkpoint before a clean restart", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-bridge-persistence-normal-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { store, jobId } = await createConversationFixture(root, "persistence-normal");
+
+  await appendAgentDelta(store, jobId, "Hello");
+  const jobDir = join(root, jobId);
+  const checkpoint = JSON.parse(await readFile(join(jobDir, "conversation.json"), "utf8"));
+  const backup = JSON.parse(await readFile(join(jobDir, "conversation.json.bak"), "utf8"));
+  const journal = nonEmptyLines(await readFile(join(jobDir, "conversation-events.jsonl"), "utf8"));
+  assert.equal(checkpoint.revision, 1);
+  assert.equal(backup.revision, 0);
+  assert.equal(JSON.parse(journal[0]!).revision, 1);
+
+  const restarted = new JobStore(root);
+  await restarted.initialize();
+  const recovered = await restarted.snapshot(jobId);
+  assert.equal(recovered.conversation?.revision, 1);
+  assert.equal(recovered.conversation?.turns[0]?.items[0]?.text, "Hello");
+});
+
+test("startup replays a committed journal revision when the checkpoint is behind", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-bridge-persistence-behind-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { store, jobId } = await createConversationFixture(root, "persistence-behind");
+  await appendAgentDelta(store, jobId, "Hello");
+  await appendAgentDelta(store, jobId, " again");
+  const jobDir = join(root, jobId);
+  await writeFile(
+    join(jobDir, "conversation.json"),
+    await readFile(join(jobDir, "conversation.json.bak"), "utf8"),
+    "utf8",
+  );
+
+  const restarted = new JobStore(root);
+  await restarted.initialize();
+  const recovered = await restarted.snapshot(jobId);
+  assert.equal(recovered.conversation?.revision, 2);
+  assert.equal(recovered.conversation?.turns[0]?.items[0]?.text, "Hello again");
+  assert.ok(recovered.conversationDiagnostics.some((item) => item.code === "conversation_checkpoint_recovered"));
+  assert.equal(JSON.parse(await readFile(join(jobDir, "conversation.json"), "utf8")).revision, 2);
+});
+
+test("startup recovers a malformed primary from backup plus journal instead of resetting", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-bridge-persistence-corrupt-primary-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { store, jobId } = await createConversationFixture(root, "persistence-corrupt-primary");
+  await appendAgentDelta(store, jobId, "Preserved answer");
+  const checkpointPath = join(root, jobId, "conversation.json");
+  await writeFile(checkpointPath, "{\"schemaVersion\":1,", "utf8");
+
+  const restarted = new JobStore(root);
+  await restarted.initialize();
+  const recovered = await restarted.snapshot(jobId);
+  assert.equal(recovered.conversation?.revision, 1);
+  assert.equal(recovered.conversation?.turns[0]?.items[0]?.text, "Preserved answer");
+  assert.ok(recovered.conversationDiagnostics.some((item) => item.code === "conversation_checkpoint_corrupt"));
+  assert.ok(recovered.conversationDiagnostics.some((item) => item.code === "conversation_checkpoint_recovered"));
+  assert.equal(JSON.parse(await readFile(checkpointPath, "utf8")).revision, 1);
+});
+
+test("startup truncates only an incomplete final journal tail", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-bridge-persistence-tail-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { store, jobId } = await createConversationFixture(root, "persistence-tail");
+  await appendAgentDelta(store, jobId, "Complete revision");
+  const journalPath = join(root, jobId, "conversation-events.jsonl");
+  await appendFile(journalPath, "{\"revision\":2", "utf8");
+
+  const restarted = new JobStore(root);
+  await restarted.initialize();
+  const recovered = await restarted.snapshot(jobId);
+  assert.equal(recovered.conversation?.revision, 1);
+  assert.ok(recovered.conversationDiagnostics.some((item) => item.code === "conversation_journal_tail_truncated"));
+  assert.equal(nonEmptyLines(await readFile(journalPath, "utf8")).length, 1);
+});
+
+test("middle journal corruption remains visible and never becomes an empty projection", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-bridge-persistence-middle-corrupt-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { store, jobId } = await createConversationFixture(root, "persistence-middle-corrupt");
+  await appendAgentDelta(store, jobId, "One");
+  await appendAgentDelta(store, jobId, " two");
+  const journalPath = join(root, jobId, "conversation-events.jsonl");
+  const lines = nonEmptyLines(await readFile(journalPath, "utf8"));
+  await writeFile(journalPath, `${lines[0]}\n{not-json}\n${lines[1]}\n`, "utf8");
+
+  const restarted = new JobStore(root);
+  await restarted.initialize();
+  assert.ok(restarted.get(jobId));
+  await assert.rejects(
+    () => restarted.snapshot(jobId),
+    (error: unknown) => error instanceof ConversationPersistenceError && error.code === "conversation_journal_corrupt",
+  );
+  assert.equal(JSON.parse(await readFile(join(root, jobId, "conversation.json"), "utf8")).revision, 2);
+});
+
+test("identical duplicate journal revisions are deterministic and not double-applied", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-bridge-persistence-duplicate-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { store, jobId } = await createConversationFixture(root, "persistence-duplicate");
+  await appendAgentDelta(store, jobId, "Once");
+  const journalPath = join(root, jobId, "conversation-events.jsonl");
+  const entry = nonEmptyLines(await readFile(journalPath, "utf8"))[0]!;
+  await appendFile(journalPath, `${entry}\n`, "utf8");
+
+  const restarted = new JobStore(root);
+  await restarted.initialize();
+  const recovered = await restarted.snapshot(jobId);
+  assert.equal(recovered.conversation?.revision, 1);
+  assert.equal(recovered.conversation?.turns[0]?.items.length, 1);
+  assert.equal(recovered.conversation?.turns[0]?.items[0]?.text, "Once");
+  assert.ok(recovered.conversationDiagnostics.some((item) => item.code === "conversation_journal_duplicate"));
+});
+
+test("revision gaps fail closed without inventing the missing patch", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-bridge-persistence-gap-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { store, jobId } = await createConversationFixture(root, "persistence-gap");
+  await appendAgentDelta(store, jobId, "One");
+  await appendAgentDelta(store, jobId, " two");
+  const journalPath = join(root, jobId, "conversation-events.jsonl");
+  const entries = nonEmptyLines(await readFile(journalPath, "utf8")).map((line) => JSON.parse(line));
+  entries[1].revision = 3;
+  await writeFile(journalPath, `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`, "utf8");
+
+  const restarted = new JobStore(root);
+  await restarted.initialize();
+  await assert.rejects(
+    () => restarted.snapshot(jobId),
+    (error: unknown) => error instanceof ConversationPersistenceError && error.code === "conversation_journal_gap",
+  );
+});
+
+test("Windows rename fallback preserves the previous checkpoint instead of copying over primary", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-bridge-persistence-eperm-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  let injectFailure = false;
+  let failedOnce = false;
+  const renameWithWindowsCollision = async (source: string, destination: string) => {
+    if (injectFailure && !failedOnce && destination.endsWith("conversation.json") && source.endsWith(".tmp")) {
+      failedOnce = true;
+      throw Object.assign(new Error("simulated Windows rename collision"), { code: "EPERM" });
+    }
+    await rename(source, destination);
+  };
+  const store = new JobStore(root, join(root, "codex-inbox"), renameWithWindowsCollision);
+  await store.initialize();
+  const { jobId } = await createConversationFixture(root, "persistence-eperm", store);
+  injectFailure = true;
+  await appendAgentDelta(store, jobId, "Promoted safely");
+
+  assert.equal(failedOnce, true);
+  assert.equal(JSON.parse(await readFile(join(root, jobId, "conversation.json"), "utf8")).revision, 1);
+  assert.equal(JSON.parse(await readFile(join(root, jobId, "conversation.json.bak"), "utf8")).revision, 0);
+});
+
+test("a second restart after successful recovery is stable and legacy checkpoints seed one backup", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-bridge-persistence-second-restart-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { store, jobId } = await createConversationFixture(root, "persistence-second-restart");
+  await appendAgentDelta(store, jobId, "Stable");
+  const jobDir = join(root, jobId);
+  await writeFile(join(jobDir, "conversation.json"), "{", "utf8");
+
+  const firstRestart = new JobStore(root);
+  await firstRestart.initialize();
+  assert.equal((await firstRestart.snapshot(jobId)).conversation?.revision, 1);
+  const secondRestart = new JobStore(root);
+  await secondRestart.initialize();
+  const stable = await secondRestart.snapshot(jobId);
+  assert.equal(stable.conversation?.revision, 1);
+  assert.ok(!stable.conversationDiagnostics.some((item) => item.code === "conversation_checkpoint_recovered"));
+
+  await unlink(join(jobDir, "conversation-events.jsonl"));
+  await unlink(join(jobDir, "conversation.json.bak"));
+  const legacyRestart = new JobStore(root);
+  await legacyRestart.initialize();
+  assert.equal((await legacyRestart.snapshot(jobId)).conversation?.revision, 1);
+  assert.equal(JSON.parse(await readFile(join(jobDir, "conversation.json.bak"), "utf8")).revision, 1);
+});
+
+async function createConversationFixture(root: string, key: string, existingStore?: JobStore) {
+  const store = existingStore ?? new JobStore(root);
+  if (!existingStore) await store.initialize();
+  const preview = previewWorkPackage({ projectId: "omi", title: key, objective: "Persist this conversation." });
+  const created = await store.create({
+    project: { id: "omi", name: "OMI", path: join(root, "project") },
+    workPackage: preview.workPackage,
+    previewDigest: preview.previewDigest,
+    idempotencyKey: `${key}-idempotency`,
+  });
+  return { store, jobId: created.record.id };
+}
+
+async function appendAgentDelta(store: JobStore, jobId: string, delta: string): Promise<void> {
+  await store.applyConversationNotification(jobId, {
+    method: "item/agentMessage/delta",
+    params: { threadId: "thread-persistence", turnId: "turn-persistence", itemId: "agent-persistence", delta },
+  });
+}
+
+function nonEmptyLines(content: string): string[] {
+  return content.split(/\r?\n/).filter(Boolean);
+}

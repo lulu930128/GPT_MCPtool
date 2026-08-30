@@ -21,6 +21,7 @@ export interface BridgeConfig {
   httpToken?: string;
   maxRecentJobs: number;
   buildId: string;
+  codexHome: string;
 }
 
 interface ProjectsFileShape {
@@ -39,6 +40,7 @@ export async function loadBridgeConfig(env: NodeJS.ProcessEnv = process.env): Pr
       (process.platform === "win32" ? "C:\\CodexBridge" : join(homedir(), ".codex-bridge")),
   );
   const handoffDir = join(projectRoot, ".local", "codex-inbox");
+  const codexHome = resolve(env.CODEX_HOME?.trim() || join(homedir(), ".codex"));
   const projects = await loadProjects(projectsFile);
   const codexLaunch = await resolveCodexLaunch(projectRoot, handoffDir, env);
 
@@ -58,6 +60,7 @@ export async function loadBridgeConfig(env: NodeJS.ProcessEnv = process.env): Pr
     httpToken: env.CODEX_BRIDGE_HTTP_TOKEN?.trim() || undefined,
     maxRecentJobs: parseBoundedInt(env.CODEX_BRIDGE_MAX_RECENT_JOBS, 20, 1, 100),
     buildId: await computeRuntimeBuildId(projectRoot),
+    codexHome,
   };
 }
 

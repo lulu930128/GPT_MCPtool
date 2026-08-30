@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { redactString } from "./redaction.js";
 import type {
+  ConversationFreshness,
   ConversationItemProjection,
   ConversationMessage,
   ConversationThreadProjection,
@@ -31,6 +32,7 @@ export function hydrateConversationProjection(
   current: ConversationThreadProjection,
   response: Record<string, unknown>,
   at = new Date().toISOString(),
+  freshness?: ConversationFreshness,
 ): ConversationThreadProjection {
   const thread = isObject(response.thread) ? response.thread : response;
   const threadId = stringValue(thread.id) ?? current.threadId;
@@ -38,11 +40,7 @@ export function hydrateConversationProjection(
     ? thread.turns.flatMap((turn) => isObject(turn) ? [normalizeTurn(turn, at)] : [])
     : [];
   const currentTurns = new Map(current.turns.map((turn) => [turn.turnId, turn]));
-  const merged = hydratedTurns.map((turn) => mergeTurn(currentTurns.get(turn.turnId), turn));
-  const hydratedIds = new Set(merged.map((turn) => turn.turnId));
-  for (const turn of current.turns) {
-    if (!hydratedIds.has(turn.turnId)) merged.push(structuredClone(turn));
-  }
+  const merged = hydratedTurns.map((turn) => mergeHydratedTurn(currentTurns.get(turn.turnId), turn));
   return {
     schemaVersion: 1,
     threadId,
@@ -51,6 +49,7 @@ export function hydrateConversationProjection(
     revision: current.revision + 1,
     updatedAt: at,
     hydratedAt: at,
+    freshness: freshness ? structuredClone(freshness) : current.freshness,
   };
 }
 
@@ -186,25 +185,36 @@ export function mergeConversationMessages(
   messages: ConversationMessage[],
 ): ConversationThreadProjection {
   const next = structuredClone(projection);
-  const projectedUsers = flattenItems(next).filter((item) => item.type === "userMessage");
-  const localUsers = messages.filter((message) => message.role === "user");
-  projectedUsers.forEach((item, index) => {
-    const message = localUsers[index];
-    if (!message) return;
-    item.text = bounded(message.content, MAX_MESSAGE_CHARS);
+  const projectedItems = flattenItems(next);
+  const projectedUsersByClientId = new Map(
+    projectedItems
+      .filter((item) => item.type === "userMessage" && item.clientMessageId)
+      .map((item) => [item.clientMessageId!, item]),
+  );
+  const matchedMessageIds = new Set<string>();
+
+  for (const message of messages) {
+    if (message.role !== "user" || !message.clientMessageId) continue;
+    const item = projectedUsersByClientId.get(message.clientMessageId);
+    if (!item) continue;
+    matchedMessageIds.add(message.id);
     item.context = message.context ? bounded(message.context, MAX_MESSAGE_CHARS) : undefined;
     item.inputArtifacts = structuredClone(message.inputArtifacts ?? []);
     item.clientMessageId = message.clientMessageId;
-  });
+  }
 
-  const roleCounts = {
-    user: projectedUsers.length,
-    assistant: flattenItems(next).filter((item) => item.type === "agentMessage").length,
-  };
-  const seen = { user: 0, assistant: 0 };
+  // Once App Server history has synchronized successfully, it is authoritative.
+  // Unmatched Bridge records may carry metadata, but must not recreate source-deleted
+  // messages or overwrite source text by ordinal position.
+  if (next.freshness?.synchronized) return next;
+
   for (const message of messages) {
-    seen[message.role] += 1;
-    if (seen[message.role] <= roleCounts[message.role]) continue;
+    if (matchedMessageIds.has(message.id)) continue;
+    const projectedType = message.role === "user" ? "userMessage" : "agentMessage";
+    const sameTurnItem = message.turnId
+      ? projectedItems.some((item) => item.turnId === message.turnId && item.type === projectedType)
+      : undefined;
+    if (sameTurnItem) continue;
     const turnId = message.turnId ?? `local:${message.id}`;
     const turn = ensureTurn(next, turnId, message.at);
     upsertItem(turn, {
@@ -300,6 +310,25 @@ function mergeTurn(current: ConversationTurnProjection | undefined, hydrated: Co
     turnId: hydrated.turnId,
     status: hydrated.status === "unknown" ? current.status : hydrated.status,
     items,
+    startedAt: hydrated.startedAt ?? current.startedAt,
+    completedAt: hydrated.completedAt ?? current.completedAt,
+    durationMs: hydrated.durationMs ?? current.durationMs,
+  };
+}
+
+function mergeHydratedTurn(
+  current: ConversationTurnProjection | undefined,
+  hydrated: ConversationTurnProjection,
+): ConversationTurnProjection {
+  if (!current) return hydrated;
+  return {
+    turnId: hydrated.turnId,
+    status: hydrated.status === "unknown" ? current.status : hydrated.status,
+    items: hydrated.items.map((item) => mergeItem(
+      current.items.find((candidate) => candidate.id === item.id),
+      item,
+      true,
+    )),
     startedAt: hydrated.startedAt ?? current.startedAt,
     completedAt: hydrated.completedAt ?? current.completedAt,
     durationMs: hydrated.durationMs ?? current.durationMs,

@@ -168,15 +168,49 @@ export interface ConversationThreadProjection {
   revision: number;
   updatedAt: string;
   hydratedAt?: string;
+  freshness?: ConversationFreshness;
+}
+
+export interface ConversationFreshness {
+  historyMode: "legacy" | "paginated";
+  synchronized: boolean;
+  sourceAvailability: "available" | "unavailable";
+  lastMetadataCheckedAt: string;
+  lastHydratedAt?: string;
+  sourceUpdatedAt?: number;
+  sourceRecencyAt?: number;
+  sourceFingerprint?: string;
+  staleReason?: string;
 }
 
 export interface ConversationProjectionPatch {
   revision: number;
   at: string;
+  replaceAll?: boolean;
   threadId?: string;
   status?: ConversationThreadProjection["status"];
   hydratedAt?: string;
+  freshness?: ConversationFreshness;
   turns: ConversationTurnProjection[];
+}
+
+export type ConversationPersistenceDiagnosticCode =
+  | "conversation_checkpoint_corrupt"
+  | "conversation_checkpoint_recovered"
+  | "conversation_checkpoint_write_failed"
+  | "conversation_journal_tail_truncated"
+  | "conversation_journal_duplicate"
+  | "conversation_journal_gap"
+  | "conversation_journal_corrupt"
+  | "conversation_journal_write_failed"
+  | "conversation_replay_failed";
+
+export interface ConversationPersistenceDiagnostic {
+  code: ConversationPersistenceDiagnosticCode;
+  message: string;
+  at: string;
+  checkpointRevision?: number;
+  journalRevision?: number;
 }
 
 export interface JobEvent {
@@ -269,6 +303,7 @@ export interface LocalThreadSummary {
   createdAt: string;
   updatedAt: string;
   threadStatus: string;
+  historyMode: "legacy" | "paginated";
   isPinned: boolean;
   historyOnly: boolean;
 }
@@ -279,6 +314,12 @@ export interface LocalThreadListPage {
   complete: boolean;
 }
 
+export interface LocalThreadFreshRead {
+  summary: LocalThreadSummary;
+  sourceFingerprint: string;
+  snapshot?: LocalThreadSnapshot;
+}
+
 export interface JobSnapshot extends JobSummary {
   messages: ConversationMessage[];
   conversation?: ConversationThreadProjection;
@@ -286,6 +327,7 @@ export interface JobSnapshot extends JobSummary {
   nextConversationRevision: number;
   serverConversationRevision: number;
   conversationHasMore: boolean;
+  conversationDiagnostics: ConversationPersistenceDiagnostic[];
   events: JobEvent[];
   nextEventSeq: number;
   serverLastEventSeq: number;
@@ -302,6 +344,66 @@ export interface LocalThreadSnapshot extends JobSnapshot {
   readOnly: boolean;
   localThreadId: string;
   threadStatus: string;
+}
+
+export interface AutomationOverlay {
+  automationId: string;
+  name: string;
+  status: "ACTIVE" | "PAUSED" | "UNKNOWN";
+  schedule: string;
+  targetThreadId: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface UnifiedConversationSummary {
+  conversationId: string;
+  threadId?: string;
+  projectId: string;
+  projectName: string;
+  title: string;
+  preview: string;
+  createdAt: string;
+  updatedAt: string;
+  threadStatus: string;
+  historyMode: "legacy" | "paginated";
+  source: "native" | "bridge" | "automation" | "mixed";
+  readOnly: boolean;
+  historyOnly: boolean;
+  bridgeJob?: JobSummary;
+  automations: AutomationOverlay[];
+  automationState?: "automation_active" | "automation_paused";
+  automationUpdatedAt?: string;
+  historyFreshness?: ConversationFreshness;
+}
+
+export interface UnifiedConversationSnapshot extends UnifiedConversationSummary {
+  view: JobSnapshot | LocalThreadSnapshot;
+  diagnostics: UnifiedConversationDiagnostic[];
+}
+
+export interface UnifiedConversationListPage {
+  conversations: UnifiedConversationSummary[];
+  nextCursor?: string;
+  complete: boolean;
+  reset: boolean;
+  diagnostics: UnifiedConversationDiagnostic[];
+}
+
+export interface UnifiedConversationDiagnostic {
+  source: "native" | "automation";
+  code:
+    | "native_unavailable"
+    | "native_inventory_truncated"
+    | "native_snapshot_unstable"
+    | "automation_unavailable"
+    | "automation_target_missing"
+    | "automation_target_unresolved"
+    | "automation_target_protected";
+  message: string;
+  count?: number;
+  automationId?: string;
+  targetThreadId?: string;
 }
 
 export interface BridgeStatus {

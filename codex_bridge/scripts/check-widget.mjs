@@ -12,9 +12,10 @@ for (const marker of [
   'rpcRequest("tools/call"',
   'message.method === "ui/notifications/tool-result"',
   'state.pollInFlight',
-  'catchUp ? 25 : 900',
+  'automationActive ? 4000 : 20000',
   'afterConversationRevision:',
   'function applyConversationChanges',
+  'if (change.replaceAll)',
   'data-timeline-key=',
   'class="new-content"',
   'activity-card',
@@ -27,7 +28,8 @@ for (const marker of [
   '本機歷史 · 可續作',
   '這個專案位置受到保護',
   'value="workspace_write" selected',
-  'codex_conversation_list',
+  'codex_unified_conversation_list',
+  'codex_unified_conversation_get',
   'class="composer"',
   '背景與文字文件',
   '貼上文字文件',
@@ -67,7 +69,11 @@ assert.ok(!html.includes("100vh") && !html.includes("100dvh"), "Widget root must
 assert.ok(!html.includes("min-height: 100%"), "Widget body must remain shrinkable inside an auto-sized host iframe.");
 assert.ok(!html.includes('setProperty("--workspace-height", "720px")'), "Inline mode must not restore a hard-coded workspace height.");
 assert.ok(!html.includes('type="file"'), "The core text shuttle must not depend on host file upload controls.");
+assert.ok(!html.includes("data.complete === true && !data.nextCursor"), "A final pagination response must not discard previously loaded conversations.");
+assert.ok(!html.includes("localThreads") && !html.includes("localHistoryCursor") && !html.includes("selectLocalThread"), "Legacy dual-inventory widget state must stay removed.");
 assert.match(html, /<body data-display-mode="inline" data-ledger="project-ledger" data-theme="night-shift">/, "Widget must expose its display mode and dark visual system.");
+assert.match(html, /const replaceRegistry = data\.reset === true;/, "Only an explicit first-page marker may replace the unified registry.");
+assert.match(html, /maxConversations:\s*10000/, "Unified inventory must continue beyond the former 2,000-conversation ceiling.");
 assert.match(html, /body\[data-display-mode="inline"\]\s*\{[^}]*padding:\s*0;/s, "Inline mode total height must not add body padding outside the bounded workspace.");
 assert.match(html, /body\[data-ledger="project-ledger"\]\[data-display-mode="inline"\] \.workspace\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\);[^}]*width:\s*100%;[^}]*max-width:\s*none;/s, "Inline mode must use the full host conversation width.");
 assert.match(html, /function inlineWorkspaceHeight\(availableWidth\)\s*\{[^}]*availableWidth \* 1\.12[^}]*Math\.max\(640, Math\.min\(960, proportionalHeight\)\)/s, "Inline height must scale from host width within bounded limits.");

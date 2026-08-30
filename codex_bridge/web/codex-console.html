@@ -1849,6 +1849,7 @@
         const state = {
           status: null,
           selectedJob: null,
+          selectedConversation: null,
           selectedProjectId: "",
           draft: {},
           busy: false,
@@ -1871,9 +1872,8 @@
           displayMode: "inline",
           openedArtifact: null,
           conversationCursor: null,
-          localThreads: [],
-          localHistoryCursor: null,
-          localHistoryComplete: false,
+          conversations: [],
+          diagnosticsSignature: "",
         };
         let rpcId = 0;
         const pendingRequests = new Map();
@@ -2008,38 +2008,52 @@
           }
           if (data.job) mergeJob(data.job);
           if (Array.isArray(data.conversations)) {
-            if (state.status) {
-              const known = new Map((state.status.recentJobs || []).map((job) => [job.id, job]));
-              data.conversations.forEach((job) => known.set(job.id, Object.assign({}, known.get(job.id) || {}, job)));
-              state.status.recentJobs = Array.from(known.values()).sort((left, right) =>
-                String(right.createdAt || "").localeCompare(String(left.createdAt || ""))
-              );
-            }
+            const replaceRegistry = data.reset === true;
+            const known = new Map((replaceRegistry ? [] : state.conversations).map((conversation) => [conversation.conversationId, conversation]));
+            data.conversations.forEach((conversation) => known.set(
+              conversation.conversationId,
+              Object.assign({}, known.get(conversation.conversationId) || {}, conversation),
+            ));
+            state.conversations = Array.from(known.values()).sort((left, right) =>
+              String(right.updatedAt || "").localeCompare(String(left.updatedAt || ""))
+            );
             state.conversationCursor = data.nextCursor || null;
             state.treeSignature = "";
           }
-          if (Array.isArray(data.localThreads)) {
-            const known = new Map(state.localThreads.map((thread) => [thread.threadId, thread]));
-            data.localThreads.forEach((thread) => known.set(thread.threadId, Object.assign({}, known.get(thread.threadId) || {}, thread)));
-            state.localThreads = Array.from(known.values()).sort((left, right) =>
-              String(right.updatedAt || "").localeCompare(String(left.updatedAt || ""))
-            );
-            state.localHistoryCursor = data.nextCursor || null;
-            state.localHistoryComplete = data.complete === true;
-            state.treeSignature = "";
-          }
-          if (data.localThread) selectLocalThread(data.localThread);
+          if (Array.isArray(data.diagnostics)) applyConversationDiagnostics(data.diagnostics);
+          if (data.unifiedConversation) selectUnifiedConversation(data.unifiedConversation);
           if (data.id && data.status && Array.isArray(data.messages)) mergeJob(data);
           render();
         }
 
         function applyStatus(status) {
           state.status = status;
-          state.conversationCursor = status.conversationNextCursor || null;
           (status.projects || []).forEach((project) => state.expandedProjects.add(project.id));
           if (!state.selectedProjectId) {
             state.selectedProjectId = state.draft.projectId || status.projects && status.projects[0] && status.projects[0].id || "";
           }
+        }
+
+        function applyConversationDiagnostics(diagnostics) {
+          const normalized = (diagnostics || []).map((item) => ({ code: item.code, count: item.count || 1 }));
+          const signature = JSON.stringify(normalized);
+          if (!normalized.length) {
+            state.diagnosticsSignature = "";
+            return;
+          }
+          if (signature === state.diagnosticsSignature) return;
+          state.diagnosticsSignature = signature;
+          const labels = {
+            native_unavailable: "Codex 對話來源暫時無法讀取",
+            native_inventory_truncated: "對話數量超過安全讀取上限",
+            native_snapshot_unstable: "對話更新中，暫時保留上一份已驗證內容",
+            automation_unavailable: "排程資訊暫時無法讀取",
+            automation_target_missing: "有排程指向已不存在的對話",
+            automation_target_unresolved: "有排程目標尚未解析",
+            automation_target_protected: "有排程指向受保護的唯讀對話",
+          };
+          const message = normalized.map((item) => (labels[item.code] || item.code) + (item.count > 1 ? " × " + item.count : "")).join("；");
+          showNotice("部分資料以降級模式顯示：" + message);
         }
 
         function mergeJob(job) {
@@ -2054,6 +2068,10 @@
             }
           }
           state.selectedJob = merged;
+          if (!state.selectedConversation || state.selectedConversation.conversationId !== (merged.threadId || "job:" + merged.id)) {
+            state.selectedConversation = summaryFromJob(merged);
+          }
+          upsertConversation(state.selectedConversation);
           state.selectedProjectId = merged.projectId;
           upsertRecentJob(merged);
           if (changed) {
@@ -2068,7 +2086,7 @@
           schedulePoll();
         }
 
-        function selectLocalThread(thread) {
+        function selectNativeConversationView(thread) {
           const changed = !state.selectedJob || state.selectedJob.id !== thread.id;
           state.selectedJob = thread;
           state.selectedProjectId = thread.projectId;
@@ -2086,11 +2104,63 @@
           state.treeSignature = "";
         }
 
+        function selectUnifiedConversation(conversation) {
+          const view = conversation.view;
+          const summary = Object.assign({}, conversation);
+          delete summary.view;
+          delete summary.diagnostics;
+          applyConversationDiagnostics(conversation.diagnostics || []);
+          state.selectedConversation = summary;
+          upsertConversation(summary);
+          if (view) {
+            if (view.source === "local") selectNativeConversationView(view);
+            else mergeJob(view);
+          }
+          state.treeSignature = "";
+        }
+
+        function summaryFromJob(job) {
+          return {
+            conversationId: job.threadId || "job:" + job.id,
+            threadId: job.threadId,
+            projectId: job.projectId,
+            projectName: job.projectName,
+            title: job.title,
+            preview: job.objective,
+            createdAt: job.createdAt,
+            updatedAt: job.updatedAt,
+            threadStatus: terminal.has(job.status) ? "idle" : "active",
+            historyMode: job.conversation && job.conversation.freshness && job.conversation.freshness.historyMode || "legacy",
+            source: "bridge",
+            readOnly: Boolean(job.readOnly),
+            historyOnly: Boolean(job.readOnly),
+            bridgeJob: job,
+            automations: [],
+          };
+        }
+
+        function upsertConversation(conversation) {
+          if (!conversation || !conversation.conversationId) return;
+          const known = new Map(state.conversations.map((item) => [item.conversationId, item]));
+          known.set(conversation.conversationId, Object.assign({}, known.get(conversation.conversationId) || {}, conversation));
+          state.conversations = Array.from(known.values()).sort((left, right) =>
+            String(right.updatedAt || "").localeCompare(String(left.updatedAt || ""))
+          );
+          state.treeSignature = "";
+        }
+
         function applyConversationChanges(conversation, changes) {
           for (const change of changes) {
+            if (change.replaceAll) conversation.turns = cloneValue(change.turns || []);
             if (change.threadId) conversation.threadId = change.threadId;
             if (change.status) conversation.status = change.status;
             if (change.hydratedAt) conversation.hydratedAt = change.hydratedAt;
+            if (change.freshness) conversation.freshness = cloneValue(change.freshness);
+            if (change.replaceAll) {
+              conversation.revision = change.revision;
+              conversation.updatedAt = change.at;
+              continue;
+            }
             for (const turnPatch of change.turns || []) {
               let turn = (conversation.turns || []).find((candidate) => candidate.turnId === turnPatch.turnId);
               if (!turn) {
@@ -2155,6 +2225,7 @@
         function startNewConversation(projectId) {
           const operableProjectId = isOperableProjectId(projectId) ? projectId : firstProjectId();
           state.selectedJob = null;
+          state.selectedConversation = null;
           state.selectedProjectId = operableProjectId || firstProjectId();
           state.messageSignature = "";
           state.workstreamSignature = "";
@@ -2294,13 +2365,14 @@
 
         async function loadMoreConversations() {
           if (!state.conversationCursor) return;
-          await callTool("codex_conversation_list", { cursor: state.conversationCursor, limit: 50 });
+          await loadConversationRegistry(state.conversationCursor);
         }
 
-        async function loadLocalHistory(cursor) {
-          await callTool("codex_local_thread_list", {
+        async function loadConversationRegistry(cursor) {
+          await callTool("codex_unified_conversation_list", {
             cursor: cursor || undefined,
-            maxThreads: 2000,
+            limit: 2000,
+            maxConversations: 10000,
           });
         }
 
@@ -2308,25 +2380,32 @@
           clearTimeout(state.pollTimer);
           if (!state.selectedJob || document.hidden) return;
           const catchUp = state.selectedJob.hasMore || state.selectedJob.conversationHasMore;
-          if (terminal.has(state.selectedJob.status) && !catchUp) return;
-          state.pollTimer = setTimeout(pollSelectedJob, catchUp ? 25 : 900);
+          const automationActive = state.selectedConversation && state.selectedConversation.automationState === "automation_active";
+          const delay = catchUp ? 25 : (!terminal.has(state.selectedJob.status) ? 900 : automationActive ? 4000 : 20000);
+          state.pollTimer = setTimeout(pollSelectedJob, delay);
         }
 
         async function pollSelectedJob() {
           const job = state.selectedJob;
           const catchUp = job && (job.hasMore || job.conversationHasMore);
-          if (!job || (terminal.has(job.status) && !catchUp) || state.pollInFlight || document.hidden) {
+          if (!job || state.pollInFlight || document.hidden) {
             schedulePoll();
             return;
           }
           state.pollInFlight = true;
           try {
-            await callTool("codex_job_get", {
-              jobId: job.id,
-              afterSeq: Number(job.nextEventSeq || 0),
-              maxEvents: 20,
-              afterConversationRevision: Number(job.nextConversationRevision || 0),
-            });
+            if (!terminal.has(job.status) || catchUp || !state.selectedConversation) {
+              await callTool("codex_job_get", {
+                jobId: job.id,
+                afterSeq: Number(job.nextEventSeq || 0),
+                maxEvents: 20,
+                afterConversationRevision: Number(job.nextConversationRevision || 0),
+              });
+            } else {
+              await callTool("codex_unified_conversation_get", {
+                conversationId: state.selectedConversation.conversationId,
+              });
+            }
           } catch (error) {
             showError(error && error.message || String(error));
           } finally {
@@ -2335,7 +2414,17 @@
           }
         }
 
-        document.addEventListener("visibilitychange", schedulePoll, { passive: true });
+        document.addEventListener("visibilitychange", () => {
+          if (!document.hidden) {
+            void loadConversationRegistry().catch(() => undefined);
+            if (state.selectedConversation) void pollSelectedJob();
+          }
+          schedulePoll();
+        }, { passive: true });
+        window.addEventListener("focus", () => {
+          void loadConversationRegistry().catch(() => undefined);
+          if (state.selectedConversation) void pollSelectedJob();
+        }, { passive: true });
         window.addEventListener("resize", () => {
           if (state.displayMode !== "fullscreen") return;
           applyHostContext({
@@ -2366,42 +2455,28 @@
 
         function renderProjectTree() {
           const projects = ledgerProjects();
-          const jobs = state.status && state.status.recentJobs || [];
           const signature = JSON.stringify([
             projects.map((project) => [project.id, project.name, project.historyOnly, project.updatedAt]),
-            jobs.map((job) => [job.id, job.projectId, job.title, job.status, job.stateVersion]),
-            state.localThreads.map((thread) => [thread.threadId, thread.projectId, thread.title, thread.updatedAt]),
-            state.selectedJob && state.selectedJob.id,
+            state.conversations.map((conversation) => [conversation.conversationId, conversation.projectId, conversation.title, conversation.updatedAt, conversation.automationState]),
+            state.selectedConversation && state.selectedConversation.conversationId,
             Array.from(state.expandedProjects),
             Array.from(state.expandedConversationProjects),
             state.conversationCursor,
-            state.localHistoryCursor,
-            state.localHistoryComplete,
           ]);
           if (signature === state.treeSignature) return;
           state.treeSignature = signature;
           $("#project-tree").innerHTML = projects.map((project) => {
-            const projectJobs = jobs.filter((job) => job.projectId === project.id);
-            const bridgeThreadIds = new Set(projectJobs.map((job) => job.threadId).filter(Boolean));
-            const allConversations = projectJobs.map((job) => ({ kind: "job", value: job }))
-              .concat(state.localThreads
-                .filter((thread) => thread.projectId === project.id && !bridgeThreadIds.has(thread.threadId))
-                .map((thread) => ({ kind: "local", value: thread })))
-              .sort((left, right) => String(right.value.updatedAt || right.value.createdAt || "").localeCompare(String(left.value.updatedAt || left.value.createdAt || "")));
+            const allConversations = state.conversations
+              .filter((conversation) => conversation.projectId === project.id)
+              .sort((left, right) => String(right.updatedAt || right.createdAt || "").localeCompare(String(left.updatedAt || left.createdAt || "")));
             const expanded = state.expandedProjects.has(project.id);
             const showAll = state.expandedConversationProjects.has(project.id);
             const visibleConversations = showAll ? allConversations : allConversations.slice(0, 8);
             const conversations = visibleConversations.length
-              ? visibleConversations.map((conversation) => {
-                  const item = conversation.value;
-                  const selected = conversation.kind === "job"
-                    ? state.selectedJob && state.selectedJob.id === item.id
-                    : state.selectedJob && state.selectedJob.localThreadId === item.threadId;
-                  const dataAttribute = conversation.kind === "job"
-                    ? 'data-job-id="' + escapeAttr(item.id) + '"'
-                    : 'data-local-thread-id="' + escapeAttr(item.threadId) + '"';
-                  return '<button class="conversation-item" type="button" ' + dataAttribute + ' aria-current="' + String(Boolean(selected)) + '">' +
-                    '<span class="conversation-dot ' + conversationDotClass(item.status || item.threadStatus) + '"></span>' +
+              ? visibleConversations.map((item) => {
+                  const selected = state.selectedConversation && state.selectedConversation.conversationId === item.conversationId;
+                  return '<button class="conversation-item" type="button" data-conversation-id="' + escapeAttr(item.conversationId) + '" aria-current="' + String(Boolean(selected)) + '">' +
+                    '<span class="conversation-dot ' + conversationDotClass(item.automationState || item.bridgeJob && item.bridgeJob.status || item.threadStatus) + '"></span>' +
                     '<span class="conversation-title">' + escapeHtml(item.title) + '</span></button>';
                 }).join("")
               : '<div class="empty-project">尚無對話</div>';
@@ -2420,10 +2495,8 @@
                   : '<button class="project-add" type="button" data-project-new="' + escapeAttr(project.id) + '" aria-label="在此專案新增對話">＋</button>') +
               '</div><div class="conversation-list">' + conversations + reveal + '</div></section>';
           }).join("") + (state.conversationCursor
-            ? '<button class="load-conversations" type="button" data-load-conversations>載入更早 Bridge 對話</button>'
-            : "") + (state.localHistoryCursor
-              ? '<button class="load-conversations" type="button" data-load-local-history>載入更多本機歷史</button>'
-              : "") || '<div class="empty-project">尚未找到本機 Codex 對話</div>';
+            ? '<button class="load-conversations" type="button" data-load-local-history>載入更多對話</button>'
+            : "") || '<div class="empty-project">尚未找到本機 Codex 對話</div>';
 
           document.querySelectorAll("[data-project-toggle]").forEach((button) => button.addEventListener("click", () => {
             const id = button.dataset.projectToggle;
@@ -2440,32 +2513,26 @@
             state.treeSignature = "";
             renderProjectTree();
           }));
-          document.querySelectorAll("[data-job-id]").forEach((button) => button.addEventListener("click", () => withBusy(async () => {
-            await callTool("codex_job_get", { jobId: button.dataset.jobId, afterSeq: 0, maxEvents: 20 });
+          document.querySelectorAll("[data-conversation-id]").forEach((button) => button.addEventListener("click", () => withBusy(async () => {
+            await callTool("codex_unified_conversation_get", { conversationId: button.dataset.conversationId });
             $("#console").classList.remove("rail-open");
           })));
-          document.querySelectorAll("[data-local-thread-id]").forEach((button) => button.addEventListener("click", () => withBusy(async () => {
-            await callTool("codex_local_thread_read", { threadId: button.dataset.localThreadId });
-            $("#console").classList.remove("rail-open");
-          })));
-          const loadMore = document.querySelector("[data-load-conversations]");
-          if (loadMore) loadMore.addEventListener("click", () => withBusy(loadMoreConversations));
           const loadMoreLocal = document.querySelector("[data-load-local-history]");
-          if (loadMoreLocal) loadMoreLocal.addEventListener("click", () => withBusy(() => loadLocalHistory(state.localHistoryCursor)));
+          if (loadMoreLocal) loadMoreLocal.addEventListener("click", () => withBusy(() => loadConversationRegistry(state.conversationCursor)));
         }
 
         function ledgerProjects() {
           const configured = state.status && state.status.projects || [];
           const configuredIds = new Set(configured.map((project) => project.id));
           const localProjects = new Map();
-          state.localThreads.forEach((thread) => {
-            const previous = localProjects.get(thread.projectId);
-            if (!previous || String(thread.updatedAt || "") > String(previous.updatedAt || "")) {
-              localProjects.set(thread.projectId, {
-                id: thread.projectId,
-                name: thread.projectName,
-                historyOnly: thread.historyOnly === true,
-                updatedAt: thread.updatedAt,
+          state.conversations.forEach((conversation) => {
+            const previous = localProjects.get(conversation.projectId);
+            if (!previous || String(conversation.updatedAt || "") > String(previous.updatedAt || "")) {
+              localProjects.set(conversation.projectId, {
+                id: conversation.projectId,
+                name: conversation.projectName,
+                historyOnly: conversation.historyOnly === true,
+                updatedAt: conversation.updatedAt,
               });
             }
           });
@@ -3227,7 +3294,7 @@
 
         function conversationDotClass(status) {
           if (status === "awaiting_approval") return "approval";
-          if (["queued", "preparing", "running"].includes(status)) return "active";
+          if (["queued", "preparing", "running", "active", "automation_active"].includes(status)) return "active";
           if (["failed", "interrupted", "cancelled"].includes(status)) return "failed";
           return "";
         }
@@ -3299,7 +3366,7 @@
         bridgeReady.then(async () => {
           updateFromResponse({ structuredContent: window.openai && window.openai.toolOutput });
           await refreshStatus();
-          await loadLocalHistory();
+          await loadConversationRegistry();
           if (!state.selectedJob) startNewConversation(state.draft.projectId || state.selectedProjectId);
         }).catch((error) => showError("無法連接 MCP Apps host：" + (error && error.message || String(error))));
       })();

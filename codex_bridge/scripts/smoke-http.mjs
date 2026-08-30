@@ -63,6 +63,7 @@ try {
     "codex_artifact_list",
     "codex_artifact_read_chunk",
     "codex_bridge_status",
+    "codex_conversation_get",
     "codex_conversation_list",
     "codex_conversation_send",
     "codex_job_cancel",
@@ -75,6 +76,8 @@ try {
     "codex_text_bundle_append",
     "codex_text_bundle_begin",
     "codex_text_bundle_finalize",
+    "codex_unified_conversation_get",
+    "codex_unified_conversation_list",
     "render_codex_console",
   ]);
   for (const action of [
@@ -86,13 +89,15 @@ try {
     "codex_job_steer",
     "codex_local_thread_list",
     "codex_local_thread_read",
+    "codex_unified_conversation_get",
+    "codex_unified_conversation_list",
     "codex_text_bundle_append",
     "codex_text_bundle_begin",
     "codex_text_bundle_finalize",
   ]) {
     assert.deepEqual(tools.find((tool) => tool.name === action)?._meta?.ui?.visibility, ["app"], `${action} must be app-only`);
   }
-  assert.equal(tools.find((tool) => tool.name === "render_codex_console")?._meta?.ui?.resourceUri, "ui://codex-bridge/chat-workspace-v11.html");
+  assert.equal(tools.find((tool) => tool.name === "render_codex_console")?._meta?.ui?.resourceUri, "ui://codex-bridge/chat-workspace-v13.html");
 
   const statusResult = await client.callTool({ name: "codex_bridge_status", arguments: {} });
   assert.equal(statusResult.structuredContent?.service, "codex-handoff-bridge");
@@ -133,13 +138,13 @@ try {
   assert.equal(runtime.store.list().length, 0, "Preview must not create a job.");
 
   const resources = await client.listResources();
-  assert.ok(resources.resources.some((resource) => resource.uri === "ui://codex-bridge/chat-workspace-v11.html"));
-  const widget = await client.readResource({ uri: "ui://codex-bridge/chat-workspace-v11.html" });
+  assert.ok(resources.resources.some((resource) => resource.uri === "ui://codex-bridge/chat-workspace-v13.html"));
+  const widget = await client.readResource({ uri: "ui://codex-bridge/chat-workspace-v13.html" });
   assert.equal(widget.contents[0]?.mimeType, "text/html;profile=mcp-app");
   assert.match(widget.contents[0]?.text || "", /ui\/initialize/);
   assert.match(widget.contents[0]?.text || "", /ui\/request-display-mode/);
   assert.match(widget.contents[0]?.text || "", /id="reviewer"/);
-  assert.match(widget.contents[0]?.text || "", /codex_local_thread_list/);
+  assert.match(widget.contents[0]?.text || "", /codex_unified_conversation_list/);
   assert.match(widget.contents[0]?.text || "", /本機歷史 · 可續作/);
   assert.match(widget.contents[0]?.text || "", /本機歷史 · 受保護/);
 
@@ -147,7 +152,7 @@ try {
     ok: true,
     health: { version: health.version, buildId: health.buildId, controller: health.controller },
     toolCount: tools.length,
-    appOnlyActions: 11,
+    appOnlyActions: 13,
     finalizedTextBundle: bundleId,
     widgetMimeType: widget.contents[0]?.mimeType,
     previewCreatedJobs: runtime.store.list().length,

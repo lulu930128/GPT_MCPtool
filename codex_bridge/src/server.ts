@@ -2,10 +2,11 @@ import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from "@model
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { BridgeRuntime } from "./runtime.js";
+import { toolErrorResult } from "./tool-error-result.js";
 import type { BridgeStatus, JobSnapshot } from "./types.js";
 import { previewWorkPackage } from "./work-package.js";
 
-const WIDGET_URI = "ui://codex-bridge/chat-workspace-v11.html";
+const WIDGET_URI = "ui://codex-bridge/chat-workspace-v13.html";
 
 const workPackageInput = {
   projectId: z.string().min(2).max(32),
@@ -163,11 +164,71 @@ export function createCodexBridgeMcpServer(runtime: BridgeRuntime): McpServer {
     },
     async (args) => safeResult(async () => {
       if (args.projectId) requireAllowedProject(runtime, args.projectId);
-      const page = runtime.store.listPage(args.limit ?? 50, args.cursor, args.projectId);
+      const page = await runtime.conversations.listPage({
+        visibility: "public",
+        projectId: args.projectId,
+        limit: args.limit ?? 50,
+        cursor: args.cursor,
+      });
       return result(
-        { conversations: page.data, nextCursor: page.nextCursor },
-        `Loaded ${page.data.length} saved Codex conversation(s).`,
+        page,
+        `Loaded ${page.conversations.length} saved Codex conversation(s).`,
       );
+    }),
+  );
+
+  server.registerTool(
+    "codex_conversation_get",
+    {
+      title: "Get Codex conversation",
+      description: "Read one unified Codex conversation inside the configured public project allowlist.",
+      annotations: readAnnotations(),
+      inputSchema: { conversationId: z.string().min(1).max(256) },
+    },
+    async (args) => safeResult(async () => {
+      const conversation = await runtime.conversations.get(args.conversationId, "public");
+      return result({ unifiedConversation: conversation }, `Loaded Codex conversation ${args.conversationId}.`);
+    }),
+  );
+
+  registerAppTool(
+    server,
+    "codex_unified_conversation_list",
+    {
+      title: "List unified Codex history",
+      description: "Load the app-only unified registry of native threads, Bridge jobs, and safe automation metadata.",
+      annotations: readAnnotations(),
+      inputSchema: {
+        cursor: z.string().min(8).max(1_024).optional(),
+        limit: z.number().int().min(1).max(2_000).optional(),
+        maxConversations: z.number().int().min(1).max(10_000).optional(),
+      },
+      _meta: { ui: { visibility: ["app"] } },
+    },
+    async (args) => safeResult(async () => {
+      const page = await runtime.conversations.listPage({
+        visibility: "app",
+        cursor: args.cursor,
+        limit: args.limit ?? 2_000,
+        maxConversations: args.maxConversations ?? 10_000,
+      });
+      return result(page, `Loaded ${page.conversations.length} unified Codex conversation(s).`);
+    }),
+  );
+
+  registerAppTool(
+    server,
+    "codex_unified_conversation_get",
+    {
+      title: "Read unified Codex conversation",
+      description: "Read one app-only unified conversation with native history and Bridge or automation overlays.",
+      annotations: readAnnotations(),
+      inputSchema: { conversationId: z.string().min(1).max(256) },
+      _meta: { ui: { visibility: ["app"] } },
+    },
+    async (args) => safeResult(async () => {
+      const conversation = await runtime.conversations.get(args.conversationId, "app");
+      return result({ unifiedConversation: conversation }, `Loaded unified Codex conversation ${args.conversationId}.`);
     }),
   );
 
@@ -181,12 +242,12 @@ export function createCodexBridgeMcpServer(runtime: BridgeRuntime): McpServer {
       annotations: readAnnotations(),
       inputSchema: {
         cursor: z.string().min(1).max(512).optional(),
-        maxThreads: z.number().int().min(1).max(2_000).optional(),
+        maxThreads: z.number().int().min(1).max(10_000).optional(),
       },
       _meta: { ui: { visibility: ["app"] } },
     },
     async (args) => safeResult(async () => {
-      const page = await runtime.controller.listLocalThreads(args.cursor, args.maxThreads ?? 2_000);
+      const page = await runtime.controller.listLocalThreads(args.cursor, args.maxThreads ?? 10_000);
       return result(
         { localThreads: page.threads, nextCursor: page.nextCursor, complete: page.complete },
         `Loaded ${page.threads.length} local Codex conversation(s).`,
@@ -545,9 +606,6 @@ async function safeResult(operation: () => Promise<ReturnType<typeof result>>) {
   try {
     return await operation();
   } catch (error) {
-    return {
-      isError: true,
-      content: [{ type: "text" as const, text: error instanceof Error ? error.message : String(error) }],
-    };
+    return toolErrorResult(error);
   }
 }

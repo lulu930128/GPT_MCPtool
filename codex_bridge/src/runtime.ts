@@ -4,12 +4,15 @@ import type { BridgeConfig } from "./config.js";
 import { CodexBridgeController } from "./controller.js";
 import { JobStore } from "./job-store.js";
 import { TextBundleStore } from "./text-bundle-store.js";
+import { AutomationRegistry } from "./automation-registry.js";
+import { UnifiedConversationRegistry } from "./unified-conversation-registry.js";
 
 export interface BridgeRuntime {
   config: BridgeConfig;
   store: JobStore;
   textBundles: TextBundleStore;
   controller: CodexBridgeController;
+  conversations: UnifiedConversationRegistry;
   widgetHtml: string;
   close: () => Promise<void>;
 }
@@ -25,5 +28,7 @@ export async function createBridgeRuntime(config: BridgeConfig): Promise<BridgeR
     args: config.codexArgs,
   });
   const controller = new CodexBridgeController(config, store, textBundles, appServer);
-  return { config, store, textBundles, controller, widgetHtml, close: () => controller.close() };
+  const automations = new AutomationRegistry(config.codexHome);
+  const conversations = new UnifiedConversationRegistry(config, store, controller, automations);
+  return { config, store, textBundles, controller, conversations, widgetHtml, close: () => controller.close() };
 }
