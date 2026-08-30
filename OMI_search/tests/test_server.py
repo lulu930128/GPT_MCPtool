@@ -3,8 +3,12 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import sys
 import unittest
 from unittest.mock import patch
+
+import anyio
+from mcp import Client, StdioServerParameters
 
 
 def _load_server_module():
@@ -42,7 +46,7 @@ class OmiSearchMappingTests(unittest.TestCase):
         cls.server = _load_server_module()
 
     def test_application_release_version(self) -> None:
-        self.assertEqual(self.server.SERVER_VERSION, "1.1.0")
+        self.assertEqual(self.server.SERVER_VERSION, "1.2.0")
 
     def test_minimal_canonical_request_is_read_only_and_not_interpreted(self) -> None:
         question = "TSM intraday live quote"
@@ -247,7 +251,7 @@ class OmiSearchMappingTests(unittest.TestCase):
             source_schema["x-omi-public-contract-digest"],
         )
         status = tools[1]
-        self.assertEqual(status["name"], "omi.read_refresh_status")
+        self.assertEqual(status["name"], "omi_read_refresh_status")
         self.assertEqual(status["title"], "Backend Refresh Status")
         self.assertEqual(status["inputSchema"]["required"], ["job_id"])
 
@@ -258,8 +262,8 @@ class OmiSearchMappingTests(unittest.TestCase):
             tools = self.server._tools_for_client()
 
         self.assertIs(tools, self.server.PUBLIC_TOOLS)
-        self.assertEqual(tools[0]["name"], "omi.ask")
-        self.assertEqual(tools[1]["name"], "omi.read_refresh_status")
+        self.assertEqual(tools[0]["name"], "omi_ask")
+        self.assertEqual(tools[1]["name"], "omi_read_refresh_status")
 
     def test_snapshot_contract_metadata_survives_adapter_projection(self) -> None:
         snapshot = self.server.PUBLIC_CONTRACT_SNAPSHOT
@@ -279,43 +283,50 @@ class OmiSearchMappingTests(unittest.TestCase):
         )
 
     def test_tools_list_exposes_curated_surface_and_hides_legacy_alias(self) -> None:
-        with patch.object(
-            self.server,
-            "_tools_for_client",
-            return_value=self.server.PUBLIC_TOOLS,
-        ):
-            response = self.server._handle_request(
-                {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
-            )
+        async def scenario() -> list[str]:
+            with patch.object(
+                self.server,
+                "_tools_for_client",
+                return_value=self.server.PUBLIC_TOOLS,
+            ):
+                async with Client(
+                    self.server.build_mcp_server(), mode="auto"
+                ) as client:
+                    result = await client.list_tools()
+                    return [tool.name for tool in result.tools]
 
-        names = [tool["name"] for tool in response["result"]["tools"]]
+        names = anyio.run(scenario)
         self.assertEqual(
             names,
             [
-                "omi.ask",
-                "omi.read_refresh_status",
-                "omi.read_market_overview",
-                "omi.read_stock_context",
-                "omi.read_data_freshness",
-                "omi.read_source_health",
-                "omi.read_capability_status",
-                "omi.read_tw_market_dashboard",
-                "omi.open_tw_market_dashboard",
-                "omi.search_tw_symbols",
-                "omi.read_tw_stock_dashboard_detail",
+                "omi_ask",
+                "omi_read_refresh_status",
+                "omi_read_market_overview",
+                "omi_read_stock_context",
+                "omi_read_data_freshness",
+                "omi_read_source_health",
+                "omi_read_capability_status",
+                "omi_read_tw_market_dashboard",
+                "omi_open_tw_market_dashboard",
+                "omi_search_tw_symbols",
+                "omi_read_tw_stock_dashboard_detail",
             ],
         )
+        self.assertTrue(all("." not in name for name in names))
         self.assertNotIn("omi.search", names)
 
     def test_initialize_declares_resources_capability(self) -> None:
-        response = self.server._handle_request(
-            {"jsonrpc": "2.0", "id": 1, "method": "initialize"}
-        )
+        async def scenario() -> tuple[str, object]:
+            async with Client(
+                self.server.build_mcp_server(), mode="legacy"
+            ) as client:
+                return client.protocol_version, client.server_capabilities.resources
 
-        self.assertEqual(
-            response["result"]["capabilities"]["resources"],
-            {"subscribe": False, "listChanged": False},
-        )
+        protocol_version, resources = anyio.run(scenario)
+        self.assertEqual(protocol_version, "2025-11-25")
+        self.assertIsNotNone(resources)
+        self.assertFalse(resources.subscribe)
+        self.assertFalse(resources.list_changed)
 
     def test_dashboard_tools_use_generated_exact_output_schemas(self) -> None:
         tools = {item["name"]: item for item in self.server.PUBLIC_TOOLS}
@@ -323,48 +334,47 @@ class OmiSearchMappingTests(unittest.TestCase):
 
         self.assertTrue(snapshot["digest"])
         self.assertEqual(
-            tools["omi.read_tw_market_dashboard"]["outputSchema"],
+            tools["omi_read_tw_market_dashboard"]["outputSchema"],
             snapshot["dashboard_output_schema"],
         )
         self.assertEqual(
-            tools["omi.search_tw_symbols"]["outputSchema"],
+            tools["omi_search_tw_symbols"]["outputSchema"],
             snapshot["symbol_search_output_schema"],
         )
         self.assertEqual(
-            tools["omi.read_tw_stock_dashboard_detail"]["outputSchema"],
+            tools["omi_read_tw_stock_dashboard_detail"]["outputSchema"],
             snapshot["stock_detail_output_schema"],
         )
-        render = tools["omi.open_tw_market_dashboard"]
+        render = tools["omi_open_tw_market_dashboard"]
         self.assertEqual(
             render["_meta"]["ui"]["resourceUri"],
             self.server.TW_DASHBOARD_RESOURCE_URI,
         )
         for name, tool in tools.items():
-            if name != "omi.open_tw_market_dashboard":
+            if name != "omi_open_tw_market_dashboard":
                 self.assertNotIn("resourceUri", tool.get("_meta", {}).get("ui", {}))
 
     def test_dashboard_resource_is_versioned_inline_and_network_closed(self) -> None:
-        listed = self.server._handle_request(
-            {"jsonrpc": "2.0", "id": 2, "method": "resources/list"}
-        )
-        read = self.server._handle_request(
-            {
-                "jsonrpc": "2.0",
-                "id": 3,
-                "method": "resources/read",
-                "params": {"uri": self.server.TW_DASHBOARD_RESOURCE_URI},
-            }
-        )
+        async def scenario():
+            async with Client(
+                self.server.build_mcp_server(), mode="auto"
+            ) as client:
+                listed = await client.list_resources()
+                read = await client.read_resource(
+                    self.server.TW_DASHBOARD_RESOURCE_URI
+                )
+                return listed, read
 
-        resource = listed["result"]["resources"][0]
-        self.assertEqual(resource["uri"], self.server.TW_DASHBOARD_RESOURCE_URI)
+        listed, read = anyio.run(scenario)
+        resource = listed.resources[0]
+        self.assertEqual(str(resource.uri), self.server.TW_DASHBOARD_RESOURCE_URI)
         self.assertEqual(
-            resource["mimeType"], self.server.TW_DASHBOARD_RESOURCE_MIME_TYPE
+            resource.mime_type, self.server.TW_DASHBOARD_RESOURCE_MIME_TYPE
         )
-        content = read["result"]["contents"][0]
-        self.assertIn("<div id=\"root\"></div>", content["text"])
+        content = read.contents[0]
+        self.assertIn("<div id=\"root\"></div>", content.text)
         self.assertEqual(
-            content["_meta"]["ui"]["csp"],
+            content.meta["ui"]["csp"],
             {"connectDomains": [], "resourceDomains": []},
         )
 
@@ -385,15 +395,15 @@ class OmiSearchMappingTests(unittest.TestCase):
             side_effect=[dashboard, search, detail],
         ) as request:
             read_dashboard = self.server._call_tool(
-                "omi.read_tw_market_dashboard",
+                "omi_read_tw_market_dashboard",
                 {"watchlist_group_id": 7, "watchlist_limit": 20},
             )
             read_search = self.server._call_tool(
-                "omi.search_tw_symbols",
+                "omi_search_tw_symbols",
                 {"keyword": "台積 電", "limit": 12},
             )
             read_detail = self.server._call_tool(
-                "omi.read_tw_stock_dashboard_detail",
+                "omi_read_tw_stock_dashboard_detail",
                 {"stock_id": "2330", "timeframe": "weekly", "bars": 60},
             )
 
@@ -429,7 +439,7 @@ class OmiSearchMappingTests(unittest.TestCase):
         dashboard = _dashboard_payload()
         with patch.object(self.server, "_api_request") as request:
             rendered = self.server._call_tool(
-                "omi.open_tw_market_dashboard", dashboard
+                "omi_open_tw_market_dashboard", dashboard
             )
 
         request.assert_not_called()
@@ -446,7 +456,7 @@ class OmiSearchMappingTests(unittest.TestCase):
             self.server, "_api_request", return_value=backend_response
         ) as request:
             result = self.server._call_tool(
-                "omi.read_refresh_status", {"job_id": 41}
+                "omi_read_refresh_status", {"job_id": 41}
             )
 
         self.assertIs(result, backend_response)
@@ -456,7 +466,7 @@ class OmiSearchMappingTests(unittest.TestCase):
             with self.subTest(job_id=invalid):
                 with self.assertRaisesRegex(ValueError, "positive integer"):
                     self.server._call_tool(
-                        "omi.read_refresh_status", {"job_id": invalid}
+                        "omi_read_refresh_status", {"job_id": invalid}
                     )
 
     def test_legacy_omi_search_remains_callable(self) -> None:
@@ -554,34 +564,62 @@ class OmiSearchMappingTests(unittest.TestCase):
             "contract_version": "omi.decision.v4",
             "status": "TARGET_NOT_FOUND",
         }
-        with patch.object(self.server, "_call_tool", return_value=payload):
-            response = self.server._handle_request(
-                {
-                    "jsonrpc": "2.0",
-                    "id": 9,
-                    "method": "tools/call",
-                    "params": {"name": "omi.ask", "arguments": {"question": "x"}},
-                }
-            )
+        async def scenario():
+            with patch.object(self.server, "_call_tool", return_value=payload):
+                async with Client(
+                    self.server.build_mcp_server(), mode="auto"
+                ) as client:
+                    return await client.call_tool(
+                        "omi_ask", {"question": "x"}
+                    )
 
-        self.assertFalse(response["result"]["isError"])
-        self.assertEqual(response["result"]["structuredContent"], payload)
+        response = anyio.run(scenario)
+        self.assertFalse(response.is_error)
+        self.assertEqual(response.structured_content, payload)
 
     def test_adapter_failure_is_transport_error(self) -> None:
-        with patch.object(
-            self.server, "_call_tool", side_effect=RuntimeError("offline")
-        ):
-            response = self.server._handle_request(
-                {
-                    "jsonrpc": "2.0",
-                    "id": 10,
-                    "method": "tools/call",
-                    "params": {"name": "omi.ask", "arguments": {"question": "x"}},
-                }
-            )
+        async def scenario():
+            with patch.object(
+                self.server, "_call_tool", side_effect=RuntimeError("offline")
+            ):
+                async with Client(
+                    self.server.build_mcp_server(), mode="auto"
+                ) as client:
+                    return await client.call_tool(
+                        "omi_ask", {"question": "x"}
+                    )
 
-        self.assertTrue(response["result"]["isError"])
-        self.assertIn("offline", response["result"]["structuredContent"]["error"])
+        response = anyio.run(scenario)
+        self.assertTrue(response.is_error)
+        self.assertIn("offline", response.structured_content["error"])
+
+    def test_stdio_subprocess_uses_official_sdk_transport(self) -> None:
+        server_path = Path(__file__).resolve().parents[1] / "server.py"
+
+        async def scenario():
+            parameters = StdioServerParameters(
+                command=sys.executable,
+                args=["-B", str(server_path)],
+                cwd=server_path.parent,
+            )
+            async with Client(parameters, mode="auto") as client:
+                tools = await client.list_tools()
+                resources = await client.list_resources()
+                dashboard = await client.read_resource(
+                    "ui://omi/tw-market-dashboard/v2.html"
+                )
+                return tools, resources, dashboard
+
+        try:
+            tools, resources, dashboard = anyio.run(scenario)
+        except PermissionError as exc:
+            self.skipTest(f"Windows sandbox denied subprocess pipes: {exc}")
+        self.assertEqual(len(tools.tools), 11)
+        self.assertIn(
+            "ui://omi/tw-market-dashboard/v2.html",
+            {str(resource.uri) for resource in resources.resources},
+        )
+        self.assertIn("<!doctype html>", dashboard.contents[0].text.lower())
 
 
 if __name__ == "__main__":

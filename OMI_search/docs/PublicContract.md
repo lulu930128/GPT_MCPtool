@@ -25,17 +25,17 @@ budget enforcement, and response shaping. The adapter must not duplicate or rein
 
 | Tool | Mechanical mapping |
 | --- | --- |
-| `omi.ask` | Canonical caller-supplied question and target |
-| `omi.read_refresh_status` | Positive `job_id` to the dedicated redacted refresh-status endpoint |
-| `omi.read_market_overview` | `target.type=market` and `mode=data_only` |
-| `omi.read_stock_context` | Market-specific stock target and `mode=data_only` |
-| `omi.read_data_freshness` | `target.type=data_freshness` and optional market |
-| `omi.read_source_health` | `target.type=source_health` plus explicit filters |
-| `omi.read_capability_status` | `target.type=capability_status` plus explicit filters |
-| `omi.read_tw_market_dashboard` | Cache-only `GET /api/market/tw-dashboard/snapshot` |
-| `omi.open_tw_market_dashboard` | Render the complete prepared `omi.tw_market_dashboard.v1` snapshot without backend IO |
-| `omi.search_tw_symbols` | Bounded local `GET /api/market/tw-dashboard/symbols/search` |
-| `omi.read_tw_stock_dashboard_detail` | Cache-only focused OHLC, backend MA, and technical detail |
+| `omi_ask` | Canonical caller-supplied question and target |
+| `omi_read_refresh_status` | Positive `job_id` to the dedicated redacted refresh-status endpoint |
+| `omi_read_market_overview` | `target.type=market` and `mode=data_only` |
+| `omi_read_stock_context` | Market-specific stock target and `mode=data_only` |
+| `omi_read_data_freshness` | `target.type=data_freshness` and optional market |
+| `omi_read_source_health` | `target.type=source_health` plus explicit filters |
+| `omi_read_capability_status` | `target.type=capability_status` plus explicit filters |
+| `omi_read_tw_market_dashboard` | Cache-only `GET /api/market/tw-dashboard/snapshot` |
+| `omi_open_tw_market_dashboard` | Render the complete prepared `omi.tw_market_dashboard.v1` snapshot without backend IO |
+| `omi_search_tw_symbols` | Bounded local `GET /api/market/tw-dashboard/symbols/search` |
+| `omi_read_tw_stock_dashboard_detail` | Cache-only focused OHLC, backend MA, and technical detail |
 
 `omi.search` remains callable only as a legacy compatibility alias and is omitted from
 `tools/list`. Only that alias may translate `query`, `stock_id`, or `symbol` into canonical
@@ -94,17 +94,20 @@ validate backend-owned parameters.
 
 ## HTTP transport
 
-The local Streamable HTTP endpoint is `/mcp`. A client must:
+The local Streamable HTTP endpoint is `/mcp`, implemented by the official Python MCP SDK. The SDK
+owns initialization, protocol negotiation, JSON-RPC framing, request validation, and transport
+lifecycle. The adapter does not maintain a second handwritten dispatcher.
 
-1. send `initialize`;
-2. preserve the returned `Mcp-Session-Id`;
-3. reuse it for `resources/list`, `resources/read`, `tools/list`, and `tools/call`.
+- Current clients negotiate the SDK's current protocol and use the sessionless Streamable HTTP flow.
+- Exact legacy `2025-06-18` clients remain supported. They must preserve the returned
+  `Mcp-Session-Id` and reuse it for later requests.
+- Both flows expose the same resources, tools, structured business results, and adapter failures.
 
 ## MCP Apps UI resource
 
-- URI: `ui://omi/tw-market-dashboard/v1.html`
+- URI: `ui://omi/tw-market-dashboard/v2.html`
 - MIME: `text/html;profile=mcp-app`
-- only `omi.open_tw_market_dashboard` declares `_meta.ui.resourceUri`;
+- only `omi_open_tw_market_dashboard` declares `_meta.ui.resourceUri`;
 - data/search/detail tools remain independently useful without UI;
 - the resource has no direct network allowlist and calls backend-owned tools through the MCP Apps bridge;
 - `tw_market_dashboard_contract_snapshot.json` is generated from OMI backend Pydantic models and supplies exact tool `outputSchema` values.

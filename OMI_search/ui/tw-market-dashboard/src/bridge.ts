@@ -225,7 +225,7 @@ export class McpAppsBridge {
     this.updatePresentation({ initializeStatus: "pending", initializeError: null });
     try {
       await this.request("ui/initialize", {
-        appInfo: { name: "omi-tw-market-dashboard", version: "1.1.0" },
+        appInfo: { name: "omi-tw-market-dashboard", version: "1.2.0" },
         appCapabilities: {},
         protocolVersion: "2026-01-26",
       });

@@ -20,6 +20,9 @@ domain-contract versions remain independent and are not rewritten by a workspace
 
 ### Changed
 
+- OMI Search 1.2.0 now uses the official Python MCP SDK with locked `uv` dependencies, publishes
+  eleven underscore-only tool names, retains `omi.search` only as a hidden legacy callable alias,
+  and advances the Taiwan dashboard resource to its v2 contract.
 - MCP Control Center now adopts all seven production MCP components and uses a dedicated framed
   result-pipe wrapper so inherited component child handles cannot keep bounded actions open.
 - Project Reading, OMI Search, Japanese Study, English Study, and Personal Asset OS now bind an

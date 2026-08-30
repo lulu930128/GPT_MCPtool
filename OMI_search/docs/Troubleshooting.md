@@ -12,8 +12,9 @@ Do not patch the adapter until the failing boundary is identified.
 
 ```powershell
 cd C:\GPT_MCPtool\OMI_search
-python -B -m unittest discover -s tests
-python -B -c "import ast, pathlib; [ast.parse(p.read_text(encoding='utf-8'), filename=str(p)) for p in pathlib.Path('.').rglob('*.py')]; print('syntax ok')"
+uv sync --frozen
+.\.venv\Scripts\python.exe -B -m unittest discover -s tests
+.\.venv\Scripts\python.exe -B -c "import ast, pathlib; [ast.parse(p.read_text(encoding='utf-8'), filename=str(p)) for p in pathlib.Path('.').rglob('*.py')]; print('syntax ok')"
 ```
 
 These prove source behavior only. They do not prove the tray, listener, backend, tunnel, or ChatGPT
@@ -63,9 +64,11 @@ guessing.
 
 ### MCP calls fail after `initialize`
 
-Preserve the `Mcp-Session-Id` response header and send it on later requests. A generic PowerShell
-HTTP wrapper can lose session headers; use the repository protocol test or another raw client when
-diagnosing session behavior.
+First record the negotiated `protocolVersion`. Current SDK clients use the sessionless Streamable
+HTTP flow and should not invent a session header. Exact legacy `2025-06-18` clients must preserve
+the returned `Mcp-Session-Id` and send it on later requests. A generic PowerShell HTTP wrapper can
+lose headers or send the wrong flow; use the repository protocol tests or an SDK client when
+diagnosing transport behavior.
 
 ### Local MCP works but ChatGPT cannot connect
 

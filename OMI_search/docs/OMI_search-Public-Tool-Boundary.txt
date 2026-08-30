@@ -48,12 +48,12 @@ Adapter 不可做
 公開 surface
 ------------
 
-- omi.ask
-- omi.read_market_overview
-- omi.read_stock_context
-- omi.read_data_freshness
-- omi.read_source_health
-- omi.read_capability_status
+- omi_ask
+- omi_read_market_overview
+- omi_read_stock_context
+- omi_read_data_freshness
+- omi_read_source_health
+- omi_read_capability_status
 
 omi.search 是 hidden legacy alias，不得出現在 tools/list。
 
@@ -71,7 +71,7 @@ Backend schema 是 target/capability/parameter 的 system of record。Adapter �
 Request 不變量
 -------------
 
-- canonical omi.ask 必須有 question。
+- canonical omi_ask 必須有 question。
 - question 的文字與空白不得被 adapter 改寫。
 - 沒有 explicit target 時，不得從 stock_id、symbol 或 question 推斷 target。
 - 沒有 explicit refresh_if_missing=true 時，allow_external_fetch 必須是 false。

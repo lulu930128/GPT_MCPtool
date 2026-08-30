@@ -6,11 +6,16 @@ import json
 import os
 from pathlib import Path
 import sys
-import traceback
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
+
+import anyio
+import mcp.types as mcp_types
+from mcp.server.lowlevel import Server
+from mcp.server.stdio import stdio_server
+from mcp.shared.exceptions import MCPError
 
 
 def _configure_stdio() -> None:
@@ -32,9 +37,19 @@ def _configure_stdio() -> None:
 _configure_stdio()
 
 
-PROTOCOL_VERSION = "2025-06-18"
 SERVER_NAME = "omi-search-mcp"
-SERVER_VERSION = "1.1.0"
+SERVER_VERSION = "1.2.0"
+SERVER_TITLE = "OMI_search MCP Adapter"
+SERVER_INSTRUCTIONS = (
+    "Use omi.ask as the canonical read-only OMI entry point. "
+    "Use omi.read_refresh_status for a returned background refresh job. "
+    "The adapter maps MCP fields to POST /api/ai/ask, fixes "
+    "allow_llm=false and allow_write=false, and returns the unchanged "
+    "omi.decision.v4 envelope. OMI backend owns all market and answer "
+    "judgment. refresh_if_missing must be explicit. For the Taiwan "
+    "dashboard, call omi.read_tw_market_dashboard before "
+    "omi.open_tw_market_dashboard."
+)
 API_BASE_URL = (
     os.environ.get("OMI_SEARCH_API_BASE_URL")
     or os.environ.get("OMI_API_BASE_URL")
@@ -338,7 +353,7 @@ def _build_tw_dashboard_tools() -> list[dict[str, Any]]:
     annotations = _read_only_annotations()
     return [
         {
-            "name": "omi.read_tw_market_dashboard",
+            "name": "omi_read_tw_market_dashboard",
             "title": "Read OMI Taiwan Market Dashboard",
             "description": (
                 "Read the cache-only backend-owned Taiwan market dashboard. "
@@ -375,7 +390,7 @@ def _build_tw_dashboard_tools() -> list[dict[str, Any]]:
             "annotations": deepcopy(annotations),
         },
         {
-            "name": "omi.open_tw_market_dashboard",
+            "name": "omi_open_tw_market_dashboard",
             "title": "Open OMI Taiwan Market Dashboard",
             "description": (
                 "Render a dashboard returned by omi.read_tw_market_dashboard. "
@@ -393,7 +408,7 @@ def _build_tw_dashboard_tools() -> list[dict[str, Any]]:
             },
         },
         {
-            "name": "omi.search_tw_symbols",
+            "name": "omi_search_tw_symbols",
             "title": "Search OMI Taiwan Symbols",
             "description": (
                 "Search active Taiwan stock symbols in the OMI local stock "
@@ -421,7 +436,7 @@ def _build_tw_dashboard_tools() -> list[dict[str, Any]]:
             "annotations": deepcopy(annotations),
         },
         {
-            "name": "omi.read_tw_stock_dashboard_detail",
+            "name": "omi_read_tw_stock_dashboard_detail",
             "title": "Read OMI Taiwan Stock Dashboard Detail",
             "description": (
                 "Read cache-only OHLC, backend-computed MA5/20/60, and the "
@@ -468,7 +483,7 @@ def _build_public_tools(
         source_schema = ask_source.get("inputSchema")
     ask_schema = _adapter_ask_schema(source_schema)
     ask_tool = {
-        "name": "omi.ask",
+        "name": "omi_ask",
         "title": str(ask_source.get("title") or "Ask OMI"),
         "description": (
             "Map a read-only MCP request to OMI POST /api/ai/ask and return the "
@@ -484,7 +499,7 @@ def _build_public_tools(
     if not isinstance(status_schema, dict):
         status_schema = _fallback_refresh_status_source()["input_schema"]
     refresh_status_tool = {
-        "name": "omi.read_refresh_status",
+        "name": "omi_read_refresh_status",
         "title": str(status_source.get("title") or "Read OMI Refresh Status"),
         "description": str(
             status_source.get("description")
@@ -501,7 +516,7 @@ def _build_public_tools(
         ask_tool,
         refresh_status_tool,
         {
-            "name": "omi.read_market_overview",
+            "name": "omi_read_market_overview",
             "title": "Read OMI Market Overview",
             "description": "Map a market-overview shortcut to canonical OMI ask.",
             "inputSchema": _shortcut_input_schema(
@@ -510,7 +525,7 @@ def _build_public_tools(
             ),
         },
         {
-            "name": "omi.read_stock_context",
+            "name": "omi_read_stock_context",
             "title": "Read OMI Stock Context",
             "description": "Map an explicit market and symbol to canonical OMI ask.",
             "inputSchema": _shortcut_input_schema(
@@ -527,7 +542,7 @@ def _build_public_tools(
             ),
         },
         {
-            "name": "omi.read_data_freshness",
+            "name": "omi_read_data_freshness",
             "title": "Read OMI Data Freshness",
             "description": (
                 "Map a freshness shortcut to canonical OMI ask without hiding "
@@ -539,7 +554,7 @@ def _build_public_tools(
             ),
         },
         {
-            "name": "omi.read_source_health",
+            "name": "omi_read_source_health",
             "title": "Read OMI Source Health",
             "description": "Map source-health filters to canonical OMI ask.",
             "inputSchema": _shortcut_input_schema(
@@ -572,7 +587,7 @@ def _build_public_tools(
             ),
         },
         {
-            "name": "omi.read_capability_status",
+            "name": "omi_read_capability_status",
             "title": "Read OMI Capability Status",
             "description": "Map capability-status filters to canonical OMI ask.",
             "inputSchema": _shortcut_input_schema(
@@ -634,34 +649,6 @@ def _sanitize_json_value(value: Any) -> Any:
             for key, item in value.items()
         }
     return value
-
-
-def _write(message: dict[str, Any]) -> None:
-    safe_message = _sanitize_json_value(message)
-    payload = json.dumps(
-        safe_message,
-        ensure_ascii=False,
-        default=_json_default,
-        allow_nan=False,
-    )
-    sys.stdout.write(payload + "\n")
-    sys.stdout.flush()
-
-
-def _response(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": request_id, "result": result}
-
-
-def _error(
-    request_id: Any,
-    code: int,
-    message: str,
-    data: Any | None = None,
-) -> dict[str, Any]:
-    error: dict[str, Any] = {"code": code, "message": message}
-    if data is not None:
-        error["data"] = data
-    return {"jsonrpc": "2.0", "id": request_id, "error": error}
 
 
 def _tool_result(value: Any, *, is_error: bool = False) -> dict[str, Any]:
@@ -1193,142 +1180,125 @@ def _capability_status_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
-    if name == "omi.read_tw_market_dashboard":
+    if name == "omi_read_tw_market_dashboard":
         return _read_tw_market_dashboard(arguments)
-    if name == "omi.open_tw_market_dashboard":
+    if name == "omi_open_tw_market_dashboard":
         return _open_tw_market_dashboard(arguments)
-    if name == "omi.search_tw_symbols":
+    if name == "omi_search_tw_symbols":
         return _search_tw_symbols(arguments)
-    if name == "omi.read_tw_stock_dashboard_detail":
+    if name == "omi_read_tw_stock_dashboard_detail":
         return _read_tw_stock_dashboard_detail(arguments)
-    if name == "omi.ask":
+    if name == "omi_ask":
         return _search(arguments)
-    if name == "omi.read_refresh_status":
+    if name == "omi_read_refresh_status":
         return _read_refresh_status(arguments)
     if name in LEGACY_TOOL_ALIASES:
         return _search(arguments, allow_legacy_aliases=True)
-    if name == "omi.read_market_overview":
+    if name == "omi_read_market_overview":
         return _search(_market_overview_arguments(arguments))
-    if name == "omi.read_stock_context":
+    if name == "omi_read_stock_context":
         return _search(_stock_context_arguments(arguments))
-    if name == "omi.read_data_freshness":
+    if name == "omi_read_data_freshness":
         return _search(_data_freshness_arguments(arguments))
-    if name == "omi.read_source_health":
+    if name == "omi_read_source_health":
         return _search(_source_health_arguments(arguments))
-    if name == "omi.read_capability_status":
+    if name == "omi_read_capability_status":
         return _search(_capability_status_arguments(arguments))
     raise KeyError(f"Unknown tool: {name}")
 
 
-def _handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
-    request_id = message.get("id")
-    method = message.get("method")
-    params = message.get("params") or {}
+def _mcp_tool(tool: dict[str, Any]) -> mcp_types.Tool:
+    return mcp_types.Tool.model_validate(tool)
 
-    if method == "notifications/initialized":
-        return None
 
-    if method == "initialize":
-        return _response(
-            request_id,
-            {
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {
-                    "tools": {"listChanged": False},
-                    "resources": {
-                        "subscribe": False,
-                        "listChanged": False,
-                    },
-                },
-                "serverInfo": {
-                    "name": SERVER_NAME,
-                    "title": "OMI_search MCP Adapter",
-                    "version": SERVER_VERSION,
-                },
-                "instructions": (
-                    "Use omi.ask as the canonical read-only OMI entry point. "
-                    "Use omi.read_refresh_status for a returned background refresh job. "
-                    "The adapter maps MCP fields to POST /api/ai/ask, fixes "
-                    "allow_llm=false and allow_write=false, and returns the unchanged "
-                    "omi.decision.v4 envelope. OMI backend owns all market and answer "
-                    "judgment. refresh_if_missing must be explicit. For the Taiwan "
-                    "dashboard, call omi.read_tw_market_dashboard before "
-                    "omi.open_tw_market_dashboard."
-                ),
-            },
+def _mcp_tool_result(value: Any, *, is_error: bool = False) -> mcp_types.CallToolResult:
+    return mcp_types.CallToolResult.model_validate(
+        _tool_result(value, is_error=is_error)
+    )
+
+
+async def _on_list_tools(
+    _context: Any,
+    _params: mcp_types.PaginatedRequestParams | None,
+) -> mcp_types.ListToolsResult:
+    tools = await anyio.to_thread.run_sync(_tools_for_client)
+    return mcp_types.ListToolsResult(tools=[_mcp_tool(tool) for tool in tools])
+
+
+async def _on_call_tool(
+    _context: Any,
+    params: mcp_types.CallToolRequestParams,
+) -> mcp_types.CallToolResult:
+    name = params.name
+    arguments = params.arguments or {}
+    if not isinstance(arguments, dict):
+        return _mcp_tool_result(
+            {"error": "Tool arguments must be an object.", "tool": name},
+            is_error=True,
+        )
+    try:
+        payload = await anyio.to_thread.run_sync(
+            lambda: _call_tool(name, arguments)
+        )
+        return _mcp_tool_result(payload, is_error=False)
+    except Exception as exc:
+        return _mcp_tool_result(
+            {"error": str(exc), "tool": name},
+            is_error=True,
         )
 
-    if method == "ping":
-        return _response(request_id, {})
 
-    if method == "tools/list":
-        return _response(request_id, {"tools": _tools_for_client()})
+async def _on_list_resources(
+    _context: Any,
+    _params: mcp_types.PaginatedRequestParams | None,
+) -> mcp_types.ListResourcesResult:
+    return mcp_types.ListResourcesResult(
+        resources=[
+            mcp_types.Resource.model_validate(resource)
+            for resource in _tw_dashboard_resources_for_client()
+        ]
+    )
 
-    if method == "resources/list":
-        return _response(
-            request_id,
-            {"resources": _tw_dashboard_resources_for_client()},
+
+async def _on_read_resource(
+    _context: Any,
+    params: mcp_types.ReadResourceRequestParams,
+) -> mcp_types.ReadResourceResult:
+    try:
+        result = await anyio.to_thread.run_sync(
+            lambda: _read_tw_dashboard_resource(str(params.uri))
         )
+    except KeyError as exc:
+        raise MCPError(mcp_types.INVALID_PARAMS, str(exc)) from exc
+    return mcp_types.ReadResourceResult.model_validate(result)
 
-    if method == "resources/read":
-        uri = params.get("uri") if isinstance(params, dict) else None
-        if not isinstance(uri, str) or not uri:
-            return _error(request_id, -32602, "Missing required resource URI.")
-        try:
-            return _response(request_id, _read_tw_dashboard_resource(uri))
-        except KeyError as exc:
-            return _error(request_id, -32602, str(exc))
-        except Exception as exc:
-            return _error(request_id, -32603, str(exc))
 
-    if method == "tools/call":
-        name = str(params.get("name") or "")
-        arguments = params.get("arguments") or {}
-        if not isinstance(arguments, dict):
-            return _response(
-                request_id,
-                _tool_result("Tool arguments must be an object.", is_error=True),
-            )
-        try:
-            tool_payload = _call_tool(name, arguments)
-            return _response(
-                request_id,
-                _tool_result(tool_payload, is_error=False),
-            )
-        except KeyError as exc:
-            return _error(request_id, -32602, str(exc))
-        except Exception as exc:
-            return _response(
-                request_id,
-                _tool_result({"error": str(exc), "tool": name}, is_error=True),
-            )
+def build_mcp_server() -> Server[Any]:
+    """Build the official low-level MCP server over the thin adapter core."""
+    return Server(
+        SERVER_NAME,
+        version=SERVER_VERSION,
+        title=SERVER_TITLE,
+        instructions=SERVER_INSTRUCTIONS,
+        on_list_tools=_on_list_tools,
+        on_call_tool=_on_call_tool,
+        on_list_resources=_on_list_resources,
+        on_read_resource=_on_read_resource,
+    )
 
-    if request_id is None:
-        return None
-    return _error(request_id, -32601, f"Method not found: {method}")
+
+async def _run_stdio() -> None:
+    mcp_server = build_mcp_server()
+    async with stdio_server() as (read_stream, write_stream):
+        await mcp_server.run(
+            read_stream,
+            write_stream,
+            mcp_server.create_initialization_options(),
+        )
 
 
 def main() -> int:
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            message = json.loads(line)
-        except json.JSONDecodeError as exc:
-            _write(_error(None, -32700, "Parse error", str(exc)))
-            continue
-        try:
-            response = _handle_request(message)
-        except Exception as exc:
-            response = _error(
-                message.get("id") if isinstance(message, dict) else None,
-                -32603,
-                "Internal error",
-                {"error": str(exc), "traceback": traceback.format_exc()},
-            )
-        if response is not None:
-            _write(response)
+    anyio.run(_run_stdio)
     return 0
 
 

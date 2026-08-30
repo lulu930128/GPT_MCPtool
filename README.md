@@ -5,7 +5,7 @@ runtime 中樞的公開原始碼。它採用 source-only monorepo：七個 MCP �
 啟動方式、測試、PID authority 與安全邊界，不把程式碼攤平成單一套件，也不由中樞接管
 domain data 或 component lifecycle。
 
-目前 workspace release 為 `1.1.0`。本次依各元件既有 SemVer 提升 minor：Project Reading 為 `1.5.0`、English Study 為 `0.3.0`，其餘 application／package 為 `1.1.0`。MCP protocol、schema、registry 與 domain contract 版本維持各自獨立演進，不隨 workspace release 重新編號。
+目前 workspace release 為 `1.1.0`。各元件依自己的 application SemVer 獨立演進：OMI Search 為 `1.2.0`、Project Reading 為 `1.5.0`、English Study 為 `0.3.0`，其餘 application／package 為 `1.1.0`。MCP protocol、schema、registry 與 domain contract 版本維持各自獨立演進，不隨 workspace release 重新編號。
 
 > 這是 source-only repository。個人資料、SQLite、DPAPI 密文、tunnel profile、
 > token、log、PID、cache、虛擬環境、編譯輸出、下載的 executable，以及本機 Agent／Codex
@@ -111,7 +111,8 @@ GitHub repository 目前是 public。提交前至少要確認：
 
 ```powershell
 cd C:\GPT_MCPtool\OMI_search
-python -B -m unittest discover -s tests
+uv sync --frozen
+.\.venv\Scripts\python.exe -B -m unittest discover -s tests
 
 cd "C:\GPT_MCPtool\Memory Core"
 uv run pytest

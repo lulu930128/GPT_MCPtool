@@ -40,7 +40,11 @@ $HttpEntry = Join-Path $ProjectRoot "http_server.py"
 $SourceBuildFiles = @(
   $HttpEntry,
   (Join-Path $ProjectRoot "server.py"),
-  (Join-Path $ProjectRoot "public_contract_snapshot.json")
+  (Join-Path $ProjectRoot "pyproject.toml"),
+  (Join-Path $ProjectRoot "uv.lock"),
+  (Join-Path $ProjectRoot "public_contract_snapshot.json"),
+  (Join-Path $ProjectRoot "tw_market_dashboard_contract_snapshot.json"),
+  (Join-Path $ProjectRoot "ui\tw-market-dashboard\dist\index.html")
 )
 $McpUrl = "http://${HostName}:${Port}/mcp"
 $HealthUrl = "http://${HostName}:${Port}/health"
@@ -61,7 +65,10 @@ $TunnelPidFile = Join-Path $TmpDir "tunnel-client.pid"
 $ServerPidFile = Join-Path $TmpDir "omi-search-http-server.pid"
 $TrayPidFile = Join-Path $TmpDir "omi-search-tray.pid"
 $TrayLogFile = Join-Path $TmpDir "omi-search-tray.log"
-$PythonPath = (Get-Command python -ErrorAction Stop).Source
+$PythonPath = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+if (-not (Test-Path -LiteralPath $PythonPath -PathType Leaf)) {
+  throw "MANAGED_PYTHON_MISSING: Run 'uv sync --frozen' in $ProjectRoot before starting OMI Search."
+}
 $ControllerPath = Join-Path $PSScriptRoot "runtime-control.ps1"
 
 function Get-ExpectedSourceBuildId {

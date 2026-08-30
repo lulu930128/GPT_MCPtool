@@ -66,7 +66,7 @@ test("initializes the MCP Apps bridge before requesting fullscreen", async () =>
     }
 
     assert.deepEqual(initializeParams, {
-      appInfo: { name: "omi-tw-market-dashboard", version: "1.1.0" },
+      appInfo: { name: "omi-tw-market-dashboard", version: "1.2.0" },
       appCapabilities: {},
       protocolVersion: "2026-01-26",
     });

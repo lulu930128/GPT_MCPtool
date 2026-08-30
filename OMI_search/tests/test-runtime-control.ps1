@@ -104,15 +104,18 @@ try {
   }
   Copy-Item -LiteralPath (Join-Path $projectRoot "http_server.py") -Destination (Join-Path $testRoot "http_server.py")
   Copy-Item -LiteralPath (Join-Path $projectRoot "server.py") -Destination (Join-Path $testRoot "server.py")
+  Copy-Item -LiteralPath (Join-Path $projectRoot "pyproject.toml") -Destination (Join-Path $testRoot "pyproject.toml")
+  Copy-Item -LiteralPath (Join-Path $projectRoot "uv.lock") -Destination (Join-Path $testRoot "uv.lock")
   Copy-Item -LiteralPath (Join-Path $projectRoot "public_contract_snapshot.json") -Destination (Join-Path $testRoot "public_contract_snapshot.json")
   Copy-Item -LiteralPath (Join-Path $projectRoot "tw_market_dashboard_contract_snapshot.json") -Destination (Join-Path $testRoot "tw_market_dashboard_contract_snapshot.json")
-  $widgetBundle = Join-Path $testRoot "ui\tw-market-dashboard\dist\index.html"
-  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $widgetBundle) | Out-Null
-  [IO.File]::WriteAllText($widgetBundle, "<!doctype html><title>ownership fixture</title>", $utf8NoBom)
-  $workspaceRoot = Split-Path -Parent $projectRoot
-  Copy-Item -LiteralPath (Join-Path $workspaceRoot "project_reading\scripts\key-store.ps1") -Destination (Join-Path $testRoot "scripts\key-store.ps1")
+  New-Item -ItemType Directory -Force -Path (Join-Path $testRoot "ui\tw-market-dashboard\dist") | Out-Null
+  Copy-Item -LiteralPath (Join-Path $projectRoot "ui\tw-market-dashboard\dist\index.html") -Destination (Join-Path $testRoot "ui\tw-market-dashboard\dist\index.html")
+  Copy-Item -LiteralPath "C:\GPT_MCPtool\project_reading\scripts\key-store.ps1" -Destination (Join-Path $testRoot "scripts\key-store.ps1")
 
-  $pythonPath = (Get-Command python -ErrorAction Stop).Source
+  $pythonPath = Join-Path $projectRoot ".venv\Scripts\python.exe"
+  if (-not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) {
+    throw "Managed test Python is missing: $pythonPath. Run 'uv sync --frozen' first."
+  }
   $backendPort = Get-FreeTcpPort
   do { $serverPort = Get-FreeTcpPort } while ($serverPort -eq $backendPort)
   do { $tunnelPort = Get-FreeTcpPort } while ($tunnelPort -in @($backendPort, $serverPort))

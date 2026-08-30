@@ -3,20 +3,27 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
-import json
+from importlib.metadata import version as package_version
 import os
-import sys
-from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import sys
 from typing import Any
-from uuid import uuid4
+
+import anyio
+from mcp.server.auth.provider import AccessToken, TokenVerifier
+from mcp.server.auth.settings import AuthSettings
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Route
+import uvicorn
 
 import server as omi_search_stdio
 
 
 SERVER_NAME = "omi-search-http-mcp"
-SERVER_VERSION = "1.1.0"
+SERVER_VERSION = omi_search_stdio.SERVER_VERSION
+MCP_ARCHITECTURE = "official-python-sdk-v2"
+MCP_SDK_VERSION = package_version("mcp")
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 18797
 MAX_BODY_BYTES = 1_048_576
@@ -24,6 +31,8 @@ UPSTREAM_HEALTH_TIMEOUT_SECONDS = 2
 SOURCE_BUILD_FILES = (
     Path(__file__).resolve(),
     Path(omi_search_stdio.__file__).resolve(),
+    Path(__file__).resolve().with_name("pyproject.toml"),
+    Path(__file__).resolve().with_name("uv.lock"),
     Path(__file__).resolve().with_name("public_contract_snapshot.json"),
     Path(__file__).resolve().with_name(
         "tw_market_dashboard_contract_snapshot.json"
@@ -58,32 +67,16 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def _json_bytes(value: Any) -> bytes:
-    return json.dumps(value, ensure_ascii=False, default=str).encode("utf-8")
+def _loopback_host(host: str) -> bool:
+    return host in {"127.0.0.1", "localhost", "::1", "[::1]"}
 
 
-def _single_header(headers: Any, name: str) -> str | None:
-    value = headers.get(name)
-    if value is None:
-        return None
-    return str(value)
-
-
-def _authorized(headers: Any, bearer_token: str | None) -> bool:
-    if not bearer_token:
-        return True
-    authorization = _single_header(headers, "Authorization") or ""
-    prefix = "Bearer "
-    if not authorization.startswith(prefix):
-        return False
-    candidate = authorization[len(prefix) :].strip()
-    return hmac.compare_digest(candidate, bearer_token)
+def _display_host(host: str) -> str:
+    return f"[{host}]" if ":" in host and not host.startswith("[") else host
 
 
 def _upstream_health_document() -> dict[str, Any]:
-    base = {
-        "service": "omi-search-upstream",
-    }
+    base = {"service": "omi-search-upstream"}
     try:
         payload = omi_search_stdio._api_request(
             "GET",
@@ -118,194 +111,85 @@ def _upstream_health_document() -> dict[str, Any]:
     }
 
 
-class OmiSearchHttpServer(ThreadingHTTPServer):
-    allow_reuse_address = True
+class StaticBearerTokenVerifier(TokenVerifier):
+    """Preserve the optional local shared bearer boundary without logging it."""
 
-    def __init__(
-        self,
-        server_address: tuple[str, int],
-        RequestHandlerClass: type[BaseHTTPRequestHandler],
-        *,
-        bearer_token: str | None = None,
-    ) -> None:
-        super().__init__(server_address, RequestHandlerClass)
-        self.bearer_token = bearer_token
-        self.sessions: set[str] = set()
+    def __init__(self, expected_token: str) -> None:
+        self._expected_token = expected_token
 
-
-class OmiSearchHttpHandler(BaseHTTPRequestHandler):
-    server: OmiSearchHttpServer
-    protocol_version = "HTTP/1.1"
-
-    def do_GET(self) -> None:
-        if self.path_without_query == "/health":
-            self.send_json(
-                HTTPStatus.OK,
-                {
-                    "ok": True,
-                    "service": SERVER_NAME,
-                    "version": SERVER_VERSION,
-                    "buildId": SOURCE_BUILD_ID,
-                    "mcp_url": f"http://{self.server.server_address[0]}:{self.server.server_address[1]}/mcp",
-                    "omi_api_base_url": omi_search_stdio.API_BASE_URL,
-                },
-            )
-            return
-
-        if self.path_without_query == "/upstream-health":
-            self.send_json(HTTPStatus.OK, _upstream_health_document())
-            return
-
-        if self.path_without_query == "/mcp":
-            self.send_json_rpc_error(
-                HTTPStatus.METHOD_NOT_ALLOWED,
-                -32000,
-                "GET event streams are not used by this adapter. Send JSON-RPC requests with POST.",
-            )
-            return
-
-        self.send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Not found."})
-
-    def do_DELETE(self) -> None:
-        if self.path_without_query != "/mcp":
-            self.send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Not found."})
-            return
-        if not self.is_authorized():
-            return
-        session_id = self.header("Mcp-Session-Id")
-        if session_id:
-            self.server.sessions.discard(session_id)
-        self.send_json(HTTPStatus.ACCEPTED, {"ok": True})
-
-    def do_POST(self) -> None:
-        if self.path_without_query != "/mcp":
-            self.send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Not found."})
-            return
-        if not self.is_authorized():
-            return
-
-        try:
-            message = self.read_json_body()
-        except ValueError as exc:
-            self.send_json_rpc_error(HTTPStatus.BAD_REQUEST, -32700, str(exc))
-            return
-
-        if not isinstance(message, dict):
-            self.send_json_rpc_error(HTTPStatus.BAD_REQUEST, -32600, "JSON-RPC request must be an object.")
-            return
-
-        method = str(message.get("method") or "")
-        request_id = message.get("id")
-        incoming_session_id = self.header("Mcp-Session-Id")
-        response_session_id: str | None = None
-
-        if method == "initialize":
-            response_session_id = incoming_session_id or uuid4().hex
-            self.server.sessions.add(response_session_id)
-        elif incoming_session_id and incoming_session_id in self.server.sessions:
-            response_session_id = incoming_session_id
-        elif incoming_session_id and method == "notifications/initialized":
-            self.server.sessions.add(incoming_session_id)
-            response_session_id = incoming_session_id
-        elif not incoming_session_id and method != "initialize":
-            self.send_json_rpc_error(
-                HTTPStatus.BAD_REQUEST,
-                -32000,
-                "Bad Request: no valid MCP session ID provided.",
-                request_id=request_id,
-            )
-            return
-
-        response = omi_search_stdio._handle_request(message)
-        if response is None:
-            self.send_empty(HTTPStatus.ACCEPTED, session_id=response_session_id)
-            return
-
-        self.send_json(HTTPStatus.OK, response, session_id=response_session_id)
-
-    @property
-    def path_without_query(self) -> str:
-        return self.path.split("?", 1)[0]
-
-    def header(self, name: str) -> str | None:
-        return _single_header(self.headers, name)
-
-    def is_authorized(self) -> bool:
-        if _authorized(self.headers, self.server.bearer_token):
-            return True
-        self.send_response(HTTPStatus.UNAUTHORIZED)
-        self.send_header("WWW-Authenticate", "Bearer")
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.end_headers_with_body(_json_bytes({"ok": False, "error": "Unauthorized."}))
-        return False
-
-    def read_json_body(self) -> Any:
-        raw_length = self.header("Content-Length")
-        if raw_length is None:
-            raise ValueError("Missing Content-Length.")
-        try:
-            length = int(raw_length)
-        except ValueError as exc:
-            raise ValueError("Invalid Content-Length.") from exc
-        if length < 0 or length > MAX_BODY_BYTES:
-            raise ValueError("Request body is too large.")
-        body = self.rfile.read(length)
-        if not body:
+    async def verify_token(self, token: str) -> AccessToken | None:
+        if not hmac.compare_digest(token, self._expected_token):
             return None
-        try:
-            return json.loads(body.decode("utf-8"))
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Parse error: {exc}") from exc
-
-    def send_json(
-        self,
-        status: int,
-        body: Any,
-        *,
-        session_id: str | None = None,
-    ) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        if session_id:
-            self.send_header("Mcp-Session-Id", session_id)
-        self.end_headers_with_body(_json_bytes(body))
-
-    def send_json_rpc_error(
-        self,
-        status: int,
-        code: int,
-        message: str,
-        *,
-        request_id: Any | None = None,
-    ) -> None:
-        self.send_json(
-            status,
-            {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "error": {"code": code, "message": message},
-            },
+        return AccessToken(
+            token=token,
+            client_id="omi-search-static-token",
+            scopes=[],
         )
 
-    def send_empty(self, status: int, *, session_id: str | None = None) -> None:
-        self.send_response(status)
-        if session_id:
-            self.send_header("Mcp-Session-Id", session_id)
-        self.send_header("Content-Length", "0")
-        self.end_headers()
 
-    def end_headers_with_body(self, body: bytes) -> None:
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        if body:
-            self.wfile.write(body)
+def _health_document(*, host: str, port: int) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "service": SERVER_NAME,
+        "version": SERVER_VERSION,
+        "buildId": SOURCE_BUILD_ID,
+        "mcpSdk": MCP_SDK_VERSION,
+        "mcpArchitecture": MCP_ARCHITECTURE,
+        "toolCount": len(omi_search_stdio.PUBLIC_TOOLS),
+        "mcp_url": f"http://{_display_host(host)}:{port}/mcp",
+        # Retained for the existing Control Center summary contract. The value
+        # is launcher-selected loopback state, never a credential or public URL.
+        "omi_api_base_url": omi_search_stdio.API_BASE_URL,
+    }
 
-    def log_message(self, format: str, *args: Any) -> None:
-        sys.stderr.write(f"{self.address_string()} - {format % args}\n")
+
+def build_app(
+    *,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    bearer_token: str | None = None,
+):
+    if not _loopback_host(host):
+        raise ValueError("OMI Search MCP HTTP host must be loopback.")
+
+    async def health(_request: Request) -> JSONResponse:
+        return JSONResponse(_health_document(host=host, port=port))
+
+    async def upstream_health(_request: Request) -> JSONResponse:
+        return JSONResponse(
+            await anyio.to_thread.run_sync(_upstream_health_document)
+        )
+
+    mcp_server = omi_search_stdio.build_mcp_server()
+    verifier = StaticBearerTokenVerifier(bearer_token) if bearer_token else None
+    auth = (
+        AuthSettings(
+            issuer_url=f"http://{_display_host(host)}:{port}",
+            resource_server_url=f"http://{_display_host(host)}:{port}/mcp",
+            required_scopes=[],
+        )
+        if verifier
+        else None
+    )
+    return mcp_server.streamable_http_app(
+        streamable_http_path="/mcp",
+        json_response=True,
+        stateless_http=False,
+        max_request_body_size=MAX_BODY_BYTES,
+        host=host,
+        auth=auth,
+        token_verifier=verifier,
+        custom_starlette_routes=[
+            Route("/health", health, methods=["GET"]),
+            Route("/upstream-health", upstream_health, methods=["GET"]),
+        ],
+    )
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run OMI Search MCP over Streamable HTTP-compatible POST endpoint.")
+    parser = argparse.ArgumentParser(
+        description="Run OMI Search with the official MCP Streamable HTTP transport."
+    )
     parser.add_argument(
         "--host",
         default=os.environ.get("OMI_SEARCH_MCP_HTTP_HOST", DEFAULT_HOST),
@@ -318,31 +202,42 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--token",
         default=os.environ.get("OMI_SEARCH_MCP_HTTP_TOKEN", "").strip(),
-        help="Optional Bearer token for /mcp. Leave empty only behind Secure MCP Tunnel or trusted localhost.",
+        help=(
+            "Optional Bearer token for /mcp. Leave empty only behind "
+            "Secure MCP Tunnel or trusted localhost."
+        ),
     )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    httpd = OmiSearchHttpServer(
-        (args.host, args.port),
-        OmiSearchHttpHandler,
+    if not _loopback_host(args.host):
+        print("OMI Search MCP HTTP host must be loopback.", file=sys.stderr)
+        return 2
+    app = build_app(
+        host=args.host,
+        port=args.port,
         bearer_token=args.token or None,
     )
-    host, port = httpd.server_address
-    print(f"OMI Search MCP HTTP listening at http://{host}:{port}/mcp", file=sys.stderr)
+    print(
+        f"OMI Search MCP HTTP listening at "
+        f"http://{_display_host(args.host)}:{args.port}/mcp",
+        file=sys.stderr,
+    )
     if not args.token:
         print(
-            "WARNING: OMI_SEARCH_MCP_HTTP_TOKEN is not set. Use only behind Secure MCP Tunnel or trusted localhost.",
+            "WARNING: OMI_SEARCH_MCP_HTTP_TOKEN is not set. Use only behind "
+            "Secure MCP Tunnel or trusted localhost.",
             file=sys.stderr,
         )
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        httpd.server_close()
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level="warning",
+        access_log=False,
+    )
     return 0
 
 

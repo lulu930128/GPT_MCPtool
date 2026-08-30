@@ -26,6 +26,18 @@ function Test-OmiStartTimeEqual {
   return ([Math]::Abs(($leftTime - $rightTime).TotalSeconds) -lt 1.0)
 }
 
+function Test-OmiStartTimeWithinWindow {
+  param([string]$Candidate, [string]$NotBefore, [int]$MaximumSeconds = 15)
+  if ([string]::IsNullOrWhiteSpace($Candidate) -or [string]::IsNullOrWhiteSpace($NotBefore)) { return $false }
+  $styles = [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal
+  $candidateTime = [DateTimeOffset]::MinValue
+  $notBeforeTime = [DateTimeOffset]::MinValue
+  if (-not [DateTimeOffset]::TryParse($Candidate, [Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$candidateTime)) { return $false }
+  if (-not [DateTimeOffset]::TryParse($NotBefore, [Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$notBeforeTime)) { return $false }
+  $delta = ($candidateTime - $notBeforeTime).TotalSeconds
+  return ($delta -ge -1.0 -and $delta -le $MaximumSeconds)
+}
+
 function Write-OmiAtomicText {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
@@ -105,11 +117,13 @@ function Get-OmiProcess {
     $executablePath = $null
     $startTimeUtc = $null
     $commandLine = $null
+    $parentProcessId = $null
     try { $executablePath = [string]$process.Path } catch { }
     try { $startTimeUtc = $process.StartTime.ToUniversalTime().ToString("o") } catch { }
     try {
       $cim = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction Stop
       $commandLine = [string]$cim.CommandLine
+      $parentProcessId = [int]$cim.ParentProcessId
     }
     catch { }
     return [pscustomobject]@{
@@ -118,6 +132,7 @@ function Get-OmiProcess {
       ExecutablePath = $executablePath
       StartTimeUtc = $startTimeUtc
       CommandLine = $commandLine
+      ParentProcessId = $parentProcessId
     }
   }
   catch { return $null }
@@ -315,6 +330,42 @@ function Get-OmiRoleDefinition {
   }
 }
 
+function Test-OmiManagedServerLineage {
+  param(
+    [Parameter(Mandatory = $true)]$Context,
+    [Parameter(Mandatory = $true)]$Process,
+    [int]$RequiredLauncherPid = 0,
+    [string]$RequiredLauncherStartTimeUtc = ""
+  )
+  $listenerCommandKnown = -not [string]::IsNullOrWhiteSpace([string]$Process.CommandLine)
+  $listenerHasExactCommand = $listenerCommandKnown -and (Test-OmiLegacyCommandIdentity -Context $Context -Role server -Process $Process)
+  $current = $Process
+  for ($depth = 0; $depth -lt 6 -and $null -ne $current; $depth++) {
+    $isManagedLauncher = (
+      (Test-OmiPathEqual -Left ([string]$current.ExecutablePath) -Right ([string]$Context.pythonPath)) -and
+      (Test-OmiLegacyCommandIdentity -Context $Context -Role server -Process $current)
+    )
+    if ($isManagedLauncher -and ($RequiredLauncherPid -le 0 -or [int]$current.ProcessId -eq $RequiredLauncherPid)) {
+      return $true
+    }
+    if ($RequiredLauncherPid -gt 0 -and [int]$current.ProcessId -eq $RequiredLauncherPid) {
+      return $false
+    }
+    if ($null -eq $current.ParentProcessId -or [int]$current.ParentProcessId -le 0) { break }
+    $current = Get-OmiProcess -ProcessId ([int]$current.ParentProcessId)
+  }
+  if ($RequiredLauncherPid -gt 0 -and (-not $listenerCommandKnown -or $listenerHasExactCommand) -and
+      [IO.Path]::GetFileName([string]$Process.ExecutablePath) -in @("python.exe", "pythonw.exe") -and
+      (Test-OmiStartTimeWithinWindow -Candidate ([string]$Process.StartTimeUtc) -NotBefore $RequiredLauncherStartTimeUtc)) {
+    # Windows venv shims may hand the server to the base interpreter and exit
+    # before the listener is inspected. The listener is accepted only inside
+    # this just-started window. If Windows exposes a command line it must match;
+    # otherwise the caller also requires the exact build health before adoption.
+    return $true
+  }
+  return $false
+}
+
 function Test-OmiExecutableIdentity {
   param(
     [Parameter(Mandatory = $true)]$Context,
@@ -322,7 +373,18 @@ function Test-OmiExecutableIdentity {
     [Parameter(Mandatory = $true)]$Process
   )
   $definition = Get-OmiRoleDefinition -Context $Context -Role $Role
-  return (Test-OmiPathEqual -Left ([string]$Process.ExecutablePath) -Right ([string]$definition.executablePath))
+  if (Test-OmiPathEqual -Left ([string]$Process.ExecutablePath) -Right ([string]$definition.executablePath)) {
+    return $true
+  }
+  if ($Role -ne "server") { return $false }
+  if (Test-OmiManagedServerLineage -Context $Context -Process $Process) { return $true }
+  $leafName = [IO.Path]::GetFileName([string]$Process.ExecutablePath)
+  return (
+    $leafName -in @("python.exe", "pythonw.exe") -and
+    (Test-OmiOwnerMetadata -Context $Context -Role server -Process $Process) -and
+    ([string]::IsNullOrWhiteSpace([string]$Process.CommandLine) -or
+      (Test-OmiLegacyCommandIdentity -Context $Context -Role server -Process $Process))
+  )
 }
 
 function Test-OmiLegacyCommandIdentity {
@@ -673,6 +735,10 @@ function Start-OmiServer {
   foreach ($required in @($Context.pythonPath) + @($Context.sourceBuildArtifacts)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "SERVER_ENTRY_MISSING: Adapter source is incomplete." }
   }
+  $dependencyProbe = & $Context.pythonPath -B -c "import importlib.metadata; assert importlib.metadata.version('mcp') == '2.1.1'; import uvicorn" 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    throw "SERVER_DEPENDENCY_MISMATCH: Locked MCP runtime is unavailable. $dependencyProbe"
+  }
   $resolvedBackend = Resolve-OmiBackendUrl -Context $Context
   $startInfo = New-Object Diagnostics.ProcessStartInfo
   $startInfo.FileName = $Context.pythonPath
@@ -704,8 +770,33 @@ function Start-OmiServer {
     $null = Remove-OmiStaleOwnershipPair -Definition $definition -PidSnapshot $startedPidSnapshot -OwnerSnapshot $startedOwnerSnapshot
     throw "SERVER_NOT_READY: Adapter did not reach its expected source build."
   }
+  $listener = Get-OmiListenerState -Port $Context.port
+  if (-not $listener.known -or $listener.pids.Count -ne 1) {
+    throw "OWNERSHIP_MISMATCH: Started server listener ownership is ambiguous."
+  }
+  $listenerPid = [int]$listener.pids[0]
+  if ($listenerPid -ne $process.Id) {
+    $listenerProcess = Get-OmiProcess -ProcessId $listenerPid
+    if ($null -eq $listenerProcess) {
+      throw "OWNERSHIP_MISMATCH: Started server listener process is unavailable."
+    }
+    if (-not (Test-OmiManagedServerLineage -Context $Context -Process $listenerProcess -RequiredLauncherPid $process.Id -RequiredLauncherStartTimeUtc $started.StartTimeUtc)) {
+      $diagnostic = [ordered]@{
+        listenerPid = $listenerPid
+        listenerExecutable = [IO.Path]::GetFileName([string]$listenerProcess.ExecutablePath)
+        listenerCommandKnown = -not [string]::IsNullOrWhiteSpace([string]$listenerProcess.CommandLine)
+        listenerParentPid = $listenerProcess.ParentProcessId
+        listenerStartTimeUtc = $listenerProcess.StartTimeUtc
+        launcherPid = $process.Id
+        launcherStartTimeUtc = $started.StartTimeUtc
+      } | ConvertTo-Json -Compress
+      throw "OWNERSHIP_MISMATCH: Started server listener executable is outside the managed Python lineage. $diagnostic"
+    }
+    Write-OmiAtomicText -Path $Context.serverPidFile -Value ([string]$listenerPid)
+    Write-OmiOwnerMetadata -Context $Context -Role server -Process $listenerProcess
+  }
   $readyOwner = Resolve-OmiRoleOwnership -Context $Context -Role server
-  if (-not $readyOwner.canMutate -or $readyOwner.pid -ne $process.Id) { throw "OWNERSHIP_MISMATCH: Started server does not own the listener." }
+  if (-not $readyOwner.canMutate -or $readyOwner.pid -ne $listenerPid) { throw "OWNERSHIP_MISMATCH: Started server does not own the listener." }
 }
 
 function Start-OmiTunnelOnce {
@@ -821,17 +912,11 @@ function New-OmiSearchRuntimeContext {
   $resolvedRoot = (Resolve-Path -LiteralPath $ProjectRoot -ErrorAction Stop).Path
   $runtimeDir = Join-Path $resolvedRoot ".tmp"
   if ([string]::IsNullOrWhiteSpace($PythonPath)) {
-    $recordedPythonPath = $null
-    $serverOwnerPath = Join-Path $runtimeDir "omi-search-http-server.owner.json"
-    if (Test-Path -LiteralPath $serverOwnerPath -PathType Leaf) {
-      try {
-        $serverOwner = [IO.File]::ReadAllText($serverOwnerPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
-        $candidate = [string]$serverOwner.executablePath
-        if (-not [string]::IsNullOrWhiteSpace($candidate) -and (Test-Path -LiteralPath $candidate -PathType Leaf)) { $recordedPythonPath = $candidate }
-      }
-      catch { }
+    $managedPythonPath = Join-Path $resolvedRoot ".venv\Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $managedPythonPath -PathType Leaf)) {
+      throw "MANAGED_PYTHON_MISSING: Run 'uv sync --frozen' in $resolvedRoot before starting OMI Search."
     }
-    $PythonPath = if ([string]::IsNullOrWhiteSpace($recordedPythonPath)) { (Get-Command python -ErrorAction Stop).Source } else { $recordedPythonPath }
+    $PythonPath = $managedPythonPath
   }
   if ([string]::IsNullOrWhiteSpace($TunnelProfileDir)) { $TunnelProfileDir = Join-Path $resolvedRoot ".tunnel-client" }
   $healthUri = [Uri]$TunnelHealthUrl
@@ -858,6 +943,8 @@ function New-OmiSearchRuntimeContext {
     sourceBuildArtifacts = @(
       (Join-Path $resolvedRoot "http_server.py")
       (Join-Path $resolvedRoot "server.py")
+      (Join-Path $resolvedRoot "pyproject.toml")
+      (Join-Path $resolvedRoot "uv.lock")
       (Join-Path $resolvedRoot "public_contract_snapshot.json")
       (Join-Path $resolvedRoot "tw_market_dashboard_contract_snapshot.json")
       (Join-Path $resolvedRoot "ui\tw-market-dashboard\dist\index.html")

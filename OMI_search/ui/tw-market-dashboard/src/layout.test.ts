@@ -61,7 +61,7 @@ test("restores backend-owned today daily weekly and monthly K-line navigation", 
   assert.match(app, /key: "daily", label: "日 K"/);
   assert.match(app, /key: "weekly", label: "週 K"/);
   assert.match(app, /key: "monthly", label: "月 K"/);
-  assert.match(app, /omi\.read_tw_stock_dashboard_detail/);
+  assert.match(app, /omi_read_tw_stock_dashboard_detail/);
   assert.match(app, /\{ stock_id: stockId, timeframe, bars: DETAIL_BARS\[timeframe\] \}/);
   assert.match(app, /omi\.tw_stock_dashboard_detail\.v2/);
   assert.match(app, /const resultError = toolResultError\(response\)/);

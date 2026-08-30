@@ -737,7 +737,7 @@ export function App({ bridge }: { bridge: McpAppsBridge }) {
       };
       try {
         const result = await bridge.callTool(
-          "omi.read_tw_market_dashboard",
+          "omi_read_tw_market_dashboard",
           buildDashboardRequest(requestedScope),
           controller.signal,
         );
@@ -782,7 +782,7 @@ export function App({ bridge }: { bridge: McpAppsBridge }) {
     setSearching(true);
     setSearchError(null);
     try {
-      const result = structuredContent(await bridge.callTool("omi.search_tw_symbols", { keyword: query, limit: 12 }));
+      const result = structuredContent(await bridge.callTool("omi_search_tw_symbols", { keyword: query, limit: 12 }));
       setSearchResults(isRecord(result) ? list(result.items) : []);
     } catch (error) {
       setSearchResults([]);
@@ -810,7 +810,7 @@ export function App({ bridge }: { bridge: McpAppsBridge }) {
     setDetailError(null);
     try {
       const response = await bridge.callTool(
-        "omi.read_tw_stock_dashboard_detail",
+        "omi_read_tw_stock_dashboard_detail",
         { stock_id: stockId, timeframe, bars: DETAIL_BARS[timeframe] },
         controller.signal,
       );
@@ -864,7 +864,7 @@ export function App({ bridge }: { bridge: McpAppsBridge }) {
 
     try {
       const result = await bridge.callTool(
-        "omi.read_tw_market_dashboard",
+        "omi_read_tw_market_dashboard",
         buildDashboardRequest({ watchlistGroupId: groupId }),
         controller.signal,
       );

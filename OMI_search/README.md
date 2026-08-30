@@ -1,12 +1,13 @@
 # OMI Search MCP Adapter
 
-`OMI_search` 是 OMI 的 standalone MCP 映射層。它只處理 MCP protocol、公開 tool surface、相容欄位映射與 HTTP transport；所有市場資料與回答判斷都由 OMI backend 擁有。
+`OMI_search` 是 OMI 的 standalone MCP 映射層。官方 Python MCP SDK 擁有 protocol negotiation、stdio 與 Streamable HTTP transport；adapter 只處理公開 tool surface、相容欄位映射與 OMI backend projection。所有市場資料與回答判斷都由 OMI backend 擁有。
 
-目前 application release 為 `1.1.0`；`omi.decision.v4` 仍是獨立的 domain contract 版本。
+目前 application release 為 `1.2.0`；鎖定 `mcp==2.1.1`，並以 `uv.lock` 管理 runtime。`omi.decision.v4` 仍是獨立的 domain contract 版本。
 
 ```text
 MCP client
-  -> C:\GPT_MCPtool\OMI_search\server.py
+  -> official MCP Python SDK (stdio / Streamable HTTP)
+  -> C:\GPT_MCPtool\OMI_search\server.py mapping handlers
   -> OMI launcher-selected loopback backend
   -> GET  /api/ai/tools
   -> POST /api/ai/ask
@@ -24,9 +25,9 @@ MCP client
 
 ## 嚴格責任邊界
 
-Adapter 只負責：
+官方 MCP SDK 負責 `initialize`、protocol version negotiation、JSON-RPC framing、session／request validation 與 transport lifecycle。Adapter 只負責：
 
-- MCP `initialize`、`resources/list`、`resources/read`、`tools/list`、`tools/call` 與 JSON serialization。
+- 註冊 `resources/list`、`resources/read`、`tools/list`、`tools/call` handlers。
 - 將 canonical tool arguments 映射到 `POST /api/ai/ask`。
 - 固定 `contract_version=omi.decision.v4`、`caller_profile=omi_search`、`allow_llm=false`、`allow_write=false`。
 - 將 caller 明確指定的 `refresh_if_missing` 映射成 `allow_external_fetch`。
@@ -46,19 +47,19 @@ Adapter 不負責：
 
 ## 公開 tools
 
-- `omi.ask`：canonical `omi.decision.v4` read-only 入口。
-- `omi.read_refresh_status`：依正整數 `job_id` 讀取 redacted refresh operation/evidence 狀態與 cache-only resume template。
-- `omi.read_market_overview`：將明確 market 映射成 market target。
-- `omi.read_stock_context`：將明確 market + symbol 映射成 stock target。
-- `omi.read_data_freshness`：映射成 data-freshness target。
-- `omi.read_source_health`：映射成 source-health target 與 filters。
-- `omi.read_capability_status`：映射成 capability-status target 與 filters。
-- `omi.read_tw_market_dashboard`：讀取 backend-owned `omi.tw_market_dashboard.v1` cache-only snapshot。
-- `omi.open_tw_market_dashboard`：唯一綁定 UI resource 的 render-only tool；輸入為前一工具的完整 dashboard structured content。
-- `omi.search_tw_symbols`：bounded 本機台股代碼／名稱搜尋。
-- `omi.read_tw_stock_dashboard_detail`：cache-only 個股 OHLC、backend MA5/20/60 與 technical report。
+- `omi_ask`：canonical `omi.decision.v4` read-only 入口。
+- `omi_read_refresh_status`：依正整數 `job_id` 讀取 redacted refresh operation/evidence 狀態與 cache-only resume template。
+- `omi_read_market_overview`：將明確 market 映射成 market target。
+- `omi_read_stock_context`：將明確 market + symbol 映射成 stock target。
+- `omi_read_data_freshness`：映射成 data-freshness target。
+- `omi_read_source_health`：映射成 source-health target 與 filters。
+- `omi_read_capability_status`：映射成 capability-status target 與 filters。
+- `omi_read_tw_market_dashboard`：讀取 backend-owned `omi.tw_market_dashboard.v1` cache-only snapshot。
+- `omi_open_tw_market_dashboard`：唯一綁定 UI resource 的 render-only tool；輸入為前一工具的完整 dashboard structured content。
+- `omi_search_tw_symbols`：bounded 本機台股代碼／名稱搜尋。
+- `omi_read_tw_stock_dashboard_detail`：cache-only 個股 OHLC、backend MA5/20/60 與 technical report。
 
-`omi.search` 不出現在 `tools/list`，但仍保留為 legacy callable alias。只有這個 legacy alias 會把 `query` 映射成 `question`，並支援舊的 `stock_id` / `symbol` target alias。新 caller 必須使用 `omi.ask`、`question` 與明確 `target`。
+`omi.search` 不出現在 `tools/list`，但仍保留為 legacy callable alias。只有這個 legacy alias 會把 `query` 映射成 `question`，並支援舊的 `stock_id` / `symbol` target alias。新 caller 必須使用 `omi_ask`、`question` 與明確 `target`。
 
 Shortcuts 只依 tool 名稱與明確 arguments 做機械映射，固定使用 `mode=data_only`；不從自然語言推斷 target。
 
@@ -172,15 +173,16 @@ $env:OMI_SEARCH_TUNNEL_ID = ""
 
 ```powershell
 cd C:\GPT_MCPtool\OMI_search
-python -B -m unittest discover -s tests
-python -B -c "import ast, pathlib; [ast.parse(p.read_text(encoding='utf-8'), filename=str(p)) for p in pathlib.Path('.').rglob('*.py')]; print('syntax ok')"
+uv sync --frozen
+.\.venv\Scripts\python.exe -B -m unittest discover -s tests
+.\.venv\Scripts\python.exe -B -c "import ast, pathlib; [ast.parse(p.read_text(encoding='utf-8'), filename=str(p)) for p in pathlib.Path('.').rglob('*.py')]; print('syntax ok')"
 ```
 
 ## Codex MCP 設定
 
 ```toml
 [mcp_servers.omi_search]
-command = "python"
+command = "C:/GPT_MCPtool/OMI_search/.venv/Scripts/python.exe"
 args = ["C:/GPT_MCPtool/OMI_search/server.py"]
 env = { OMI_SEARCH_API_BASE_URL = "http://127.0.0.1:8400" }
 default_tools_approval_mode = "prompt"
@@ -194,14 +196,15 @@ ChatGPT Web 無法直接存取本機 stdio 或 `127.0.0.1`。本專案提供 HTT
 
 ```powershell
 cd C:\GPT_MCPtool\OMI_search
-python .\http_server.py
+uv sync --frozen
+.\.venv\Scripts\python.exe .\http_server.py
 ```
 
 本機 endpoint 為 `http://127.0.0.1:18797/mcp`，公開連線與 Secure MCP Tunnel 設定見 [docs/ChatGPT-Setup.md](docs/ChatGPT-Setup.md)。
 
 ### 台股 dashboard widget
 
-React/TypeScript source 位於 `ui/tw-market-dashboard/`。UI 不直接連 backend 或 provider；所有更新、搜尋與個股詳情都走 MCP Apps bridge `tools/call`。只有 `omi.open_tw_market_dashboard` 綁定 `ui://omi/tw-market-dashboard/v1.html`，resource MIME 為 `text/html;profile=mcp-app`，CSP 的 network allowlist 為空。
+React/TypeScript source 位於 `ui/tw-market-dashboard/`。UI 不直接連 backend 或 provider；所有更新、搜尋與個股詳情都走 MCP Apps bridge `tools/call`。只有 `omi_open_tw_market_dashboard` 綁定 `ui://omi/tw-market-dashboard/v2.html`，resource MIME 為 `text/html;profile=mcp-app`，CSP 的 network allowlist 為空。
 
 首次使用或修改 widget source 後先執行：
 
@@ -226,7 +229,7 @@ URL、原始 response、exception、credential 或市場資料，供 Control Cen
 一般啟動使用 `scripts\Start-Tray.cmd`；它不會破壞性取代已存在的 tray。修改 adapter
 source 或 public contract snapshot 後，使用 `scripts\Restart-Tray.cmd`。Restart 會先
 確認舊的 18797 listener 已釋放，再要求 `/health` 的 `buildId` 與目前
-`http_server.py`、`server.py`、兩份 contract snapshots 與 dashboard `dist/index.html` 完全一致。
+`http_server.py`、`server.py`、`pyproject.toml`、`uv.lock`、兩份 contract snapshots 與 dashboard `dist/index.html` 完全一致。
 
 托盤使用 `unified-always-on-v2` 契約。正式啟動會一起準備 MCP server 與 Secure MCP
 Tunnel；選單不提供 Start／Stop 或 tunnel restart。OMI backend 仍由正式 OMI launcher

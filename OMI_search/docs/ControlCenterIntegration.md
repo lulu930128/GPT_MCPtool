@@ -46,7 +46,7 @@ never receives the key, secret path, tunnel ID or OMI domain payload.
 
 ```powershell
 cd C:\GPT_MCPtool\OMI_search
-python -B -m unittest discover -s tests
+.\.venv\Scripts\python.exe -B -m unittest discover -s tests
 powershell -NoProfile -ExecutionPolicy Bypass `
   -File tests\test-runtime-control.ps1
 powershell -NoProfile -ExecutionPolicy Bypass `

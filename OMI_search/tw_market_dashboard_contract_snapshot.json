@@ -21,6 +21,18 @@
             "default": null,
             "title": "As Of"
           },
+          "canonical_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Canonical Ref"
+          },
           "coverage": {
             "title": "Coverage",
             "type": "integer"
@@ -29,6 +41,20 @@
             "title": "Coverage Ratio",
             "type": "number"
           },
+          "coverage_reason_counts": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "Coverage Reason Counts",
+            "type": "object"
+          },
           "decision_usable": {
             "title": "Decision Usable",
             "type": "boolean"
@@ -36,6 +62,23 @@
           "decline": {
             "title": "Decline",
             "type": "integer"
+          },
+          "deprecated": {
+            "default": false,
+            "title": "Deprecated",
+            "type": "boolean"
+          },
+          "failed_batch_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Failed Batch Count"
           },
           "market": {
             "title": "Market",
@@ -49,13 +92,57 @@
             "title": "Provisional",
             "type": "boolean"
           },
+          "raw_unknown_reason_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Raw Unknown Reason Counts",
+            "type": "object"
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Scope"
+          },
           "session_phase": {
             "title": "Session Phase",
             "type": "string"
           },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Source"
+          },
           "status": {
             "title": "Status",
             "type": "string"
+          },
+          "trade_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Trade Date"
           },
           "unchanged": {
             "title": "Unchanged",
@@ -489,6 +576,212 @@
         "title": "TaiwanDashboardIndexEstimateRead",
         "type": "object"
       },
+      "TaiwanDashboardResolvedIndexRead": {
+        "properties": {
+          "acquisition_policy": {
+            "const": "cache_only",
+            "default": "cache_only",
+            "title": "Acquisition Policy",
+            "type": "string"
+          },
+          "authority": {
+            "enum": [
+              "official_exchange",
+              "provider",
+              "derived_proxy",
+              "unknown"
+            ],
+            "title": "Authority",
+            "type": "string"
+          },
+          "change": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Change"
+          },
+          "change_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Change Pct"
+          },
+          "decision_usable": {
+            "title": "Decision Usable",
+            "type": "boolean"
+          },
+          "event_time": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Event Time"
+          },
+          "finalization": {
+            "enum": [
+              "intraday",
+              "provisional",
+              "final",
+              "unknown"
+            ],
+            "title": "Finalization",
+            "type": "string"
+          },
+          "index_id": {
+            "title": "Index Id",
+            "type": "string"
+          },
+          "market": {
+            "title": "Market",
+            "type": "string"
+          },
+          "official": {
+            "title": "Official",
+            "type": "boolean"
+          },
+          "official_close_confirmed": {
+            "title": "Official Close Confirmed",
+            "type": "boolean"
+          },
+          "official_close_status": {
+            "title": "Official Close Status",
+            "type": "string"
+          },
+          "official_source": {
+            "title": "Official Source",
+            "type": "boolean"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Provider"
+          },
+          "provisional": {
+            "title": "Provisional",
+            "type": "boolean"
+          },
+          "provisional_estimate": {
+            "title": "Provisional Estimate",
+            "type": "boolean"
+          },
+          "resolution_id": {
+            "title": "Resolution Id",
+            "type": "string"
+          },
+          "resolution_version": {
+            "title": "Resolution Version",
+            "type": "string"
+          },
+          "selected_candidate": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Selected Candidate"
+          },
+          "selection_reason": {
+            "title": "Selection Reason",
+            "type": "string"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Source"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "trade_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Trade Date"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Value"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "index_id",
+          "market",
+          "status",
+          "authority",
+          "finalization",
+          "official_source",
+          "official_close_confirmed",
+          "provisional_estimate",
+          "selection_reason",
+          "resolution_version",
+          "resolution_id",
+          "official_close_status",
+          "official",
+          "provisional",
+          "decision_usable"
+        ],
+        "title": "TaiwanDashboardResolvedIndexRead",
+        "type": "object"
+      },
       "TaiwanDashboardSessionRead": {
         "properties": {
           "is_current_trading_day": {
@@ -787,6 +1080,18 @@
       "freshness": {
         "$ref": "#/$defs/TaiwanDashboardFreshnessRead"
       },
+      "headline_breadth_field": {
+        "const": "resolved_breadth",
+        "default": "resolved_breadth",
+        "title": "Headline Breadth Field",
+        "type": "string"
+      },
+      "headline_index_field": {
+        "const": "resolved_indices",
+        "default": "resolved_indices",
+        "title": "Headline Index Field",
+        "type": "string"
+      },
       "hot_groups": {
         "items": {
           "$ref": "#/$defs/TaiwanDashboardGroupRead"
@@ -812,6 +1117,20 @@
           "type": "string"
         },
         "title": "Limitations",
+        "type": "array"
+      },
+      "resolved_breadth": {
+        "additionalProperties": {
+          "$ref": "#/$defs/TaiwanDashboardBreadthRead"
+        },
+        "title": "Resolved Breadth",
+        "type": "object"
+      },
+      "resolved_indices": {
+        "items": {
+          "$ref": "#/$defs/TaiwanDashboardResolvedIndexRead"
+        },
+        "title": "Resolved Indices",
         "type": "array"
       },
       "session": {
@@ -861,7 +1180,7 @@
     "title": "TaiwanMarketDashboardRead",
     "type": "object"
   },
-  "digest": "db95f3134ea8cc042b651783bd44610ba4ea66acca9ed81d750645415859418e",
+  "digest": "86303d7685858bd3c052734deb58748d690e0a5508dab6733bd021a675bb3fbb",
   "schema_version": "omi.mcp.tw_market_dashboard_snapshot.v1",
   "stock_detail_contract_version": "omi.tw_stock_dashboard_detail.v2",
   "stock_detail_output_schema": {
@@ -966,6 +1285,10 @@
       },
       "MarketOhlcChartRead": {
         "properties": {
+          "available_bar_count": {
+            "title": "Available Bar Count",
+            "type": "integer"
+          },
           "backfill": {
             "anyOf": [
               {
@@ -983,10 +1306,21 @@
             "title": "Bars",
             "type": "integer"
           },
+          "bars_legacy_count": {
+            "title": "Bars Legacy Count",
+            "type": "integer"
+          },
           "data_quality": {
             "default": "ok",
             "title": "Data Quality",
             "type": "string"
+          },
+          "deprecated_fields": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Deprecated Fields",
+            "type": "array"
           },
           "expected_data_date": {
             "anyOf": [
@@ -1042,6 +1376,19 @@
             "default": null,
             "title": "Latest Data Date"
           },
+          "latest_finalized_data_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Latest Finalized Data Date"
+          },
           "lookback_days": {
             "title": "Lookback Days",
             "type": "integer"
@@ -1062,6 +1409,27 @@
             "title": "Refresh Recommended",
             "type": "boolean"
           },
+          "requested_bar_count": {
+            "title": "Requested Bar Count",
+            "type": "integer"
+          },
+          "requested_to_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Requested To Date"
+          },
+          "returned_point_count": {
+            "title": "Returned Point Count",
+            "type": "integer"
+          },
           "stock_id": {
             "title": "Stock Id",
             "type": "string"
@@ -1075,6 +1443,28 @@
             "title": "To Date",
             "type": "string"
           },
+          "volume_semantics": {
+            "default": "not_provided",
+            "title": "Volume Semantics",
+            "type": "string"
+          },
+          "volume_status": {
+            "default": "not_provided",
+            "title": "Volume Status",
+            "type": "string"
+          },
+          "volume_unit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Volume Unit"
+          },
           "warnings": {
             "items": {
               "type": "string"
@@ -1087,6 +1477,10 @@
           "stock_id",
           "timeframe",
           "bars",
+          "requested_bar_count",
+          "available_bar_count",
+          "returned_point_count",
+          "bars_legacy_count",
           "lookback_days",
           "from_date",
           "to_date",

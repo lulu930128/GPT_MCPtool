@@ -16,10 +16,11 @@ Invoke-RestMethod http://127.0.0.1:8400/api/system/health
 
 ```powershell
 cd C:\GPT_MCPtool\OMI_search
+uv sync --frozen
 $env:OMI_SEARCH_API_BASE_URL = "http://127.0.0.1:8400"
 $env:OMI_SEARCH_MCP_HTTP_HOST = "127.0.0.1"
 $env:OMI_SEARCH_MCP_HTTP_PORT = "18797"
-python .\http_server.py
+.\.venv\Scripts\python.exe .\http_server.py
 ```
 
 本機 MCP endpoint：
@@ -100,7 +101,7 @@ C:\GPT_MCPtool\OMI_search\scripts\start-tray.vbs
 
 托盤會自動啟動本機 MCP server，並嘗試啟動 tunnel。若還沒保存 `CONTROL_PLANE_API_KEY`，托盤會開啟密碼輸入框讓你貼上 key；也可以右鍵托盤圖示選 `Save CONTROL_PLANE_API_KEY...` 手動保存，或選 `Show key status` 查看目前是否已保存且可解密。
 
-也可以手動保持 `python .\http_server.py` 正在跑，另開一個 PowerShell：
+也可以手動保持 `.\.venv\Scripts\python.exe .\http_server.py` 正在跑，另開一個 PowerShell：
 
 ```powershell
 cd C:\GPT_MCPtool\OMI_search
@@ -115,18 +116,18 @@ cd C:\GPT_MCPtool\OMI_search
 2. 選剛建立的 OMI Search tunnel，或貼自己的 tunnel ID。
 3. 本機 target 是 `http://127.0.0.1:18797/mcp`。
 4. 連上後請 ChatGPT 列出 tools，應看到：
-   - `omi.ask`
-   - `omi.read_market_overview`
-   - `omi.read_stock_context`
-   - `omi.read_data_freshness`
-   - `omi.read_source_health`
-   - `omi.read_capability_status`
-   - `omi.read_tw_market_dashboard`
-   - `omi.open_tw_market_dashboard`
-   - `omi.search_tw_symbols`
-   - `omi.read_tw_stock_dashboard_detail`
+   - `omi_ask`
+   - `omi_read_market_overview`
+   - `omi_read_stock_context`
+   - `omi_read_data_freshness`
+   - `omi_read_source_health`
+   - `omi_read_capability_status`
+   - `omi_read_tw_market_dashboard`
+   - `omi_open_tw_market_dashboard`
+   - `omi_search_tw_symbols`
+   - `omi_read_tw_stock_dashboard_detail`
 
-   `resources/list` 也應列出 `ui://omi/tw-market-dashboard/v1.html`。若 tool 已出現但 widget resource 讀取失敗，先到 `ui/tw-market-dashboard` 執行 `npm run build`，再透過 Control Center 只 restart `omi_search` component。
+   `resources/list` 也應列出 `ui://omi/tw-market-dashboard/v2.html`。若 tool 已出現但 widget resource 讀取失敗，先到 `ui/tw-market-dashboard` 執行 `npm run build`，再透過 Control Center 只 restart `omi_search` component。
 
 若仍只看到舊 `omi.search`，在 connector/plugin 管理介面 Refresh Actions、
 重新連線或重新載入 schema。`omi.search` 仍保留為隱藏 callable alias，因此
@@ -140,11 +141,11 @@ cd C:\GPT_MCPtool\OMI_search
 連上後可以先問：
 
 ```text
-Use the OMI Search MCP connector. List available tools, then call omi.ask for stock_id 2330 with question "2330 最近資料" and mode data_only. Do not refresh data.
+Use the OMI Search MCP connector. List available tools, then call omi_ask for stock_id 2330 with question "2330 最近資料" and mode data_only. Do not refresh data.
 ```
 
 若要允許 OMI backend 在資料缺漏時補資料：
 
 ```text
-Call omi.ask for stock_id 2330 with question "2330 最近量價與籌碼資料", mode data_only, refresh_if_missing true, and tool_budget max_calls 3 max_external_fetches 2 max_total_seconds 20.
+Call omi_ask for stock_id 2330 with question "2330 最近量價與籌碼資料", mode data_only, refresh_if_missing true, and tool_budget max_calls 3 max_external_fetches 2 max_total_seconds 20.
 ```
