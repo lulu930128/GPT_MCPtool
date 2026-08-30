@@ -15,6 +15,17 @@ function Test-OmiPathEqual {
   catch { return $false }
 }
 
+function Test-OmiStartTimeEqual {
+  param([string]$Left, [string]$Right)
+  if ([string]::IsNullOrWhiteSpace($Left) -or [string]::IsNullOrWhiteSpace($Right)) { return $false }
+  $styles = [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal
+  $leftTime = [DateTimeOffset]::MinValue
+  $rightTime = [DateTimeOffset]::MinValue
+  if (-not [DateTimeOffset]::TryParse($Left, [Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$leftTime)) { return $false }
+  if (-not [DateTimeOffset]::TryParse($Right, [Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$rightTime)) { return $false }
+  return ([Math]::Abs(($leftTime - $rightTime).TotalSeconds) -lt 1.0)
+}
+
 function Write-OmiAtomicText {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
@@ -43,6 +54,38 @@ function Read-OmiPidFile {
   }
   catch { }
   return $null
+}
+
+function Read-OmiRuntimeFileSnapshot {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return [pscustomobject]@{ exists=$false; raw=$null } }
+  try { return [pscustomobject]@{ exists=$true; raw=[IO.File]::ReadAllText($Path) } }
+  catch { return [pscustomobject]@{ exists=$true; raw=$null } }
+}
+
+function Remove-OmiRuntimeFileSnapshot {
+  param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)]$Snapshot)
+  if (-not [bool]$Snapshot.exists) { return $true }
+  if ($null -eq $Snapshot.raw) { return $false }
+  try {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $true }
+    if ([IO.File]::ReadAllText($Path) -cne [string]$Snapshot.raw) { return $false }
+    Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+    return $true
+  }
+  catch { return $false }
+}
+
+function Remove-OmiStaleOwnershipPair {
+  param($Definition, $PidSnapshot, $OwnerSnapshot)
+  foreach ($entry in @(@{ path=$Definition.pidFile; snapshot=$PidSnapshot }, @{ path=$Definition.ownerFile; snapshot=$OwnerSnapshot })) {
+    if ([bool]$entry.snapshot.exists) {
+      if ($null -eq $entry.snapshot.raw -or -not (Test-Path -LiteralPath $entry.path -PathType Leaf) -or [IO.File]::ReadAllText($entry.path) -cne [string]$entry.snapshot.raw) { return $false }
+    }
+    elseif (Test-Path -LiteralPath $entry.path -PathType Leaf) { return $false }
+  }
+  if (-not (Remove-OmiRuntimeFileSnapshot -Path $Definition.ownerFile -Snapshot $OwnerSnapshot)) { return $false }
+  return (Remove-OmiRuntimeFileSnapshot -Path $Definition.pidFile -Snapshot $PidSnapshot)
 }
 
 function Remove-OmiRuntimeFile {
@@ -78,6 +121,85 @@ function Get-OmiProcess {
     }
   }
   catch { return $null }
+}
+
+function Get-OmiProcessInspection {
+  param([Parameter(Mandatory = $true)][int]$ProcessId)
+  try {
+    $process = Get-Process -Id $ProcessId -ErrorAction Stop
+    $details = Get-OmiProcess -ProcessId $ProcessId
+    if ($null -eq $details) { return [pscustomobject]@{ state="Unknown"; process=$null } }
+    return [pscustomobject]@{ state="Present"; process=$details }
+  }
+  catch {
+    $missing = $_.CategoryInfo.Category -eq [Management.Automation.ErrorCategory]::ObjectNotFound
+    return [pscustomobject]@{ state=$(if ($missing) { "MissingConfirmed" } else { "Unknown" }); process=$null }
+  }
+}
+
+function Get-OmiTerminationBinding {
+  param([Parameter(Mandatory = $true)][int]$ProcessId)
+  $nativeProcess = $null
+  try {
+    $nativeProcess = Get-Process -Id $ProcessId -ErrorAction Stop
+    $null = $nativeProcess.Handle
+    if ($nativeProcess.HasExited) {
+      $nativeProcess.Dispose()
+      return [pscustomobject]@{ state="MissingConfirmed"; process=$null; nativeProcess=$null }
+    }
+    $executablePath = [string]$nativeProcess.Path
+    $startTimeUtc = $nativeProcess.StartTime.ToUniversalTime().ToString("o")
+    if ([string]::IsNullOrWhiteSpace($executablePath) -or [string]::IsNullOrWhiteSpace($startTimeUtc)) { throw "Process identity is incomplete." }
+    return [pscustomobject]@{
+      state="Present"
+      process=[pscustomobject]@{
+        ProcessId=[int]$nativeProcess.Id; Name=[string]$nativeProcess.ProcessName
+        ExecutablePath=$executablePath; StartTimeUtc=$startTimeUtc
+        CommandLine=$null; ParentProcessId=$null
+      }
+      nativeProcess=$nativeProcess
+    }
+  }
+  catch {
+    if ($null -ne $nativeProcess) { try { $nativeProcess.Dispose() } catch { } }
+    $missing = $_.CategoryInfo.Category -eq [Management.Automation.ErrorCategory]::ObjectNotFound
+    return [pscustomobject]@{ state=$(if ($missing) { "MissingConfirmed" } else { "Unknown" }); process=$null; nativeProcess=$null }
+  }
+}
+
+function Stop-OmiBoundProcess {
+  param([Parameter(Mandatory = $true)]$Binding, [int]$TimeoutMilliseconds = 5000)
+  try {
+    if ($Binding.state -ne "Present" -or $null -eq $Binding.nativeProcess) { throw "OWNERSHIP_CHANGED: Process binding is unavailable." }
+    if (-not $Binding.nativeProcess.HasExited) { $Binding.nativeProcess.Kill() }
+    if (-not $Binding.nativeProcess.WaitForExit($TimeoutMilliseconds)) { throw "STOP_TIMEOUT: Bound process did not exit." }
+  }
+  finally { if ($null -ne $Binding.nativeProcess) { $Binding.nativeProcess.Dispose() } }
+}
+
+function Read-OmiOwnerMetadataSnapshot {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  $snapshot = Read-OmiRuntimeFileSnapshot -Path $Path
+  if (-not $snapshot.exists) { return [pscustomobject]@{ file=$snapshot; state="Missing"; metadata=$null } }
+  if ($null -eq $snapshot.raw) { return [pscustomobject]@{ file=$snapshot; state="Unknown"; metadata=$null } }
+  try { return [pscustomobject]@{ file=$snapshot; state="Parsed"; metadata=$snapshot.raw | ConvertFrom-Json } }
+  catch { return [pscustomobject]@{ file=$snapshot; state="Malformed"; metadata=$null } }
+}
+
+function Test-OmiOwnerMetadataComplete {
+  param($Metadata)
+  if ($null -eq $Metadata) { return $false }
+  foreach ($name in @("schemaVersion", "role", "pid", "executablePath", "startTimeUtc", "identity")) {
+    if ($null -eq $Metadata.PSObject.Properties[$name]) { return $false }
+  }
+  return (
+    [int]$Metadata.schemaVersion -eq 1 -and
+    -not [string]::IsNullOrWhiteSpace([string]$Metadata.role) -and
+    [int]$Metadata.pid -gt 0 -and
+    -not [string]::IsNullOrWhiteSpace([string]$Metadata.executablePath) -and
+    -not [string]::IsNullOrWhiteSpace([string]$Metadata.startTimeUtc) -and
+    -not [string]::IsNullOrWhiteSpace([string]$Metadata.identity)
+  )
 }
 
 function Get-OmiListenerState {
@@ -252,13 +374,19 @@ function Test-OmiOwnerMetadata {
   if (-not (Test-Path -LiteralPath $definition.ownerFile -PathType Leaf)) { return $false }
   try { $metadata = [IO.File]::ReadAllText($definition.ownerFile, [Text.Encoding]::UTF8) | ConvertFrom-Json }
   catch { return $false }
+  if (-not (Test-OmiOwnerMetadataComplete -Metadata $metadata)) { return $false }
+  $startTimeMatches = if ($Role -eq "server") {
+    Test-OmiStartTimeEqual -Left ([string]$metadata.startTimeUtc) -Right ([string]$Process.StartTimeUtc)
+  } else {
+    [string]$metadata.startTimeUtc -eq [string]$Process.StartTimeUtc
+  }
   return (
     [int]$metadata.schemaVersion -eq 1 -and
     [string]$metadata.role -eq $Role -and
     [int]$metadata.pid -eq [int]$Process.ProcessId -and
     (Test-OmiPathEqual -Left ([string]$metadata.executablePath) -Right ([string]$Process.ExecutablePath)) -and
     -not [string]::IsNullOrWhiteSpace([string]$Process.StartTimeUtc) -and
-    [string]$metadata.startTimeUtc -eq [string]$Process.StartTimeUtc -and
+    $startTimeMatches -and
     [string]$metadata.identity -eq [string]$definition.identity
   )
 }
@@ -279,20 +407,10 @@ function Resolve-OmiRoleOwnership {
     [switch]$AdoptLegacyExactListener
   )
   $definition = Get-OmiRoleDefinition -Context $Context -Role $Role
+  $pidSnapshot = Read-OmiRuntimeFileSnapshot -Path $definition.pidFile
+  $ownerInspection = Read-OmiOwnerMetadataSnapshot -Path $definition.ownerFile
   $managedPid = Read-OmiPidFile -Path $definition.pidFile
-  $managedProcess = $null
-  if ($null -ne $managedPid) {
-    $managedProcess = Get-OmiProcess -ProcessId $managedPid
-    if ($null -eq $managedProcess) {
-      Remove-OmiRuntimeFile -Path $definition.pidFile -ExpectedPid $managedPid
-      Remove-OmiRuntimeFile -Path $definition.ownerFile
-      $managedPid = $null
-    }
-    elseif (-not (Test-OmiExecutableIdentity -Context $Context -Role $Role -Process $managedProcess)) {
-      return [pscustomobject]@{ role=$Role; state="OwnershipMismatch"; pid=$managedPid; listenerPid=$null; reason="pid_process_mismatch"; canMutate=$false; adopted=$false }
-    }
-  }
-
+  $processInspection = if ($null -eq $managedPid) { $null } else { Get-OmiProcessInspection -ProcessId $managedPid }
   $listener = Get-OmiListenerState -Port $definition.port
   if (-not $listener.known) {
     return [pscustomobject]@{ role=$Role; state="OwnershipUnknown"; pid=$managedPid; listenerPid=$null; reason=$listener.errorCode; canMutate=$false; adopted=$false }
@@ -301,6 +419,67 @@ function Resolve-OmiRoleOwnership {
     return [pscustomobject]@{ role=$Role; state="OwnershipMismatch"; pid=$managedPid; listenerPid=$null; reason="multiple_listener_owners"; canMutate=$false; adopted=$false }
   }
   $listenerPid = if ($listener.pids.Count -eq 1) { [int]$listener.pids[0] } else { $null }
+
+  if ($pidSnapshot.exists -and $null -eq $managedPid) {
+    if ($null -ne $listenerPid) {
+      return [pscustomobject]@{ role=$Role; state="OwnershipMismatch"; pid=$null; listenerPid=$listenerPid; reason="invalid_pid_file_with_listener"; canMutate=$false; adopted=$false }
+    }
+    if (-not (Remove-OmiStaleOwnershipPair -Definition $definition -PidSnapshot $pidSnapshot -OwnerSnapshot $ownerInspection.file)) {
+      return [pscustomobject]@{ role=$Role; state="OwnershipUnknown"; pid=$null; listenerPid=$null; reason="stale_metadata_changed_during_cleanup"; canMutate=$false; adopted=$false }
+    }
+  }
+
+  if ($null -ne $managedPid) {
+    if ($processInspection.state -eq "Unknown") {
+      return [pscustomobject]@{ role=$Role; state="OwnershipUnknown"; pid=$managedPid; listenerPid=$listenerPid; reason="process_inspection_failed"; canMutate=$false; adopted=$false }
+    }
+    if ($processInspection.state -eq "MissingConfirmed") {
+      if ($null -ne $listenerPid) {
+        return [pscustomobject]@{ role=$Role; state="OwnershipMismatch"; pid=$managedPid; listenerPid=$listenerPid; reason="stale_pid_with_listener"; canMutate=$false; adopted=$false }
+      }
+      if (-not (Remove-OmiStaleOwnershipPair -Definition $definition -PidSnapshot $pidSnapshot -OwnerSnapshot $ownerInspection.file)) {
+        return [pscustomobject]@{ role=$Role; state="OwnershipUnknown"; pid=$managedPid; listenerPid=$null; reason="stale_metadata_changed_during_cleanup"; canMutate=$false; adopted=$false }
+      }
+      $managedPid = $null
+    }
+  }
+
+  $managedProcess = if ($null -ne $managedPid) { $processInspection.process } else { $null }
+  if ($null -ne $managedProcess) {
+    if ([string]::IsNullOrWhiteSpace([string]$managedProcess.ExecutablePath) -or [string]::IsNullOrWhiteSpace([string]$managedProcess.StartTimeUtc)) {
+      return [pscustomobject]@{ role=$Role; state="OwnershipUnknown"; pid=$managedPid; listenerPid=$listenerPid; reason="process_identity_unavailable"; canMutate=$false; adopted=$false }
+    }
+    $metadataComplete = $ownerInspection.state -eq "Parsed" -and (Test-OmiOwnerMetadataComplete -Metadata $ownerInspection.metadata)
+    $sameRecordedPid = $metadataComplete -and [int]$ownerInspection.metadata.pid -eq $managedPid
+    $instanceMismatch = (
+      -not (Test-OmiExecutableIdentity -Context $Context -Role $Role -Process $managedProcess) -or
+      ($sameRecordedPid -and (
+        -not (Test-OmiPathEqual -Left ([string]$ownerInspection.metadata.executablePath) -Right ([string]$managedProcess.ExecutablePath)) -or
+        -not (Test-OmiStartTimeEqual -Left ([string]$ownerInspection.metadata.startTimeUtc) -Right ([string]$managedProcess.StartTimeUtc))
+      ))
+    )
+    if ($instanceMismatch) {
+      if ($null -ne $listenerPid) {
+        return [pscustomobject]@{ role=$Role; state="OwnershipMismatch"; pid=$managedPid; listenerPid=$listenerPid; reason="pid_process_mismatch"; canMutate=$false; adopted=$false }
+      }
+      if (-not (Remove-OmiStaleOwnershipPair -Definition $definition -PidSnapshot $pidSnapshot -OwnerSnapshot $ownerInspection.file)) {
+        return [pscustomobject]@{ role=$Role; state="OwnershipUnknown"; pid=$managedPid; listenerPid=$null; reason="stale_metadata_changed_during_cleanup"; canMutate=$false; adopted=$false }
+      }
+      $managedPid = $null
+      $managedProcess = $null
+    }
+    elseif (-not $metadataComplete -or -not $sameRecordedPid) {
+      if ($AdoptLegacyExactListener -and $null -ne $listenerPid -and $listenerPid -eq $managedPid -and
+          (Test-OmiRoleReady -Context $Context -Role $Role) -and
+          (Test-OmiLegacyCommandIdentity -Context $Context -Role $Role -Process $managedProcess)) {
+        Write-OmiOwnerMetadata -Context $Context -Role $Role -Process $managedProcess
+        $ownerInspection = Read-OmiOwnerMetadataSnapshot -Path $definition.ownerFile
+      }
+      else {
+        return [pscustomobject]@{ role=$Role; state="OwnershipUnknown"; pid=$managedPid; listenerPid=$listenerPid; reason="owner_metadata_unavailable_or_incoherent"; canMutate=$false; adopted=$false }
+      }
+    }
+  }
 
   if ($null -ne $managedPid) {
     if ($null -ne $listenerPid -and $listenerPid -ne $managedPid) {
@@ -348,7 +527,10 @@ function Get-OmiSearchRuntimeStatus {
   $tunnelReady = Test-OmiTunnelReady -Context $Context
   $upstreamReady = Test-OmiUpstreamReady -Context $Context
   $ownerStates = @($serverOwner.state, $tunnelOwner.state)
-  $status = if (@($ownerStates | Where-Object { $_ -in @("OwnershipMismatch", "OwnershipUnknown") }).Count -gt 0) {
+  $status = if ($ownerStates -contains "OwnershipUnknown") {
+    "OwnershipUnknown"
+  }
+  elseif ($ownerStates -contains "OwnershipMismatch") {
     "OwnershipMismatch"
   }
   elseif (-not $serverHealthy -and $serverOwner.state -eq "Stopped" -and $tunnelOwner.state -eq "Stopped") { "Stopped" }
@@ -461,19 +643,22 @@ function Stop-OmiOwnedRole {
     [Parameter(Mandatory = $true)][ValidateSet("server", "tunnel")][string]$Role
   )
   $definition = Get-OmiRoleDefinition -Context $Context -Role $Role
+  $pidSnapshot = Read-OmiRuntimeFileSnapshot -Path $definition.pidFile
+  $ownerSnapshot = Read-OmiRuntimeFileSnapshot -Path $definition.ownerFile
   $ownership = Resolve-OmiRoleOwnership -Context $Context -Role $Role
   if (-not $ownership.canMutate) { throw "OWNERSHIP_MISMATCH: Cannot stop $Role because ownership is $($ownership.state)." }
   if ($ownership.state -eq "Stopped") { return }
-  $process = Get-OmiProcess -ProcessId ([int]$ownership.pid)
-  if ($null -eq $process -or -not (Test-OmiExecutableIdentity -Context $Context -Role $Role -Process $process) -or -not (Test-OmiOwnerMetadata -Context $Context -Role $Role -Process $process)) {
-    throw "OWNERSHIP_MISMATCH: $Role PID changed before stop."
+  $binding = Get-OmiTerminationBinding -ProcessId ([int]$ownership.pid)
+  if ($binding.state -ne "Present" -or
+      -not (Test-OmiExecutableIdentity -Context $Context -Role $Role -Process $binding.process) -or
+      -not (Test-OmiOwnerMetadata -Context $Context -Role $Role -Process $binding.process)) {
+    if ($null -ne $binding.nativeProcess) { $binding.nativeProcess.Dispose() }
+    throw "OWNERSHIP_CHANGED: $Role process instance changed before stop."
   }
-  Stop-Process -Id ([int]$ownership.pid) -Force -ErrorAction Stop
-  $deadline = [DateTime]::UtcNow.AddSeconds(5)
-  while ((Get-Process -Id ([int]$ownership.pid) -ErrorAction SilentlyContinue) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
-  if (Get-Process -Id ([int]$ownership.pid) -ErrorAction SilentlyContinue) { throw "STOP_TIMEOUT: $Role did not exit." }
-  Remove-OmiRuntimeFile -Path $definition.pidFile -ExpectedPid ([int]$ownership.pid)
-  Remove-OmiRuntimeFile -Path $definition.ownerFile
+  Stop-OmiBoundProcess -Binding $binding
+  if (-not (Remove-OmiStaleOwnershipPair -Definition $definition -PidSnapshot $pidSnapshot -OwnerSnapshot $ownerSnapshot)) {
+    throw "OWNERSHIP_CHANGED: Runtime metadata changed before cleanup."
+  }
 }
 
 function Start-OmiServer {
@@ -507,13 +692,16 @@ function Start-OmiServer {
   $started = Get-OmiProcess -ProcessId $process.Id
   if ($null -eq $started) { throw "SERVER_START_FAILED: Started process is unavailable." }
   Write-OmiOwnerMetadata -Context $Context -Role server -Process $started
+  $startedPidSnapshot = Read-OmiRuntimeFileSnapshot -Path $Context.serverPidFile
+  $startedOwnerSnapshot = Read-OmiRuntimeFileSnapshot -Path $Context.serverOwnerFile
   if (-not (Wait-OmiCondition -TimeoutSeconds $Context.serverReadyTimeoutSeconds -Condition { Test-OmiServerHealth -Context $Context })) {
-    $current = Get-OmiProcess -ProcessId $process.Id
-    if ($null -ne $current -and (Test-OmiExecutableIdentity -Context $Context -Role server -Process $current) -and (Test-OmiOwnerMetadata -Context $Context -Role server -Process $current)) {
-      Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    try {
+      $null = $process.Handle
+      if (-not $process.HasExited) { $process.Kill(); $null = $process.WaitForExit(5000) }
     }
-    Remove-OmiRuntimeFile -Path $Context.serverPidFile -ExpectedPid $process.Id
-    Remove-OmiRuntimeFile -Path $Context.serverOwnerFile
+    catch { }
+    $definition = Get-OmiRoleDefinition -Context $Context -Role server
+    $null = Remove-OmiStaleOwnershipPair -Definition $definition -PidSnapshot $startedPidSnapshot -OwnerSnapshot $startedOwnerSnapshot
     throw "SERVER_NOT_READY: Adapter did not reach its expected source build."
   }
   $readyOwner = Resolve-OmiRoleOwnership -Context $Context -Role server

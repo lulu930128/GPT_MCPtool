@@ -8,10 +8,13 @@ directories for convenience.
 
 Before changing a component, read:
 
-1. root `AGENTS.md` and `README.md`;
-2. the component's `AGENTS.md` and `README.md`;
-3. non-empty `docs/product/` documents, if present;
-4. relevant design/contract docs, manifest, tests, and entrypoints.
+1. root `README.md`, `SECURITY.md`, and this contribution guide;
+2. the component's `README.md` and tracked design/contract documents;
+3. non-empty tracked `docs/product/` documents, if present;
+4. relevant manifest, tests, entrypoints, and lifecycle documentation.
+
+Local Agent or Codex instruction files may exist in a contributor's checkout, but they are ignored
+operator state rather than public product documentation and must not be force-added.
 
 Public visibility does not itself grant reuse rights. This contribution guide describes repository
 quality and safety expectations; it is not a software license.
@@ -46,6 +49,8 @@ Never add:
 - usable secrets, tokens, DPAPI content, tunnel profiles, private endpoints, or credentials;
 - `.env`, `.secrets`, `.local`, logs, PIDs, caches, databases, backups, exports, personal data, or
   financial/study/memory/job content;
+- `AGENTS.md`, `.agents`, `.codex`, remote attachments, agent-run notes, or other local AI-agent
+  instruction/session state;
 - virtualenvs, `node_modules`, build output, downloaded executables, or generated runtime state.
 
 Examples must use unusable placeholders such as `tunnel_replace_me`. Screenshots and fixtures must

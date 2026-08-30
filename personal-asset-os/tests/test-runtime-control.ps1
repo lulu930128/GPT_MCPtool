@@ -20,6 +20,7 @@ $tunnelPort = Get-FreeTcpPort
 while ($tunnelPort -eq $serverPort) { $tunnelPort = Get-FreeTcpPort }
 $utf8 = New-Object Text.UTF8Encoding($false)
 $foreign = $null
+$staleForeign = $null
 $context = $null
 
 try {
@@ -102,6 +103,40 @@ http.createServer((request,response)=>{const body=request.url==="/readyz"?"ready
   $initial = Invoke-TestController -Action Status
   Assert-Equal $initial.document.after.status 'Stopped' 'isolated runtime starts stopped'
 
+  $staleForeign = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 120') -WindowStyle Hidden -PassThru
+  [IO.File]::WriteAllText($context.serverPidFile, [string]$staleForeign.Id, $utf8)
+  [IO.File]::WriteAllText($context.serverOwnerFile, '{}', $utf8)
+  $reused = Invoke-TestController -Action Status
+  Assert-Equal $reused.document.after.server.ownership 'Stopped' 'listener-free reused PID is classified stopped'
+  Assert-True (-not (Test-Path -LiteralPath $context.serverPidFile)) 'listener-free reused PID file is removed'
+  Assert-True (-not (Test-Path -LiteralPath $context.serverOwnerFile)) 'listener-free reused owner file is removed'
+  Assert-True ($null -ne (Get-Process -Id $staleForeign.Id -ErrorAction SilentlyContinue)) 'listener-free reused process remains untouched'
+  Stop-TestProcess -Process $staleForeign; $staleForeign = $null
+
+  $staleForeign = Start-Process -FilePath $nodePath -ArgumentList @('-e','setInterval(()=>{},1000)') -WindowStyle Hidden -PassThru
+  $sameExecutableOwner = [ordered]@{
+    schemaVersion=1; role='server'; pid=$staleForeign.Id; executablePath=$nodePath
+    startTimeUtc=[DateTime]::UtcNow.AddDays(-1).ToString('o'); identity=$context.serverIdentity
+    recordedAt=[DateTime]::UtcNow.AddDays(-1).ToString('o')
+  }
+  [IO.File]::WriteAllText($context.serverPidFile, [string]$staleForeign.Id, $utf8)
+  [IO.File]::WriteAllText($context.serverOwnerFile, ($sameExecutableOwner | ConvertTo-Json -Compress), $utf8)
+  $sameExecutable = Invoke-TestController -Action Status
+  Assert-Equal $sameExecutable.document.after.server.ownership 'Stopped' 'same executable wrong instance is stale when listener-free'
+  Assert-True ($null -ne (Get-Process -Id $staleForeign.Id -ErrorAction SilentlyContinue)) 'same-executable unrelated process remains untouched'
+  Stop-TestProcess -Process $staleForeign; $staleForeign = $null
+
+  $staleForeign = Start-Process -FilePath $nodePath -ArgumentList @('-e','setInterval(()=>{},1000)',[string]$context.serverIdentity) -WindowStyle Hidden -PassThru
+  [IO.File]::WriteAllText($context.serverPidFile, [string]$staleForeign.Id, $utf8)
+  Remove-Item -LiteralPath $context.serverOwnerFile -Force -ErrorAction SilentlyContinue
+  $missingOwner = Invoke-TestController -Action Status
+  Assert-Equal $missingOwner.document.after.server.ownership 'OwnershipUnknown' 'live exact-command process with missing owner metadata remains unknown'
+  Assert-Equal $missingOwner.document.after.status 'OwnershipUnknown' 'role ownership unknown propagates to top-level runtime status'
+  Assert-True (Test-Path -LiteralPath $context.serverPidFile) 'unknown ownership preserves PID evidence'
+  Assert-True ($null -ne (Get-Process -Id $staleForeign.Id -ErrorAction SilentlyContinue)) 'unknown ownership leaves the process untouched'
+  Stop-TestProcess -Process $staleForeign; $staleForeign = $null
+  Remove-Item -LiteralPath $context.serverPidFile,$context.serverOwnerFile -Force -ErrorAction SilentlyContinue
+
   $ensure = Invoke-TestController -Action EnsureRunning
   Assert-Equal $ensure.document.after.status 'Ready' 'ensure starts server and tunnel'
   Assert-Equal $ensure.document.after.server.relation 'Descendant' 'server listener is a descendant of its exact runner'
@@ -132,10 +167,17 @@ http.createServer((request,response)=>{const body=request.url==="/readyz"?"ready
 
   $foreign = Start-Process -FilePath $nodePath -ArgumentList "`"$(Join-Path $testRoot 'fake-server-child.js')`" $serverPort" -WorkingDirectory $testRoot -WindowStyle Hidden -PassThru
   Assert-True (Wait-TcpPort -Port $serverPort -Open $true) 'foreign server listener starts'
+  $staleForeign = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 120') -WindowStyle Hidden -PassThru
+  [IO.File]::WriteAllText($context.serverPidFile, [string]$staleForeign.Id, $utf8)
+  [IO.File]::WriteAllText($context.serverOwnerFile, '{}', $utf8)
   $foreignShutdown = Invoke-TestController -Action ShutdownRuntime -ExpectSuccess $false
   Assert-Equal $foreignShutdown.document.errorCode 'OWNERSHIP_MISMATCH' 'foreign listener blocks shutdown'
   Assert-True ($null -ne (Get-Process -Id $foreign.Id -ErrorAction SilentlyContinue)) 'foreign listener remains untouched'
+  Assert-True ($null -ne (Get-Process -Id $staleForeign.Id -ErrorAction SilentlyContinue)) 'stale PID process remains untouched while listener exists'
+  Assert-True (Test-Path -LiteralPath $context.serverPidFile) 'listener conflict preserves stale PID evidence'
   Stop-TestProcess -Process $foreign; $foreign = $null
+  Stop-TestProcess -Process $staleForeign; $staleForeign = $null
+  Remove-Item -LiteralPath $context.serverPidFile,$context.serverOwnerFile -Force -ErrorAction SilentlyContinue
 
   $audit = Join-Path $testRoot '.tmp\runtime-control.jsonl'
   Assert-True (Test-Path -LiteralPath $audit -PathType Leaf) 'action audit exists'
@@ -148,6 +190,7 @@ http.createServer((request,response)=>{const body=request.url==="/readyz"?"ready
 }
 finally {
   Stop-TestProcess -Process $foreign
+  Stop-TestProcess -Process $staleForeign
   if ($null -ne $context) { try { Invoke-PersonalAssetOsLifecycleAction -Context $context -Action ShutdownRuntime } catch { } }
   try {
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |

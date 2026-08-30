@@ -614,10 +614,14 @@ foreach ($statusName in $restartRouting.Keys) {
     Assert-True $decision.allowed "Restart MCP allows the safe $statusName state"
     Assert-Equal $decision.action $restartRouting[$statusName] "Restart MCP routes $statusName to the expected controller capability"
 }
-foreach ($statusName in @("OwnershipMismatch", "Misconfigured", "NotInstalled", "Unknown")) {
+foreach ($statusName in @("OwnershipMismatch", "OwnershipUnknown", "Misconfigured", "NotInstalled", "Unknown")) {
     $decision = Get-McpCcRestartMcpDecision -ComponentStatus ([pscustomobject]@{ status = $statusName; issues = @() })
     Assert-True (-not $decision.allowed -and $null -eq $decision.action) "Restart MCP rejects $statusName"
 }
+$unknownGate = Get-McpCcControllerMutationGate -ControllerEntry ([pscustomobject]@{ status="OwnershipUnknown"; manageable=$false; errorCode=$null })
+Assert-True (-not $unknownGate.allowed -and $unknownGate.decision -eq "ManualAttention" -and $unknownGate.errorCode -eq "OWNERSHIP_UNKNOWN") "controller ownership unknown blocks automatic mutation"
+$controllerGuardPlan = @(Get-McpCcReconcilePlan -Manifest ([pscustomobject]@{ components=@($registryPaos) }) -State ([pscustomobject]@{ components=@([pscustomobject]@{ id="personal_asset_os"; status="Stopped" }) }) -ControllerAudit ([pscustomobject]@{ entries=@([pscustomobject]@{ component="personal_asset_os"; status="OwnershipUnknown"; manageable=$false; errorCode=$null }) }))
+Assert-True ($controllerGuardPlan.Count -eq 1 -and $controllerGuardPlan[0].decision -eq "ManualAttention" -and $controllerGuardPlan[0].reasonCode -eq "OWNERSHIP_UNKNOWN") "reconcile never auto-starts a component whose controller reports ownership unknown"
 $monitorDecision = Get-McpCcRestartMcpDecision -ComponentStatus ([pscustomobject]@{
     status = "Unhealthy"
     issues = @([pscustomobject]@{ code = "MONITOR_EXCEPTION" })
@@ -1368,6 +1372,19 @@ foreach ($relativeSourcePath in $networkPolicySources) {
     Assert-True ($sourceText.Contains("127.0.0.1,localhost")) "$relativeSourcePath declares the loopback bypass"
     Assert-True ($sourceText -match '(?s)finally\s*\{.*SetEnvironmentVariable') "$relativeSourcePath restores parent environment in finally"
 }
+
+$cleanupRaceScript = Join-Path $projectRoot "tests\test-ownership-cleanup-race.ps1"
+$cleanupRace = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $cleanupRaceScript | ConvertFrom-Json
+Assert-True ($LASTEXITCODE -eq 0 -and $cleanupRace.ok -and [int]$cleanupRace.components -eq 5 -and [int]$cleanupRace.assertions -eq 30) "central suite enforces guarded ownership-pair cleanup races"
+$ownershipConformanceScript = Join-Path $projectRoot "tests\test-ownership-conformance.ps1"
+$ownershipConformance = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ownershipConformanceScript | ConvertFrom-Json
+Assert-True ($LASTEXITCODE -eq 0 -and $ownershipConformance.ok -and [int]$ownershipConformance.components -eq 5 -and [int]$ownershipConformance.assertions -eq 30) "central suite enforces ownership unknown and multiple-listener conformance"
+$ownershipStopRaceScript = Join-Path $projectRoot "tests\test-ownership-stop-race.ps1"
+$ownershipStopRace = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ownershipStopRaceScript | ConvertFrom-Json
+Assert-True ($LASTEXITCODE -eq 0 -and $ownershipStopRace.ok -and [int]$ownershipStopRace.components -eq 5 -and [int]$ownershipStopRace.assertions -eq 15) "central suite enforces resolve-to-stop process-instance race rejection"
+$lifecycleMutexScript = Join-Path $projectRoot "tests\test-lifecycle-mutex.ps1"
+$lifecycleMutex = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $lifecycleMutexScript | ConvertFrom-Json
+Assert-True ($LASTEXITCODE -eq 0 -and $lifecycleMutex.ok -and [int]$lifecycleMutex.components -eq 5 -and [int]$lifecycleMutex.assertions -eq 15) "central suite enforces nonblocking component lifecycle mutexes"
 
 $sourceFiles = @(Get-ChildItem -LiteralPath $projectRoot -Recurse -File | Where-Object { $_.Extension -in @(".ps1", ".psm1") })
 $parseFailures = @()

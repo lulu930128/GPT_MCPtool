@@ -46,6 +46,44 @@ function Read-PrPidFile {
   return $null
 }
 
+function Read-PrRuntimeFileSnapshot {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+    return [pscustomobject]@{ exists = $false; raw = $null }
+  }
+  try { return [pscustomobject]@{ exists = $true; raw = [IO.File]::ReadAllText($Path) } }
+  catch { return [pscustomobject]@{ exists = $true; raw = $null } }
+}
+
+function Remove-PrRuntimeFileSnapshot {
+  param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)]$Snapshot)
+  if (-not [bool]$Snapshot.exists) { return $true }
+  if ($null -eq $Snapshot.raw) { return $false }
+  try {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $true }
+    if ([IO.File]::ReadAllText($Path) -cne [string]$Snapshot.raw) { return $false }
+    Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+    return $true
+  }
+  catch { return $false }
+}
+
+function Remove-PrStaleOwnershipPair {
+  param(
+    [Parameter(Mandatory = $true)]$Definition,
+    [Parameter(Mandatory = $true)]$PidSnapshot,
+    [Parameter(Mandatory = $true)]$OwnerSnapshot
+  )
+  foreach ($entry in @(@{ path=$Definition.pidFile; snapshot=$PidSnapshot }, @{ path=$Definition.ownerFile; snapshot=$OwnerSnapshot })) {
+    if ([bool]$entry.snapshot.exists) {
+      if ($null -eq $entry.snapshot.raw -or -not (Test-Path -LiteralPath $entry.path -PathType Leaf) -or [IO.File]::ReadAllText($entry.path) -cne [string]$entry.snapshot.raw) { return $false }
+    }
+    elseif (Test-Path -LiteralPath $entry.path -PathType Leaf) { return $false }
+  }
+  if (-not (Remove-PrRuntimeFileSnapshot -Path $Definition.ownerFile -Snapshot $OwnerSnapshot)) { return $false }
+  return (Remove-PrRuntimeFileSnapshot -Path $Definition.pidFile -Snapshot $PidSnapshot)
+}
+
 function Remove-PrPidFile {
   param([Parameter(Mandatory = $true)][string]$Path, [int]$ExpectedPid = 0)
   if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
@@ -74,6 +112,100 @@ function Get-PrProcess {
   catch {
     return $null
   }
+}
+
+function Get-PrProcessInspection {
+  param([Parameter(Mandatory = $true)][int]$ProcessId)
+  try {
+    $process = Get-Process -Id $ProcessId -ErrorAction Stop
+    $executablePath = $null
+    $startTimeUtc = $null
+    try { $executablePath = [string]$process.Path } catch { }
+    try { $startTimeUtc = $process.StartTime.ToUniversalTime().ToString("o") } catch { }
+    return [pscustomobject]@{
+      state = "Present"
+      process = [pscustomobject]@{
+        ProcessId = [int]$process.Id
+        Name = [string]$process.ProcessName
+        ExecutablePath = $executablePath
+        StartTimeUtc = $startTimeUtc
+      }
+    }
+  }
+  catch {
+    $missing = $_.CategoryInfo.Category -eq [Management.Automation.ErrorCategory]::ObjectNotFound
+    return [pscustomobject]@{ state = $(if ($missing) { "MissingConfirmed" } else { "Unknown" }); process = $null }
+  }
+}
+
+function Get-PrTerminationBinding {
+  param([Parameter(Mandatory = $true)][int]$ProcessId)
+  $nativeProcess = $null
+  try {
+    $nativeProcess = Get-Process -Id $ProcessId -ErrorAction Stop
+    $null = $nativeProcess.Handle
+    if ($nativeProcess.HasExited) {
+      $nativeProcess.Dispose()
+      return [pscustomobject]@{ state = "MissingConfirmed"; process = $null; nativeProcess = $null }
+    }
+    $executablePath = [string]$nativeProcess.Path
+    $startTimeUtc = $nativeProcess.StartTime.ToUniversalTime().ToString("o")
+    if ([string]::IsNullOrWhiteSpace($executablePath) -or [string]::IsNullOrWhiteSpace($startTimeUtc)) {
+      throw "Process identity is incomplete."
+    }
+    return [pscustomobject]@{
+      state = "Present"
+      process = [pscustomobject]@{
+        ProcessId = [int]$nativeProcess.Id
+        Name = [string]$nativeProcess.ProcessName
+        ExecutablePath = $executablePath
+        StartTimeUtc = $startTimeUtc
+      }
+      nativeProcess = $nativeProcess
+    }
+  }
+  catch {
+    if ($null -ne $nativeProcess) { try { $nativeProcess.Dispose() } catch { } }
+    $missing = $_.CategoryInfo.Category -eq [Management.Automation.ErrorCategory]::ObjectNotFound
+    return [pscustomobject]@{ state = $(if ($missing) { "MissingConfirmed" } else { "Unknown" }); process = $null; nativeProcess = $null }
+  }
+}
+
+function Stop-PrBoundProcess {
+  param([Parameter(Mandatory = $true)]$Binding, [int]$TimeoutMilliseconds = 5000)
+  try {
+    if ($Binding.state -ne "Present" -or $null -eq $Binding.nativeProcess) { throw "OWNERSHIP_CHANGED: Process binding is unavailable." }
+    if (-not $Binding.nativeProcess.HasExited) { $Binding.nativeProcess.Kill() }
+    if (-not $Binding.nativeProcess.WaitForExit($TimeoutMilliseconds)) { throw "STOP_TIMEOUT: Bound process did not exit." }
+  }
+  finally {
+    if ($null -ne $Binding.nativeProcess) { $Binding.nativeProcess.Dispose() }
+  }
+}
+
+function Read-PrOwnerMetadataSnapshot {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  $snapshot = Read-PrRuntimeFileSnapshot -Path $Path
+  if (-not $snapshot.exists) { return [pscustomobject]@{ file = $snapshot; state = "Missing"; metadata = $null } }
+  if ($null -eq $snapshot.raw) { return [pscustomobject]@{ file = $snapshot; state = "Unknown"; metadata = $null } }
+  try { return [pscustomobject]@{ file = $snapshot; state = "Parsed"; metadata = $snapshot.raw | ConvertFrom-Json } }
+  catch { return [pscustomobject]@{ file = $snapshot; state = "Malformed"; metadata = $null } }
+}
+
+function Test-PrOwnerMetadataComplete {
+  param($Metadata)
+  if ($null -eq $Metadata) { return $false }
+  foreach ($name in @("schemaVersion", "role", "pid", "executablePath", "startTimeUtc", "identity")) {
+    if ($null -eq $Metadata.PSObject.Properties[$name]) { return $false }
+  }
+  return (
+    [int]$Metadata.schemaVersion -eq 1 -and
+    -not [string]::IsNullOrWhiteSpace([string]$Metadata.role) -and
+    [int]$Metadata.pid -gt 0 -and
+    -not [string]::IsNullOrWhiteSpace([string]$Metadata.executablePath) -and
+    -not [string]::IsNullOrWhiteSpace([string]$Metadata.startTimeUtc) -and
+    -not [string]::IsNullOrWhiteSpace([string]$Metadata.identity)
+  )
 }
 
 function Get-PrListenerState {
@@ -154,6 +286,7 @@ function Test-PrOwnerMetadata {
   if (-not (Test-Path -LiteralPath $definition.ownerFile -PathType Leaf)) { return $false }
   try { $metadata = Get-Content -LiteralPath $definition.ownerFile -Encoding UTF8 -Raw | ConvertFrom-Json }
   catch { return $false }
+  if (-not (Test-PrOwnerMetadataComplete -Metadata $metadata)) { return $false }
   return (
     [int]$metadata.schemaVersion -eq 1 -and
     [string]$metadata.role -eq $Role -and
@@ -181,22 +314,10 @@ function Resolve-PrRoleOwnership {
     [switch]$AdoptExactListener
   )
   $definition = Get-PrRoleDefinition -Context $Context -Role $Role
+  $pidSnapshot = Read-PrRuntimeFileSnapshot -Path $definition.pidFile
+  $ownerInspection = Read-PrOwnerMetadataSnapshot -Path $definition.ownerFile
   $managedPid = Read-PrPidFile -Path $definition.pidFile
-  if ($null -ne $managedPid) {
-    $managedProcess = Get-PrProcess -ProcessId $managedPid
-    if ($null -eq $managedProcess) {
-      Remove-PrPidFile -Path $definition.pidFile -ExpectedPid $managedPid
-      Remove-PrPidFile -Path $definition.ownerFile
-      $managedPid = $null
-    }
-    elseif (-not (Test-PrOwnedProcess -Context $Context -Role $Role -Process $managedProcess)) {
-      return [pscustomobject]@{
-        role = $Role; state = "OwnershipMismatch"; pid = $managedPid; listenerPid = $null
-        reason = "PID_FILE_PROCESS_MISMATCH"; canMutate = $false; adopted = $false
-      }
-    }
-  }
-
+  $processInspection = if ($null -eq $managedPid) { $null } else { Get-PrProcessInspection -ProcessId $managedPid }
   $listener = Get-PrListenerState -Port $definition.port
   if (-not $listener.known) {
     return [pscustomobject]@{
@@ -211,6 +332,91 @@ function Resolve-PrRoleOwnership {
     }
   }
   $listenerPid = if ($listener.pids.Count -eq 1) { [int]$listener.pids[0] } else { $null }
+
+  if ($pidSnapshot.exists -and $null -eq $managedPid) {
+    if ($null -ne $listenerPid) {
+      return [pscustomobject]@{
+        role = $Role; state = "OwnershipMismatch"; pid = $null; listenerPid = $listenerPid
+        reason = "INVALID_PID_FILE_WITH_LISTENER"; canMutate = $false; adopted = $false
+      }
+    }
+    if (-not (Remove-PrStaleOwnershipPair -Definition $definition -PidSnapshot $pidSnapshot -OwnerSnapshot $ownerInspection.file)) {
+      return [pscustomobject]@{
+        role = $Role; state = "OwnershipUnknown"; pid = $null; listenerPid = $null
+        reason = "STALE_METADATA_CHANGED_DURING_CLEANUP"; canMutate = $false; adopted = $false
+      }
+    }
+  }
+
+  if ($null -ne $managedPid) {
+    if ($processInspection.state -eq "Unknown") {
+      return [pscustomobject]@{
+        role = $Role; state = "OwnershipUnknown"; pid = $managedPid; listenerPid = $listenerPid
+        reason = "PROCESS_INSPECTION_FAILED"; canMutate = $false; adopted = $false
+      }
+    }
+    if ($processInspection.state -eq "MissingConfirmed") {
+      if ($null -ne $listenerPid) {
+        return [pscustomobject]@{
+          role = $Role; state = "OwnershipMismatch"; pid = $managedPid; listenerPid = $listenerPid
+          reason = "STALE_PID_WITH_LISTENER"; canMutate = $false; adopted = $false
+        }
+      }
+      if (-not (Remove-PrStaleOwnershipPair -Definition $definition -PidSnapshot $pidSnapshot -OwnerSnapshot $ownerInspection.file)) {
+        return [pscustomobject]@{
+          role = $Role; state = "OwnershipUnknown"; pid = $managedPid; listenerPid = $null
+          reason = "STALE_METADATA_CHANGED_DURING_CLEANUP"; canMutate = $false; adopted = $false
+        }
+      }
+      $managedPid = $null
+    }
+  }
+
+  $managedProcess = if ($null -ne $managedPid) { $processInspection.process } else { $null }
+  if ($null -ne $managedProcess) {
+    $processIdentityKnown = (
+      -not [string]::IsNullOrWhiteSpace([string]$managedProcess.ExecutablePath) -and
+      -not [string]::IsNullOrWhiteSpace([string]$managedProcess.StartTimeUtc)
+    )
+    if (-not $processIdentityKnown) {
+      return [pscustomobject]@{
+        role = $Role; state = "OwnershipUnknown"; pid = $managedPid; listenerPid = $listenerPid
+        reason = "PROCESS_IDENTITY_UNAVAILABLE"; canMutate = $false; adopted = $false
+      }
+    }
+    $executableMatches = Test-PrOwnedProcess -Context $Context -Role $Role -Process $managedProcess
+    $metadataComplete = $ownerInspection.state -eq "Parsed" -and (Test-PrOwnerMetadataComplete -Metadata $ownerInspection.metadata)
+    $sameRecordedPid = $metadataComplete -and [int]$ownerInspection.metadata.pid -eq $managedPid
+    $instanceMismatch = (
+      -not $executableMatches -or
+      ($sameRecordedPid -and (
+        -not (Test-PrPathEqual -Left ([string]$ownerInspection.metadata.executablePath) -Right ([string]$managedProcess.ExecutablePath)) -or
+        [string]$ownerInspection.metadata.startTimeUtc -ne [string]$managedProcess.StartTimeUtc
+      ))
+    )
+    if ($instanceMismatch) {
+      if ($null -ne $listenerPid) {
+        return [pscustomobject]@{
+          role = $Role; state = "OwnershipMismatch"; pid = $managedPid; listenerPid = $listenerPid
+          reason = "PID_FILE_PROCESS_MISMATCH"; canMutate = $false; adopted = $false
+        }
+      }
+      if (-not (Remove-PrStaleOwnershipPair -Definition $definition -PidSnapshot $pidSnapshot -OwnerSnapshot $ownerInspection.file)) {
+        return [pscustomobject]@{
+          role = $Role; state = "OwnershipUnknown"; pid = $managedPid; listenerPid = $null
+          reason = "STALE_METADATA_CHANGED_DURING_CLEANUP"; canMutate = $false; adopted = $false
+        }
+      }
+      $managedPid = $null
+      $managedProcess = $null
+    }
+    elseif (-not $metadataComplete -or -not $sameRecordedPid) {
+      return [pscustomobject]@{
+        role = $Role; state = "OwnershipUnknown"; pid = $managedPid; listenerPid = $listenerPid
+        reason = "OWNER_METADATA_UNAVAILABLE_OR_INCOHERENT"; canMutate = $false; adopted = $false
+      }
+    }
+  }
 
   if ($null -ne $managedPid) {
     if ($null -ne $listenerPid -and $listenerPid -ne $managedPid) {
@@ -316,7 +522,10 @@ function Get-PrRuntimeStatus {
   $serverHealthy = Test-PrServerHealth -Context $Context
   $tunnelReady = Test-PrTunnelReady -Context $Context
   $ownerStates = @($serverOwner.state, $tunnelOwner.state)
-  $status = if (@($ownerStates | Where-Object { $_ -in @("OwnershipMismatch", "OwnershipUnknown") }).Count -gt 0) {
+  $status = if ($ownerStates -contains "OwnershipUnknown") {
+    "OwnershipUnknown"
+  }
+  elseif ($ownerStates -contains "OwnershipMismatch") {
     "OwnershipMismatch"
   }
   elseif ($serverHealthy -and $tunnelReady) { "Ready" }
@@ -411,23 +620,22 @@ function Stop-PrOwnedRole {
     [Parameter(Mandatory = $true)][ValidateSet("server", "tunnel")][string]$Role
   )
   $definition = Get-PrRoleDefinition -Context $Context -Role $Role
+  $pidSnapshot = Read-PrRuntimeFileSnapshot -Path $definition.pidFile
+  $ownerSnapshot = Read-PrRuntimeFileSnapshot -Path $definition.ownerFile
   $ownership = Resolve-PrRoleOwnership -Context $Context -Role $Role -AdoptExactListener
   if (-not $ownership.canMutate) { throw "OWNERSHIP_MISMATCH: Cannot stop $Role because ownership is $($ownership.state)." }
   if ($ownership.state -eq "Stopped") { return }
-  $process = Get-PrProcess -ProcessId ([int]$ownership.pid)
-  if ($null -eq $process -or -not (Test-PrOwnedProcess -Context $Context -Role $Role -Process $process)) {
-    throw "OWNERSHIP_MISMATCH: $Role PID changed before stop."
+  $binding = Get-PrTerminationBinding -ProcessId ([int]$ownership.pid)
+  if ($binding.state -ne "Present" -or
+      -not (Test-PrOwnedProcess -Context $Context -Role $Role -Process $binding.process) -or
+      -not (Test-PrOwnerMetadata -Context $Context -Role $Role -Process $binding.process)) {
+    if ($null -ne $binding.nativeProcess) { $binding.nativeProcess.Dispose() }
+    throw "OWNERSHIP_CHANGED: $Role process instance changed before stop."
   }
-  Stop-Process -Id ([int]$ownership.pid) -Force -ErrorAction Stop
-  $deadline = [DateTime]::UtcNow.AddSeconds(5)
-  while ((Get-Process -Id ([int]$ownership.pid) -ErrorAction SilentlyContinue) -and [DateTime]::UtcNow -lt $deadline) {
-    Start-Sleep -Milliseconds 100
+  Stop-PrBoundProcess -Binding $binding
+  if (-not (Remove-PrStaleOwnershipPair -Definition $definition -PidSnapshot $pidSnapshot -OwnerSnapshot $ownerSnapshot)) {
+    throw "OWNERSHIP_CHANGED: Runtime metadata changed before cleanup."
   }
-  if (Get-Process -Id ([int]$ownership.pid) -ErrorAction SilentlyContinue) {
-    throw "STOP_TIMEOUT: $Role PID $($ownership.pid) did not exit."
-  }
-  Remove-PrPidFile -Path $definition.pidFile -ExpectedPid ([int]$ownership.pid)
-  Remove-PrPidFile -Path $definition.ownerFile
 }
 
 function Start-PrServer {
@@ -455,12 +663,16 @@ function Start-PrServer {
   $startedProcess = Get-PrProcess -ProcessId $process.Id
   if ($null -eq $startedProcess) { throw "SERVER_START_FAILED: Started server process is unavailable." }
   Write-PrOwnerMetadata -Context $Context -Role server -Process $startedProcess
+  $startedPidSnapshot = Read-PrRuntimeFileSnapshot -Path $Context.serverPidFile
+  $startedOwnerSnapshot = Read-PrRuntimeFileSnapshot -Path $Context.serverOwnerFile
   if (-not (Wait-PrCondition -TimeoutSeconds $Context.serverReadyTimeoutSeconds -Condition { Test-PrServerHealth -Context $Context })) {
-    $current = Get-PrProcess -ProcessId $process.Id
-    if ($null -ne $current -and (Test-PrOwnedProcess -Context $Context -Role server -Process $current)) {
-      Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    try {
+      $null = $process.Handle
+      if (-not $process.HasExited) { $process.Kill(); $null = $process.WaitForExit(5000) }
     }
-    Remove-PrPidFile -Path $Context.serverPidFile -ExpectedPid $process.Id
+    catch { }
+    $definition = Get-PrRoleDefinition -Context $Context -Role server
+    $null = Remove-PrStaleOwnershipPair -Definition $definition -PidSnapshot $startedPidSnapshot -OwnerSnapshot $startedOwnerSnapshot
     throw "SERVER_NOT_READY: Server did not become healthy within $($Context.serverReadyTimeoutSeconds) seconds."
   }
   $adopted = Resolve-PrRoleOwnership -Context $Context -Role server -AdoptExactListener

@@ -15,7 +15,7 @@
 
 ## 提問前
 
-1. 閱讀根目錄與目標元件的 `README.md`、`AGENTS.md` 及相關 `docs/`。
+1. 閱讀根目錄與目標元件的 `README.md`、`SECURITY.md` 及相關 tracked `docs/`。
 2. 搜尋既有 issue，確認問題尚未被回報或已有替代方案。
 3. 使用目前 `main` 或清楚提供 commit SHA；不要只寫「最新版」。
 4. 執行最接近問題的最小驗證，不要為了提問重啟或清除無關 runtime。
@@ -40,6 +40,7 @@ tunnel id、port mapping、資料內容與 endpoint。
 
 - API key、token、cookie、password、private key、authorization header 或 DPAPI 內容；
 - `.env`、`.local`、tunnel profile、private endpoint、完整環境變數或 process dump；
+- `AGENTS.md`、`.agents`、`.codex`、Agent run notes、Codex session／memory 或 remote attachment；
 - SQLite、WAL／SHM、backup、export、log、PID、cache 或正式 runtime artifact；
 - 個人財務、記憶、學習、job、workspace diff 或公司機密內容。
 

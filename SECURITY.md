@@ -54,8 +54,9 @@ can still be sensitive and should not be included unless they are synthetic.
 | `personal-asset-os` | Local immutable ledger, read-only MCP, loopback API, verified backups, ingest-only mobile staging |
 | `mcp_control_center` | Orchestration/observability only; component-owned lifecycle and exact-path process ownership |
 
-Each component's `AGENTS.md`, README, and security/design documents are normative for changes in
-that directory.
+Each component's tracked README and security/design documents define its public boundary. Local
+Agent or Codex instruction files are checkout-specific operator state and are intentionally not
+part of the public source contract.
 
 ## Public source rules
 
@@ -64,6 +65,7 @@ The following must stay out of Git:
 - local credentials and any usable example value;
 - runtime state, private data, logs, PIDs, generated profiles, dependencies, builds, and downloaded
   executables;
+- local Agent/Codex instructions, sessions, memories, remote attachments, and agent-run notes;
 - private paths or identifiers embedded in documentation/screenshots;
 - ignored files force-added with `git add -f`.
 

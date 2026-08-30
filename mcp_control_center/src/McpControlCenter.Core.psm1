@@ -1651,6 +1651,9 @@ function Get-McpCcStatusPresentation {
         "OwnershipMismatch" {
             return [pscustomobject]@{ level = "Critical"; symbol = [string][char]0x2715; label = "Ownership mismatch" }
         }
+        "OwnershipUnknown" {
+            return [pscustomobject]@{ level = "Critical"; symbol = "?"; label = "Ownership unknown" }
+        }
         "Misconfigured" {
             return [pscustomobject]@{ level = "Critical"; symbol = [string][char]0x2715; label = "Misconfigured" }
         }
@@ -1693,6 +1696,9 @@ function Get-McpCcRestartMcpDecision {
                 errorCode = $null
                 message = "Reload the complete component-owned runtime."
             }
+        }
+        "OwnershipUnknown" {
+            return [pscustomobject]@{ allowed = $false; action = $null; errorCode = "OWNERSHIP_UNKNOWN"; message = "Ownership evidence is incomplete." }
         }
         "OwnershipMismatch" {
             return [pscustomobject]@{ allowed = $false; action = $null; errorCode = "OWNERSHIP_MISMATCH"; message = "Ownership could not be verified." }
@@ -2384,7 +2390,7 @@ function Get-McpCcSystemState {
             $components += New-McpCcMonitorExceptionStatus -Component $component
         }
     }
-    $severe = @("NotInstalled", "Misconfigured", "OwnershipMismatch", "Unhealthy")
+    $severe = @("NotInstalled", "Misconfigured", "OwnershipMismatch", "OwnershipUnknown", "Unhealthy")
     $overall = if (@($components | Where-Object { $_.status -in $severe }).Count -gt 0) {
         "Failed"
     }
@@ -2393,7 +2399,7 @@ function Get-McpCcSystemState {
     }
     else { "Ready" }
     $counts = [ordered]@{}
-    foreach ($statusName in @("Ready", "Degraded", "BlockedUpstream", "Stopped", "Unhealthy", "OwnershipMismatch", "Misconfigured", "NotInstalled")) {
+    foreach ($statusName in @("Ready", "Degraded", "BlockedUpstream", "Stopped", "Unhealthy", "OwnershipMismatch", "OwnershipUnknown", "Misconfigured", "NotInstalled")) {
         $counts[$statusName] = @($components | Where-Object { $_.status -eq $statusName }).Count
     }
     return [pscustomobject]@{
@@ -3122,7 +3128,7 @@ function Get-McpCcControllerAudit {
                 throw "The component controller status document has no runtime status."
             }
             $status = [string]$statusProperty.value
-            $knownStatuses = @("Ready", "Degraded", "BlockedUpstream", "Stopped", "Unhealthy", "OwnershipMismatch")
+            $knownStatuses = @("Ready", "Degraded", "BlockedUpstream", "Stopped", "Unhealthy", "OwnershipMismatch", "OwnershipUnknown")
             if ($status -notin $knownStatuses) {
                 throw "The component controller returned an unknown runtime status."
             }
@@ -3130,7 +3136,7 @@ function Get-McpCcControllerAudit {
             $entries += [pscustomobject]@{
                 component = [string]$component.id
                 status = $status
-                manageable = ($status -ne "OwnershipMismatch")
+                manageable = ($status -notin @("OwnershipMismatch", "OwnershipUnknown"))
                 errorCode = $null
                 elapsedMs = [int]$started.ElapsedMilliseconds
             }
@@ -3151,6 +3157,25 @@ function Get-McpCcControllerAudit {
         manageableCount = @($entries | Where-Object { $_.manageable }).Count
         unmanageableCount = @($entries | Where-Object { -not $_.manageable }).Count
     }
+}
+
+function Get-McpCcControllerMutationGate {
+    param($ControllerEntry)
+    if ($null -eq $ControllerEntry) {
+        return [pscustomobject]@{ allowed=$false; decision="ManualAttention"; errorCode="CONTROLLER_STATUS_MISSING" }
+    }
+    $status = [string]$ControllerEntry.status
+    if ($status -eq "OwnershipUnknown") {
+        return [pscustomobject]@{ allowed=$false; decision="ManualAttention"; errorCode="OWNERSHIP_UNKNOWN" }
+    }
+    if ($status -eq "OwnershipMismatch") {
+        return [pscustomobject]@{ allowed=$false; decision="ManualAttention"; errorCode="OWNERSHIP_MISMATCH" }
+    }
+    if (-not [bool]$ControllerEntry.manageable) {
+        $errorCode = if ([string]::IsNullOrWhiteSpace([string]$ControllerEntry.errorCode)) { "CONTROLLER_STATUS_FAILED" } else { [string]$ControllerEntry.errorCode }
+        return [pscustomobject]@{ allowed=$false; decision="ManualAttention"; errorCode=$errorCode }
+    }
+    return [pscustomobject]@{ allowed=$true; decision="Continue"; errorCode=$null }
 }
 
 function Get-McpCcAutomaticRepairDecision {
@@ -3261,13 +3286,17 @@ function Get-McpCcAutomaticRepairDecision {
 function Get-McpCcReconcilePlan {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
-        [Parameter(Mandatory = $true)]$State
+        [Parameter(Mandatory = $true)]$State,
+        $ControllerAudit
     )
     $items = @()
     foreach ($component in @($Manifest.components | Sort-Object startupOrder)) {
         $status = @($State.components | Where-Object { $_.id -eq $component.id } | Select-Object -First 1)[0]
+        $controllerEntry = if ($null -eq $ControllerAudit) { $null } else { @($ControllerAudit.entries | Where-Object { $_.component -eq $component.id } | Select-Object -First 1)[0] }
+        $controllerGate = if ($null -eq $ControllerAudit) { [pscustomobject]@{ allowed=$true; errorCode=$null } } else { Get-McpCcControllerMutationGate -ControllerEntry $controllerEntry }
         $repairDecision = Get-McpCcAutomaticRepairDecision -Manifest $Manifest -Component $component -ComponentStatus $status
         $decision = if (-not [bool]$component.autoStart) { "SkipDisabled" }
+        elseif (-not $controllerGate.allowed) { "ManualAttention" }
         elseif ($status.status -eq "Stopped") { "Start" }
         elseif ($status.status -eq "Ready") { "NoAction" }
         elseif ($status.status -eq "BlockedUpstream") { "WaitForDependency" }
@@ -3276,10 +3305,10 @@ function Get-McpCcReconcilePlan {
         $items += [pscustomobject]@{
             component = [string]$component.id
             displayName = [string]$component.displayName
-            currentStatus = [string]$status.status
+            currentStatus = if ($null -ne $controllerEntry -and [string]$controllerEntry.status -in @("OwnershipUnknown", "OwnershipMismatch", "ControllerError")) { [string]$controllerEntry.status } else { [string]$status.status }
             decision = $decision
             classification = if ($decision -eq "RepairConnectivity" -or $status.status -eq "Degraded") { [string]$repairDecision.classification } else { $null }
-            reasonCode = if ($decision -eq "ManualAttention" -and $status.status -eq "Degraded") { [string]$repairDecision.errorCode } else { $null }
+            reasonCode = if ($decision -eq "ManualAttention" -and -not $controllerGate.allowed) { [string]$controllerGate.errorCode } elseif ($decision -eq "ManualAttention" -and $status.status -eq "Degraded") { [string]$repairDecision.errorCode } else { $null }
             managerAttemptLimit = if ($decision -eq "RepairConnectivity") { [int]$repairDecision.managerAttemptLimit } else { 0 }
             retryOwner = if ($decision -eq "RepairConnectivity") { [string]$repairDecision.retryOwner } else { $null }
             controllerTimeoutSeconds = if ($decision -eq "RepairConnectivity") { [int]$repairDecision.controllerTimeoutSeconds } else { 0 }
@@ -3439,6 +3468,7 @@ Export-ModuleMember -Function @(
     "Invoke-McpCcComponentAction",
     "Invoke-McpCcComponentUiAction",
     "Get-McpCcControllerAudit",
+    "Get-McpCcControllerMutationGate",
     "Get-McpCcReconcilePlan",
     "Invoke-McpCcReconcileItems",
     "Test-McpCcShortcutMatches",

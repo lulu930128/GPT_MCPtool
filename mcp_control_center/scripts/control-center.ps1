@@ -288,9 +288,10 @@ try {
                 Start-Sleep -Seconds ([int]$manifest.settings.initialDelaySeconds)
             }
             $initial = Get-McpCcSystemState -Manifest $manifest -BootId $bootId
-            $plan = Get-McpCcReconcilePlan -Manifest $manifest -State $initial
+            $controllerAudit = Get-McpCcControllerAudit -Manifest $manifest -RuntimeRoot $RuntimeRoot
+            $plan = Get-McpCcReconcilePlan -Manifest $manifest -State $initial -ControllerAudit $controllerAudit
             if ($PlanOnly) {
-                [pscustomobject]@{ schemaVersion = [int]$manifest.schemaVersion; planOnly = $true; initialState = $initial; plan = $plan } | ConvertTo-Json -Depth 12
+                [pscustomobject]@{ schemaVersion = [int]$manifest.schemaVersion; planOnly = $true; initialState = $initial; controllerAudit = $controllerAudit; plan = $plan } | ConvertTo-Json -Depth 12
                 break
             }
 
@@ -309,6 +310,20 @@ try {
                 }
                 $item.currentStatus = [string]$current.status
                 try {
+                    $singleComponentManifest = [pscustomobject]@{ settings=$manifest.settings; components=@($definition) }
+                    $freshControllerAudit = Get-McpCcControllerAudit -Manifest $singleComponentManifest -RuntimeRoot $RuntimeRoot
+                    $controllerEntry = @($freshControllerAudit.entries | Select-Object -First 1)[0]
+                    $controllerGate = Get-McpCcControllerMutationGate -ControllerEntry $controllerEntry
+                    if (-not $controllerGate.allowed) {
+                        Write-McpCcEvent -RuntimeRoot $RuntimeRoot -BootId $bootId -Type "manual_attention_required" -Component $definition.id -Details @{
+                            status = [string]$controllerEntry.status; reasonCode = [string]$controllerGate.errorCode
+                        } | Out-Null
+                        return [pscustomobject]@{
+                            component = $definition.id; action = "ManualAttention"; before = [string]$controllerEntry.status; after = [string]$controllerEntry.status
+                            ok = $true; errorCode = $null; message = "Component-owned ownership evidence blocked automatic lifecycle mutation."
+                            classification = "OwnershipGate"; reasonCode = [string]$controllerGate.errorCode
+                        }
+                    }
                     if ($current.status -eq "BlockedUpstream") {
                         $current = Wait-ForComponentState -Manifest $manifest -ComponentDefinition $definition -TimeoutSeconds (Get-McpCcComponentTimingSeconds -Manifest $manifest -Component $definition -Name "postStartTimeoutSeconds") -AcceptedStates @("Ready", "Stopped")
                         $item.currentStatus = [string]$current.status

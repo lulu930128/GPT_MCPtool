@@ -39,7 +39,7 @@ runtime，完成 action 後退出。中樞不持有 child process handle，也�
   對 Windows venv shim 產生的 listener，可再驗證 component 內 managed PID 檔、managed
   process command line，以及 listener 到 managed PID 的父子程序鏈。
 - 區分 `Ready`、`Degraded`、`BlockedUpstream`、`Stopped`、`Unhealthy`、
-  `OwnershipMismatch`、`Misconfigured`、`NotInstalled`。
+  `OwnershipUnknown`、`OwnershipMismatch`、`Misconfigured`、`NotInstalled`。
 - 狀態優先序為 ownership、owned core、connectivity、dependency；因此
   `BlockedUpstream` 僅表示 owned core 與 tunnel 都已就緒，外部 dependency 仍不可用，
   不會遮蔽 server 或 tunnel failure。
@@ -48,6 +48,9 @@ runtime，完成 action 後退出。中樞不持有 child process handle，也�
   `Unhealthy`、上游阻塞或 ownership 不明的程序。每個 component 的 monitor、action 與
   post-action wait 都有獨立 exception boundary；單一失敗會寫入 bounded
   `reconcile_component_failed` event 與安全 `actions[]` row，但不會阻止後續元件。
+- Reconcile 在任何自動 Start／Repair 前會再讀取 component controller 的 bounded `Status`；
+  `OwnershipUnknown`、`OwnershipMismatch` 或 controller status failure 一律轉為
+  `ManualAttention`，不委派 lifecycle mutation。Ownership 判斷仍由 component controller 擁有。
 - 人工 Start／Repair connectivity／Restart core／Reload／Stop 會委派給 manifest 中已驗證、位於 component root 內的固定 entrypoint；Stop 必須逐元件確認，不提供 Stop All。
 - Startup adoption 會先驗證各 descriptor 宣告的 legacy shortcut target，再移到 private backup；不直接刪除，並可依 receipt 回復。
 
@@ -266,6 +269,11 @@ listener module 名稱判定 ownership，而會要求 listener 等於該 managed
 exact-path lifecycle。PID 檔不存在、內容無效、程序無關或 command 不符都會得到
 `OwnershipMismatch`，CIM 權限不足則維持 ownership unknown，不冒充已驗證。
 
+Component controller 的 PID reuse、owner sidecar、listener/lineage 與 cleanup race 規格集中於
+[`docs/LifecycleOwnershipPolicy.md`](docs/LifecycleOwnershipPolicy.md)；現有 tunnel PID 雙 writer
+盤點與保留條件記錄於 [`docs/TunnelPidWriterAudit.md`](docs/TunnelPidWriterAudit.md)。這兩份文件
+只定義 component 應遵守的 contract，不把 process ownership 移進 manager。
+
 OMI Search 的 dependency probe 指向 adapter 自己的固定 loopback `/upstream-health`；實際
 OMI backend URL 仍由 OMI launcher 與 adapter 擁有。中樞不讀 OMI launcher log、不接管 backend，
 也不保存 resolved URL 或 upstream response。Memory Core internal backend 預設使用 `18765`；
@@ -369,7 +377,7 @@ Control Center 的日常元件選單固定只呈現：
 - `Open MCP health`：開啟獨立、無 listener 的 WinForms 詳情頁，顯示 safe state、probe、ownership 與低頻連線工具。
 - `Open <Frontend>`：只有 descriptor 宣告正式 `primary-ui` 時出現。第一版支援 VBS `primaryLauncher` 與 `primary_ui` loopback navigation。
 
-`OwnershipMismatch`、`Misconfigured`、`NotInstalled` 與 `MONITOR_EXCEPTION` 一律拒絕 `Restart MCP`。底層 `RepairConnectivity`、`RestartCore`、`ShutdownRuntime` 與 component-owned UI adapter 保留給 CLI、Health > Advanced 與 troubleshooting，不再平鋪到日常托盤。
+`OwnershipUnknown`、`OwnershipMismatch`、`Misconfigured`、`NotInstalled` 與 `MONITOR_EXCEPTION` 一律拒絕 `Restart MCP`。底層 `RepairConnectivity`、`RestartCore`、`ShutdownRuntime` 與 component-owned UI adapter 保留給 CLI、Health > Advanced 與 troubleshooting，不再平鋪到日常托盤。
 
 Health 詳情頁只讀取 registry/descriptor、sanitized `state.json` 與 `%LOCALAPPDATA%\McpControlCenter\last-actions\<component-id>.json`；不讀 MCP domain payload、secret、credential 或 component 私有資料。每個元件的狀態檢查有獨立 exception boundary，意外監測錯誤會合成固定 `MONITOR_EXCEPTION` issue，其餘元件仍會保留並更新。
 

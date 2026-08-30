@@ -39,6 +39,38 @@ function Read-PaosPidFile {
   return $null
 }
 
+function Read-PaosRuntimeFileSnapshot {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return [pscustomobject]@{ exists=$false; raw=$null } }
+  try { return [pscustomobject]@{ exists=$true; raw=[IO.File]::ReadAllText($Path) } }
+  catch { return [pscustomobject]@{ exists=$true; raw=$null } }
+}
+
+function Remove-PaosRuntimeFileSnapshot {
+  param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)]$Snapshot)
+  if (-not [bool]$Snapshot.exists) { return $true }
+  if ($null -eq $Snapshot.raw) { return $false }
+  try {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $true }
+    if ([IO.File]::ReadAllText($Path) -cne [string]$Snapshot.raw) { return $false }
+    Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+    return $true
+  }
+  catch { return $false }
+}
+
+function Remove-PaosStaleOwnershipPair {
+  param($Definition, $PidSnapshot, $OwnerSnapshot)
+  foreach ($entry in @(@{ path=$Definition.pidFile; snapshot=$PidSnapshot }, @{ path=$Definition.ownerFile; snapshot=$OwnerSnapshot })) {
+    if ([bool]$entry.snapshot.exists) {
+      if ($null -eq $entry.snapshot.raw -or -not (Test-Path -LiteralPath $entry.path -PathType Leaf) -or [IO.File]::ReadAllText($entry.path) -cne [string]$entry.snapshot.raw) { return $false }
+    }
+    elseif (Test-Path -LiteralPath $entry.path -PathType Leaf) { return $false }
+  }
+  if (-not (Remove-PaosRuntimeFileSnapshot -Path $Definition.ownerFile -Snapshot $OwnerSnapshot)) { return $false }
+  return (Remove-PaosRuntimeFileSnapshot -Path $Definition.pidFile -Snapshot $PidSnapshot)
+}
+
 function Remove-PaosRuntimeFile {
   param([Parameter(Mandatory = $true)][string]$Path)
   Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
@@ -61,21 +93,85 @@ function Get-PaosProcess {
   catch { return $null }
 }
 
-function Get-PaosListenerPid {
+function Get-PaosProcessInspection {
+  param([Parameter(Mandatory = $true)][int]$ProcessId)
+  try { $nativeProcess = Get-Process -Id $ProcessId -ErrorAction Stop }
+  catch {
+    $missing = $_.CategoryInfo.Category -eq [Management.Automation.ErrorCategory]::ObjectNotFound
+    return [pscustomobject]@{ state=$(if ($missing) { 'MissingConfirmed' } else { 'Unknown' }); process=$null }
+  }
+  $executablePath = $null
+  $startTimeUtc = $null
+  try { $executablePath = [string]$nativeProcess.Path } catch { }
+  try { $startTimeUtc = $nativeProcess.StartTime.ToUniversalTime().ToString('o') } catch { }
+  $cim = $null
+  try { $cim = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction Stop } catch { }
+  if ([string]::IsNullOrWhiteSpace($executablePath) -and $null -ne $cim) { $executablePath = [string]$cim.ExecutablePath }
+  return [pscustomobject]@{
+    state='Present'
+    process=[pscustomobject]@{
+      ProcessId=[int]$nativeProcess.Id
+      ParentProcessId=$(if ($null -eq $cim) { $null } else { [int]$cim.ParentProcessId })
+      Name=$(if ($null -eq $cim) { [string]$nativeProcess.Name } else { [string]$cim.Name })
+      ExecutablePath=$executablePath
+      StartTimeUtc=$startTimeUtc
+      CommandLine=$(if ($null -eq $cim) { $null } else { [string]$cim.CommandLine })
+    }
+  }
+}
+
+function Get-PaosTerminationBinding {
+  param([Parameter(Mandatory = $true)]$ExpectedProcess)
+  $nativeProcess = $null
+  try {
+    $nativeProcess = Get-Process -Id ([int]$ExpectedProcess.ProcessId) -ErrorAction Stop
+    $null = $nativeProcess.Handle
+    if ($nativeProcess.HasExited) {
+      $nativeProcess.Dispose()
+      return [pscustomobject]@{ state='MissingConfirmed'; process=$null; nativeProcess=$null }
+    }
+    $cim = Get-CimInstance Win32_Process -Filter "ProcessId = $([int]$ExpectedProcess.ProcessId)" -ErrorAction Stop
+    $process = [pscustomobject]@{
+      ProcessId=[int]$nativeProcess.Id; ParentProcessId=[int]$cim.ParentProcessId; Name=[string]$cim.Name
+      ExecutablePath=[string]$nativeProcess.Path; StartTimeUtc=$nativeProcess.StartTime.ToUniversalTime().ToString('o')
+      CommandLine=[string]$cim.CommandLine
+    }
+    $matches = (
+      [int]$process.ProcessId -eq [int]$ExpectedProcess.ProcessId -and
+      [int]$process.ParentProcessId -eq [int]$ExpectedProcess.ParentProcessId -and
+      (Test-PaosPathEqual $process.ExecutablePath $ExpectedProcess.ExecutablePath) -and
+      -not [string]::IsNullOrWhiteSpace([string]$process.StartTimeUtc) -and
+      [string]$process.StartTimeUtc -eq [string]$ExpectedProcess.StartTimeUtc
+    )
+    if (-not $matches) {
+      $nativeProcess.Dispose()
+      return [pscustomobject]@{ state='OwnershipChanged'; process=$process; nativeProcess=$null }
+    }
+    return [pscustomobject]@{ state='Present'; process=$process; nativeProcess=$nativeProcess }
+  }
+  catch {
+    if ($null -ne $nativeProcess) { try { $nativeProcess.Dispose() } catch { } }
+    $missing = $_.CategoryInfo.Category -eq [Management.Automation.ErrorCategory]::ObjectNotFound
+    return [pscustomobject]@{ state=$(if ($missing) { 'MissingConfirmed' } else { 'Unknown' }); process=$null; nativeProcess=$null }
+  }
+}
+
+function Get-PaosListenerState {
   param([Parameter(Mandatory = $true)][int]$Port)
   $netstatPath = Join-Path $env:WINDIR 'System32\netstat.exe'
-  if (Test-Path -LiteralPath $netstatPath -PathType Leaf) {
-    foreach ($line in @(& $netstatPath -ano -p TCP 2>$null)) {
-      if ([string]$line -match ("^\s*TCP\s+\S+:" + $Port + "\s+\S+\s+LISTENING\s+(\d+)\s*$")) { return [int]$matches[1] }
-    }
-    return $null
+  if (-not (Test-Path -LiteralPath $netstatPath -PathType Leaf)) {
+    return [pscustomobject]@{ known=$false; pids=@(); errorCode='listener_query_unavailable' }
   }
   try {
-    $connection = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction Stop | Select-Object -First 1
-    if ($null -ne $connection) { return [int]$connection.OwningProcess }
+    $pids = @()
+    $lines = @(& $netstatPath -ano -p TCP 2>$null)
+    if ($LASTEXITCODE -ne 0) { throw 'netstat failed' }
+    foreach ($line in $lines) {
+      if ([string]$line -match ("^\s*TCP\s+\S+:" + $Port + "\s+\S+\s+LISTENING\s+(\d+)\s*$")) { $pids += [int]$matches[1] }
+    }
+    return [pscustomobject]@{ known=$true; pids=@($pids | Sort-Object -Unique); errorCode=$null }
   }
-  catch { }
-  return $null
+  catch { return [pscustomobject]@{ known=$false; pids=@(); errorCode='listener_query_failed' } }
 }
 
 function Test-PaosCommandContains {
@@ -178,14 +274,23 @@ function Read-PaosOwnerMetadata {
 function Test-PaosOwnerMetadata {
   param($Context, [ValidateSet('server', 'tunnel')][string]$Role, $Process, $Metadata)
   if ($null -eq $Process -or $null -eq $Metadata) { return $false }
+  foreach ($name in @('schemaVersion','role','pid','executablePath','startTimeUtc','identity')) {
+    if ($null -eq $Metadata.PSObject.Properties[$name]) { return $false }
+  }
   $definition = Get-PaosRoleDefinition -Context $Context -Role $Role
   return (
+    [int]$Metadata.schemaVersion -eq 1 -and
+    [string]$Metadata.role -eq $Role -and
     [int]$Metadata.pid -eq [int]$Process.ProcessId -and
     (Test-PaosPathEqual ([string]$Metadata.executablePath) $definition.executablePath) -and
     (Test-PaosPathEqual $Process.ExecutablePath $definition.executablePath) -and
+    -not [string]::IsNullOrWhiteSpace([string]$Process.StartTimeUtc) -and
     [string]$Metadata.startTimeUtc -eq [string]$Process.StartTimeUtc -and
     [string]$Metadata.identity -eq [string]$definition.identity -and
-    (Test-PaosCommandContains $Process.CommandLine @($definition.identity))
+    (
+      [string]::IsNullOrWhiteSpace([string]$Process.CommandLine) -or
+      (Test-PaosCommandContains $Process.CommandLine @($definition.identity))
+    )
   )
 }
 
@@ -216,32 +321,107 @@ function Find-PaosLegacyRootProcess {
 function Resolve-PaosRoleOwnership {
   param($Context, [ValidateSet('server', 'tunnel')][string]$Role, [switch]$AdoptLegacyExactListener)
   $definition = Get-PaosRoleDefinition -Context $Context -Role $Role
+  $pidSnapshot = Read-PaosRuntimeFileSnapshot -Path $definition.pidFile
+  $ownerSnapshot = Read-PaosRuntimeFileSnapshot -Path $definition.ownerFile
   $managedPid = Read-PaosPidFile -Path $definition.pidFile
-  $managedProcess = if ($null -eq $managedPid) { $null } else { Get-PaosProcess -ProcessId $managedPid }
   $metadata = Read-PaosOwnerMetadata -Path $definition.ownerFile
-  $listenerPid = Get-PaosListenerPid -Port $definition.port
-  $listenerProcess = if ($null -eq $listenerPid) { $null } else { Get-PaosProcess -ProcessId $listenerPid }
-
-  if ($null -eq $managedProcess -and $null -ne $managedPid) {
-    Remove-PaosRuntimeFile -Path $definition.pidFile
-    Remove-PaosRuntimeFile -Path $definition.ownerFile
-    $managedPid = $null; $metadata = $null
+  $managedInspection = if ($null -eq $managedPid) { $null } else { Get-PaosProcessInspection -ProcessId $managedPid }
+  $listener = Get-PaosListenerState -Port $definition.port
+  if (-not $listener.known) {
+    return [pscustomobject]@{ state='OwnershipUnknown'; canMutate=$false; managedPid=$managedPid; listenerPid=$null; relation='Unknown'; reason=$listener.errorCode }
   }
+  if ($listener.pids.Count -gt 1) {
+    return [pscustomobject]@{ state='OwnershipMismatch'; canMutate=$false; managedPid=$managedPid; listenerPid=$null; relation='Multiple'; reason='multiple_listener_owners' }
+  }
+  $listenerPid = if ($listener.pids.Count -eq 1) { [int]$listener.pids[0] } else { $null }
+  $listenerInspection = if ($null -eq $listenerPid) { $null } else { Get-PaosProcessInspection -ProcessId $listenerPid }
+  if ($null -ne $listenerInspection -and $listenerInspection.state -ne 'Present') {
+    return [pscustomobject]@{ state='OwnershipUnknown'; canMutate=$false; managedPid=$managedPid; listenerPid=$listenerPid; relation='Unknown'; reason='listener_process_inspection_failed' }
+  }
+  $listenerProcess = if ($null -eq $listenerInspection) { $null } else { $listenerInspection.process }
+
+  if ($pidSnapshot.exists -and $null -eq $managedPid) {
+    if ($null -ne $listenerPid) {
+      return [pscustomobject]@{ state='OwnershipMismatch'; canMutate=$false; managedPid=$null; listenerPid=$listenerPid; relation='Unknown'; reason='invalid_pid_file_with_listener' }
+    }
+    if (-not (Remove-PaosStaleOwnershipPair -Definition $definition -PidSnapshot $pidSnapshot -OwnerSnapshot $ownerSnapshot)) {
+      return [pscustomobject]@{ state='OwnershipUnknown'; canMutate=$false; managedPid=$null; listenerPid=$null; relation='Unknown'; reason='stale_metadata_changed_during_cleanup' }
+    }
+  }
+
+  if ($null -ne $managedPid) {
+    if ($managedInspection.state -eq 'Unknown') {
+      return [pscustomobject]@{ state='OwnershipUnknown'; canMutate=$false; managedPid=$managedPid; listenerPid=$listenerPid; relation='Unknown'; reason='managed_process_inspection_failed' }
+    }
+    if ($managedInspection.state -eq 'MissingConfirmed') {
+      if ($null -ne $listenerPid) {
+        return [pscustomobject]@{ state='OwnershipMismatch'; canMutate=$false; managedPid=$managedPid; listenerPid=$listenerPid; relation='Unknown'; reason='stale_pid_with_listener' }
+      }
+      if (-not (Remove-PaosStaleOwnershipPair -Definition $definition -PidSnapshot $pidSnapshot -OwnerSnapshot $ownerSnapshot)) {
+        return [pscustomobject]@{ state='OwnershipUnknown'; canMutate=$false; managedPid=$managedPid; listenerPid=$null; relation='Unknown'; reason='stale_metadata_changed_during_cleanup' }
+      }
+      $managedPid = $null
+    }
+  }
+  $managedProcess = if ($null -eq $managedPid) { $null } else { $managedInspection.process }
+
+  if ($null -ne $managedProcess) {
+    if ([string]::IsNullOrWhiteSpace([string]$managedProcess.ExecutablePath) -or
+        [string]::IsNullOrWhiteSpace([string]$managedProcess.StartTimeUtc)) {
+      return [pscustomobject]@{ state='OwnershipUnknown'; canMutate=$false; managedPid=$managedPid; listenerPid=$listenerPid; relation='Unknown'; reason='managed_process_identity_incomplete' }
+    }
+    $executableMatches = Test-PaosPathEqual $managedProcess.ExecutablePath $definition.executablePath
+    $commandKnown = -not [string]::IsNullOrWhiteSpace([string]$managedProcess.CommandLine)
+    $commandMatches = $commandKnown -and (Test-PaosCommandContains $managedProcess.CommandLine @($definition.identity))
+    $metadataComplete = Test-PaosOwnerMetadata -Context $Context -Role $Role -Process $managedProcess -Metadata $metadata
+    $metadataHasInstance = (
+      $null -ne $metadata -and
+      $null -ne $metadata.PSObject.Properties['pid'] -and
+      $null -ne $metadata.PSObject.Properties['executablePath'] -and
+      $null -ne $metadata.PSObject.Properties['startTimeUtc'] -and
+      [int]$metadata.pid -eq $managedPid
+    )
+    $positiveMismatch = -not $executableMatches -or ($commandKnown -and -not $commandMatches) -or ($metadataHasInstance -and (
+      -not (Test-PaosPathEqual ([string]$metadata.executablePath) ([string]$managedProcess.ExecutablePath)) -or
+      [string]$metadata.startTimeUtc -ne [string]$managedProcess.StartTimeUtc
+    ))
+    if ($positiveMismatch) {
+      if ($null -ne $listenerPid) {
+        return [pscustomobject]@{ state='OwnershipMismatch'; canMutate=$false; managedPid=$managedPid; listenerPid=$listenerPid; relation='Unknown'; reason='pid_process_mismatch' }
+      }
+      if (-not (Remove-PaosStaleOwnershipPair -Definition $definition -PidSnapshot $pidSnapshot -OwnerSnapshot $ownerSnapshot)) {
+        return [pscustomobject]@{ state='OwnershipUnknown'; canMutate=$false; managedPid=$managedPid; listenerPid=$null; relation='Unknown'; reason='stale_metadata_changed_during_cleanup' }
+      }
+      $managedPid = $null
+      $managedProcess = $null
+    }
+    elseif (-not $metadataComplete) {
+      if ($AdoptLegacyExactListener -and $null -ne $listenerProcess) {
+        $root = Find-PaosLegacyRootProcess -Context $Context -Role $Role -ListenerPid ([int]$listenerProcess.ProcessId)
+        if ($null -ne $root -and [int]$root.ProcessId -eq $managedPid) {
+          Write-PaosOwnerMetadata -Context $Context -Role $Role -Process $root
+          return Resolve-PaosRoleOwnership -Context $Context -Role $Role
+        }
+      }
+      return [pscustomobject]@{ state='OwnershipUnknown'; canMutate=$false; managedPid=$managedPid; listenerPid=$listenerPid; relation='Unknown'; reason='owner_metadata_unavailable_or_incoherent' }
+    }
+  }
+
   if ($null -eq $listenerProcess -and $null -eq $managedProcess) {
-    return [pscustomobject]@{ state = 'Stopped'; canMutate = $true; managedPid = $null; listenerPid = $null; relation = $null }
+    return [pscustomobject]@{ state='Stopped'; canMutate=$true; managedPid=$null; listenerPid=$null; relation=$null }
   }
   if ($null -ne $managedProcess -and (Test-PaosOwnerMetadata -Context $Context -Role $Role -Process $managedProcess -Metadata $metadata)) {
     if ($null -eq $listenerProcess) {
-      return [pscustomobject]@{ state = 'OwnedNotListening'; canMutate = $true; managedPid = [int]$managedProcess.ProcessId; listenerPid = $null; relation = $null }
+      return [pscustomobject]@{ state='OwnedNotListening'; canMutate=$true; managedPid=[int]$managedProcess.ProcessId; listenerPid=$null; relation=$null }
     }
     $lineage = Get-PaosLineage -ProcessId ([int]$listenerProcess.ProcessId) -ExpectedAncestorProcessId ([int]$managedProcess.ProcessId)
-    if ($lineage.known -and $lineage.matches) {
-      return [pscustomobject]@{
-        state = 'OwnedReady'; canMutate = $true; managedPid = [int]$managedProcess.ProcessId; listenerPid = [int]$listenerProcess.ProcessId
-        relation = $(if ([int]$lineage.depth -eq 0) { 'Self' } else { 'Descendant' })
-      }
+    if (-not $lineage.known) {
+      return [pscustomobject]@{ state='OwnershipUnknown'; canMutate=$false; managedPid=[int]$managedProcess.ProcessId; listenerPid=[int]$listenerProcess.ProcessId; relation='Unknown'; reason='listener_lineage_unavailable' }
     }
-    return [pscustomobject]@{ state = 'OwnershipMismatch'; canMutate = $false; managedPid = [int]$managedProcess.ProcessId; listenerPid = [int]$listenerProcess.ProcessId; relation = 'Unrelated' }
+    if ($lineage.matches) {
+      return [pscustomobject]@{ state='OwnedReady'; canMutate=$true; managedPid=[int]$managedProcess.ProcessId; listenerPid=[int]$listenerProcess.ProcessId; relation=$(if ([int]$lineage.depth -eq 0) { 'Self' } else { 'Descendant' }) }
+    }
+    return [pscustomobject]@{ state='OwnershipMismatch'; canMutate=$false; managedPid=[int]$managedProcess.ProcessId; listenerPid=[int]$listenerProcess.ProcessId; relation='Unrelated' }
   }
   if ($AdoptLegacyExactListener -and $null -ne $listenerProcess) {
     $root = Find-PaosLegacyRootProcess -Context $Context -Role $Role -ListenerPid ([int]$listenerProcess.ProcessId)
@@ -250,12 +430,7 @@ function Resolve-PaosRoleOwnership {
       return Resolve-PaosRoleOwnership -Context $Context -Role $Role
     }
   }
-  return [pscustomobject]@{
-    state = 'OwnershipMismatch'; canMutate = $false
-    managedPid = if ($null -eq $managedProcess) { $null } else { [int]$managedProcess.ProcessId }
-    listenerPid = if ($null -eq $listenerProcess) { $null } else { [int]$listenerProcess.ProcessId }
-    relation = 'Unknown'
-  }
+  return [pscustomobject]@{ state='OwnershipMismatch'; canMutate=$false; managedPid=$(if ($null -eq $managedProcess) { $null } else { [int]$managedProcess.ProcessId }); listenerPid=$(if ($null -eq $listenerProcess) { $null } else { [int]$listenerProcess.ProcessId }); relation='Unknown' }
 }
 
 function Get-PaosOwnedDescendants {
@@ -263,15 +438,31 @@ function Get-PaosOwnedDescendants {
   $all = @(Get-CimInstance Win32_Process -ErrorAction Stop)
   $byPid = @{}
   foreach ($process in $all) { $byPid[[int]$process.ProcessId] = $process }
-  $rows = @()
+  $candidates = @()
   foreach ($process in $all) {
     $current = [int]$process.ProcessId
     for ($depth = 0; $depth -lt 32; $depth++) {
-      if ($current -eq $RootPid) { $rows += [pscustomobject]@{ ProcessId = [int]$process.ProcessId; Depth = $depth }; break }
+      if ($current -eq $RootPid) { $candidates += [pscustomobject]@{ ProcessId = [int]$process.ProcessId; Depth = $depth }; break }
       if (-not $byPid.ContainsKey($current)) { break }
       $parent = [int]$byPid[$current].ParentProcessId
       if ($parent -le 0 -or $parent -eq $current) { break }
       $current = $parent
+    }
+  }
+  $rows = @()
+  foreach ($candidate in $candidates) {
+    $inspection = Get-PaosProcessInspection -ProcessId ([int]$candidate.ProcessId)
+    if ($inspection.state -eq 'MissingConfirmed') { continue }
+    if ($inspection.state -ne 'Present' -or $null -eq $inspection.process -or
+        $null -eq $inspection.process.ParentProcessId -or
+        [string]::IsNullOrWhiteSpace([string]$inspection.process.ExecutablePath) -or
+        [string]::IsNullOrWhiteSpace([string]$inspection.process.StartTimeUtc)) {
+      throw 'OWNERSHIP_UNKNOWN: Descendant process identity is unavailable.'
+    }
+    $rows += [pscustomobject]@{
+      ProcessId=[int]$inspection.process.ProcessId; ParentProcessId=[int]$inspection.process.ParentProcessId
+      ExecutablePath=[string]$inspection.process.ExecutablePath; StartTimeUtc=[string]$inspection.process.StartTimeUtc
+      Depth=[int]$candidate.Depth
     }
   }
   return @($rows | Sort-Object -Property @{ Expression = 'Depth'; Descending = $true }, @{ Expression = 'ProcessId'; Descending = $true })
@@ -280,18 +471,52 @@ function Get-PaosOwnedDescendants {
 function Stop-PaosOwnedRole {
   param($Context, [ValidateSet('server', 'tunnel')][string]$Role)
   $definition = Get-PaosRoleDefinition -Context $Context -Role $Role
+  $pidSnapshot = Read-PaosRuntimeFileSnapshot -Path $definition.pidFile
+  $ownerSnapshot = Read-PaosRuntimeFileSnapshot -Path $definition.ownerFile
   $ownership = Resolve-PaosRoleOwnership -Context $Context -Role $Role
   if (-not $ownership.canMutate) { throw "OWNERSHIP_MISMATCH: Cannot stop $Role while ownership is $($ownership.state)." }
   if ($ownership.state -eq 'Stopped') { return }
   $rootPid = [int]$ownership.managedPid
-  foreach ($entry in @(Get-PaosOwnedDescendants -RootPid $rootPid)) {
-    if ([int]$entry.ProcessId -eq $PID) { throw 'OWNERSHIP_MISMATCH: Refusing to stop the lifecycle controller.' }
-    Stop-Process -Id ([int]$entry.ProcessId) -Force -ErrorAction SilentlyContinue
+  $snapshots = @(Get-PaosOwnedDescendants -RootPid $rootPid)
+  $snapshotByPid = @{}; foreach ($entry in $snapshots) { $snapshotByPid[[int]$entry.ProcessId] = $entry }
+  if (-not $snapshotByPid.ContainsKey($rootPid)) { throw 'OWNERSHIP_CHANGED: Managed root disappeared before stop.' }
+  try { $ownerMetadata = [string]$ownerSnapshot.raw | ConvertFrom-Json }
+  catch { throw 'OWNERSHIP_UNKNOWN: Owner metadata became unavailable before stop.' }
+  $bindings = @(); $bindingByPid = @{}
+  try {
+    foreach ($entry in @($snapshots | Sort-Object Depth, ProcessId)) {
+      if ([int]$entry.ProcessId -eq $PID) { throw 'OWNERSHIP_MISMATCH: Refusing to stop the lifecycle controller.' }
+      $binding = Get-PaosTerminationBinding -ExpectedProcess $entry
+      if ($binding.state -eq 'MissingConfirmed') { continue }
+      if ($binding.state -ne 'Present') { throw "OWNERSHIP_CHANGED: PID $($entry.ProcessId) changed before stop." }
+      $bindings += [pscustomobject]@{ snapshot=$entry; nativeProcess=$binding.nativeProcess; process=$binding.process }
+      $bindingByPid[[int]$entry.ProcessId] = $bindings[-1]
+    }
+    if (-not $bindingByPid.ContainsKey($rootPid) -or
+        -not (Test-PaosOwnerMetadata -Context $Context -Role $Role -Process $bindingByPid[$rootPid].process -Metadata $ownerMetadata)) {
+      throw 'OWNERSHIP_CHANGED: Managed root identity changed before stop.'
+    }
+    if ([IO.File]::ReadAllText($definition.ownerFile) -cne [string]$ownerSnapshot.raw) { throw 'OWNERSHIP_CHANGED: Owner metadata changed before stop.' }
+    foreach ($binding in $bindings) {
+      $currentPid = [int]$binding.snapshot.ProcessId
+      if ($currentPid -eq $rootPid) { continue }
+      for ($depth = 0; $depth -lt 32 -and $currentPid -ne $rootPid; $depth++) {
+        if (-not $snapshotByPid.ContainsKey($currentPid) -or -not $bindingByPid.ContainsKey($currentPid)) { throw 'OWNERSHIP_CHANGED: Descendant lineage changed before stop.' }
+        $currentPid = [int]$snapshotByPid[$currentPid].ParentProcessId
+      }
+      if ($currentPid -ne $rootPid) { throw 'OWNERSHIP_CHANGED: Descendant no longer belongs to the verified root.' }
+    }
+    foreach ($binding in @($bindings | Sort-Object @{ Expression={ [int]$_.snapshot.Depth }; Descending=$true }, @{ Expression={ [int]$_.snapshot.ProcessId }; Descending=$true })) {
+      if (-not $binding.nativeProcess.HasExited) { $binding.nativeProcess.Kill() }
+      if (-not $binding.nativeProcess.WaitForExit(5000)) { throw "STOP_FAILED: PID $($binding.snapshot.ProcessId) did not exit." }
+    }
   }
-  try { Wait-Process -Id $rootPid -Timeout 5 -ErrorAction SilentlyContinue } catch { }
-  if ($null -ne (Get-PaosProcess -ProcessId $rootPid)) { throw "STOP_FAILED: $Role PID $rootPid did not exit." }
-  Remove-PaosRuntimeFile -Path $definition.pidFile
-  Remove-PaosRuntimeFile -Path $definition.ownerFile
+  finally {
+    foreach ($binding in $bindings) { if ($null -ne $binding.nativeProcess) { $binding.nativeProcess.Dispose() } }
+  }
+  if (-not (Remove-PaosStaleOwnershipPair -Definition $definition -PidSnapshot $pidSnapshot -OwnerSnapshot $ownerSnapshot)) {
+    throw 'OWNERSHIP_CHANGED: Runtime metadata changed before cleanup.'
+  }
 }
 
 function Start-PaosChildProcess {
@@ -331,15 +556,16 @@ function Start-PaosServer {
   $startInfo.WorkingDirectory = $Context.projectRoot; $startInfo.UseShellExecute = $true; $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
   $process = Start-PaosChildProcess -StartInfo $startInfo -Environment @{ PYTHONUTF8 = '1' }
   if ($null -eq $process) { throw 'SERVER_START_FAILED: Personal Asset OS server did not start.' }
-  $started = Get-PaosProcess -ProcessId $process.Id
-  if ($null -eq $started) { throw 'SERVER_START_FAILED: Started Personal Asset OS runner is unavailable.' }
+  $startedInspection = Get-PaosProcessInspection -ProcessId $process.Id
+  $started = $startedInspection.process
+  if ($startedInspection.state -ne 'Present' -or $null -eq $started) { throw 'SERVER_START_FAILED: Started Personal Asset OS runner is unavailable.' }
   Write-PaosOwnerMetadata -Context $Context -Role server -Process $started
   if (-not (Wait-PaosCondition -TimeoutSeconds $Context.coreReadyTimeoutSeconds -Condition { Test-PaosServerHealthy -Context $Context })) {
     Stop-PaosOwnedRole -Context $Context -Role server
     throw 'SERVER_NOT_READY: Personal Asset OS failed bounded startup.'
   }
   $ready = Resolve-PaosRoleOwnership -Context $Context -Role server
-  if ($ready.state -ne 'OwnedReady') { throw 'OWNERSHIP_MISMATCH: Server listener is not a descendant of the started runner.' }
+  if ($ready.state -ne 'OwnedReady') { throw "OWNERSHIP_MISMATCH: Server listener is not a descendant of the started runner (state=$($ready.state), reason=$($ready.reason), managedPid=$($ready.managedPid), listenerPid=$($ready.listenerPid))." }
 }
 
 function Start-PaosTunnelOnce {
@@ -375,8 +601,9 @@ function Start-PaosTunnelOnce {
     [Environment]::SetEnvironmentVariable('CONTROL_PLANE_ORGANIZATION_ID', $savedOrg, 'Process')
   }
   if ($null -eq $process) { throw 'TUNNEL_START_FAILED: Tunnel process did not start.' }
-  $started = Get-PaosProcess -ProcessId $process.Id
-  if ($null -eq $started) { throw 'TUNNEL_START_FAILED: Started tunnel is unavailable.' }
+  $startedInspection = Get-PaosProcessInspection -ProcessId $process.Id
+  $started = $startedInspection.process
+  if ($startedInspection.state -ne 'Present' -or $null -eq $started) { throw 'TUNNEL_START_FAILED: Started tunnel is unavailable.' }
   Write-PaosOwnerMetadata -Context $Context -Role tunnel -Process $started
 }
 
@@ -443,7 +670,8 @@ function Get-PersonalAssetOsRuntimeStatus {
   $serverHealthy = Test-PaosServerHealthy -Context $Context
   $tunnelReady = Test-PaosTunnelReady -Context $Context
   $ownerships = @($server, $tunnel)
-  $status = if (@($ownerships | Where-Object { $_.state -eq 'OwnershipMismatch' }).Count -gt 0) { 'OwnershipMismatch' }
+  $status = if (@($ownerships | Where-Object { $_.state -eq 'OwnershipUnknown' }).Count -gt 0) { 'OwnershipUnknown' }
+    elseif (@($ownerships | Where-Object { $_.state -eq 'OwnershipMismatch' }).Count -gt 0) { 'OwnershipMismatch' }
     elseif ($serverHealthy -and $tunnelReady -and @($ownerships | Where-Object { $_.state -ne 'OwnedReady' }).Count -eq 0) { 'Ready' }
     elseif ($serverHealthy -and $server.state -eq 'OwnedReady') { 'Degraded' }
     elseif (@($ownerships | Where-Object { $_.state -ne 'Stopped' }).Count -eq 0) { 'Stopped' }

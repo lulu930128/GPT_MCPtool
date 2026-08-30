@@ -1,13 +1,15 @@
 # GPT MCP Tool Workspace
 
 這個 repository 保存七個本機 MCP 專案、一個非 MCP 的 KGI Broker Bridge 與一個 Windows
-runtime 中樞的原始碼。它採用 monorepo：七個 MCP 元件維持各自的依賴、啟動方式、測試與
-安全邊界，不把程式碼攤平成單一套件。
+runtime 中樞的公開原始碼。它採用 source-only monorepo：七個 MCP 元件維持各自的依賴、
+啟動方式、測試、PID authority 與安全邊界，不把程式碼攤平成單一套件，也不由中樞接管
+domain data 或 component lifecycle。
 
 目前 workspace release 為 `1.1.0`。本次依各元件既有 SemVer 提升 minor：Project Reading 為 `1.5.0`、English Study 為 `0.3.0`，其餘 application／package 為 `1.1.0`。MCP protocol、schema、registry 與 domain contract 版本維持各自獨立演進，不隨 workspace release 重新編號。
 
 > 這是 source-only repository。個人資料、SQLite、DPAPI 密文、tunnel profile、
-> token、log、PID、cache、虛擬環境、編譯輸出與下載的 executable 都不應進入 Git。
+> token、log、PID、cache、虛擬環境、編譯輸出、下載的 executable，以及本機 Agent／Codex
+> 指令與 session state 都不應進入 Git。
 
 ## 專案一覽
 
@@ -23,7 +25,27 @@ runtime 中樞的原始碼。它採用 monorepo：七個 MCP 元件維持各自�
 | [`personal-asset-os/kgi_broker_bridge`](./personal-asset-os/kgi_broker_bridge/) | PAOS 專用的 KGI 帳務／持倉唯讀隔離 bridge；不是 MCP | Python / FastAPI | 已接 PAOS read-time valuation overlay；原始持倉不持久化 |
 | [`mcp_control_center`](./mcp_control_center/) | 可擴充的 Windows runtime orchestration／observability 中樞；本身不是 MCP | PowerShell / WinForms | 只使用 registry 中各元件宣告的 lifecycle 與 loopback health／readyz |
 
-請先閱讀各目錄的 `README.md` 與 `AGENTS.md`；它們才是該元件的正式操作與安全規則。
+各元件的公開操作方式、依賴、契約與安全邊界以目錄內的 `README.md` 為入口。本機 Agent
+工作指令不屬於產品原始碼，由 `.gitignore` 排除且不作為公開操作文件。
+
+## 目前架構狀態
+
+- 七個 MCP component controller 採用 `unified-lifecycle-v3`，由元件自己持有固定 action、
+  mutex、PID／owner metadata、listener 與 process lineage 判斷。
+- PID 只是 locator，不是 process identity。可變更 runtime 前必須取得同一個 native process
+  instance handle，核對 executable、start time、owner metadata 與 lineage，並透過同一 handle
+  執行終止；不能在驗證後重新用 numeric PID 尋找並終止程序。
+- `OwnershipUnknown`、`OwnershipMismatch`、foreign listener、multiple listener 或 controller
+  inspection failure 一律 fail closed，保留 PID／owner evidence 並交由人工處理。
+- MCP Control Center 是 orchestration／observability 中樞，不是 MCP server，也不讀取 domain
+  payload、credential 或 private runtime state。Reconcile 在每次自動 mutation 前重新取得
+  bounded controller ownership audit。
+- Startup adoption、source validation、目前 runtime adoption 與 Windows cold boot acceptance 是
+  分開的驗收 gate；source test 通過不代表 running process 已重載或 reboot gate 已完成。
+
+完整 lifecycle contract 與 tunnel PID writer 邊界見
+[`LifecycleOwnershipPolicy.md`](./mcp_control_center/docs/LifecycleOwnershipPolicy.md) 與
+[`TunnelPidWriterAudit.md`](./mcp_control_center/docs/TunnelPidWriterAudit.md)。
 
 ## Repository 文件
 
@@ -76,7 +98,9 @@ GitHub repository 目前是 public。提交前至少要確認：
    或下載的 `tunnel-client.exe`。
 2. `.env.example` 只包含 placeholder，不包含任何可用 credential。
 3. 文件與測試沒有不應公開的個人內容、私有資料內容或公司機密。
-4. 只提交 source、lockfile、migration、測試、範例與必要文件。
+4. `AGENTS.md`、`.agents/`、`.codex/`、`.codex-remote-attachments/` 與
+   `docs/agent-runs/` 等本機 Agent／Codex state 沒有出現在 staged paths。
+5. 只提交 source、lockfile、migration、測試、範例與必要文件。
 
 不要用 `git add -f` 繞過忽略規則。若某個 ignored artifact 確實需要發布，
 應先確認授權與資料風險，再使用獨立 release artifact 或可重現的安裝腳本。
@@ -96,6 +120,9 @@ uv run ruff check .
 cd C:\GPT_MCPtool\japanese_study
 npm test
 
+cd C:\GPT_MCPtool\english_study
+npm test
+
 cd C:\GPT_MCPtool\project_reading
 npm test
 
@@ -108,6 +135,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\validate.ps1
 
 cd C:\GPT_MCPtool\personal-asset-os\kgi_broker_bridge
 .\.venv\Scripts\python.exe -X utf8 -m pytest -q
+
+cd C:\GPT_MCPtool\mcp_control_center
+powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\control-center.ps1 -Action SelfTest
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\tray.ps1 -SelfTest
 ```
 
 Live backend、tunnel 與 browser／ChatGPT connector smoke 不是單純 source archive 的
@@ -147,5 +179,11 @@ read-only validator，以及 SHA-guarded Plan／Apply／receipt／rollback 註�
 從 disabled、非 auto-start 開始，完成自己的 exact ownership 與 targeted lifecycle tests 後才可
 啟用。詳細操作與安全界線見
 [`mcp_control_center/README.md`](./mcp_control_center/README.md)。
+
+所有 Stop／Reload 路徑都必須在 component mutex 內先完成 bounded ownership snapshot。單一程序
+要以已驗證且已開啟 handle 的同一 instance 終止；process tree 則要在第一個 kill 前完成 root
+與所有存活 descendant 的 instance binding、owner 與 lineage 驗證，再 deepest-first 終止。
+若 PID file、owner sidecar、listener query、process inspection 或 lineage 無法得到肯定證據，
+controller 必須回傳 `OwnershipUnknown` 或 `OWNERSHIP_CHANGED`，不得清除 evidence 或嘗試接管。
 
 日常 Control Center tray 已收斂為每個元件最多三項：狀態感知的 `Restart MCP`、統一 `Open MCP health` 詳情頁，以及 descriptor 明確宣告時才顯示的正式 frontend。維修層的 connectivity repair、core-only restart、shutdown、URL/Tunnel/Logs 等能力仍保留在 component controller、Health > Advanced 或 CLI，不由 tray 第一層直接暴露。

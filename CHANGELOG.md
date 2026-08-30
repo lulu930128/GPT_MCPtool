@@ -22,6 +22,13 @@ domain-contract versions remain independent and are not rewritten by a workspace
 
 - MCP Control Center now adopts all seven production MCP components and uses a dedicated framed
   result-pipe wrapper so inherited component child handles cannot keep bounded actions open.
+- Project Reading, OMI Search, Japanese Study, English Study, and Personal Asset OS now bind an
+  already-validated native process instance before termination instead of resolving a numeric PID
+  again after ownership checks. Process trees are fully bound and lineage-validated before the
+  first deepest-first termination.
+- MCP Control Center Reconcile now performs a fresh bounded component ownership audit before every
+  automatic lifecycle mutation and routes unknown, mismatched, or failed inspection to manual
+  attention.
 - Personal Asset OS removes the duplicated Quick Capture manager action and keeps daily capture in
   the product-owned dashboard and authenticated mobile flow.
 - Japanese Study and English Study desktop launchers now target their component-owned fixed Hub
@@ -31,6 +38,9 @@ domain-contract versions remain independent and are not rewritten by a workspace
 
 - Memory Core lifecycle recovery now distinguishes stale or reused managed PIDs from an active
   owned listener before deciding whether a component is running.
+- Component lifecycle status preserves `OwnershipUnknown` when process, owner, listener, or lineage
+  evidence is unavailable, and guarded cleanup no longer removes a newer PID/owner pair written by
+  another lifecycle instance.
 - Codex Bridge cancellation and startup recovery now settle stale pending approvals, and its MCP
   Apps widget no longer overflows narrow containers.
 - Japanese Study validates practice contract-version invariants before preview or record requests
@@ -38,6 +48,9 @@ domain-contract versions remain independent and are not rewritten by a workspace
 
 ### Security
 
+- Local `AGENTS.md`, `.agents`, `.codex`, remote-attachment, and agent-run state are excluded from
+  the public source tree; existing tracked agent instruction files are removed from the repository
+  while remaining available in local checkouts.
 - Project Reading denies Codex credential, capability, installation, global-state, and session-index
   filenames when a reviewed `.codex` directory is configured as a named root.
 - Personal Asset OS keeps broker credentials, raw holdings, mobile device identifiers, and runtime

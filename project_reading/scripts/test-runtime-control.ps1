@@ -8,6 +8,7 @@ $script:Passed = 0
 $previousApiKey = $env:CONTROL_PLANE_API_KEY
 $previousTunnelPort = $env:PROJECT_READING_TEST_TUNNEL_PORT
 $foreign = $null
+$staleForeign = $null
 
 function Assert-True([bool]$Condition, [string]$Message) {
   if (-not $Condition) { throw "Assertion failed: $Message" }
@@ -141,6 +142,55 @@ public static class FakeTunnel
   $initial = Invoke-TestController -Action Status
   Assert-Equal $initial.document.after.status "Stopped" ("isolated runtime starts stopped; evidence=" + ($initial.document.after | ConvertTo-Json -Compress -Depth 5))
 
+  $staleForeign = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-Command", "Start-Sleep -Seconds 120") -WindowStyle Hidden -PassThru
+  $serverPidFile = Join-Path $testRoot ".tmp\project-reading-server.pid"
+  $serverOwnerFile = Join-Path $testRoot ".tmp\project-reading-server.owner.json"
+  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $serverPidFile) | Out-Null
+  [IO.File]::WriteAllText($serverPidFile, [string]$staleForeign.Id, (New-Object Text.UTF8Encoding($false)))
+  [IO.File]::WriteAllText($serverOwnerFile, '{}', (New-Object Text.UTF8Encoding($false)))
+  $reused = Invoke-TestController -Action Status
+  Assert-Equal $reused.document.after.server.ownership "Stopped" "listener-free reused PID is classified stopped"
+  Assert-True (-not (Test-Path -LiteralPath $serverPidFile)) "listener-free reused PID file is removed"
+  Assert-True (-not (Test-Path -LiteralPath $serverOwnerFile)) "listener-free reused owner file is removed"
+  Assert-True ($null -ne (Get-Process -Id $staleForeign.Id -ErrorAction SilentlyContinue)) "listener-free reused process remains untouched"
+  Stop-Process -Id $staleForeign.Id -Force -ErrorAction Stop
+  $null = $staleForeign.WaitForExit(5000)
+  $staleForeign.Dispose()
+  $staleForeign = $null
+
+  $nodePath = (Get-Command node -ErrorAction Stop).Source
+  $sameExecutablePath = Join-Path $testRoot "same-executable.js"
+  [IO.File]::WriteAllText($sameExecutablePath, 'setInterval(()=>{},1000);', (New-Object Text.UTF8Encoding($false)))
+  $staleForeign = Start-Process -FilePath $nodePath -ArgumentList "`"$sameExecutablePath`"" -WorkingDirectory $testRoot -WindowStyle Hidden -PassThru
+  $sameExecutableMetadata = [ordered]@{
+    schemaVersion = 1; role = "server"; pid = $staleForeign.Id; executablePath = $nodePath
+    startTimeUtc = [DateTime]::UtcNow.AddDays(-1).ToString("o"); identity = (Join-Path $testRoot "dist\src\http-main.js")
+    recordedAt = [DateTime]::UtcNow.AddDays(-1).ToString("o")
+  }
+  [IO.File]::WriteAllText($serverPidFile, [string]$staleForeign.Id, (New-Object Text.UTF8Encoding($false)))
+  [IO.File]::WriteAllText($serverOwnerFile, ($sameExecutableMetadata | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))
+  $sameExecutable = Invoke-TestController -Action Status
+  Assert-Equal $sameExecutable.document.after.server.ownership "Stopped" "same executable with wrong start time is stale when listener-free"
+  Assert-True ($null -ne (Get-Process -Id $staleForeign.Id -ErrorAction SilentlyContinue)) "same-executable unrelated process remains untouched"
+  Stop-Process -Id $staleForeign.Id -Force -ErrorAction Stop
+  $null = $staleForeign.WaitForExit(5000)
+  $staleForeign.Dispose()
+  $staleForeign = $null
+
+  $staleForeign = Start-Process -FilePath $nodePath -ArgumentList "`"$sameExecutablePath`"" -WorkingDirectory $testRoot -WindowStyle Hidden -PassThru
+  [IO.File]::WriteAllText($serverPidFile, [string]$staleForeign.Id, (New-Object Text.UTF8Encoding($false)))
+  Remove-Item -LiteralPath $serverOwnerFile -Force -ErrorAction SilentlyContinue
+  $missingOwner = Invoke-TestController -Action Status
+  Assert-Equal $missingOwner.document.after.server.ownership "OwnershipUnknown" "live exact executable with missing metadata remains unknown"
+  Assert-Equal $missingOwner.document.after.status "OwnershipUnknown" "role ownership unknown propagates to top-level runtime status"
+  Assert-True (Test-Path -LiteralPath $serverPidFile) "unknown ownership preserves PID evidence"
+  Assert-True ($null -ne (Get-Process -Id $staleForeign.Id -ErrorAction SilentlyContinue)) "unknown ownership does not stop the process"
+  Stop-Process -Id $staleForeign.Id -Force -ErrorAction Stop
+  $null = $staleForeign.WaitForExit(5000)
+  $staleForeign.Dispose()
+  $staleForeign = $null
+  Remove-Item -LiteralPath $serverPidFile,$serverOwnerFile -Force -ErrorAction SilentlyContinue
+
   $ensure = Invoke-TestController -Action EnsureRunning
   Assert-Equal $ensure.document.after.status "Ready" "ensure running starts the isolated server and tunnel"
   $serverPid1 = [int]$ensure.document.after.server.pid
@@ -170,16 +220,25 @@ public static class FakeTunnel
   $foreignSource = 'const http=require("http");const p=Number(process.argv[2]);http.createServer((q,s)=>{s.writeHead(200,{"content-type":"application/json"});s.end(JSON.stringify({ok:true,service:"not-project-reading"}))}).listen(p,"127.0.0.1");'
   $foreignPath = Join-Path $testRoot "foreign.js"
   [IO.File]::WriteAllText($foreignPath, $foreignSource, (New-Object Text.UTF8Encoding($false)))
-  $nodePath = (Get-Command node -ErrorAction Stop).Source
   $foreign = Start-Process -FilePath $nodePath -ArgumentList "`"$foreignPath`" $serverPort" -WorkingDirectory $testRoot -WindowStyle Hidden -PassThru
   Start-Sleep -Milliseconds 600
+  $staleForeign = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-Command", "Start-Sleep -Seconds 120") -WindowStyle Hidden -PassThru
+  [IO.File]::WriteAllText($serverPidFile, [string]$staleForeign.Id, (New-Object Text.UTF8Encoding($false)))
+  [IO.File]::WriteAllText($serverOwnerFile, '{}', (New-Object Text.UTF8Encoding($false)))
   $foreignShutdown = Invoke-TestController -Action ShutdownRuntime -ExpectSuccess $false
   Assert-Equal $foreignShutdown.document.errorCode "OWNERSHIP_MISMATCH" "shutdown rejects a foreign listener"
   Assert-True ($null -ne (Get-Process -Id $foreign.Id -ErrorAction SilentlyContinue)) "foreign listener remains untouched"
+  Assert-True ($null -ne (Get-Process -Id $staleForeign.Id -ErrorAction SilentlyContinue)) "stale PID process remains untouched while a foreign listener exists"
+  Assert-True (Test-Path -LiteralPath $serverPidFile) "foreign-listener conflict preserves stale PID evidence"
   Stop-Process -Id $foreign.Id -Force -ErrorAction SilentlyContinue
   $null = $foreign.WaitForExit(5000)
   $foreign.Dispose()
   $foreign = $null
+  Stop-Process -Id $staleForeign.Id -Force -ErrorAction SilentlyContinue
+  $null = $staleForeign.WaitForExit(5000)
+  $staleForeign.Dispose()
+  $staleForeign = $null
+  Remove-Item -LiteralPath $serverPidFile,$serverOwnerFile -Force -ErrorAction SilentlyContinue
 
   Assert-True (Test-Path -LiteralPath (Join-Path $testRoot ".tmp\runtime-control.jsonl") -PathType Leaf) "controller writes a component-owned action audit"
   [pscustomobject]@{
@@ -193,6 +252,11 @@ finally {
     Stop-Process -Id $foreign.Id -Force -ErrorAction SilentlyContinue
     try { $null = $foreign.WaitForExit(5000) } catch { }
     $foreign.Dispose()
+  }
+  if ($null -ne $staleForeign) {
+    Stop-Process -Id $staleForeign.Id -Force -ErrorAction SilentlyContinue
+    try { $null = $staleForeign.WaitForExit(5000) } catch { }
+    $staleForeign.Dispose()
   }
   foreach ($pair in @(
     @(".tmp\project-reading-server.pid", ".tmp\project-reading-server.owner.json"),

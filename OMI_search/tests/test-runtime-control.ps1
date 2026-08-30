@@ -9,6 +9,7 @@ $script:Passed = 0
 $previousApiKey = $env:CONTROL_PLANE_API_KEY
 $backendProcess = $null
 $foreignProcess = $null
+$staleForeignProcess = $null
 
 function Assert-True([bool]$Condition, [string]$Message) {
   if (-not $Condition) { throw "Assertion failed: $Message" }
@@ -105,9 +106,11 @@ try {
   Copy-Item -LiteralPath (Join-Path $projectRoot "server.py") -Destination (Join-Path $testRoot "server.py")
   Copy-Item -LiteralPath (Join-Path $projectRoot "public_contract_snapshot.json") -Destination (Join-Path $testRoot "public_contract_snapshot.json")
   Copy-Item -LiteralPath (Join-Path $projectRoot "tw_market_dashboard_contract_snapshot.json") -Destination (Join-Path $testRoot "tw_market_dashboard_contract_snapshot.json")
-  New-Item -ItemType Directory -Force -Path (Join-Path $testRoot "ui\tw-market-dashboard\dist") | Out-Null
-  Copy-Item -LiteralPath (Join-Path $projectRoot "ui\tw-market-dashboard\dist\index.html") -Destination (Join-Path $testRoot "ui\tw-market-dashboard\dist\index.html")
-  Copy-Item -LiteralPath "C:\GPT_MCPtool\project_reading\scripts\key-store.ps1" -Destination (Join-Path $testRoot "scripts\key-store.ps1")
+  $widgetBundle = Join-Path $testRoot "ui\tw-market-dashboard\dist\index.html"
+  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $widgetBundle) | Out-Null
+  [IO.File]::WriteAllText($widgetBundle, "<!doctype html><title>ownership fixture</title>", $utf8NoBom)
+  $workspaceRoot = Split-Path -Parent $projectRoot
+  Copy-Item -LiteralPath (Join-Path $workspaceRoot "project_reading\scripts\key-store.ps1") -Destination (Join-Path $testRoot "scripts\key-store.ps1")
 
   $pythonPath = (Get-Command python -ErrorAction Stop).Source
   $backendPort = Get-FreeTcpPort
@@ -199,6 +202,48 @@ public static class FakeTunnel
   $initial = Invoke-TestController -Action Status
   Assert-Equal $initial.document.after.status "Stopped" "isolated runtime starts stopped"
 
+  $serverPidFile = Join-Path $testRoot ".tmp\omi-search-http-server.pid"
+  $serverOwnerFile = Join-Path $testRoot ".tmp\omi-search-http-server.owner.json"
+  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $serverPidFile) | Out-Null
+  $staleForeignProcess = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-Command", "Start-Sleep -Seconds 120") -WindowStyle Hidden -PassThru
+  [IO.File]::WriteAllText($serverPidFile, [string]$staleForeignProcess.Id, $utf8NoBom)
+  [IO.File]::WriteAllText($serverOwnerFile, '{}', $utf8NoBom)
+  $reused = Invoke-TestController -Action Status
+  Assert-Equal $reused.document.after.server.ownership "Stopped" "listener-free reused PID is classified stopped"
+  Assert-True (-not (Test-Path -LiteralPath $serverPidFile)) "listener-free reused PID file is removed"
+  Assert-True (-not (Test-Path -LiteralPath $serverOwnerFile)) "listener-free reused owner file is removed"
+  Assert-True ($null -ne (Get-Process -Id $staleForeignProcess.Id -ErrorAction SilentlyContinue)) "listener-free reused process remains untouched"
+  Stop-TestProcess -Process $staleForeignProcess
+  $staleForeignProcess = $null
+
+  $sleepScript = Join-Path $testRoot "same_executable_sleep.py"
+  [IO.File]::WriteAllText($sleepScript, "import time`ntime.sleep(120)`n", $utf8NoBom)
+  $staleForeignProcess = Start-Process -FilePath $pythonPath -ArgumentList "-B `"$sleepScript`"" -WorkingDirectory $testRoot -WindowStyle Hidden -PassThru
+  $sameExecutableMetadata = [ordered]@{
+    schemaVersion = 1; role = "server"; pid = $staleForeignProcess.Id; executablePath = $pythonPath
+    startTimeUtc = [DateTime]::UtcNow.AddDays(-1).ToString("o"); identity = (Join-Path $testRoot "http_server.py")
+    recordedAt = [DateTime]::UtcNow.AddDays(-1).ToString("o")
+  }
+  [IO.File]::WriteAllText($serverPidFile, [string]$staleForeignProcess.Id, $utf8NoBom)
+  [IO.File]::WriteAllText($serverOwnerFile, ($sameExecutableMetadata | ConvertTo-Json -Compress), $utf8NoBom)
+  $sameExecutable = Invoke-TestController -Action Status
+  Assert-Equal $sameExecutable.document.after.server.ownership "Stopped" "same executable with wrong start time is stale when listener-free"
+  Assert-True ($null -ne (Get-Process -Id $staleForeignProcess.Id -ErrorAction SilentlyContinue)) "same-executable unrelated process remains untouched"
+  Stop-TestProcess -Process $staleForeignProcess
+  $staleForeignProcess = $null
+
+  $staleForeignProcess = Start-Process -FilePath $pythonPath -ArgumentList "-B `"$sleepScript`"" -WorkingDirectory $testRoot -WindowStyle Hidden -PassThru
+  [IO.File]::WriteAllText($serverPidFile, [string]$staleForeignProcess.Id, $utf8NoBom)
+  Remove-Item -LiteralPath $serverOwnerFile -Force -ErrorAction SilentlyContinue
+  $missingOwner = Invoke-TestController -Action Status
+  Assert-Equal $missingOwner.document.after.server.ownership "OwnershipUnknown" "live exact executable with missing metadata remains unknown"
+  Assert-Equal $missingOwner.document.after.status "OwnershipUnknown" "role ownership unknown propagates to top-level runtime status"
+  Assert-True (Test-Path -LiteralPath $serverPidFile) "unknown ownership preserves PID evidence"
+  Assert-True ($null -ne (Get-Process -Id $staleForeignProcess.Id -ErrorAction SilentlyContinue)) "unknown ownership leaves the process untouched"
+  Stop-TestProcess -Process $staleForeignProcess
+  $staleForeignProcess = $null
+  Remove-Item -LiteralPath $serverPidFile,$serverOwnerFile -Force -ErrorAction SilentlyContinue
+
   $ensure = Invoke-TestController -Action EnsureRunning
   Assert-Equal $ensure.document.after.status "Ready" "ensure starts adapter and tunnel"
   $serverPid1 = [int]$ensure.document.after.server.pid
@@ -243,11 +288,19 @@ public static class FakeTunnel
   $env:OMI_SEARCH_API_BASE_URL = "http://127.0.0.1:$backendPort"
   $foreignProcess = Start-Process -FilePath $pythonPath -ArgumentList "-B `"$(Join-Path $testRoot 'http_server.py')`" --host 127.0.0.1 --port $serverPort" -WorkingDirectory $testRoot -WindowStyle Hidden -PassThru
   Assert-True (Wait-TcpPort -Port $serverPort -Open $true) "foreign adapter listener started"
+  $staleForeignProcess = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-Command", "Start-Sleep -Seconds 120") -WindowStyle Hidden -PassThru
+  [IO.File]::WriteAllText($serverPidFile, [string]$staleForeignProcess.Id, $utf8NoBom)
+  [IO.File]::WriteAllText($serverOwnerFile, '{}', $utf8NoBom)
   $foreignShutdown = Invoke-TestController -Action ShutdownRuntime -ExpectSuccess $false
   Assert-Equal $foreignShutdown.document.errorCode "OWNERSHIP_MISMATCH" "shutdown rejects an unmanaged exact listener"
   Assert-True ($null -ne (Get-Process -Id $foreignProcess.Id -ErrorAction SilentlyContinue)) "foreign listener remains untouched"
+  Assert-True ($null -ne (Get-Process -Id $staleForeignProcess.Id -ErrorAction SilentlyContinue)) "stale PID process remains untouched while listener exists"
+  Assert-True (Test-Path -LiteralPath $serverPidFile) "listener conflict preserves stale PID evidence"
   Stop-TestProcess -Process $foreignProcess
   $foreignProcess = $null
+  Stop-TestProcess -Process $staleForeignProcess
+  $staleForeignProcess = $null
+  Remove-Item -LiteralPath $serverPidFile,$serverOwnerFile -Force -ErrorAction SilentlyContinue
   if ($null -eq $previousBaseUrl) { Remove-Item Env:\OMI_SEARCH_API_BASE_URL -ErrorAction SilentlyContinue } else { $env:OMI_SEARCH_API_BASE_URL = $previousBaseUrl }
 
   $actionLogPath = Join-Path $testRoot ".tmp\runtime-control.jsonl"
@@ -264,6 +317,7 @@ public static class FakeTunnel
 }
 finally {
   Stop-TestProcess -Process $foreignProcess
+  Stop-TestProcess -Process $staleForeignProcess
   Stop-TestProcess -Process $backendProcess
   foreach ($pair in @(
     @(".tmp\omi-search-http-server.pid", ".tmp\omi-search-http-server.owner.json"),
