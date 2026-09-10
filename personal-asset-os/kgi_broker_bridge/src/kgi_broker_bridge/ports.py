@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal, Protocol
 
+from kgi_broker_bridge.account_state import AccountState
 from kgi_broker_bridge.contracts import (
     BrokerHealth,
     BrokerPositionSnapshot,
@@ -38,9 +39,12 @@ class RawBrokerSnapshotBatch:
     captured_at: datetime
     scopes: tuple[RawMarketInventoryScope, ...]
     warnings: tuple[str, ...] = ()
+    account_state: Mapping[str, object] = field(default_factory=dict, repr=False)
 
 
 class InventoryGateway(Protocol):
+    def close(self) -> None: ...
+
     def get_health(self) -> BrokerHealth: ...
 
     def read_inventory(self, book_code: str) -> RawInventoryBatch: ...
@@ -49,8 +53,12 @@ class InventoryGateway(Protocol):
 
 
 class BrokerAdapter(Protocol):
+    def close(self) -> None: ...
+
     def get_health(self) -> BrokerHealth: ...
 
     def get_positions(self) -> BrokerPositionSnapshot: ...
 
     def get_positions_v2(self) -> BrokerPositionSnapshotV2: ...
+
+    def get_account_state(self) -> AccountState: ...

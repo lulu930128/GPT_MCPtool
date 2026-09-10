@@ -96,7 +96,13 @@ def test_update_uses_version_and_reject_preserves_tombstone(client: TestClient) 
     assert client.get("/api/transactions").json() == []
 
 
-def test_finalize_creates_one_balanced_transaction_and_is_retry_safe(client: TestClient) -> None:
+def test_finalize_creates_one_balanced_transaction_and_is_retry_safe(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "personal_asset_os.services.reporting.utc_now",
+        lambda: datetime(2026, 8, 10, tzinfo=UTC),
+    )
     bank = client.post(
         "/api/accounts",
         json={"name": "日常銀行", "kind": "asset", "subtype": "bank", "is_liquid": True},

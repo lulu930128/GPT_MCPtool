@@ -72,6 +72,7 @@ export class CodexAppServerClient extends EventEmitter implements AppServerTrans
     }
   }
 
+  /** Component-scoped shutdown for the one App Server shared by every Bridge thread and turn. */
   async close(): Promise<void> {
     const child = this.child;
     this.child = undefined;

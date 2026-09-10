@@ -1,6 +1,6 @@
 # GPT Project Workspace MCP
 
-目前 application release 為 `1.5.0`，tool contract 為 `2026-08-14.3`。Workspace root、asset scope 與 tool contract 仍依各自的安全契約演進。
+目前 application release 為 `1.5.0`，tool contract 為 `2026-09-10.1`。Workspace root、asset scope 與 tool contract 仍依各自的安全契約演進。
 
 圖片、Office 與 PDF 檔案的公開讀取設計、限制與設定方式請見
 [docs/Asset-Readers.md](docs/Asset-Readers.md)。
@@ -32,6 +32,7 @@
 
 ## 工具
 
+- `read_audio`：以 MCP AudioContent 回傳原始音訊；不提供自訂播放器或診斷卡，host 是否播放取決於其支援。
 - `workspace_info`：回傳目前 root allowlist、預設 root、限制與安全政策摘要。
 - `list_projects`：列出指定 root 的直接子資料夾，標示 README、AGENTS、git repo。
 - `project_context`：讀取某個專案的 README、AGENTS、package scripts、pyproject 等入口資訊摘要。

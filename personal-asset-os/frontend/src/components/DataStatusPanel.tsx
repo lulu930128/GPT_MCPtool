@@ -98,7 +98,7 @@ export function DataStatusPanel({
   loading: boolean;
   onRefresh: () => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(true);
   const notices = useMemo(() => {
     const result: StatusNotice[] = [];
     if (error) {

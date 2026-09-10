@@ -95,7 +95,7 @@ try {
     "Missing workspace asset resource template",
   );
   const listed = await rpc("tools/list", {});
-  assert.equal(listed.tools.length, 24);
+  assert.equal(listed.tools.length, 25);
   for (const required of [
     "read_files",
     "find_files",

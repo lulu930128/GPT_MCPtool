@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Literal, Protocol, Self
@@ -10,6 +10,7 @@ from typing import Literal, Protocol, Self
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from personal_asset_os.services.broker_account_state import AccountState
 from personal_asset_os.settings import Settings
 from personal_asset_os.temporal import ensure_utc, utc_now
 
@@ -318,6 +319,7 @@ class BrokerReadResult:
     retrieved_at: datetime
     snapshot: BrokerSnapshot | BrokerSnapshotV2 | None = None
     warnings: tuple[str, ...] = ()
+    account_state: AccountState | None = None
 
     @classmethod
     def disabled(cls, *, now: datetime | None = None) -> BrokerReadResult:
@@ -370,6 +372,7 @@ class BrokerBridgeClient:
                     retrieved_at=checked_at,
                     snapshot=self._cached.snapshot,
                     warnings=self._cached.warnings,
+                    account_state=self._cached.account_state,
                 )
             try:
                 result = self._read_live(checked_at)
@@ -381,7 +384,7 @@ class BrokerBridgeClient:
                     and cache_age is not None
                     and cache_age <= self._fallback_ttl
                 ):
-                    return BrokerReadResult(
+                    result = BrokerReadResult(
                         status="stale",
                         read_mode="memory_fallback",
                         retrieved_at=checked_at,
@@ -389,15 +392,30 @@ class BrokerBridgeClient:
                         warnings=self._cached.warnings
                         + (warning, "KGI 即時讀取失敗，暫用本次 PAOS 程序記憶體內的上次成功快照"),
                     )
-                return BrokerReadResult(
-                    status="unavailable",
-                    read_mode="unavailable",
-                    retrieved_at=checked_at,
-                    warnings=(warning,),
-                )
-            self._cached = result
-            self._cached_monotonic = monotonic_now
+                else:
+                    result = BrokerReadResult(
+                        status="unavailable", read_mode="unavailable",
+                        retrieved_at=checked_at, warnings=(warning,),
+                    )
+            result = replace(result, account_state=self._read_account_state())
+            if result.read_mode == "live":
+                self._cached = result
+                self._cached_monotonic = monotonic_now
             return result
+
+    def _read_account_state(self) -> AccountState | None:
+        try:
+            with httpx.Client(
+                timeout=self._timeout, transport=self._transport, trust_env=False,
+            ) as client:
+                response = client.get(
+                    self._v2_url.replace("/api/v2/positions", "/api/v1/account-state"),
+                    headers={"Authorization": f"Bearer {self._token}"},
+                )
+                response.raise_for_status()
+                return AccountState.model_validate(response.json())
+        except (httpx.HTTPError, ValueError, TypeError):
+            return None
 
     def _cache_age(self, monotonic_now: float) -> float | None:
         if self._cached_monotonic is None:

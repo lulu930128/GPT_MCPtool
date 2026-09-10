@@ -65,6 +65,22 @@ def _position(
     }
 
 
+def test_stock_columns_aggregate_shares_but_do_not_invent_a_mixed_price() -> None:
+    first = _position(market="US", symbol="XYZ", name="Synthetic", market_value=Decimal("100"))
+    second = dict(first)
+    second["quantity"] = Decimal("2")
+    result, _ = dashboard_review._stock_allocation([first, second])
+    item = result["table_items"][0]
+    assert item["quantity"] == 3
+    assert item["native_price"] == 100
+    assert item["native_currency"] == "USD"
+    second["native_price"] = Decimal("101")
+    result, _ = dashboard_review._stock_allocation([first, second])
+    assert result["table_items"][0]["quantity"] == 3
+    assert result["table_items"][0]["native_price"] is None
+    assert result["table_items"][0]["price_quality"] == "mixed"
+
+
 def test_asset_and_tw_us_stock_allocations_reconcile_to_twd_values(session: Session) -> None:
     add_account(
         session,

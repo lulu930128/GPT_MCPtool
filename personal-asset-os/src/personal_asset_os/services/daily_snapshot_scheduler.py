@@ -58,6 +58,7 @@ def capture_current_daily_snapshot(
         broker_read=broker_reader.read(now=checked_at),
         broker_investment_account_id=settings.broker_investment_account_id,
         broker_us_investment_account_id=settings.broker_us_investment_account_id,
+        broker_cash_account_id=settings.broker_cash_account_id,
         fx_provider=fx_reader,
         reporting_timezone=settings.reporting_timezone,
     )

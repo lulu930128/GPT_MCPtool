@@ -11,9 +11,11 @@ Personal Asset OS 是本機優先的個人資產與帳務系統。目前提供�
 - 記錄股票買進與賣出，使用移動平均成本推導持倉與已實現損益。
 - 保存手動市場價格及其時間、來源與品質，不把舊價冒充即時價格。
 - 顯示總資產、負債、可用現金、投資成本／市值、當月收支與資料警告。
+- 股票總覽顯示原幣現價、報價時間與合併股數；總覽可見時約每 25 秒更新，背景分頁暫停。
+  更新失敗保留前次畫面並提示；實際報價新鮮度仍取決於來源，現金與交割另有 60 秒快取。
 - 手機以「金額、分類、描述（選填）」快速記錄；分類下拉選單依本機保存次數排序，自訂分類保存一次後成為可選項，並透過 Financial Event 保留分類 lineage。
 - 日常收支固定使用唯一「活動資金」帳戶：支出直接扣除、收入直接增加；finalize 會建立平衡交易、lineage 與 audit。
-- 保存帳戶餘額觀察值與帳面差額，支援月結快照。
+- 保存帳戶餘額觀察值與帳面差額；本機「確定」建立盤點時間的平衡調整交易，保留後續收支、不計入收入支出，重複確認不重複入帳。支援月結快照。
 - 由 PAOS lifecycle 每日保存一次彙總估值；錯過取樣時間時在元件下一次 ready 後補抓，並提供不補零的 1／3／12 個月資產走勢。
 - 建立 SQLite online backup、SHA-256 manifest 與 integrity check。
 - 透過七個唯讀 MCP 工具查詢總覽、帳戶、部位、近期交易、待處理日常記錄、對帳與系統狀態。
@@ -65,6 +67,21 @@ KGI 原始 snapshot、即時價、匯率與逐筆持倉不會寫成交易、Ledg
   若元件當時未啟動，下一次 ready 後會補抓。此時間不代表任何市場的官方收盤保證。
 
 ## 文件導覽
+
+### KGI 券商帳務
+
+資產複盤新增券商帳務區塊，透過 `broker.account_state.v1` 顯示 KGI 實際交割日期、
+signed 應收付金額、USD 原幣可交易餘額（`pp3`）與可出金（`pp5`）。
+使用者已確認 USD 查詢中的 `balance_twd` 實際為 USD 現金；Bridge 保留原欄位 lineage，
+以 `settled_cash_currency=USD` 輸出。PAOS 沿用持倉匯率，或在沒有 USD 持倉時獨立讀取既有
+USD/TWD provider；只納入新鮮現金及 complete 匯率，保留匯率來源／時間／品質。
+台幣值是參考匯率估值，可能與券商 App 的購買力不同，不固定匹配 App 金額。
+`PAOS_BROKER_CASH_ACCOUNT_ID` 可指定既有 TWD 現金帳戶，以差額取代而非重複加總。
+未映射且無 broker_cash 帳戶時作外部暫估資產；已有 broker_cash 帳戶但未映射則不納入。
+已交割現金只增加 provisional net worth 與對應資產配置；known_net_worth、Ledger 現金與
+活動資金保持原義。`SettleMark` 不推論是否已入帳，交割款與 liquidity 不另加為資產。
+既有每日彙總快照保存現金估值來源摘要，不保存帳號或原始資料；無 schema migration。
+
 
 - [帳本模型](docs/LedgerModel.md)：`transactions + postings`、debit-positive、immutability、
   idempotency、投資與對帳語意。
@@ -271,3 +288,14 @@ uv run personal-asset-os restore-backup `
 ```
 
 確認新資料庫的 dashboard、筆數與月結快照後，再由使用者明確切換 `PAOS_DATA_DIR`。
+
+### e財庫與交割帳戶
+
+「交易」頁的「建立／確認凱基帳戶與對應」會建立 TWD `broker_cash` 與
+`investment` 帳戶，並保存本機 `broker_cash_account_id` 設定；既有
+`PAOS_BROKER_CASH_ACCOUNT_ID` 優先且不允許不一致的設定。建立帳戶不帶入金額。
+一般資金與 e財庫之間使用互轉，投資帳戶禁止直接互轉；餘額透過盤點確認。
+KGI 現金依既有讀取時估值規則去重，不新增 ledger posting。
+交割摘要僅合計來源表列應收／應付，不代表尚未入帳、不可直接加到美股現金，
+也不會依日期或 SettleMark 自動入帳。股票交易仍是成交時扣款模型，尚未提供
+逐筆 T+2 應收應付帳本，不能再次用互轉登記同一筆股票交割。

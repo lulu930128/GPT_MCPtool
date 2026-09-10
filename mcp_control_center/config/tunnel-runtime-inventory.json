@@ -47,6 +47,12 @@
       "path": "english_study\\vendor\\tunnel-client\\tunnel-client.exe",
       "source": "component_local",
       "override": "TunnelClientPath"
+    },
+    {
+      "id": "listening_audio",
+      "path": "project_reading\\vendor\\tunnel-client\\tunnel-client.exe",
+      "source": "legacy_shared",
+      "override": "TunnelClientPath"
     }
   ]
 }

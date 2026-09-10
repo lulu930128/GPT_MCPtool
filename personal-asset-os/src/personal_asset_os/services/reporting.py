@@ -5,7 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import cast
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from personal_asset_os.build import source_build_id
@@ -15,7 +15,7 @@ from personal_asset_os.domain.enums import (
     AuditAction,
     FinancialEventStatus,
 )
-from personal_asset_os.errors import NotFoundError, ValidationError
+from personal_asset_os.errors import ConflictError, NotFoundError, ValidationError
 from personal_asset_os.models import (
     Account,
     AppSetting,
@@ -26,6 +26,7 @@ from personal_asset_os.models import (
     Posting,
     Snapshot,
 )
+from personal_asset_os.services.broker_cash import cash_projection
 from personal_asset_os.services.broker_read import BrokerReadResult
 from personal_asset_os.services.dashboard_review import (
     build_dashboard_review,
@@ -35,9 +36,12 @@ from personal_asset_os.services.fx_rates import FxRateProvider
 from personal_asset_os.services.ledger import (
     MONEY_QUANT,
     ZERO,
+    PostingDraft,
     account_balance,
+    create_transaction,
     money,
     require_account,
+    system_account,
 )
 from personal_asset_os.services.portfolio import portfolio_read_model
 from personal_asset_os.services.reporting_annotations import metadata_by_transaction
@@ -113,6 +117,62 @@ def record_balance_observation(
     return observation
 
 
+def confirm_balance_observation(
+    session: Session, observation_id: str, *, expected_difference: Decimal,
+) -> dict[str, object]:
+    # Acquire the SQLite write lock before reading balances; repeat clicks cannot post twice.
+    session.execute(update(BalanceObservation).where(
+        BalanceObservation.id == observation_id,
+    ).values(reconciled=BalanceObservation.reconciled))
+    observation = session.get(BalanceObservation, observation_id, populate_existing=True)
+    if observation is None:
+        raise NotFoundError("找不到對帳觀察")
+    key = f"reconciliation:{observation.id}"
+    existing = session.scalar(select(LedgerTransaction).where(
+        LedgerTransaction.idempotency_key == key,
+    ))
+    if observation.reconciled:
+        return {"id": observation.id, "transaction_id": existing.id if existing else None,
+                "reconciled": True, "created": False}
+    account = require_account(session, observation.account_id)
+    if account.is_system or account.kind not in {AccountKind.ASSET, AccountKind.LIABILITY}:
+        raise ValidationError("對帳調整只適用個人資產或負債帳戶")
+    if account.currency != "TWD" or account.subtype is AccountSubtype.INVESTMENT:
+        raise ValidationError("此帳戶不支援餘額調整")
+    if observation.observed_at > utc_now():
+        raise ValidationError("不可確認未來時間的盤點")
+    latest = session.scalar(select(BalanceObservation.id).where(
+        BalanceObservation.account_id == account.id,
+    ).order_by(BalanceObservation.observed_at.desc(), BalanceObservation.created_at.desc()))
+    if latest != observation.id:
+        raise ConflictError("已有較新的盤點，請重新整理後確認")
+    difference = money(observation.balance - account_balance(
+        session, account.id, as_of=observation.observed_at,
+    ))
+    if difference != money(expected_difference):
+        raise ConflictError("帳面差額已變動，請重新整理後確認")
+    transaction = None
+    if difference != ZERO:
+        equity = system_account(session, AccountSubtype.OPENING_BALANCE)
+        transaction, _ = create_transaction(
+            session, occurred_at=observation.observed_at,
+            description=f"盤點調整：{account.name}", source="reconciliation_adjustment",
+            idempotency_key=key,
+            postings=[PostingDraft(account.id, difference, difference),
+                      PostingDraft(equity.id, -difference, -difference)],
+        )
+    observation.reconciled = True
+    session.add(AuditLog(
+        entity_type="balance_observation", entity_id=observation.id,
+        action=AuditAction.UPDATE, actor="local_user",
+        after_json=json.dumps({"reconciled": True, "difference": str(difference),
+                               "transaction_id": transaction.id if transaction else None}),
+    ))
+    session.flush()
+    return {"id": observation.id, "transaction_id": transaction.id if transaction else None,
+            "reconciled": True, "created": transaction is not None}
+
+
 def _monthly_flow(
     session: Session, *, kind: AccountKind, start: datetime, end: datetime
 ) -> Decimal:
@@ -137,6 +197,7 @@ def dashboard(
     broker_read: BrokerReadResult | None = None,
     broker_investment_account_id: str | None = None,
     broker_us_investment_account_id: str | None = None,
+    broker_cash_account_id: str | None = None,
     fx_provider: FxRateProvider | None = None,
     reporting_timezone: str = "Asia/Taipei",
 ) -> dict[str, object]:
@@ -218,6 +279,27 @@ def dashboard(
     ]
     provisional_net_worth = non_investment_assets + valued_market + unpriced_cost - debt
     known_net_worth = non_investment_assets + valued_market - debt
+    saved_cash_mapping = session.get(AppSetting, "broker_cash_account_id")
+    broker_cash_account_id = broker_cash_account_id or (
+        saved_cash_mapping.value if saved_cash_mapping else None
+    )
+    cash_view, cash_delta, cash_warnings = cash_projection(
+        session, broker_read.account_state if broker_read else None, now=cutoff,
+        fx=portfolio_view.broker.get("fx"), fx_provider=fx_provider,
+        account_id=broker_cash_account_id, accounts=accounts,
+    )
+    broker_cash_accounts = [account for account in accounts
+                            if account.kind == AccountKind.ASSET
+                            and (account.subtype == AccountSubtype.BROKER_CASH
+                                 or account.id == broker_cash_account_id)]
+    broker_cash_total = (
+        sum((account_balance(session, account.id, as_of=cutoff)
+             for account in broker_cash_accounts), ZERO) + cash_delta
+        if broker_cash_accounts or (cash_view and cash_view["cash_valuation_included"])
+        else None
+    )
+    non_investment_assets += cash_delta
+    provisional_net_worth += cash_delta
     reserve = reserved_cash(session)
     available_cash = liquid_cash - debt - reserve
 
@@ -289,7 +371,7 @@ def dashboard(
         )
         or ZERO
     )
-    warnings = list(portfolio_view.warnings)
+    warnings = list(portfolio_view.warnings) + cash_warnings
     if missing_count:
         warnings.append(f"{missing_count} 個投資部位缺少價格，淨資產包含成本替代值")
     if stale_count:
@@ -311,6 +393,11 @@ def dashboard(
         positions=positions,
         reporting_timezone=reporting_timezone,
     )
+    if cash_delta:
+        allocation = cast(dict[str, object], review["asset_allocation"])
+        for item in cast(list[dict[str, object]], allocation["table_items"]):
+            if item.get("key") == "other_assets":
+                item["label_source"] = "asset_valuation"
     warnings.extend(review_warnings)
 
     recent_transaction_rows = list(
@@ -342,6 +429,7 @@ def dashboard(
 
     not_initialized = not accounts or all(account.is_system for account in accounts)
     broker = portfolio_view.broker
+    broker["account_state"] = cash_view
     broker_reconciliation_count = sum(
         int(cast(int, broker[key]))
         for key in (
@@ -351,10 +439,13 @@ def dashboard(
             "ledger_only_count",
         )
     )
-    broker_degraded = broker["status"] in {"unavailable", "stale", "partial"}
+    broker_degraded = broker["status"] in {"unavailable", "stale", "partial"} or bool(
+        cash_view and cash_view["freshness"] == "stale"
+    )
+    account_partial = bool(broker.get("enabled"))  # Settlement posting is still unknown.
     quality_flags = sum(
         [
-            bool(missing_count or pending_count or needs_review_count),
+            bool(missing_count or pending_count or needs_review_count or account_partial),
             bool(stale_count or broker_degraded),
             bool(unresolved_count or broker_reconciliation_count),
         ]
@@ -367,7 +458,7 @@ def dashboard(
         quality = "unreconciled"
     elif stale_count or broker_degraded:
         quality = "stale"
-    elif missing_count or pending_count or needs_review_count:
+    elif missing_count or pending_count or needs_review_count or account_partial:
         quality = "partial"
     else:
         quality = "complete"
@@ -391,6 +482,8 @@ def dashboard(
             "investment_book_value": investment_book_value,
             "investment_market_value": valued_market,
             "broker_market_value": broker["market_value"],
+            "broker_cash_adjustment": cash_delta,
+            "broker_cash_total": broker_cash_total,
             "broker_position_count": broker["position_count"],
             "broker_unreconciled_count": broker_reconciliation_count,
             "unpriced_investment_cost": unpriced_cost,

@@ -181,6 +181,8 @@ export interface ConversationFreshness {
   sourceRecencyAt?: number;
   sourceFingerprint?: string;
   staleReason?: string;
+  projectionLimited?: boolean;
+  projectionTruncatedItemCount?: number;
 }
 
 export interface ConversationProjectionPatch {
@@ -396,6 +398,7 @@ export interface UnifiedConversationDiagnostic {
     | "native_unavailable"
     | "native_inventory_truncated"
     | "native_snapshot_unstable"
+    | "native_projection_bounded"
     | "automation_unavailable"
     | "automation_target_missing"
     | "automation_target_unresolved"

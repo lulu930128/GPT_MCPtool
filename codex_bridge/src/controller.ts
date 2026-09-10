@@ -535,6 +535,8 @@ export class CodexBridgeController {
       return job;
     }
     if (job.threadId && job.turnId && this.appServer.status === "ready") {
+      // App Server is shared across jobs. Cancellation must target the exact turn and must never
+      // close or kill the component-owned App Server process.
       await this.appServer.request("turn/interrupt", { threadId: job.threadId, turnId: job.turnId });
     }
     if (job.turnId) {
@@ -876,10 +878,13 @@ export class CodexBridgeController {
   }
 
   private async handleStderr(line: string): Promise<void> {
-    const active = Array.from(this.jobsByTurn.values()).at(-1);
-    if (!active) {
+    const activeJobs = new Set(this.jobsByTurn.values());
+    if (activeJobs.size !== 1) {
+      // App Server stderr has no thread identity. With concurrent turns, assigning it to the most
+      // recently inserted job would make shared process diagnostics look like per-thread truth.
       return;
     }
+    const active = activeJobs.values().next().value!;
     const diagnostic = errorDiagnostic(line);
     if (!diagnostic) {
       return;

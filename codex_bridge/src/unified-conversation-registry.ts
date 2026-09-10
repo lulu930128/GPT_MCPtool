@@ -21,6 +21,7 @@ const MAX_UNIFIED_INVENTORY = 10_000;
 
 export class UnifiedConversationRegistry {
   private readonly nativeSnapshots = new Map<string, { sourceFingerprint: string; snapshot: LocalThreadSnapshot }>();
+  private readonly verifiedNativeInventory = new Map<string, LocalThreadSummary>();
 
   constructor(
     private readonly config: BridgeConfig,
@@ -56,13 +57,22 @@ export class UnifiedConversationRegistry {
         { count: nativePage.threads.length },
       ));
     }
+    if (nativeResult.status === "fulfilled" && nativePage.complete) {
+      this.verifiedNativeInventory.clear();
+      for (const thread of nativePage.threads) {
+        this.verifiedNativeInventory.set(thread.threadId, structuredClone(thread));
+      }
+    }
+    const nativeThreads = nativeResult.status === "fulfilled" && nativePage.complete
+      ? nativePage.threads
+      : mergeNativeInventory(this.verifiedNativeInventory, nativePage.threads);
     const automationList = automationResult.status === "fulfilled" ? automationResult.value : [];
     if (automationResult.status === "rejected") {
       diagnostics.push(diagnostic("automation", "automation_unavailable", "Automation metadata is temporarily unavailable."));
     }
 
     const automationByThread = groupAutomations(automationList);
-    const nativeByThread = new Map(nativePage.threads.map((thread) => [thread.threadId, thread]));
+    const nativeByThread = new Map(nativeThreads.map((thread) => [thread.threadId, thread]));
     const jobByThread = new Map<string, JobSummary>();
     const placeholders: JobSummary[] = [];
     for (const job of this.store.listAll()) {
@@ -74,7 +84,7 @@ export class UnifiedConversationRegistry {
     }
 
     const conversations: UnifiedConversationSummary[] = [];
-    for (const native of nativePage.threads) {
+    for (const native of nativeThreads) {
       conversations.push(this.mergeNative(native, jobByThread.get(native.threadId), automationByThread.get(native.threadId) ?? []));
     }
     for (const [threadId, job] of jobByThread) {
@@ -98,7 +108,7 @@ export class UnifiedConversationRegistry {
       conversations: page.map((conversation) => structuredClone(conversation)),
       nextCursor: filtered.length > page.length && last ? encodeCursor(last) : undefined,
       complete: nativeResult.status === "fulfilled" && nativePage.complete && filtered.length <= page.length,
-      reset: !input.cursor,
+      reset: !input.cursor && nativeResult.status === "fulfilled" && nativePage.complete,
       diagnostics,
     };
   }
@@ -181,6 +191,15 @@ export class UnifiedConversationRegistry {
     }
 
     const native = summaryFromLocal(local);
+    const projectionTruncatedItemCount = local.conversation?.freshness?.projectionTruncatedItemCount;
+    if (local.conversation?.freshness?.projectionLimited && projectionTruncatedItemCount) {
+      diagnostics.push(diagnostic(
+        "native",
+        "native_projection_bounded",
+        "Verbose technical history was bounded for the UI projection; native Codex history remains authoritative.",
+        { count: projectionTruncatedItemCount },
+      ));
+    }
     if (preflightNative && preflightNative.projectId !== native.projectId) {
       throw new Error("The conversation workspace changed during the allowlist check.");
     }
@@ -259,6 +278,16 @@ export class UnifiedConversationRegistry {
   private assertVisible(conversation: UnifiedConversationSummary, visibility: ConversationVisibility): void {
     if (!this.visible(conversation, visibility)) throw new Error("This conversation is outside the public project allowlist.");
   }
+}
+
+function mergeNativeInventory(
+  verified: Map<string, LocalThreadSummary>,
+  current: LocalThreadSummary[],
+): LocalThreadSummary[] {
+  const merged = new Map<string, LocalThreadSummary>();
+  for (const thread of verified.values()) merged.set(thread.threadId, structuredClone(thread));
+  for (const thread of current) merged.set(thread.threadId, thread);
+  return Array.from(merged.values());
 }
 
 function summaryFromLocal(local: LocalThreadSnapshot): LocalThreadSummary {

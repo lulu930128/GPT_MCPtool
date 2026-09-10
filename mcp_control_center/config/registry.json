@@ -65,6 +65,14 @@
                            "enabled":  true,
                            "autoStart":  true,
                            "startupOrder":  70
+                       },
+                       {
+                           "id":  "listening_audio",
+                           "root":  "..\\..\\listening_audio",
+                           "descriptor":  "control-center\\component.json",
+                           "enabled":  true,
+                           "autoStart":  true,
+                           "startupOrder":  80
                        }
                    ]
 }

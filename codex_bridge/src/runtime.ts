@@ -23,6 +23,8 @@ export async function createBridgeRuntime(config: BridgeConfig): Promise<BridgeR
   const textBundles = new TextBundleStore(config.stagingDir);
   await textBundles.initialize();
   const widgetHtml = await readFile(config.widgetPath, "utf8");
+  // One component-owned App Server is shared by all Bridge threads. Per-turn cancellation belongs
+  // to CodexBridgeController.cancel() and turn/interrupt; this client is never a thread process.
   const appServer = new CodexAppServerClient({
     command: config.codexCommand,
     args: config.codexArgs,

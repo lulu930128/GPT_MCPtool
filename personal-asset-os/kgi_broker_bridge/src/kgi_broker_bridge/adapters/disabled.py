@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from kgi_broker_bridge.account_state import AccountState
 from kgi_broker_bridge.contracts import (
     BrokerHealth,
     BrokerPositionSnapshot,
@@ -22,6 +23,9 @@ class DisabledBrokerAdapter:
     package_version: str | None = None
     clock: Callable[[], datetime] = _utc_now
 
+    def close(self) -> None:
+        pass
+
     def get_health(self) -> BrokerHealth:
         return BrokerHealth(
             status=HealthStatus.NOT_CONFIGURED,
@@ -39,4 +43,7 @@ class DisabledBrokerAdapter:
         raise AdapterNotConfiguredError
 
     def get_positions_v2(self) -> BrokerPositionSnapshotV2:
+        raise AdapterNotConfiguredError
+
+    def get_account_state(self) -> AccountState:
         raise AdapterNotConfiguredError

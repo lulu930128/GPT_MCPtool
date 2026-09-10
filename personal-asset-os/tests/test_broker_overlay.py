@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -9,6 +10,7 @@ from sqlalchemy.orm import Session
 from personal_asset_os.domain.enums import AccountKind, AccountSubtype
 from personal_asset_os.models import AuditLog, LedgerTransaction, Posting, PriceFact, Trade
 from personal_asset_os.services import ledger, portfolio, reporting
+from personal_asset_os.services.broker_account_state import AccountState
 from personal_asset_os.services.broker_read import (
     BrokerMarketScopeV2,
     BrokerPositionV2,
@@ -20,6 +22,22 @@ from personal_asset_os.services.fx_rates import FxRateFact, FxReadResult
 from tests.broker_helpers import broker_result
 
 NOW = datetime(2026, 8, 20, 2, 0, tzinfo=UTC)
+
+
+def test_account_evidence_is_visible_without_changing_assets_or_writing(session: Session) -> None:
+    read = us_broker_result()
+    baseline = reporting.dashboard(session, broker_read=read, as_of=NOW)
+    before = session.scalar(select(func.count()).select_from(Posting))
+    enriched = replace(read, account_state=AccountState(
+        captured_at=NOW, status="partial", cash_candidate=Decimal("13.25"),
+        buying_power=Decimal("250"), withdrawable_cash=Decimal("100"),
+    ))
+    result = reporting.dashboard(session, broker_read=enriched, as_of=NOW)
+    assert result["metrics"] == baseline["metrics"]
+    assert result["broker"]["account_state"]["cash_candidate"] == "13.25"
+    assert result["broker"]["account_state"]["valuation_included"] is False
+    assert session.scalar(select(func.count()).select_from(Posting)) == before
+    assert not session.new and not session.dirty and not session.deleted
 
 
 class FakeFxProvider:

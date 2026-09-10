@@ -1,6 +1,7 @@
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { readAudioAsset } from "./audio.js";
 import {
   inspectAsset,
   readDocumentAsset,
@@ -547,6 +548,32 @@ export function createWorkspaceMcpServer(config: ServerConfig): McpServer {
               },
             },
           ],
+        };
+      } catch (error) {
+        return toErrorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "read_audio",
+    {
+      title: "Read Audio",
+      outputSchema: objectOutputSchema,
+      description:
+        "Return an allowed local WAV, MP3, OGG, or FLAC as MCP AudioContent. No custom player UI is provided. Requires a file-return-enabled asset scope and preserves the shared path guard, deny policy and fetch size limit. MIME is extension-based; host playback requires validation.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+      inputSchema: {
+        scope: fileReturnScopeInput,
+        path: z.string().min(1).describe("Audio path relative to the selected file-return-enabled asset scope."),
+      },
+    },
+    async (args) => {
+      try {
+        const result = await readAudioAsset(config, args);
+        return {
+          structuredContent: result.metadata,
+          content: [{ type: "audio" as const, data: result.data, mimeType: result.mimeType }],
         };
       } catch (error) {
         return toErrorResult(error);

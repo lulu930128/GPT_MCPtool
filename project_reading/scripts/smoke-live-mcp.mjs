@@ -63,7 +63,7 @@ assert.ok(
 
 const listedTools = await rpc("tools/list", {});
 const tools = listedTools.tools;
-assert.equal(tools.length, 24);
+assert.equal(tools.length, 25);
 const projectMapTool = tools.find((tool) => tool.name === "project_map");
 assert.ok(projectMapTool, "project_map is missing from tools/list");
 assert.match(projectMapTool.inputSchema.properties.maxFiles.description, /Defaults to 30/);
@@ -89,6 +89,7 @@ assert.deepEqual(
     "fetch_asset",
     "inspect_asset",
     "inspect_pdf",
+    "read_audio",
     "read_document",
     "read_image",
     "read_pdf_page",
@@ -103,7 +104,7 @@ const rootIds = workspaceInfo.roots.map((root) => root.id);
 assert.ok(rootIds.length > 0);
 assert.ok(rootIds.includes(workspaceInfo.defaultRoot));
 assert.equal(workspaceInfo.applicationVersion, "1.5.0");
-assert.equal(workspaceInfo.toolContractVersion, "2026-08-14.3");
+assert.equal(workspaceInfo.toolContractVersion, "2026-09-10.1");
 assert.equal(workspaceInfo.limits.fetch.maxFileBytes, 12_582_912);
 assert.ok(workspaceInfo.limits.fetch.enabledScopes.includes("projects"));
 assert.equal(typeof workspaceInfo.buildId, "string");

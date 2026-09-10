@@ -31,6 +31,9 @@ Codex Handoff Bridge 是私人、allowlist-first 的 MCP Apps 對話工作區。
   `thread/turns/list(itemsView="full")`。Paginated snapshot 讀取前後必須有相同 fingerprint；若中途新增 turn 會完整
   重試一次，仍不一致則保留上一份已驗證 projection。Active job 以 900 ms poll，待補頁以 25 ms catch-up；terminal
   thread 每 20 秒、active automation target 每 4 秒只先核對 metadata fingerprint，只有來源變更才抓完整 history。
+- Native history 仍會完整讀取並作為權威來源；送往 Widget 的 projection 另有 2,000,000 字元總文字預算，
+  每筆 command output 最多 2,000 字元。超限只縮限 UI 技術輸出、保留 item identity／status，並回報
+  `native_projection_bounded`；不會修改或截斷 App Server 保存的原始 history。
 - App Server user message text 是對話內容權威；Bridge 只以 exact `clientId`／`clientMessageId` 加回 context 與驗證後文字
   文件 metadata，不按訊息位置覆寫文字。Native、Bridge JobStore 與 automation registry 可獨立降級，缺失來源與孤兒排程
   以 bounded diagnostic 顯示，不讓單一 adapter 故障清空整個 Project Ledger。
@@ -91,7 +94,10 @@ flowchart TD
 ```
 
 Codex App Server 不對外開 listener。只有 Bridge 在本機用 stdio 啟動它；公開入口只能經過既有
-Secure MCP Tunnel。
+Secure MCP Tunnel。每個 Bridge runtime 只有一個 shared App Server child process，所有 thread／turn
+共用；停止或 `Stop-Process` 該 PID 是 component-level shutdown／restart，會中斷所有 active turns，不能
+拿來取消單一 thread。Per-thread cancellation 必須經 `codex_job_cancel` 走 exact `turn/interrupt`；active job
+或 pending approval 期間仍受 approval-sensitive restart guard 保護，也不另建平行 process manager。
 
 ## 安裝與設定
 

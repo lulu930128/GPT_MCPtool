@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import secrets
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, Request, Response
@@ -8,6 +10,7 @@ from fastapi.responses import JSONResponse
 from pydantic import SecretStr
 
 from kgi_broker_bridge import __version__
+from kgi_broker_bridge.account_state import AccountState
 from kgi_broker_bridge.contracts import (
     BridgeErrorBody,
     BridgeErrorEnvelope,
@@ -24,10 +27,18 @@ def create_app(service: BrokerBridgeService, *, api_token: SecretStr) -> FastAPI
     if len(expected_token) < 32:
         raise ValueError("api token must contain at least 32 characters")
 
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            service.close()
+
     app = FastAPI(
         title="KGI Broker Bridge",
         version=__version__,
         description="Loopback-only, read-only KGI broker isolation bridge.",
+        lifespan=lifespan,
     )
 
     def require_bearer_token(
@@ -76,5 +87,13 @@ def create_app(service: BrokerBridgeService, *, api_token: SecretStr) -> FastAPI
     def get_positions_v2(response: Response) -> BrokerPositionSnapshotV2:
         response.headers["Cache-Control"] = "no-store"
         return service.get_positions_v2()
+
+    @app.get(
+        "/api/v1/account-state", response_model=AccountState,
+        dependencies=[Depends(require_bearer_token)],
+    )
+    def get_account_state(response: Response) -> AccountState:
+        response.headers["Cache-Control"] = "no-store"
+        return service.get_account_state()
 
     return app

@@ -173,7 +173,7 @@ export function AssetTrendChart({
             <h2 id="asset-trend-title">資產歷史</h2>
             {loading ? <Spinner size="tiny" label="讀取歷史資料" /> : null}
           </div>
-          <Caption1>每日不可變估值快照 · TWD · 缺少日期不補零</Caption1>
+          <Caption1>TWD</Caption1>
         </div>
         <div className="asset-trend-range" aria-label="歷史區間">
           {RANGES.map((option) => (
@@ -273,14 +273,7 @@ export function AssetTrendChart({
             </svg>
           </div>
 
-          <div className="asset-trend-caption">
-            <Caption1>
-              {showLine
-                ? `${pointCount} 個保存點；線段遇到缺日會中斷。縱軸依目前區間縮放。`
-                : `目前 ${pointCount} 個保存點；累積 ${MIN_TREND_POINTS} 點後才連成趨勢線，避免用稀疏資料製造趨勢。`}
-            </Caption1>
-            <span className="asset-trend-key"><i aria-hidden="true" />空心虛線點代表暫估資料</span>
-          </div>
+          <Caption1>{pointCount} 個保存點</Caption1>
           <ol className="sr-only">
             {plot.points.map((point) => (
               <li key={`accessible:${point.source.id}`}>
@@ -294,7 +287,7 @@ export function AssetTrendChart({
           <Text weight="semibold">{unavailable ? "資產歷史目前無法讀取" : "每日資料正在累積"}</Text>
           <Caption1>
             {unavailable
-              ? "詳細原因已放在上方更新狀態；其他資產資料仍可正常使用。"
+              ? "請至設定 → 更新狀態查看原因。"
               : "PAOS 會在每日取樣時間保存一個彙總估值點，累積後才顯示趨勢。"}
           </Caption1>
         </div>

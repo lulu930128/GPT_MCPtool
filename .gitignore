@@ -44,6 +44,10 @@
 **/__pycache__/
 **/*.py[cod]
 **/.pytest_cache/
+**/.pytest-tmp-*/
+**/.test-tmp-*/
+**/test-tmp-*/
+**/pytest-cache-files-*/
 **/.mypy_cache/
 **/.ruff_cache/
 **/.coverage

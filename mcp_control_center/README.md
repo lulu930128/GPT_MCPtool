@@ -1,14 +1,14 @@
 # MCP Control Center
 
-`MCP Control Center` 是可擴充的本機 MCP runtime Windows 中樞。它不是第八個 MCP，
+`MCP Control Center` 是可擴充的本機 MCP runtime Windows 中樞。它不是 MCP server，
 不持有任何市場、記憶、學習、workspace、Codex job 或財務資料；即使 MCP server 或
 Secure MCP Tunnel 故障，中樞仍可獨立檢查、記錄與協調啟動。
 
 目前 application release 為 `1.1.0`。registry schema v3、component descriptor schema v1
 與 `unified-lifecycle-v3` 是獨立契約版本，不因 application release 而重新編號。
 
-目前預設的 registry v3 已登錄七個元件，全部使用 `unified-lifecycle-v3`
-component controller，並由各元件自己持有 runtime ownership。七個正式元件都維持 enabled、
+目前預設的 registry v3 已登錄八個元件，全部使用 `unified-lifecycle-v3`
+component controller，並由各元件自己持有 runtime ownership。八個正式元件都維持 enabled、
 auto-start；English Study 常駐 Hub、MCP 與元件自有 tunnel。OMI backend 維持 external
 dependency，不屬於 Control Center lifecycle ownership；Memory Core 與 Personal Asset OS
 的正式私人資料也不屬於 manager authority：
@@ -21,7 +21,7 @@ dependency，不屬於 Control Center lifecycle ownership；Memory Core 與 Pers
 
 目前保留全部舊 component tray source、launcher、Startup／restore artifact 與
 `config/components.json` rollback manifest。中樞提供單一狀態與操作入口，但不隱藏或取代
-component-specific action，也不提供危險的 Stop All／kill-by-name。七個元件皆已完成
+component-specific action，也不提供危險的 Stop All／kill-by-name。八個元件皆已完成
 controller 遷移與 live adoption；既有六個元件另保留 legacy tray closure artifact，舊 artifact
 尚未刪除。
 
@@ -30,7 +30,7 @@ controller 遷移與 live adoption；既有六個元件另保留 legacy tray clo
 component-owned stateless lifecycle controller：controller 以 mutex、PID file、exact
 executable／command、listener ownership 與必要的 process lineage 管理 detached child
 runtime，完成 action 後退出。中樞不持有 child process handle，也不新增 IPC。Loader 仍保留
-`legacy-tray` 相容能力，供 rollback 或尚未升級的新註冊元件使用；目前七個 descriptor 皆為 v3。
+`legacy-tray` 相容能力，供 rollback 或尚未升級的新註冊元件使用；目前八個 descriptor 皆為 v3。
 
 ## 能力
 
@@ -44,6 +44,9 @@ runtime，完成 action 後退出。中樞不持有 child process handle，也�
   `BlockedUpstream` 僅表示 owned core 與 tunnel 都已就緒，外部 dependency 仍不可用，
   不會遮蔽 server 或 tunnel failure。
 - 將目前狀態寫入 atomic `state.json`，只在狀態變化或 action 發生時追加每日 JSONL event。
+- Reconcile 另寫入 atomic `reconcile-progress.json`；tray 只接受自己啟動的 operation ID，並在
+  controller 執行期間逐元件顯示 `Pending`、`Checking`、`Ready`、`Needs attention` 或 `Failed`。
+  因此新開機的長時間檢查不會再把上一次 boot 的 `Stopped` 當成目前結果。
 - 開機 reconciliation 只對真正 `Stopped` 的元件呼叫既有非破壞性 Start；不自動 Restart
   `Unhealthy`、上游阻塞或 ownership 不明的程序。每個 component 的 monitor、action 與
   post-action wait 都有獨立 exception boundary；單一失敗會寫入 bounded
@@ -81,7 +84,7 @@ Automatic repair 遵循 [`Bounded Repair Policy`](docs/RepairPolicy.md)：只有
 
 ### Tunnel runtime inventory 與 child network policy
 
-[`Child Process Network Policy`](docs/ChildProcessNetworkPolicy.md) 定義七個 production component
+[`Child Process Network Policy`](docs/ChildProcessNetworkPolicy.md) 定義八個 production component
 共用的 loopback bypass 與 proxy 邊界。Controller 只在 child spawn 時清除 ambient proxy、設定
 `NO_PROXY=127.0.0.1,localhost`，完成後還原 parent environment；不修改 Windows 全域 proxy。
 
@@ -104,6 +107,7 @@ Inventory 不下載、更新、複製或切換 binary。`runtime\tunnel-client\`
 ```text
 %LOCALAPPDATA%\McpControlCenter\
 ├── state.json
+├── reconcile-progress.json
 ├── tray.pid
 ├── events\YYYY-MM-DD.jsonl
 ├── diagnostics\latest.json
@@ -116,7 +120,11 @@ Inventory 不下載、更新、複製或切換 binary。`runtime\tunnel-client\`
     └── <原 Startup shortcuts>
 ```
 
-可用 `MCP_CONTROL_CENTER_DATA_DIR` 指定另一個 private、repo-external 目錄。事件不保存
+`reconcile-progress.json` 是 manager-owned、bounded 的營運進度，只含 boot／operation ID、時間、
+元件 ID／顯示名稱與安全狀態；完成後保留最後一次結果供診斷，下一次 Reconcile 會原子取代。
+損毀、超過大小限制、舊 operation 或不符 contract 的文件會 fail closed，tray 不會採用。
+
+可用 `MCP_CONTROL_CENTER_DATA_DIR` 指定另一個 private、repo-external 目錄。事件與進度不保存
 health response body、MCP payload、token、secret、credential、DPAPI ciphertext 或 domain data；
 `token`、`secret`、`credential`、`authorization`、`payload`、`content` 等欄位會被 redaction。
 
@@ -158,7 +166,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\control-center.ps1 `
 
 中樞 tray 的 `Exit control center only` 只關閉中樞，不停止任何 component。
 
-七個元件都使用 `component-menu-v1`；既有元件把舊托盤的 Copy／Open／金鑰狀態／備份等功能直接列在
+八個元件都使用 `component-menu-v1`；既有元件把舊托盤的 Copy／Open／金鑰狀態／備份等功能直接列在
 Control Center 的元件子選單。中樞只渲染 descriptor 內固定的 action ID，再委派給元件自己的
 `scripts/control-center-ui.ps1`；它不接收任意 arguments，也不讀 tunnel ID、credential、備份結果
 或 domain payload。`Open troubleshooting tools` 仍可按需開啟 component-owned diagnostic UI，
@@ -181,7 +189,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\startup.ps1 -Action 
 
 Adopt 只移動 descriptor 中已識別的 component shortcut，其他 Startup 項目與
 `Open Market Intelligence Launcher.lnk` 不在操作範圍。中樞登入後先等待設定的 initial delay，
-再按 `startupOrder` 逐一檢查；已 Ready 的元件不會重複啟動。
+再按 `startupOrder` 逐一檢查；已 Ready 的元件不會重複啟動。等待與檢查期間 tray 會顯示
+本次 Reconcile 的即時進度，不會沿用上一份 `state.json` 的 component label；controller 完成後
+才切回最終 authoritative `state.json`。
 
 預覽回復：
 
@@ -389,3 +399,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\component-health.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\component-health.ps1 `
   -Component personal_asset_os -SmokeTest
 ```
+
+
+## Listening Audio 納管
+
+`listening_audio` 是第八個 enabled／autoStart 元件，startupOrder `80`。
+元件 controller 擁有 Trainer → MCP → tunnel 的啟動流程；固定埠為 `18811`、`18810`、`18812`。
+依賴、私有設定與操作方法見 [Listening Audio 整合文件](../listening_audio/docs/ControlCenterIntegration.md)。
+中樞只讀安全 health 與 ownership metadata，不讀取題目、音訊、作答或金鑰。

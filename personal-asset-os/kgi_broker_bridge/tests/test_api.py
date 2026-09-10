@@ -58,6 +58,15 @@ def test_health_is_bounded_and_positions_require_bearer_token() -> None:
             )
             assert positions_v2.status_code == 200
             assert positions_v2.json()["schema_version"] == "broker.position.v2"
+            unauthorized_account = await client.get("/api/v1/account-state")
+            assert unauthorized_account.status_code == 401
+            state = await client.get(
+                "/api/v1/account-state", headers={"Authorization": f"Bearer {TOKEN}"}
+            )
+            assert state.status_code == 200
+            assert state.headers["cache-control"] == "no-store"
+            assert state.json()["settled_cash"] is None
+            assert synthetic_batch().account_ref not in state.text
             assert {scope["market"] for scope in positions_v2.json()["scopes"]} == {
                 "TW",
                 "US",
@@ -86,6 +95,8 @@ def test_disabled_runtime_fails_closed_and_exposes_no_trading_routes() -> None:
                 "/api/health",
                 "/api/v1/positions",
                 "/api/v2/positions",
+                "/api/v1/account-state",
             }
+            assert all(set(methods) == {"get"} for methods in paths.values())
 
     asyncio.run(exercise())

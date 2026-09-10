@@ -14,6 +14,17 @@ raw reasoning、任意本機路徑或未授權資料暴露給 client。
 4. `messages.jsonl` 保留使用者輸入 metadata、附件摘要與舊版相容，不再獨自代表完整 transcript。
 5. `events.jsonl` 是 Bridge 操作／稽核事件；它與 user-visible conversation projection 分開。
 
+## Shared App Server ownership
+
+`BridgeRuntime` 建立一個 component-owned `CodexAppServerClient`，由它啟動一個 shared App Server child
+process；所有 Bridge thread 與 turn 都共用這個 process。App Server PID 不代表任何單一 thread，停止或
+kill 該 PID 是整個 Codex Bridge 的 shutdown／restart，會使其他 active turns 一起中斷。
+
+單一工作取消只能由 controller 以 exact `threadId`／`turnId` 呼叫 `turn/interrupt`。Active job 或 pending
+approval 期間的 component restart 仍由 approval-sensitive lifecycle guard 拒絕；不得用直接
+`Stop-Process`、per-thread PID 假設或第二套 process manager 繞過此邊界。Shared stderr 若沒有 thread identity，
+在多個 turn 同時 active 時也不得任意歸到其中一個 job。
+
 ## Checkpoint 與 journal recovery
 
 - Revision 先 append 到 `conversation-events.jsonl` 並完成 file sync，才允許更新 process memory；checkpoint
@@ -76,6 +87,9 @@ flowchart LR
 - Reader 不以 exception 猜 protocol；先依 metadata 的 `historyMode` 分流。Paginated history 必須取得全部
   cursor pages，並固定要求 `itemsView="full"`；任何頁失敗、cursor loop、重複 turn 或安全上限超出都不覆蓋
   最後一次已驗證 projection。
+- App Server history 會完整讀取；送往 Widget 的 bounded projection 使用 2,000,000 字元總文字預算，且每筆
+  command output 最多 2,000 字元。超限時保留 item identity／status、優先保留較新的 user-visible narrative，
+  並以 `native_projection_bounded` 明示 UI 技術輸出已縮限；原始 native history 不會被修改。
 - Paginated full read 前後會各取一次 metadata/head fingerprint。中途新增或變更 turn 時完整重試一次；第二次仍不一致
   以 `HistoryChangedDuringRead` fail closed。到達 `maxTurns` 且仍有 cursor 時直接回 `HistoryLimitExceeded`，不送出 `limit=0`。
 - Fingerprint 變更或週期 full-read 到期才抓完整 history；成功 hydration 是 authoritative replacement，來源已移除
@@ -85,6 +99,9 @@ flowchart LR
 - Live delta 以 stable item id 更新原項目；`item/completed` 取代同 item 的暫態內容。
 - Interrupted／failed turn 會停止 streaming indicator，但保留 partial assistant／command output。
 - 同一個 job 的 notification、approval 與 synthetic lifecycle event 依序處理，避免 race 造成 revision 倒退。
+- Widget 以 `data-timeline-key` 做 incremental reconciliation；append、remove、reorder 只新增、移除或移動
+  對應節點，signature 變更只替換該節點並保留 `details.open`。正常 poll 不重建整段 transcript，既有節點的
+  action 使用一次性 event delegation，避免重用節點時累積 click handler。
 
 ## User-visible item allowlist
 
@@ -118,6 +135,10 @@ active automation target 每 4 秒核對，focus／visibility 回復時立即 re
 未變更時沿用 process 內最後一份已驗證 native snapshot，不重讀完整 history。Patch 第一個 revision 若不是預期下一筆，
 或 client cursor 與 server state 無法連續，server 回傳完整 projection 重新對齊，避免靜默漏訊息。
 
+Focus 與 visibility 共用同一個 full-registry single-flight coordinator。每次新 full refresh 取得 monotonic
+generation；只有 current generation 可以修改 conversations、cursor 與 diagnostics，stale response 直接丟棄。
+Cursor load-more 會等待 full refresh、綁定當下 generation／cursor，且永遠 merge-only，不具有 replace authority。
+
 ## 專案與對話範圍
 
 Server-side unified registry 以 App Server `thread/list` 為 native inventory，依 `threadId` 合併 Bridge JobStore
@@ -129,7 +150,9 @@ precedence。Bridge 不掃描 `.codex` database 或 rollout；automation adapter
 Native inventory 與 automation adapter 使用獨立 failure boundary；其中一方失敗時仍回傳另一方與 durable Bridge jobs，
 並附上 bounded diagnostics。Conversation `updatedAt` 不混入 automation 設定時間，automation 時間另放
 `automationUpdatedAt`。Inventory 會沿 App Server cursor chain 讀取，顯式安全上限為 10,000；超過時標示 incomplete。
-Widget 只有在 server 回傳 `reset=true` 的第一頁才重建 registry，後續頁一律累加。
+Registry 只在 native inventory 成功、complete 且為 first page 時回 `reset=true`。Unavailable、incomplete、truncated
+或 cursor page 都是 merge-only；server 會保留上一份 verified native inventory，並讓 durable Bridge／automation
+overlay 繼續合併。Widget 即使收到 degraded first page 也不清除既有 conversation。
 
 本機 history project 若與 `.local/projects.json` 的 exact path 相符，會與 Bridge job 合併並以 `threadId`
 去重。其他 App Server 發現的 cwd 會先經 `realpath`、目錄存在性與敏感路徑 deny rules 檢查；安全的實際

@@ -105,6 +105,20 @@ def _gateway(runner: FakeRunner) -> KGISuperPySubprocessGateway:
     )
 
 
+def test_account_and_positions_share_bounded_acquisition(monkeypatch: pytest.MonkeyPatch) -> None:
+    tick = [100.0]
+    monkeypatch.setattr(
+        "kgi_broker_bridge.adapters.kgisuperpy_gateway.time.monotonic", lambda: tick[0]
+    )
+    runner = FakeRunner(_v2_success_payload())
+    gateway = _gateway(runner)
+    first = gateway.read_positions_v2()
+    tick[0] += 1
+    assert gateway.read_positions_v2() is first
+    tick[0] += 15
+    assert gateway.read_positions_v2() is not first
+
+
 def test_gateway_passes_secrets_only_in_bounded_child_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

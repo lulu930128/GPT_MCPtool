@@ -1,0 +1,26 @@
+{
+  "schema_version": "1.2",
+  "set_id": "LISTENING-EXAMPLE-001",
+  "level": "N3",
+  "question_count": 1,
+  "answer_sequence": [1],
+  "questions": [{
+    "id": "Q001", "level": "N3", "type": "point_comprehension", "topic": "company",
+    "question_ja": "会議は何時からですか。",
+    "question_zh_tw": "會議幾點開始？",
+    "audio_script": [{ "seq": 1, "speaker": "Man", "voice_slot": "male", "text": "明日の会議は午後三時からです。" }],
+    "options": [
+      { "key": 1, "text_ja": "午後三時", "text_zh_tw": "下午三點" },
+      { "key": 2, "text_ja": "午後二時", "text_zh_tw": "下午兩點" },
+      { "key": 3, "text_ja": "午前十時", "text_zh_tw": "上午十點" },
+      { "key": 4, "text_ja": "午前九時", "text_zh_tw": "上午九點" }
+    ],
+    "correct_option": 1,
+    "explanation": {
+      "summary_zh_tw": "會議在明天下午三點開始。",
+      "evidence_ja": "午後三時からです。",
+      "evidence_zh_tw": "下午三點開始。",
+      "wrong_options": [], "vocabulary": [], "grammar": [], "model_sentence": "会議は午後三時からです。"
+    }
+  }]
+}

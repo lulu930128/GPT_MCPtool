@@ -6,6 +6,7 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
+from personal_asset_os.services.broker_account_state import AccountState
 from personal_asset_os.services.broker_read import BrokerBridgeClient
 from personal_asset_os.settings import Settings
 
@@ -93,6 +94,8 @@ def test_bridge_client_reads_strict_contract_and_keeps_token_secret() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal requests
         requests += 1
+        if request.url.path == "/api/v1/account-state":
+            return httpx.Response(404)
         assert request.url == "http://127.0.0.1:18878/api/v2/positions"
         assert request.headers["Authorization"] == f"Bearer {TOKEN}"
         return httpx.Response(200, json=payload())
@@ -106,7 +109,7 @@ def test_bridge_client_reads_strict_contract_and_keeps_token_secret() -> None:
     assert first.snapshot is not None
     assert first.snapshot.scopes[0].valuations[0].native_market_value == 12000  # type: ignore[union-attr]
     assert second.read_mode == "memory_cache"
-    assert requests == 1
+    assert requests == 2
     assert TOKEN not in repr(settings())
 
 
@@ -122,6 +125,32 @@ def test_bridge_error_is_unavailable_not_empty() -> None:
     assert result.snapshot is None
     assert "HTTP 503" in result.warnings[0]
     assert "failed" not in result.warnings[0]
+
+
+def test_account_success_survives_position_failure() -> None:
+    state = AccountState(captured_at=NOW, status="partial", buying_power="25")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/account-state":
+            return httpx.Response(200, json=state.model_dump(mode="json"))
+        return httpx.Response(503)
+
+    result = BrokerBridgeClient(settings(), transport=httpx.MockTransport(handler)).read(now=NOW)
+    assert result.status == "unavailable"
+    assert result.account_state is not None
+    assert result.account_state.buying_power == 25
+
+
+def test_account_failure_does_not_erase_positions() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/account-state":
+            return httpx.Response(200, json={"schema_version": "wrong", "settled_cash": "0"})
+        return httpx.Response(200, json=payload())
+
+    result = BrokerBridgeClient(settings(), transport=httpx.MockTransport(handler)).read(now=NOW)
+    assert result.status == "complete"
+    assert result.snapshot is not None
+    assert result.account_state is None
 
 
 def test_old_snapshot_is_marked_stale() -> None:

@@ -62,7 +62,12 @@ def create_mcp_server(
             "USD native values. Only describe KGI values as live when broker.status is complete "
             "and preserve as-of, price/FX quality, missing/stale price or FX, market scope, "
             "broker-account mapping, and reconciliation "
-            "warnings. "
+            "warnings. broker.account_state is independent account evidence; check its freshness "
+            "and field quality independently of position status. Qualified settled_cash is USD; "
+            "settled_cash_twd uses cash_fx and may differ from broker app buying power. Only "
+            "cash_valuation_included cash contributes to provisional net worth, with account "
+            "mapping deduplication. Settlement entries have unknown posting status and are not "
+            "pending totals; liquidity metrics are never additional assets. "
             "This server has no mutation tools and cannot write to the ledger."
         ),
     )
@@ -76,6 +81,7 @@ def create_mcp_server(
                 broker_read=resolved_broker_reader.read(),
                 broker_investment_account_id=settings.broker_investment_account_id,
                 broker_us_investment_account_id=settings.broker_us_investment_account_id,
+                broker_cash_account_id=settings.broker_cash_account_id,
                 fx_provider=resolved_fx_reader,
                 reporting_timezone=settings.reporting_timezone,
             )

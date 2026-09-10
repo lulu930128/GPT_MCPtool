@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     broker_price_max_age_seconds: float = Field(default=300.0, gt=0, le=86400)
     broker_investment_account_id: str | None = None
     broker_us_investment_account_id: str | None = None
+    broker_cash_account_id: str | None = None
     fx_enabled: bool = True
     fx_taifex_url: str = "https://openapi.taifex.com.tw/v1/DailyForeignExchangeRates"
     fx_cbc_url: str = "https://cpx.cbc.gov.tw/API/DataAPI/Get?FileName=BP01D01"
@@ -129,7 +130,8 @@ class Settings(BaseSettings):
             raise ValueError("KGI Broker Bridge URL must not contain a path")
         return value.strip().rstrip("/")
 
-    @field_validator("broker_investment_account_id", "broker_us_investment_account_id")
+    @field_validator("broker_investment_account_id", "broker_us_investment_account_id",
+                     "broker_cash_account_id")
     @classmethod
     def normalize_broker_account_id(cls, value: str | None) -> str | None:
         normalized = value.strip() if value else ""

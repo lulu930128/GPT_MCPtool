@@ -1,0 +1,31 @@
+{
+  "name": "listening-audio-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "UNLICENSED",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/tests/*.test.js",
+    "smoke:http": "npm run build && node scripts/smoke-http.mjs",
+    "smoke:live": "npm run build && node scripts/smoke-live.mjs",
+    "start": "node dist/src/http-main.js",
+    "start:http": "node dist/src/http-main.js",
+    "start:stdio": "node dist/src/index.js",
+    "test:runtime": "powershell -NoProfile -ExecutionPolicy Bypass -File tests/test-runtime-control.ps1",
+    "runtime:status": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/runtime-control.ps1 -Action Status",
+    "tunnel:init": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action Init",
+    "tunnel:doctor": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action Doctor"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

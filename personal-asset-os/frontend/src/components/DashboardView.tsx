@@ -1,3 +1,4 @@
+import { StockPieChart } from "./StockPieChart";
 import {
   Badge,
   Button,
@@ -15,6 +16,7 @@ import {
   formatCurrency,
   formatCurrencyAmount,
   formatDate,
+  formatDecimal,
   qualityLabel,
 } from "../format";
 import type {
@@ -24,7 +26,8 @@ import type {
   ReviewSpendingRange,
 } from "../types";
 import { EmptyState, Section } from "./Common";
-import { DonutChart } from "./DonutChart";
+
+import { BrokerAccountState } from "./BrokerAccountState";
 
 const RANGE_LABELS: Record<ReviewSpendingRange, string> = {
   "1m": "本月",
@@ -41,6 +44,7 @@ function labelSource(value: string): string {
     activity_fund: "活動資金帳戶",
     portfolio_valuation: "投資估值",
     ledger: "正式帳本",
+    asset_valuation: "帳本與券商現金估值",
     aggregate: "其餘合計",
     position: "持倉估值",
   }[value] ?? value;
@@ -68,6 +72,7 @@ function AllocationTable({
               {kind === "spending" ? "消費去向" : kind === "stock" ? "持股" : "資產"}
             </TableHeaderCell>
             {kind === "spending" ? <TableHeaderCell>依據</TableHeaderCell> : null}
+            {kind === "stock" ? <><TableHeaderCell>現價（原幣）</TableHeaderCell><TableHeaderCell>股數</TableHeaderCell></> : null}
             <TableHeaderCell>金額</TableHeaderCell>
             <TableHeaderCell>占比</TableHeaderCell>
           </TableRow>
@@ -90,6 +95,14 @@ function AllocationTable({
               {kind === "spending" ? (
                 <TableCell><Caption1>{labelSource(item.label_source)}</Caption1></TableCell>
               ) : null}
+              {kind === "stock" ? <>
+                <TableCell className="number-cell">
+                  <div>{item.native_price == null ? "缺少資料" : formatCurrencyAmount(item.native_price, item.native_currency ?? "TWD")}</div>
+                  <Caption1>{item.price_quality === "broker_close" ? "收盤參考" : qualityLabel(item.valuation_status)}
+                    {item.price_at ? ` · ${new Date(item.price_at).toLocaleString("zh-TW", {hour12: false})}` : ""}</Caption1>
+                </TableCell>
+                <TableCell className="number-cell">{formatDecimal(item.quantity)}</TableCell>
+              </> : null}
               <TableCell className="number-cell">{formatCurrency(item.amount)}</TableCell>
               <TableCell className="number-cell">{item.share_percent}%</TableCell>
             </TableRow>
@@ -101,9 +114,10 @@ function AllocationTable({
 }
 
 function CompositionNote({ composition }: { composition: ReviewComposition }) {
+  if (composition.excluded_count === 0 && Number(composition.excluded_amount) <= 0) return null;
   return (
     <div className="composition-note">
-      <Caption1>{composition.policy}</Caption1>
+
       {composition.excluded_count > 0 || Number(composition.excluded_amount) > 0 ? (
         <Badge appearance="tint" color="warning">
           排除 {composition.excluded_count} 筆
@@ -125,75 +139,38 @@ export function DashboardView({ dashboard, trend }: { dashboard: Dashboard; tren
 
   return (
     <div className="view-stack review-dashboard">
-      <section className="review-hero" aria-labelledby="review-title">
-        <div className="review-ledger">
-          <Caption1 className="review-eyebrow">
-            PERSONAL REVIEW · {formatDate(dashboard.review.as_of)}
-          </Caption1>
-          <h1 id="review-title">資產複盤</h1>
-          <p>把活動資金、股票、負債與本月流量放在同一張個人資產表上，先看金額，再看占比。</p>
-          <dl className="balance-sheet">
-            <div><dt>總資產</dt><dd>{formatCurrency(dashboard.review.summary.gross_assets)}</dd></div>
-            <div><dt>信用與其他負債</dt><dd className="negative">− {formatCurrency(dashboard.review.summary.debt)}</dd></div>
-            <div className="balance-total"><dt>暫估淨資產</dt><dd>{formatCurrency(dashboard.review.summary.provisional_net_worth)}</dd></div>
-            <div><dt>活動資金</dt><dd>{formatCurrency(dashboard.metrics.liquid_cash)}</dd></div>
-            <div><dt>本月收入</dt><dd>{formatCurrency(dashboard.metrics.monthly_income)}</dd></div>
-            <div><dt>本月支出</dt><dd>{formatCurrency(dashboard.metrics.monthly_expense)}</dd></div>
-          </dl>
-          {Number(dashboard.review.summary.unpriced_investment_cost) > 0 ? (
-            <Caption1 className="review-footnote">
-              總資產含 {formatCurrency(dashboard.review.summary.unpriced_investment_cost)}
-              缺價成本替代值；圓餅圖不納入。
-            </Caption1>
-          ) : null}
-        </div>
-        <div className="review-hero-chart">
-          <div className="review-module-heading">
-            <div><Caption1>全部資產</Caption1><h2>資產配置</h2></div>
-            <Badge
-              appearance="tint"
-              color={dashboard.review.asset_allocation.status === "complete" ? "success" : "warning"}
-            >
-              {qualityLabel(dashboard.review.asset_allocation.status)}
-            </Badge>
-          </div>
-          <DonutChart
-            composition={dashboard.review.asset_allocation}
-            centerLabel="資產合計"
-            ariaLabel="活動資金、股票與其他資產占比"
-          />
-          <AllocationTable
-            composition={dashboard.review.asset_allocation}
-            kind="asset"
-            ariaLabel="資產配置明細"
-          />
-          <CompositionNote composition={dashboard.review.asset_allocation} />
-        </div>
-      </section>
-
+      <header className="overview-heading"><div><Caption1>{formatDate(dashboard.review.as_of)}</Caption1><h1>資產複盤</h1></div><Badge appearance="tint">{qualityLabel(dashboard.quality)}</Badge></header>
+      <dl className="overview-metrics">
+        <div className="overview-net"><dt>暫估淨資產</dt><dd>{formatCurrency(dashboard.review.summary.provisional_net_worth)}</dd></div>
+        <div><dt>活動資金</dt><dd>{formatCurrency(dashboard.metrics.liquid_cash)}</dd></div>
+        <div><dt>e財庫現金</dt><dd>{dashboard.metrics.broker_cash_total == null ? "—" : formatCurrency(dashboard.metrics.broker_cash_total)}</dd></div>
+        <div><dt>股票市值</dt><dd>{formatCurrency(dashboard.review.stock_allocation.total)}</dd></div>
+        <div><dt>信用與其他負債</dt><dd>{formatCurrency(dashboard.review.summary.debt)}</dd></div>
+      </dl>
+      <div className="overview-flow"><span>本月收入 <strong>{formatCurrency(dashboard.metrics.monthly_income)}</strong></span><span>本月支出 <strong>{formatCurrency(dashboard.metrics.monthly_expense)}</strong></span><span>總資產 <strong>{formatCurrency(dashboard.review.summary.gross_assets)}</strong></span></div>
+      {Number(dashboard.review.summary.unpriced_investment_cost) > 0 ? <Caption1>總資產含 {formatCurrency(dashboard.review.summary.unpriced_investment_cost)} 缺價成本替代值，配置圖不納入。</Caption1> : null}
+      <Section title="資產配置">
+        <div className="allocation-strip" aria-label="資產占比">{dashboard.review.asset_allocation.chart_items.map((item, index) => <div key={item.key} style={{flexGrow: Number(item.share_percent), background: `var(--chart-${Math.min(index, 5)})`}} title={`${item.label} ${item.share_percent}%`} />)}</div>
+        <div className="allocation-inline">{dashboard.review.asset_allocation.table_items.map((item, index) => <div key={item.key}><i style={{background: `var(--chart-${Math.min(index, 5)})`}} /><span>{item.label}</span><strong>{formatCurrency(item.amount)}</strong><small>{item.share_percent}%</small></div>)}</div>
+        <CompositionNote composition={dashboard.review.asset_allocation} />
+      </Section>
+      <div className="overview-columns">
+      {trend}
       <Section title="全部股票配置">
         <div className="review-module-heading review-section-intro">
           <div>
             <Caption1>台股與美股合併</Caption1>
-            <p>以可追溯的 TWD 市值比較每檔持股；美股缺 FX 時保留持倉，但不進占比分母。</p>
+
           </div>
           <strong>{formatCurrency(dashboard.review.stock_allocation.total)}</strong>
         </div>
-        <div className="allocation-layout">
-          <DonutChart
-            composition={dashboard.review.stock_allocation}
-            centerLabel="股票市值"
-            ariaLabel="台股與美股合併持倉占比"
-          />
-          <AllocationTable
-            composition={dashboard.review.stock_allocation}
-            kind="stock"
-            ariaLabel="台美股持倉占比明細"
-          />
-        </div>
+        <StockPieChart composition={dashboard.review.stock_allocation} />
+        <AllocationTable composition={dashboard.review.stock_allocation} kind="stock" ariaLabel="台美股持倉占比明細" />
         <CompositionNote composition={dashboard.review.stock_allocation} />
       </Section>
 
+      </div>
+      <div className="overview-columns">
       <Section
         title="消費去向"
         action={
@@ -217,27 +194,21 @@ export function DashboardView({ dashboard, trend }: { dashboard: Dashboard; tren
               {dashboard.review.spending.range_semantics[spendingRange]} · {spending.transaction_count}
               筆正式消費
             </Caption1>
-            <p>同一分類、店家或描述會合併，金額仍以正式帳本為準。</p>
+
           </div>
           <strong>{formatCurrency(spending.total)}</strong>
         </div>
-        <div className="allocation-layout">
-          <DonutChart
-            composition={spending}
-            centerLabel={RANGE_LABELS[spendingRange]}
-            ariaLabel={`${RANGE_LABELS[spendingRange]}消費去向占比`}
-          />
-          <AllocationTable
-            composition={spending}
-            kind="spending"
-            ariaLabel={`${RANGE_LABELS[spendingRange]}消費去向明細`}
-          />
-        </div>
+        <div className="spending-bars">{spending.table_items.slice(0, 5).map((item, index) => <div key={item.key}><div><span>{item.label}</span><strong>{formatCurrency(item.amount)}</strong><small>{item.share_percent}%</small></div><div className="spending-track"><i style={{width: `${item.share_percent}%`, background: `var(--chart-${index})`}} /></div></div>)}</div>
+        {spending.table_items.length === 0 ? <EmptyState title="尚無消費" body="此期間尚無可比較的消費資料。" /> : null}
+        <details className="overview-details"><summary>全部消費明細（{spending.table_items.length}）</summary><AllocationTable composition={spending} kind="spending" ariaLabel="消費去向明細" /></details>
         <CompositionNote composition={spending} />
       </Section>
 
-      {trend}
+      <BrokerAccountState broker={dashboard.broker} />
 
+      </div>
+
+      <details open className="overview-details"><summary>估值與資料依據 · {qualityLabel(dashboard.quality)}</summary>
       <Section title="估值與資料依據">
         <div className="evidence-strip">
           <div><Caption1>總覽品質</Caption1><Badge appearance="tint">{qualityLabel(dashboard.quality)}</Badge></div>
@@ -253,6 +224,8 @@ export function DashboardView({ dashboard, trend }: { dashboard: Dashboard; tren
         </div>
       </Section>
 
+      </details>
+      <details open className="overview-details"><summary>最近交易（{dashboard.recent_transactions.length}）</summary>
       <Section title="最近交易">
         {dashboard.recent_transactions.length === 0 ? (
           <EmptyState title="尚無交易" body="從手機記錄並同步後，正式入帳的交易會出現在這裡。" />
@@ -286,6 +259,7 @@ export function DashboardView({ dashboard, trend }: { dashboard: Dashboard; tren
           </div>
         )}
       </Section>
+      </details>
     </div>
   );
 }

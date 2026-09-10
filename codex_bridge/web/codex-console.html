@@ -1874,6 +1874,9 @@
           conversationCursor: null,
           conversations: [],
           diagnosticsSignature: "",
+          registryRefreshGeneration: 0,
+          registryRefreshInFlight: null,
+          registryLoadMoreInFlight: null,
         };
         let rpcId = 0;
         const pendingRequests = new Map();
@@ -2007,20 +2010,8 @@
             applyStatus(data);
           }
           if (data.job) mergeJob(data.job);
-          if (Array.isArray(data.conversations)) {
-            const replaceRegistry = data.reset === true;
-            const known = new Map((replaceRegistry ? [] : state.conversations).map((conversation) => [conversation.conversationId, conversation]));
-            data.conversations.forEach((conversation) => known.set(
-              conversation.conversationId,
-              Object.assign({}, known.get(conversation.conversationId) || {}, conversation),
-            ));
-            state.conversations = Array.from(known.values()).sort((left, right) =>
-              String(right.updatedAt || "").localeCompare(String(left.updatedAt || ""))
-            );
-            state.conversationCursor = data.nextCursor || null;
-            state.treeSignature = "";
-          }
-          if (Array.isArray(data.diagnostics)) applyConversationDiagnostics(data.diagnostics);
+          const registryPayload = Array.isArray(data.conversations);
+          if (!registryPayload && Array.isArray(data.diagnostics)) applyConversationDiagnostics(data.diagnostics);
           if (data.unifiedConversation) selectUnifiedConversation(data.unifiedConversation);
           if (data.id && data.status && Array.isArray(data.messages)) mergeJob(data);
           render();
@@ -2047,6 +2038,7 @@
             native_unavailable: "Codex 對話來源暫時無法讀取",
             native_inventory_truncated: "對話數量超過安全讀取上限",
             native_snapshot_unstable: "對話更新中，暫時保留上一份已驗證內容",
+            native_projection_bounded: "大型對話的技術輸出已縮限，原始 Codex 歷史仍完整保留",
             automation_unavailable: "排程資訊暫時無法讀取",
             automation_target_missing: "有排程指向已不存在的對話",
             automation_target_unresolved: "有排程目標尚未解析",
@@ -2054,6 +2046,23 @@
           };
           const message = normalized.map((item) => (labels[item.code] || item.code) + (item.count > 1 ? " × " + item.count : "")).join("；");
           showNotice("部分資料以降級模式顯示：" + message);
+        }
+
+        function applyConversationRegistryResponse(data, options) {
+          if (!data || !Array.isArray(data.conversations)) return;
+          const replaceRegistry = options.allowAuthoritativeReset === true && data.reset === true;
+          const known = new Map((replaceRegistry ? [] : state.conversations).map((conversation) => [conversation.conversationId, conversation]));
+          data.conversations.forEach((conversation) => known.set(
+            conversation.conversationId,
+            Object.assign({}, known.get(conversation.conversationId) || {}, conversation),
+          ));
+          state.conversations = Array.from(known.values()).sort((left, right) =>
+            String(right.updatedAt || "").localeCompare(String(left.updatedAt || ""))
+          );
+          state.conversationCursor = data.nextCursor || null;
+          state.treeSignature = "";
+          applyConversationDiagnostics(Array.isArray(data.diagnostics) ? data.diagnostics : []);
+          render();
         }
 
         function mergeJob(job) {
@@ -2262,6 +2271,14 @@
             updateNewContentButton();
           }
         }, { passive: true });
+        $("#thread").addEventListener("click", (event) => {
+          const target = event.target && typeof event.target.closest === "function"
+            ? event.target.closest("[data-approval], [data-result-artifact]")
+            : null;
+          if (!target || !$("#thread").contains(target)) return;
+          if (target.dataset.approval) decideApproval(target.dataset.approval, target.dataset.decision);
+          else if (target.dataset.resultArtifact) loadArtifact(target.dataset.resultArtifact);
+        });
         $("#refresh-status").addEventListener("click", () => withBusy(refreshStatus));
         $("#classification").addEventListener("change", () => {
           state.draftArtifacts.forEach((artifact) => {
@@ -2365,15 +2382,52 @@
 
         async function loadMoreConversations() {
           if (!state.conversationCursor) return;
-          await loadConversationRegistry(state.conversationCursor);
+          await loadMoreConversationRegistry(state.conversationCursor);
         }
 
         async function loadConversationRegistry(cursor) {
-          await callTool("codex_unified_conversation_list", {
-            cursor: cursor || undefined,
+          return cursor ? loadMoreConversationRegistry(cursor) : refreshConversationRegistry();
+        }
+
+        function requestConversationRegistryRefresh() {
+          if (document.hidden) return Promise.resolve();
+          return refreshConversationRegistry();
+        }
+
+        function refreshConversationRegistry() {
+          if (state.registryRefreshInFlight) return state.registryRefreshInFlight;
+          const generation = ++state.registryRefreshGeneration;
+          const request = callTool("codex_unified_conversation_list", {
             limit: 2000,
             maxConversations: 10000,
+          }, { update: false }).then((data) => {
+            if (generation !== state.registryRefreshGeneration) return;
+            applyConversationRegistryResponse(data, { allowAuthoritativeReset: true });
+          }).finally(() => {
+            if (state.registryRefreshInFlight === request) state.registryRefreshInFlight = null;
           });
+          state.registryRefreshInFlight = request;
+          return request;
+        }
+
+        async function loadMoreConversationRegistry(cursor) {
+          if (!cursor) return;
+          if (state.registryRefreshInFlight) await state.registryRefreshInFlight;
+          if (cursor !== state.conversationCursor) return;
+          if (state.registryLoadMoreInFlight) return state.registryLoadMoreInFlight;
+          const generation = state.registryRefreshGeneration;
+          const request = callTool("codex_unified_conversation_list", {
+            cursor: cursor,
+            limit: 2000,
+            maxConversations: 10000,
+          }, { update: false }).then((data) => {
+            if (generation !== state.registryRefreshGeneration || cursor !== state.conversationCursor) return;
+            applyConversationRegistryResponse(data, { allowAuthoritativeReset: false });
+          }).finally(() => {
+            if (state.registryLoadMoreInFlight === request) state.registryLoadMoreInFlight = null;
+          });
+          state.registryLoadMoreInFlight = request;
+          return request;
         }
 
         function schedulePoll() {
@@ -2416,13 +2470,13 @@
 
         document.addEventListener("visibilitychange", () => {
           if (!document.hidden) {
-            void loadConversationRegistry().catch(() => undefined);
+            void requestConversationRegistryRefresh().catch(() => undefined);
             if (state.selectedConversation) void pollSelectedJob();
           }
           schedulePoll();
         }, { passive: true });
         window.addEventListener("focus", () => {
-          void loadConversationRegistry().catch(() => undefined);
+          void requestConversationRegistryRefresh().catch(() => undefined);
           if (state.selectedConversation) void pollSelectedJob();
         }, { passive: true });
         window.addEventListener("resize", () => {
@@ -2518,7 +2572,7 @@
             $("#console").classList.remove("rail-open");
           })));
           const loadMoreLocal = document.querySelector("[data-load-local-history]");
-          if (loadMoreLocal) loadMoreLocal.addEventListener("click", () => withBusy(() => loadConversationRegistry(state.conversationCursor)));
+          if (loadMoreLocal) loadMoreLocal.addEventListener("click", () => withBusy(loadMoreConversations));
         }
 
         function ledgerProjects() {
@@ -2612,9 +2666,7 @@
           const entries = conversationEntries(job);
           const keys = entries.map((entry) => entry.key);
           const thread = $("#thread");
-          const existing = Array.from(thread.children);
-          const sameStructure = keys.length === state.timelineKeys.length && keys.every((key, index) => state.timelineKeys[index] === key);
-          let changed = !sameStructure;
+          let changed = false;
           if (!entries.length) {
             const emptySignature = "empty:" + job.id;
             if (state.messageSignature !== emptySignature) {
@@ -2624,28 +2676,12 @@
             state.messageSignature = emptySignature;
             state.timelineKeys = [];
             state.timelineSignatures.clear();
-          } else if (!sameStructure || existing.length !== entries.length) {
-            thread.innerHTML = entries.map((entry) => entry.html).join("");
+          } else {
+            changed = reconcileTimeline(thread, entries);
             state.timelineKeys = keys;
             state.timelineSignatures = new Map(entries.map((entry) => [entry.key, entry.signature]));
             state.messageSignature = JSON.stringify(keys);
-          } else {
-            entries.forEach((entry, index) => {
-              if (state.timelineSignatures.get(entry.key) === entry.signature) return;
-              const previous = existing[index];
-              const replacement = htmlElement(entry.html);
-              if (previous && previous.tagName === "DETAILS" && replacement.tagName === "DETAILS") replacement.open = previous.open;
-              previous.replaceWith(replacement);
-              state.timelineSignatures.set(entry.key, entry.signature);
-              changed = true;
-            });
           }
-          document.querySelectorAll("[data-approval]").forEach((button) => button.addEventListener("click", () => {
-            decideApproval(button.dataset.approval, button.dataset.decision);
-          }));
-          document.querySelectorAll("[data-result-artifact]").forEach((button) => button.addEventListener("click", () => {
-            loadArtifact(button.dataset.resultArtifact);
-          }));
           if (changed && nearBottom) {
             state.newContentAvailable = false;
             requestAnimationFrame(() => { transcript.scrollTop = transcript.scrollHeight; updateNewContentButton(); });
@@ -2653,6 +2689,52 @@
             state.newContentAvailable = true;
           }
           updateNewContentButton();
+        }
+
+        function reconcileTimeline(thread, entries) {
+          const existing = Array.from(thread.children);
+          const keyedNodes = new Map();
+          for (const node of existing) {
+            const key = node.dataset.timelineKey;
+            if (!key || keyedNodes.has(key)) {
+              thread.replaceChildren(...entries.map((entry) => timelineElement(entry)));
+              return true;
+            }
+            keyedNodes.set(key, node);
+          }
+
+          let changed = existing.length !== entries.length;
+          let position = thread.firstElementChild;
+          for (const entry of entries) {
+            let node = keyedNodes.get(entry.key);
+            if (!node) {
+              node = timelineElement(entry);
+              changed = true;
+            } else if (state.timelineSignatures.get(entry.key) !== entry.signature) {
+              const wasAtPosition = node === position;
+              const replacement = timelineElement(entry);
+              if (node.tagName === "DETAILS" && replacement.tagName === "DETAILS") replacement.open = node.open;
+              node.replaceWith(replacement);
+              node = replacement;
+              if (wasAtPosition) position = replacement;
+              changed = true;
+            }
+            if (node !== position) {
+              thread.insertBefore(node, position);
+              changed = true;
+            }
+            position = node.nextElementSibling;
+            keyedNodes.delete(entry.key);
+          }
+          for (const node of keyedNodes.values()) {
+            node.remove();
+            changed = true;
+          }
+          return changed;
+        }
+
+        function timelineElement(entry) {
+          return htmlElement(entry.html);
         }
 
         function conversationEntries(job) {

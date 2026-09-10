@@ -245,6 +245,42 @@ test("controller suppresses lifecycle noise and bounds App Server diagnostics", 
   assert.equal(diagnostics[0]?.data?.target, "codex_test");
 });
 
+test("controller does not misattribute shared App Server stderr across concurrent turns", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-bridge-shared-stderr-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const projectPath = join(root, "project");
+  const jobsDir = join(root, "jobs");
+  await mkdir(projectPath);
+  const store = new JobStore(jobsDir, join(root, ".local", "codex-inbox"));
+  await store.initialize();
+  const fake = new FakeTransport();
+  const config = testConfig(root, jobsDir, projectPath);
+  const textBundles = new TextBundleStore(config.stagingDir);
+  await textBundles.initialize();
+  const controller = new CodexBridgeController(config, store, textBundles, fake);
+  const firstPreview = previewWorkPackage({ projectId: "omi", title: "First", objective: "Inspect first." });
+  const secondPreview = previewWorkPackage({ projectId: "omi", title: "Second", objective: "Inspect second." });
+  const first = await controller.dispatch({
+    preview: firstPreview,
+    previewDigest: firstPreview.previewDigest,
+    idempotencyKey: "shared-stderr-first",
+  });
+  const second = await controller.dispatch({
+    preview: secondPreview,
+    previewDigest: secondPreview.previewDigest,
+    idempotencyKey: "shared-stderr-second",
+  });
+  await waitFor(() => store.get(first.record.id)?.status === "running" && store.get(second.record.id)?.status === "running");
+
+  fake.emitStderr('{"level":"ERROR","fields":{"message":"unscoped shared failure"},"target":"codex_test"}');
+  await new Promise((resolve) => setTimeout(resolve, 25));
+
+  for (const jobId of [first.record.id, second.record.id]) {
+    const snapshot = await store.snapshot(jobId, 0, 200);
+    assert.equal(snapshot.events.some((event) => event.type === "codex.diagnostic.error"), false);
+  }
+});
+
 test("controller resumes a completed conversation with the selected model and de-duplicates messages", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "codex-bridge-conversation-"));
   context.after(() => rm(root, { recursive: true, force: true }));

@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import io
 import os
 from dataclasses import dataclass
 
 import pytest
 
-from kgi_broker_bridge.kgi_worker import WorkerFailure, run_positions, run_positions_v2
+from kgi_broker_bridge.kgi_worker import (
+    WorkerFailure,
+    _liquidity_evidence,
+    _settlement_evidence,
+    run_positions,
+    run_positions_v2,
+)
 
 
 @dataclass
@@ -234,3 +241,62 @@ def test_v2_worker_returns_partial_scope_without_erasing_tw(
     assert scopes["TW"]["error_code"] is None
     assert scopes["TW"]["rows"]
     assert scopes["US"]["error_code"] == "account_unavailable"
+
+
+def test_account_queries_are_bounded_and_strip_identity_fields() -> None:
+    calls = []
+
+    class Account:
+        def SettleAmt(self, *, FType: str) -> FakeHoldings:  # noqa: N802, N803
+            calls.append(("settlement", FType))
+            return FakeHoldings([{"CURRENCY": "TWD", "CSRPAMT1": "10",
+                                  "Account": "SECRET", "customer_name": "SECRET"}])
+
+    class SubAccount:
+        def PositionDetailReport(self, currency: str) -> FakeHoldings:  # noqa: N802
+            calls.append(("liquidity", currency))
+            return FakeHoldings([{"currency": "USD", "pp3": "0", "pp5": "0",
+                                  "customer_id": "SECRET", "customer_name": "SECRET"}])
+
+    class Api:
+        def set_Account(self, account: str) -> None:  # noqa: N802
+            calls.append(("select", account))
+
+        def set_SubAccount(self, account: str) -> None:  # noqa: N802
+            calls.append(("select_sub", account))
+
+    api = Api()
+    api.Account = Account()
+    api.SubAccount = SubAccount()
+    settlement = _settlement_evidence(api, "SYNTHETIC-TW")
+    liquidity = _liquidity_evidence(api, "SYNTHETIC-US")
+    assert "SECRET" not in repr((settlement, liquidity))
+    assert calls == [("select", "SYNTHETIC-TW"), ("settlement", "SS"),
+                     ("select_sub", "SYNTHETIC-US"), ("liquidity", "USD")]
+
+
+def test_session_reuses_login_and_preserves_account_observation_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kgi_broker_bridge import kgi_worker
+    _set_credentials(monkeypatch)
+    api = FakeApi(FakeHoldings([{"Symbol": "0050", "NETQTY0": 10}]))
+    kgi = FakeKGI(api)
+    login_calls = []
+    original_login = kgi.login
+
+    def login(*args):
+        login_calls.append(args)
+        return original_login(*args)
+
+    kgi.login = login
+    outputs = []
+    monkeypatch.setattr(kgi_worker.sys, "__stdin__", io.StringIO("read\nread\nclose\n"))
+    monkeypatch.setattr(kgi_worker, "_emit", outputs.append)
+    kgi_worker.run_session(kgi)
+    assert len(login_calls) == 1
+    assert len(outputs) == 2
+    assert api.logged_out
+    assert outputs[0]["account_state"] is outputs[1]["account_state"]
+    assert "captured_at" in outputs[0]["account_state"]
+    assert outputs[0]["scopes"] is not outputs[1]["scopes"]

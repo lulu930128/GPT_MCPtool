@@ -9,6 +9,7 @@ from decimal import Decimal, InvalidOperation
 
 from pydantic import ValidationError
 
+from kgi_broker_bridge.account_state import AccountState, normalize_account_state
 from kgi_broker_bridge.contracts import (
     AggregateSnapshotStatus,
     BrokerAccountRef,
@@ -167,6 +168,9 @@ class KGIInventoryAdapter:
     gateway: InventoryGateway
     identity: AccountIdentityProjector
 
+    def close(self) -> None:
+        self.gateway.close()
+
     def get_health(self) -> BrokerHealth:
         return self.gateway.get_health()
 
@@ -176,6 +180,10 @@ class KGIInventoryAdapter:
 
     def get_positions_v2(self) -> BrokerPositionSnapshotV2:
         return self._normalize_v2(self.gateway.read_positions_v2())
+
+    def get_account_state(self) -> AccountState:
+        batch = self.gateway.read_positions_v2()
+        return normalize_account_state(batch.account_state, batch.captured_at, self.identity)
 
     def _normalize(self, batch: RawInventoryBatch) -> BrokerPositionSnapshot:
         captured_at = _aware_utc(batch.captured_at, "captured_at")

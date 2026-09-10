@@ -1,13 +1,18 @@
 # Changelog
 
 This file records user-visible, contract, security, operations, and repository-structure changes.
-Workspace releases use one shared application/package SemVer. Protocol, schema, registry, and
-domain-contract versions remain independent and are not rewritten by a workspace release.
+Workspace and component application/package versions evolve independently. Protocol, schema,
+registry, and domain-contract versions are not rewritten by a workspace release.
 
 ## Unreleased
 
 ### Added
 
+- Listening Audio 0.1.0 provides five bounded Trainer tools, read-only WAV resources, and
+  component-owned Trainer/MCP/tunnel lifecycle integration with Control Center.
+- Project Reading adds bounded audio reads and an isolated synthetic HTTPS audio probe.
+- Personal Asset OS adds broker cash/account-state projections, explicit account mapping,
+  idempotent balance reconciliation, and dashboard explanations and allocation views.
 - English Study 0.3.0 adds three bounded reference-catalog tools, a component-owned desktop
   launcher, fixed local ports, and its own managed secure-tunnel lifecycle.
 - Personal Asset OS adds read-time Taiwan and US broker valuation overlays, traceable FX fallback,
@@ -21,6 +26,9 @@ domain-contract versions remain independent and are not rewritten by a workspace
 
 ### Changed
 
+- Control Center adds a compact status-aware tray menu and unified MCP health details.
+- Codex Bridge bounds native UI projections and preserves verified conversation inventory during
+  partial or unavailable source reads; the widget adopts a compact dark workspace layout.
 - OMI Search 1.2.0 now uses the official Python MCP SDK with locked `uv` dependencies, publishes
   eleven underscore-only tool names, retains `omi.search` only as a hidden legacy callable alias,
   and advances the Taiwan dashboard resource to its v2 contract.
@@ -40,6 +48,7 @@ domain-contract versions remain independent and are not rewritten by a workspace
 
 ### Fixed
 
+- PAOS monthly-expense API tests use a fixed reporting clock instead of depending on the host month.
 - Memory Core lifecycle recovery now distinguishes stale or reused managed PIDs from an active
   owned listener before deciding whether a component is running.
 - Component lifecycle status preserves `OwnershipUnknown` when process, owner, listener, or lineage

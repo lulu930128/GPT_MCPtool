@@ -106,3 +106,44 @@ def test_backup_restore_recovers_core_rows(
             )
     finally:
         restored.engine.dispose()
+
+
+def test_confirm_observation_is_balanced_idempotent_and_preserves_later_spending(
+    session: Session,
+) -> None:
+    bank = add_account(session, "盤點", AccountKind.ASSET, AccountSubtype.BANK,
+                       liquid=True, opening=Decimal("1000"))
+    observation = reporting.record_balance_observation(
+        session, account_id=bank.id, reported_balance=Decimal("800"),
+        observed_at=NOW, source="盤點",
+    )
+    ledger.record_expense(session, payment_account_id=bank.id, amount=Decimal("50"),
+                          occurred_at=NOW + timedelta(minutes=1), description="後續消費")
+    result = reporting.confirm_balance_observation(session, observation.id,
+                                                   expected_difference=Decimal("-200"))
+    assert result["created"] is True
+    assert ledger.account_balance(session, bank.id) == Decimal("750")
+    again = reporting.confirm_balance_observation(session, observation.id,
+                                                  expected_difference=Decimal("-200"))
+    assert again["created"] is False
+    assert again["transaction_id"] == result["transaction_id"]
+    data = reporting.dashboard(session, as_of=NOW + timedelta(minutes=2))
+    assert data["reconciliations"][0]["difference"] == Decimal("0")
+    assert data["metrics"]["monthly_expense"] == Decimal("50")
+
+
+def test_confirm_observation_rejects_changed_difference(session: Session) -> None:
+    import pytest
+
+    from personal_asset_os.errors import ConflictError
+    bank = add_account(session, "盤點", AccountKind.ASSET, AccountSubtype.BANK,
+                       liquid=True, opening=Decimal("1000"))
+    observation = reporting.record_balance_observation(
+        session, account_id=bank.id, reported_balance=Decimal("800"),
+        observed_at=NOW, source="盤點",
+    )
+    with pytest.raises(ConflictError):
+        reporting.confirm_balance_observation(session, observation.id,
+                                               expected_difference=Decimal("-100"))
+    assert ledger.account_balance(session, bank.id) == Decimal("1000")
+    assert observation.reconciled is False

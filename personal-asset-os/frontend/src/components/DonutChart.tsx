@@ -2,7 +2,7 @@ import type { CSSProperties } from "react";
 import { formatCurrency, numericValue } from "../format";
 import type { ReviewComposition } from "../types";
 
-const COLORS = ["#67a7ff", "#e1ae5a", "#7db39b", "#c98ba2", "#8f9ec2", "#717987"];
+const COLORS = Array.from({ length: 6 }, (_, index) => `var(--chart-${index})`);
 const RADIUS = 82;
 const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
 

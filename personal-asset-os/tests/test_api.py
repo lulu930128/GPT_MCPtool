@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
@@ -51,7 +52,11 @@ def test_health_and_empty_dashboard(client: TestClient) -> None:
     assert "api_key" not in ai_status.text.lower()
 
 
-def test_api_credit_card_flow(client: TestClient) -> None:
+def test_api_credit_card_flow(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "personal_asset_os.services.reporting.utc_now",
+        lambda: datetime(2026, 8, 10, tzinfo=UTC),
+    )
     bank = client.post(
         "/api/accounts",
         json={"name": "API 銀行", "kind": "asset", "subtype": "bank", "is_liquid": True},

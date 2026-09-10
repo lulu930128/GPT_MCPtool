@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime
 from decimal import Decimal
+from typing import cast
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
@@ -238,8 +239,20 @@ def _stock_allocation(
                 "label_source": "position",
                 "valuation_status": position["valuation_status"],
                 "position_source": position["position_source"],
+                "quantity": position["quantity"],
+                "native_price": position["native_price"],
+                "native_currency": position["native_currency"],
+                "price_at": position["price_at"],
+                "price_quality": position["price_quality"],
             }
         else:
+            existing["quantity"] = cast(Decimal, existing["quantity"]) + position["quantity"]
+            if any(existing[field] != position.get(field) for field in (
+                "native_price", "native_currency", "price_at", "price_quality"
+            )):
+                existing["native_price"] = None
+                existing["price_at"] = None
+                existing["price_quality"] = "mixed"
             existing_amount = existing["amount"]
             if isinstance(existing_amount, Decimal):
                 existing["amount"] = money(existing_amount + market_value)

@@ -15,7 +15,7 @@ broker snapshot 仍不持久化，也不會變成 Ledger／trade／price row。
 KGI SUPER PY / CA / session       (independent Python 3.12 runtime)
               |
               v
-       one-shot read-only worker
+       bounded read-only session worker
        - credential only via child env
        - captures vendor stdout/stderr
        - InventorySum("B") only
@@ -47,8 +47,10 @@ KGI SUPER PY / CA / session       (independent Python 3.12 runtime)
 - 完整券商帳號只可短暫存在 vendor adapter 記憶體；標準 contract 使用 HMAC opaque id 與
   masked label。
 - 失敗、未登入、CA 異常或無法證明的空結果都不是零持倉。
-- 第一版 live gateway 每次讀取建立一次隔離 session；這會比長駐 session 慢，但能限制
-  vendor dependency、credential 與 session 的生命週期，適合低頻手動同步。
+- live gateway 使用隔離的唯讀 session，連續讀取共用登入；閒置 90 秒或使用滿 30 分鐘
+  便登出，下次讀取重新建立。bridge 結束或讀取逾時也會關閉 worker。
+- 股票批次快取 15 秒；現金與交割快取 60 秒並保留各自原始觀察時間。
+  前端總覽可見時約每 25 秒讀取；輪詢頻率不代表券商報價保證即時。
 
 ## HTTP contract
 
@@ -62,6 +64,20 @@ KGI SUPER PY / CA / session       (independent Python 3.12 runtime)
 並提供完整 live 設定才會啟用 KGI worker。
 
 ## 本機設定
+
+### 帳務讀取
+
+`GET /api/v1/account-state` 使用相同 bearer 認證與 `Cache-Control: no-store`，回傳
+`broker.account_state.v1`。worker 在既有 v2 session 內額外呼叫 `Account.SettleAmt(FType="SS")`
+與 `SubAccount.PositionDetailReport("USD")`。gateway 以 15 秒程序記憶體快取共用一次
+acquisition，避免 positions／account-state 連續讀取重複登入；原始資料不落地。
+分項失敗不抹除另一分項，worker 只傳允許的數值欄位及供 HMAC 投影的帳戶識別。
+
+已檢查安裝 SDK：PositionDetailReport 實作只接受 USD，無參數也預設 USD；TWD／None
+會直接拒絕，不能依 docstring 宣稱可查所有幣別。`pp3` 為原幣可交易餘額，`pp5` 為
+原幣可出金；使用者已確認 `balance_twd` 為 USD 現金，
+故 settled_cash_currency=USD，保留 source_field；Bridge 不自行換匯或決定估值納入。
+SettleMark 並不自動轉成 pending；pending summaries 仍為 null。
 
 依本機使用者決定，第一版允許將帳密直接放在 Git-ignored `.env`。這仍是 plaintext secret：
 只應存在這台電腦、限制為目前 Windows 使用者可讀，且不得同步到雲端、貼進 issue、log、

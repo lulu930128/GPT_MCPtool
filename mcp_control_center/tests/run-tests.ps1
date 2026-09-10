@@ -1,4 +1,4 @@
-Set-StrictMode -Version 3.0
+﻿Set-StrictMode -Version 3.0
 $ErrorActionPreference = "Stop"
 
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
@@ -137,12 +137,17 @@ Assert-True (-not (Test-McpCcCommandLineContains -CommandLine 'python.exe -m uvi
 $registryManifest = Read-McpCcManifest
 Assert-Equal $registryManifest.schemaVersion 3 "default control-center registry uses schema version 3"
 Assert-True ((Get-McpCcDefaultManifestPath).EndsWith("mcp_control_center\config\registry.json", [StringComparison]::OrdinalIgnoreCase)) "default loader selects registry v3"
-Assert-Equal $registryManifest.registeredCount 7 "registry v3 has seven registered components"
-Assert-Equal $registryManifest.enabledCount 7 "registry v3 enables all seven production components"
-$expectedActiveIds = @($manifest.components.id) + "english_study"
-Assert-Equal (@($registryManifest.components.id) -join ",") ($expectedActiveIds -join ",") "registry v3 preserves legacy order and appends English Study"
-Assert-True (@($registryManifest.components | Where-Object { $_.runtimeMode -eq "component-controller" }).Count -eq 7) "registry v3 activates all seven component controllers"
+Assert-Equal $registryManifest.registeredCount 8 "registry v3 has eight registered components"
+Assert-Equal $registryManifest.enabledCount 8 "registry v3 enables all eight production components"
+$expectedActiveIds = @($manifest.components.id) + @("english_study", "listening_audio")
+Assert-Equal (@($registryManifest.components.id) -join ",") ($expectedActiveIds -join ",") "registry v3 preserves legacy order and appends English Study and Listening Audio"
+Assert-True (@($registryManifest.components | Where-Object { $_.runtimeMode -eq "component-controller" }).Count -eq 8) "registry v3 activates all eight component controllers"
 Assert-True (@($registryManifest.components | Where-Object { $_.runtimeMode -eq "legacy-tray" }).Count -eq 0) "registry v3 no longer requires a component legacy tray"
+$registeredListening = @($registryManifest.registeredComponents | Where-Object { $_.id -eq "listening_audio" })[0]
+Assert-True ($registeredListening.enabled -and $registeredListening.autoStart) "Listening Audio joins the startup chain"
+Assert-Equal $registeredListening.startupOrder 80 "Listening Audio follows existing components"
+Assert-Equal (@($registeredListening.capabilities) -join ",") "ensure_running,repair_connectivity,restart_core,reload_runtime,shutdown_runtime" "Listening Audio exposes only owned lifecycle actions"
+Assert-Equal (@($registeredListening.probes.port) -join ",") "18811,18810,18812" "Listening Audio keeps three distinct fixed ports"
 $registeredEnglish = @($registryManifest.registeredComponents | Where-Object { $_.id -eq "english_study" })[0]
 Assert-True ($null -ne $registeredEnglish) "English Study remains visible to registry validation"
 Assert-True ($registeredEnglish.enabled -and $registeredEnglish.autoStart) "English Study is adopted into the production startup chain"
@@ -217,12 +222,13 @@ $registryPaosCore = @($registryPaos.probes | Where-Object { $_.id -eq "app" })[0
 Assert-True ($registryPaosCore.resolvedOwnerManagedPidFile.EndsWith("personal-asset-os\.tmp\personal-asset-os-server.pid", [StringComparison]::OrdinalIgnoreCase)) "Personal Asset OS uses its component-owned runner PID file"
 Assert-True ("dataDir" -notin @($registryPaos.probes.summaryFields)) "Personal Asset OS public summaries omit the formal data path"
 $productionPorts = @($registryManifest.components | ForEach-Object { @($_.probes) } | ForEach-Object { [int]$_.port } | Sort-Object -Unique)
-Assert-Equal ($productionPorts -join ",") "18765,18787,18788,18790,18791,18792,18797,18799,18800,18818,18828,18829,18876,18877,18886,18887,18888" "production fixed ports use the reboot-stable high-port cohort"
+Assert-Equal ($productionPorts -join ",") "18765,18787,18788,18790,18791,18792,18797,18799,18800,18810,18811,18812,18818,18828,18829,18876,18877,18886,18887,18888" "production fixed ports use the reboot-stable high-port cohort"
 foreach ($productionPort in $productionPorts) {
     $assessment = Test-McpCcPortAgainstPolicy -Port $productionPort -HostName "127.0.0.1" -Policy $fixturePortPolicy
     Assert-True ($assessment.known -and $assessment.safe) "production port $productionPort stays outside the fixed-service exclusion policy"
 }
 $expectedComponentMenus = [ordered]@{
+    listening_audio = "copy_mcp_url,copy_health_url,open_mcp_health,open_runtime_logs"
     project_reading = "copy_mcp_url,copy_health_url,copy_tunnel_id,open_mcp_health,open_tunnel_ui,open_runtime_logs"
     omi_search = "copy_mcp_url,copy_health_url,copy_tunnel_id,open_mcp_health,open_tunnel_ui,open_runtime_logs,save_control_plane_key,show_key_status"
     japanese_study = "copy_mcp_url,copy_health_url,copy_tunnel_id,open_mcp_health,open_tunnel_ui,open_runtime_logs,open_study_browser,open_hub_health,save_tunnel_key,show_key_status"
@@ -238,6 +244,7 @@ foreach ($componentId in $expectedComponentMenus.Keys) {
     Assert-Equal (@($definition.ui.menuActions.id) -join ",") $expectedComponentMenus[$componentId] "$componentId restores its declared tray functions in template order"
 }
 $expectedDailyMenus = [ordered]@{
+    listening_audio = "restart_mcp,open_health"
     project_reading = "restart_mcp,open_health"
     omi_search = "restart_mcp,open_health"
     japanese_study = "restart_mcp,open_health,open_frontend"
@@ -285,9 +292,9 @@ Assert-Throws { Invoke-McpCcComponentUiAction -Manifest $registryManifest -Compo
 $paosBackupAction = @($registryPaos.ui.menuActions | Where-Object { $_.id -eq "create_verified_backup" })[0]
 Assert-Equal $paosBackupAction.confirmation "required" "Personal Asset OS backup remains an explicit confirmed component-owned action"
 $registrySelfTest = Test-McpCcManifest -Manifest $registryManifest
-Assert-True $registrySelfTest.ok "registry v3 passes all seven registered component contracts"
-Assert-Equal $registrySelfTest.registeredCount 7 "registry self-test reports registered count"
-Assert-Equal $registrySelfTest.enabledCount 7 "registry self-test reports enabled count"
+Assert-True $registrySelfTest.ok "registry v3 passes all eight registered component contracts"
+Assert-Equal $registrySelfTest.registeredCount 8 "registry self-test reports registered count"
+Assert-Equal $registrySelfTest.enabledCount 8 "registry self-test reports enabled count"
 Assert-Equal $registrySelfTest.expectedComponentMenuContract "component-menu-v1" "registry self-test publishes the shared component menu contract"
 foreach ($schemaPath in @("registry-v3.schema.json", "component-descriptor-v1.schema.json")) {
     $null = Get-Content -LiteralPath (Join-Path $projectRoot "schemas\$schemaPath") -Encoding UTF8 -Raw | ConvertFrom-Json
@@ -303,10 +310,13 @@ Assert-True ($traySource -match 'function Start-HealthDetail') "component health
 Assert-True ($traySource -notmatch 'New-Object Windows\.Forms\.MenuItem "(Start component|Repair connectivity|Restart MCP server|Reload component|Stop component)"') "daily tray no longer constructs maintenance lifecycle entries"
 Assert-True ($traySource -notmatch 'Start-IndependentControllerAction -Action ComponentMenuAction') "daily tray no longer flattens component adapter actions"
 Assert-True ($traySource -notmatch 'menuActionDefinition\.arguments') "component menu descriptors cannot inject command arguments"
+Assert-True ($traySource -match 'Read-McpCcReconcileProgress' -and $traySource -match 'Update-UiFromReconcileProgress') "tray polls bounded reconcile progress while the controller is active"
+Assert-True ($traySource -match 'PendingOperationId' -and $traySource -match '-OperationId') "tray scopes progress rendering to its exact reconcile operation"
 $controllerSourceText = Get-Content -LiteralPath (Join-Path $projectRoot "scripts\control-center.ps1") -Encoding UTF8 -Raw
 Assert-True ($controllerSourceText -match '"RestartMcp"\s*\{') "manager exposes the RestartMcp semantic action"
 Assert-True ($controllerSourceText -match 'Get-McpCcRestartMcpDecision') "manager routes RestartMcp through the shared fail-closed decision"
 Assert-True ($controllerSourceText -match 'Invoke-McpCcReconcileItems\s+-Plan\s+\$plan') "manager routes reconciliation through the tested component fault-isolation boundary"
+Assert-True ($controllerSourceText -match 'New-McpCcReconcileProgress' -and $controllerSourceText -match 'ProgressObserver') "manager publishes progress before and during component reconciliation"
 Assert-True ($controllerSourceText -match 'reconcile_component_failed') "manager records a bounded per-component reconciliation failure event"
 Assert-True ($controllerSourceText -match 'Get-McpCcAutomaticRepairDecision') "reconcile reclassifies current evidence before any automatic repair"
 Assert-True ($controllerSourceText -match 'Invoke-McpCcComponentAction[^\r\n]+-Action repair_connectivity') "eligible repair delegates only the component-owned connectivity action"
@@ -330,7 +340,7 @@ $controllerAudit = Get-McpCcControllerAudit -Manifest $registryManifest -Runtime
     $status = if ([string]$Definition.id -eq "omi_search") { "OwnershipMismatch" } else { "Ready" }
     return [pscustomobject]@{ ok=$true; action="Status"; before=$null; after=[pscustomobject]@{ status=$status }; ownedPids=@(); elapsedMs=0; errorCode=$null; message="Status checked." }
 }
-Assert-Equal $controllerAudit.manageableCount 6 "controller audit counts components that remain safe to manage"
+Assert-Equal $controllerAudit.manageableCount 7 "controller audit counts components that remain safe to manage"
 Assert-Equal $controllerAudit.unmanageableCount 1 "controller audit rejects an ownership mismatch even when health probes may be ready"
 Assert-True (-not @($controllerAudit.entries | Where-Object { $_.component -eq "omi_search" })[0].manageable) "controller audit exposes the unmanageable component without domain payloads"
 
@@ -530,6 +540,7 @@ $faultIsolationPlan = @(
     [pscustomobject]@{ component = "component_b"; currentStatus = "Stopped"; decision = "Start" },
     [pscustomobject]@{ component = "component_c"; currentStatus = "Stopped"; decision = "Start" }
 )
+$progressEvents = New-Object Collections.Generic.List[string]
 $faultIsolationActions = @(Invoke-McpCcReconcileItems -Plan $faultIsolationPlan -ItemExecutor {
     param($Item)
     if ($Item.component -eq "component_b") {
@@ -547,6 +558,10 @@ $faultIsolationActions = @(Invoke-McpCcReconcileItems -Plan $faultIsolationPlan 
 } -FailureObserver {
     param($Item, $Failure)
     if ($Item.component -eq "component_b") { throw "observer failure must not abort reconciliation" }
+} -ProgressObserver {
+    param($Item, $Phase, $Result)
+    $progressEvents.Add("$([string]$Item.component):$Phase") | Out-Null
+    if ($Item.component -eq "component_a" -and $Phase -eq "Running") { throw "progress observer failure must not abort reconciliation" }
 })
 Assert-Equal @($faultIsolationActions).Count 3 "reconcile returns one action result for every plan item after a component failure"
 Assert-Equal (@($faultIsolationActions.component) -join ",") "component_a,component_b,component_c" "reconcile preserves component order across a failure"
@@ -555,6 +570,7 @@ Assert-Equal $faultIsolationActions[1].errorCode "TUNNEL_NOT_READY" "reconcile p
 Assert-Equal $faultIsolationActions[1].after "Unknown" "failed reconcile item does not invent a post-action state"
 Assert-True ($faultIsolationActions[1].message -notmatch "private details") "reconcile failure output omits raw component error details"
 Assert-True ($faultIsolationActions[2].ok -and $faultIsolationActions[2].after -eq "Ready") "a later component still runs after an earlier component and observer failure"
+Assert-Equal ($progressEvents -join ",") "component_a:Running,component_a:Completed,component_b:Running,component_b:Completed,component_c:Running,component_c:Completed" "reconcile progress observer brackets every isolated component result"
 
 $codexPaosState = [pscustomobject]@{
     components = @(
@@ -622,6 +638,8 @@ $unknownGate = Get-McpCcControllerMutationGate -ControllerEntry ([pscustomobject
 Assert-True (-not $unknownGate.allowed -and $unknownGate.decision -eq "ManualAttention" -and $unknownGate.errorCode -eq "OWNERSHIP_UNKNOWN") "controller ownership unknown blocks automatic mutation"
 $controllerGuardPlan = @(Get-McpCcReconcilePlan -Manifest ([pscustomobject]@{ components=@($registryPaos) }) -State ([pscustomobject]@{ components=@([pscustomobject]@{ id="personal_asset_os"; status="Stopped" }) }) -ControllerAudit ([pscustomobject]@{ entries=@([pscustomobject]@{ component="personal_asset_os"; status="OwnershipUnknown"; manageable=$false; errorCode=$null }) }))
 Assert-True ($controllerGuardPlan.Count -eq 1 -and $controllerGuardPlan[0].decision -eq "ManualAttention" -and $controllerGuardPlan[0].reasonCode -eq "OWNERSHIP_UNKNOWN") "reconcile never auto-starts a component whose controller reports ownership unknown"
+$readyNoActionPlan = @(Get-McpCcReconcilePlan -Manifest ([pscustomobject]@{ components=@($registryOmi) }) -State ([pscustomobject]@{ components=@([pscustomobject]@{ id="omi_search"; status="Ready" }) }) -ControllerAudit ([pscustomobject]@{ entries=@([pscustomobject]@{ component="omi_search"; status="ControllerError"; manageable=$false; errorCode="CONTROLLER_STATUS_FAILED" }) }))
+Assert-Equal $readyNoActionPlan[0].decision "NoAction" "a Ready component does not require a mutation gate and cannot become false attention"
 $monitorDecision = Get-McpCcRestartMcpDecision -ComponentStatus ([pscustomobject]@{
     status = "Unhealthy"
     issues = @([pscustomobject]@{ code = "MONITOR_EXCEPTION" })
@@ -791,6 +809,30 @@ try {
     Write-McpCcJsonAtomic -Path $documentPath -Document ([pscustomobject]@{ ok = $true; value = 7 })
     $roundTrip = Get-Content -LiteralPath $documentPath -Encoding UTF8 -Raw | ConvertFrom-Json
     Assert-True ($roundTrip.ok -eq $true -and $roundTrip.value -eq 7) "atomic JSON document round-trips"
+
+    $progressOperationId = [Guid]::NewGuid().ToString("D")
+    $progressManifest = [pscustomobject]@{ components = @($registryProject, $registryOmi) }
+    $progressPlan = @(
+        [pscustomobject]@{ component = "project_reading"; currentStatus = "Ready"; decision = "NoAction" },
+        [pscustomobject]@{ component = "omi_search"; currentStatus = "Stopped"; decision = "Start" }
+    )
+    $progress = New-McpCcReconcileProgress -Manifest $progressManifest -BootId "boot-progress-test" -OperationId $progressOperationId
+    Assert-True ($progress.status -eq "Running" -and $progress.completedCount -eq 0 -and (@($progress.components.progressStatus) -join ",") -eq "Pending,Pending") "reconcile progress starts without projecting stale component state"
+    Set-McpCcReconcileProgressPlan -Progress $progress -Plan $progressPlan | Out-Null
+    Update-McpCcReconcileProgress -Progress $progress -ComponentId "project_reading" -Phase Running | Out-Null
+    Assert-Equal $progress.components[0].progressStatus "Running" "active reconcile component is explicit"
+    Update-McpCcReconcileProgress -Progress $progress -ComponentId "project_reading" -Phase Completed -Result ([pscustomobject]@{ component="project_reading"; action="NoAction"; before="Ready"; after="Ready"; ok=$true; errorCode=$null }) | Out-Null
+    Update-McpCcReconcileProgress -Progress $progress -ComponentId "omi_search" -Phase Completed -Result ([pscustomobject]@{ component="omi_search"; action="Failed"; before="Stopped"; after="Unknown"; ok=$false; errorCode="POST_ACTION_NOT_READY" }) | Out-Null
+    Assert-True ($progress.completedCount -eq 2 -and (@($progress.components.progressStatus) -join ",") -eq "Ready,Failed") "reconcile progress preserves ready and failed outcomes independently"
+    Complete-McpCcReconcileProgress -Progress $progress -Status Completed -FinalOverall Ready | Out-Null
+    Assert-True ($progress.status -eq "Completed" -and $progress.finalOverall -eq "Ready") "reconcile progress records the authoritative final aggregate separately"
+    Publish-McpCcReconcileProgress -RuntimeRoot $testRoot -Progress $progress | Out-Null
+    $readProgress = Read-McpCcReconcileProgress -RuntimeRoot $testRoot -ExpectedOperationId $progressOperationId -ExpectedBootId "boot-progress-test"
+    Assert-True ($null -ne $readProgress -and $readProgress.contractVersion -eq "mcpcc-reconcile-progress-v1") "atomic reconcile progress round-trips for the exact boot and operation"
+    Assert-True ($null -eq (Read-McpCcReconcileProgress -RuntimeRoot $testRoot -ExpectedOperationId ([Guid]::NewGuid().ToString("D")))) "another reconcile operation cannot adopt stale progress"
+    Assert-True ($null -eq (Read-McpCcReconcileProgress -RuntimeRoot $testRoot -ExpectedBootId "boot-other")) "another boot cannot adopt stale progress"
+    [IO.File]::WriteAllText((Join-Path $testRoot "reconcile-progress.json"), '{"schemaVersion":1,"contractVersion":"mcpcc-reconcile-progress-v1","secret":"must-not-project"}', (New-Object Text.UTF8Encoding($false)))
+    Assert-True ($null -eq (Read-McpCcReconcileProgress -RuntimeRoot $testRoot)) "malformed reconcile progress fails closed"
     Write-McpCcEvent -RuntimeRoot $testRoot -BootId "boot-test" -Type "redaction_test" -Details @{ apiKey = "never-write"; status = "ok" }
     $eventText = Get-Content -LiteralPath (Get-ChildItem (Join-Path $testRoot "events") -Filter "*.jsonl" | Select-Object -First 1).FullName -Encoding UTF8 -Raw
     Assert-True ($eventText -notmatch "never-write") "event log does not contain secret values"
@@ -1344,13 +1386,13 @@ $inventoryHashBeforeSelfTest = (Get-FileHash -LiteralPath $inventoryPath -Algori
 $inventorySelfTest = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $inventoryScript -Action SelfTest | ConvertFrom-Json
 Assert-True ($LASTEXITCODE -eq 0 -and $inventorySelfTest.ok) "tunnel runtime inventory SelfTest passes"
 Assert-Equal $inventorySelfTest.contractVersion "tunnel-runtime-inventory-v1" "inventory exposes a versioned contract"
-Assert-Equal $inventorySelfTest.configuredComponentCount 7 "inventory covers seven production components"
+Assert-Equal $inventorySelfTest.configuredComponentCount 8 "inventory covers eight production components"
 Assert-True ($inventorySelfTest.executesVersionOnly -and -not $inventorySelfTest.mutatesRuntime -and -not $inventorySelfTest.updatesBinary) "inventory SelfTest declares bounded read-only behavior"
 Assert-Equal (Get-FileHash -LiteralPath $inventoryPath -Algorithm SHA256).Hash $inventoryHashBeforeSelfTest "inventory SelfTest leaves configuration bytes unchanged"
 
 $inventoryConfig = Get-Content -LiteralPath $inventoryPath -Encoding UTF8 -Raw | ConvertFrom-Json
-Assert-Equal @($inventoryConfig.components).Count 7 "inventory configuration declares seven entries"
-Assert-Equal @($inventoryConfig.components.id | Sort-Object -Unique).Count 7 "inventory component ids are unique"
+Assert-Equal @($inventoryConfig.components).Count 8 "inventory configuration declares eight entries"
+Assert-Equal @($inventoryConfig.components.id | Sort-Object -Unique).Count 8 "inventory component ids are unique"
 Assert-True (@($inventoryConfig.components | Where-Object { [string]$_.override -ne "TunnelClientPath" }).Count -eq 0) "every component keeps the explicit TunnelClientPath override"
 Assert-True (-not [IO.Path]::IsPathRooted([string]$inventoryConfig.sharedRuntime.path)) "shared runtime path remains workspace-relative"
 
@@ -1361,7 +1403,8 @@ $networkPolicySources = @(
     "Memory Core\scripts\memory_core_stack.ps1",
     "codex_bridge\scripts\codex-bridge-runtime.psm1",
     "personal-asset-os\scripts\personal-asset-os-runtime.psm1",
-    "english_study\scripts\component-runtime.psm1"
+    "english_study\scripts\component-runtime.psm1",
+    "listening_audio\scripts\component-runtime.psm1"
 )
 foreach ($relativeSourcePath in $networkPolicySources) {
     $sourcePath = Join-Path $workspaceRoot $relativeSourcePath

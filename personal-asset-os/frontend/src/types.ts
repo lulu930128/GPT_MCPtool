@@ -106,6 +106,11 @@ export interface RecentTransaction {
 }
 
 export interface ReviewCompositionItem {
+  quantity?: DecimalValue | null;
+  native_price?: DecimalValue | null;
+  native_currency?: string;
+  price_at?: string | null;
+  price_quality?: string | null;
   key: string;
   label: string;
   amount: DecimalValue;
@@ -226,6 +231,7 @@ export interface Dashboard {
     known_net_worth: DecimalValue;
     non_investment_assets: DecimalValue;
     liquid_cash: DecimalValue;
+    broker_cash_total?: DecimalValue | null;
     debt: DecimalValue;
     reserved_cash: DecimalValue;
     available_cash: DecimalValue;
@@ -241,6 +247,34 @@ export interface Dashboard {
     unresolved_total: DecimalValue;
   };
   broker: {
+    account_state?: {
+      schema_version: "broker.account_state.v1";
+      captured_at: string;
+      freshness: "current" | "stale";
+      status: "partial" | "unavailable";
+      settled_cash: DecimalValue | null;
+      settled_cash_twd: DecimalValue | null;
+      cash_valuation_included: boolean;
+      cash_reconciliation_status: string;
+      ledger_account_id: string | null;
+      ledger_cash: DecimalValue | null;
+      cash_difference: DecimalValue | null;
+      settlement_schedule?: { status: string; reported_receivable: DecimalValue | null; reported_payable: DecimalValue | null; reported_net: DecimalValue | null };
+      cash_fx: {rate?: DecimalValue; provider?: string; effective_at?: string} | null;
+      cash_candidate: DecimalValue | null;
+      buying_power: DecimalValue | null;
+      withdrawable_cash: DecimalValue | null;
+      liquidity_currency: "USD";
+      settlement_status: "reported" | "unavailable";
+      settlements: Array<{
+        slot: number;
+        trade_date: string;
+        settlement_date: string;
+        currency: "TWD";
+        amount: DecimalValue;
+        settle_mark: string;
+      }>;
+    } | null;
     schema_version: "paos.broker_valuation.v2";
     enabled: boolean;
     status: "disabled" | "unavailable" | "complete" | "partial" | "explicit_empty" | "stale";
@@ -323,6 +357,7 @@ export interface DailyValuationPoint {
     known_net_worth: DecimalValue;
     non_investment_assets: DecimalValue;
     liquid_cash: DecimalValue;
+    broker_cash_total?: DecimalValue | null;
     available_cash: DecimalValue;
     debt: DecimalValue;
     investment_book_value: DecimalValue;

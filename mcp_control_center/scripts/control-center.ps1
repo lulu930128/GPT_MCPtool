@@ -6,6 +6,7 @@ param(
     [string]$UiAction,
     [string]$ManifestPath,
     [string]$RuntimeRoot,
+    [string]$OperationId,
     [switch]$PlanOnly,
     [switch]$NoInitialDelay
 )
@@ -62,8 +63,15 @@ function Invoke-StatusAndPublish {
     return $state
 }
 
+function Publish-ReconcileProgressBestEffort {
+    param([Parameter(Mandatory = $true)]$Progress)
+    try { Publish-McpCcReconcileProgress -RuntimeRoot $RuntimeRoot -Progress $Progress | Out-Null }
+    catch { }
+}
+
 $bootId = $null
 $lastActionRoutedAction = $null
+$reconcileProgress = $null
 try {
     $manifest = Read-McpCcManifest -Path $ManifestPath
     if (Test-McpCcPathWithinRoot -Path $RuntimeRoot -Root $manifest.workspaceRoot) {
@@ -284,6 +292,18 @@ try {
             $delegation | ConvertTo-Json -Depth 8
         }
         "Reconcile" {
+            if (-not $PlanOnly) {
+                if ([string]::IsNullOrWhiteSpace($OperationId)) {
+                    $OperationId = [Guid]::NewGuid().ToString("D")
+                }
+                $parsedOperationId = [Guid]::Empty
+                if (-not [Guid]::TryParse($OperationId, [ref]$parsedOperationId)) {
+                    throw "Reconcile OperationId must be a GUID."
+                }
+                $OperationId = $parsedOperationId.ToString("D")
+                $reconcileProgress = New-McpCcReconcileProgress -Manifest $manifest -BootId $bootId -OperationId $OperationId
+                Publish-ReconcileProgressBestEffort -Progress $reconcileProgress
+            }
             if (-not $NoInitialDelay -and -not $PlanOnly) {
                 Start-Sleep -Seconds ([int]$manifest.settings.initialDelaySeconds)
             }
@@ -295,9 +315,13 @@ try {
                 break
             }
 
+            Set-McpCcReconcileProgressPlan -Progress $reconcileProgress -Plan $plan | Out-Null
+            Publish-ReconcileProgressBestEffort -Progress $reconcileProgress
+
             Write-McpCcEvent -RuntimeRoot $RuntimeRoot -BootId $bootId -Type "reconcile_started" -Details @{
                 initialOverall = $initial.overall
                 componentCount = @($manifest.components).Count
+                operationId = $OperationId
             }
             $actions = @(Invoke-McpCcReconcileItems -Plan $plan -ItemExecutor {
                 param($item)
@@ -310,6 +334,12 @@ try {
                 }
                 $item.currentStatus = [string]$current.status
                 try {
+                    if ($current.status -eq "Ready") {
+                        return [pscustomobject]@{
+                            component = $definition.id; action = "NoAction"; before = $current.status; after = $current.status
+                            ok = $true; errorCode = $null; message = "Component was already ready."
+                        }
+                    }
                     $singleComponentManifest = [pscustomobject]@{ settings=$manifest.settings; components=@($definition) }
                     $freshControllerAudit = Get-McpCcControllerAudit -Manifest $singleComponentManifest -RuntimeRoot $RuntimeRoot
                     $controllerEntry = @($freshControllerAudit.entries | Select-Object -First 1)[0]
@@ -366,12 +396,6 @@ try {
                             delegation = $delegation
                         }
                     }
-                    elseif ($current.status -eq "Ready") {
-                        return [pscustomobject]@{
-                            component = $definition.id; action = "NoAction"; before = $current.status; after = $current.status
-                            ok = $true; errorCode = $null; message = "Component was already ready."
-                        }
-                    }
                     else {
                         Write-McpCcEvent -RuntimeRoot $RuntimeRoot -BootId $bootId -Type "manual_attention_required" -Component $definition.id -Details @{
                             status = $current.status; issues = $current.issues
@@ -398,9 +422,15 @@ try {
                     ok = $false
                     errorCode = [string]$failure.errorCode
                 } | Out-Null
+            } -ProgressObserver {
+                param($item, $phase, $result)
+                Update-McpCcReconcileProgress -Progress $reconcileProgress -ComponentId ([string]$item.component) -Phase $phase -Result $result | Out-Null
+                Publish-ReconcileProgressBestEffort -Progress $reconcileProgress
             })
             $final = Invoke-StatusAndPublish -Manifest $manifest -BootId $bootId
-            Write-McpCcEvent -RuntimeRoot $RuntimeRoot -BootId $bootId -Type "reconcile_completed" -Details @{ finalOverall = $final.overall }
+            Complete-McpCcReconcileProgress -Progress $reconcileProgress -Status "Completed" -FinalOverall ([string]$final.overall) | Out-Null
+            Publish-ReconcileProgressBestEffort -Progress $reconcileProgress
+            Write-McpCcEvent -RuntimeRoot $RuntimeRoot -BootId $bootId -Type "reconcile_completed" -Details @{ finalOverall = $final.overall; operationId = $OperationId }
             [pscustomobject]@{ schemaVersion = [int]$manifest.schemaVersion; planOnly = $false; initialState = $initial; actions = $actions; finalState = $final } | ConvertTo-Json -Depth 12
             if ($final.overall -ne "Ready") { exit 2 }
         }
@@ -408,6 +438,13 @@ try {
 }
 catch {
     $message = ([string]$_.Exception.Message -replace '[\r\n]+', ' ').Trim()
+    if ($Action -eq "Reconcile" -and $null -ne $reconcileProgress -and [string]$reconcileProgress.status -eq "Running") {
+        try {
+            Complete-McpCcReconcileProgress -Progress $reconcileProgress -Status "Failed" | Out-Null
+            Publish-ReconcileProgressBestEffort -Progress $reconcileProgress
+        }
+        catch { }
+    }
     if ($Action -in @("RestartMcp", "ComponentMenuAction") -and -not [string]::IsNullOrWhiteSpace($Component)) {
         try {
             $actionErrorCode = Get-McpCcActionErrorCode -Message $message

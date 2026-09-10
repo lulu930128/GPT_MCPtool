@@ -2489,6 +2489,207 @@ function Write-McpCcEvent {
     [IO.File]::AppendAllText($path, (($event | ConvertTo-Json -Compress -Depth 10) + [Environment]::NewLine), $script:Utf8NoBom)
 }
 
+function Assert-McpCcReconcileProgressDocument {
+    param([Parameter(Mandatory = $true)]$Document)
+
+    Assert-McpCcObjectShape -Object $Document `
+        -Allowed @("schemaVersion", "contractVersion", "operationId", "bootId", "action", "status", "startedAt", "updatedAt", "componentCount", "completedCount", "finalOverall", "components") `
+        -Required @("schemaVersion", "contractVersion", "operationId", "bootId", "action", "status", "startedAt", "updatedAt", "componentCount", "completedCount", "finalOverall", "components") `
+        -Label "reconcile progress"
+    if ([int]$Document.schemaVersion -ne 1 -or [string]$Document.contractVersion -ne "mcpcc-reconcile-progress-v1") {
+        throw "Unsupported reconcile progress contract."
+    }
+    $operationGuid = [Guid]::Empty
+    if (-not [Guid]::TryParse([string]$Document.operationId, [ref]$operationGuid)) {
+        throw "Reconcile progress operationId is invalid."
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$Document.bootId) -or ([string]$Document.bootId).Length -gt 128) {
+        throw "Reconcile progress bootId is invalid."
+    }
+    if ([string]$Document.action -ne "Reconcile" -or [string]$Document.status -notin @("Running", "Completed", "Failed")) {
+        throw "Reconcile progress action or status is invalid."
+    }
+    foreach ($field in @("startedAt", "updatedAt")) {
+        $parsedTimestamp = [DateTimeOffset]::MinValue
+        if (-not [DateTimeOffset]::TryParse([string]$Document.$field, [ref]$parsedTimestamp)) {
+            throw "Reconcile progress $field is invalid."
+        }
+    }
+    $componentCount = Assert-McpCcIntegerRange -Value $Document.componentCount -Label "reconcile progress componentCount" -Minimum 0 -Maximum $script:MaximumRegistryComponents
+    $completedCount = Assert-McpCcIntegerRange -Value $Document.completedCount -Label "reconcile progress completedCount" -Minimum 0 -Maximum $componentCount
+    $components = @($Document.components)
+    if ($components.Count -ne $componentCount) {
+        throw "Reconcile progress componentCount does not match components."
+    }
+    $ids = @()
+    foreach ($component in $components) {
+        Assert-McpCcObjectShape -Object $component `
+            -Allowed @("id", "displayName", "progressStatus", "observedStatus", "decision", "action", "errorCode") `
+            -Required @("id", "displayName", "progressStatus", "observedStatus", "decision", "action", "errorCode") `
+            -Label "reconcile progress component"
+        $componentId = [string]$component.id
+        if ($componentId -notmatch '^[a-z][a-z0-9_]{0,63}$' -or $componentId -in $ids) {
+            throw "Reconcile progress component id is invalid or duplicated."
+        }
+        $ids += $componentId
+        if ([string]::IsNullOrWhiteSpace([string]$component.displayName) -or ([string]$component.displayName).Length -gt 128) {
+            throw "Reconcile progress component displayName is invalid."
+        }
+        if ([string]$component.progressStatus -notin @("Pending", "Running", "Ready", "Attention", "Failed")) {
+            throw "Reconcile progress component status is invalid."
+        }
+        foreach ($boundedField in @("observedStatus", "decision", "action", "errorCode")) {
+            $value = [string]$component.$boundedField
+            if ($value.Length -gt 64 -or ($value -and $value -notmatch '^[A-Za-z0-9_]+$')) {
+                throw "Reconcile progress component $boundedField is invalid."
+            }
+        }
+    }
+    $actualCompleted = @($components | Where-Object { [string]$_.progressStatus -in @("Ready", "Attention", "Failed") }).Count
+    if ($completedCount -ne $actualCompleted) {
+        throw "Reconcile progress completedCount does not match components."
+    }
+    $finalOverall = [string]$Document.finalOverall
+    if ([string]$Document.status -eq "Running" -and -not [string]::IsNullOrWhiteSpace($finalOverall)) {
+        throw "Running reconcile progress cannot have a final overall state."
+    }
+    if ([string]$Document.status -eq "Completed" -and ($completedCount -ne $componentCount -or $finalOverall -notin @("Ready", "Degraded", "Failed"))) {
+        throw "Completed reconcile progress requires complete components and a valid final overall state."
+    }
+    if (-not [string]::IsNullOrWhiteSpace($finalOverall) -and $finalOverall -notin @("Ready", "Degraded", "Failed")) {
+        throw "Reconcile progress final overall state is invalid."
+    }
+}
+
+function New-McpCcReconcileProgress {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$BootId,
+        [Parameter(Mandatory = $true)][string]$OperationId
+    )
+
+    $now = [DateTime]::UtcNow.ToString("o")
+    $components = @($Manifest.components | Sort-Object startupOrder | ForEach-Object {
+        [pscustomobject]@{
+            id = [string]$_.id
+            displayName = [string]$_.displayName
+            progressStatus = "Pending"
+            observedStatus = "Unknown"
+            decision = "Pending"
+            action = $null
+            errorCode = $null
+        }
+    })
+    $document = [pscustomobject]@{
+        schemaVersion = 1
+        contractVersion = "mcpcc-reconcile-progress-v1"
+        operationId = $OperationId
+        bootId = $BootId
+        action = "Reconcile"
+        status = "Running"
+        startedAt = $now
+        updatedAt = $now
+        componentCount = $components.Count
+        completedCount = 0
+        finalOverall = $null
+        components = $components
+    }
+    Assert-McpCcReconcileProgressDocument -Document $document
+    return $document
+}
+
+function Set-McpCcReconcileProgressPlan {
+    param(
+        [Parameter(Mandatory = $true)]$Progress,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Plan
+    )
+
+    foreach ($item in @($Plan)) {
+        $entry = @($Progress.components | Where-Object { [string]$_.id -eq [string]$item.component } | Select-Object -First 1)[0]
+        if ($null -eq $entry) { throw "Reconcile progress plan contains an unknown component." }
+        $entry.observedStatus = [string]$item.currentStatus
+        $entry.decision = [string]$item.decision
+    }
+    $Progress.updatedAt = [DateTime]::UtcNow.ToString("o")
+    Assert-McpCcReconcileProgressDocument -Document $Progress
+    return $Progress
+}
+
+function Update-McpCcReconcileProgress {
+    param(
+        [Parameter(Mandatory = $true)]$Progress,
+        [Parameter(Mandatory = $true)][string]$ComponentId,
+        [Parameter(Mandatory = $true)][ValidateSet("Running", "Completed")][string]$Phase,
+        $Result
+    )
+
+    $entry = @($Progress.components | Where-Object { [string]$_.id -eq $ComponentId } | Select-Object -First 1)[0]
+    if ($null -eq $entry) { throw "Reconcile progress update contains an unknown component." }
+    if ($Phase -eq "Running") {
+        $entry.progressStatus = "Running"
+    }
+    else {
+        if ($null -eq $Result) { throw "Completed reconcile progress requires a result." }
+        $entry.observedStatus = if ([string]::IsNullOrWhiteSpace([string]$Result.after)) { [string]$Result.before } else { [string]$Result.after }
+        $entry.action = [string]$Result.action
+        $resultErrorCode = if ($null -eq $Result.PSObject.Properties["errorCode"]) { $null } else { [string]$Result.errorCode }
+        $entry.errorCode = if ([string]::IsNullOrWhiteSpace($resultErrorCode)) { $null } else { $resultErrorCode }
+        if (-not [bool]$Result.ok) { $entry.progressStatus = "Failed" }
+        elseif ([string]$Result.action -eq "ManualAttention") { $entry.progressStatus = "Attention" }
+        elseif ([string]$entry.observedStatus -eq "Ready") { $entry.progressStatus = "Ready" }
+        else { $entry.progressStatus = "Attention" }
+    }
+    $Progress.completedCount = @($Progress.components | Where-Object { [string]$_.progressStatus -in @("Ready", "Attention", "Failed") }).Count
+    $Progress.updatedAt = [DateTime]::UtcNow.ToString("o")
+    Assert-McpCcReconcileProgressDocument -Document $Progress
+    return $Progress
+}
+
+function Complete-McpCcReconcileProgress {
+    param(
+        [Parameter(Mandatory = $true)]$Progress,
+        [Parameter(Mandatory = $true)][ValidateSet("Completed", "Failed")][string]$Status,
+        [string]$FinalOverall
+    )
+
+    $Progress.status = $Status
+    $Progress.finalOverall = if ([string]::IsNullOrWhiteSpace($FinalOverall)) { $null } else { $FinalOverall }
+    $Progress.updatedAt = [DateTime]::UtcNow.ToString("o")
+    Assert-McpCcReconcileProgressDocument -Document $Progress
+    return $Progress
+}
+
+function Publish-McpCcReconcileProgress {
+    param(
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [Parameter(Mandatory = $true)]$Progress
+    )
+
+    Assert-McpCcReconcileProgressDocument -Document $Progress
+    $root = Assert-McpCcSafeRuntimeRoot -RuntimeRoot $RuntimeRoot
+    Write-McpCcJsonAtomic -Path (Join-Path $root "reconcile-progress.json") -Document $Progress
+    return $Progress
+}
+
+function Read-McpCcReconcileProgress {
+    param(
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [string]$ExpectedBootId,
+        [string]$ExpectedOperationId
+    )
+
+    $path = Join-Path (Assert-McpCcSafeRuntimeRoot -RuntimeRoot $RuntimeRoot) "reconcile-progress.json"
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+    try {
+        $progress = (Read-McpCcJsonFile -Path $path -Label "reconcile progress" -MaximumBytes 65536).document
+        Assert-McpCcReconcileProgressDocument -Document $progress
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedBootId) -and [string]$progress.bootId -ne $ExpectedBootId) { return $null }
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedOperationId) -and [string]$progress.operationId -ne $ExpectedOperationId) { return $null }
+        return $progress
+    }
+    catch { return $null }
+}
+
 function Read-McpCcState {
     param([Parameter(Mandatory = $true)][string]$RuntimeRoot)
     $path = Join-Path (Assert-McpCcSafeRuntimeRoot -RuntimeRoot $RuntimeRoot) "state.json"
@@ -3296,9 +3497,9 @@ function Get-McpCcReconcilePlan {
         $controllerGate = if ($null -eq $ControllerAudit) { [pscustomobject]@{ allowed=$true; errorCode=$null } } else { Get-McpCcControllerMutationGate -ControllerEntry $controllerEntry }
         $repairDecision = Get-McpCcAutomaticRepairDecision -Manifest $Manifest -Component $component -ComponentStatus $status
         $decision = if (-not [bool]$component.autoStart) { "SkipDisabled" }
+        elseif ($status.status -eq "Ready") { "NoAction" }
         elseif (-not $controllerGate.allowed) { "ManualAttention" }
         elseif ($status.status -eq "Stopped") { "Start" }
-        elseif ($status.status -eq "Ready") { "NoAction" }
         elseif ($status.status -eq "BlockedUpstream") { "WaitForDependency" }
         elseif ($repairDecision.allowed) { "RepairConnectivity" }
         else { "ManualAttention" }
@@ -3321,12 +3522,17 @@ function Invoke-McpCcReconcileItems {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Plan,
         [Parameter(Mandatory = $true)][scriptblock]$ItemExecutor,
-        [scriptblock]$FailureObserver
+        [scriptblock]$FailureObserver,
+        [scriptblock]$ProgressObserver
     )
 
     $actions = @()
     foreach ($item in @($Plan)) {
         $componentId = [string]$item.component
+        if ($null -ne $ProgressObserver) {
+            try { & $ProgressObserver $item "Running" $null | Out-Null }
+            catch { }
+        }
         try {
             $results = @(& $ItemExecutor $item)
             if ($results.Count -ne 1 -or $null -eq $results[0]) {
@@ -3338,6 +3544,10 @@ function Invoke-McpCcReconcileItems {
                 throw "RECONCILE_COMPONENT_FAILED: Reconcile executor returned a mismatched component result."
             }
             $actions += $result
+            if ($null -ne $ProgressObserver) {
+                try { & $ProgressObserver $item "Completed" $result | Out-Null }
+                catch { }
+            }
         }
         catch {
             $rawMessage = ([string]$_.Exception.Message -replace '[\r\n]+', ' ').Trim()
@@ -3356,6 +3566,10 @@ function Invoke-McpCcReconcileItems {
             $actions += $failure
             if ($null -ne $FailureObserver) {
                 try { & $FailureObserver $item $failure | Out-Null }
+                catch { }
+            }
+            if ($null -ne $ProgressObserver) {
+                try { & $ProgressObserver $item "Completed" $failure | Out-Null }
                 catch { }
             }
         }
@@ -3461,6 +3675,12 @@ Export-ModuleMember -Function @(
     "ConvertTo-McpCcSafeObject",
     "Write-McpCcJsonAtomic",
     "Write-McpCcEvent",
+    "New-McpCcReconcileProgress",
+    "Set-McpCcReconcileProgressPlan",
+    "Update-McpCcReconcileProgress",
+    "Complete-McpCcReconcileProgress",
+    "Publish-McpCcReconcileProgress",
+    "Read-McpCcReconcileProgress",
     "Read-McpCcState",
     "Publish-McpCcState",
     "Test-McpCcComponentContract",

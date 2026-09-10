@@ -1,11 +1,11 @@
 # GPT MCP Tool Workspace
 
-這個 repository 保存七個本機 MCP 專案、一個非 MCP 的 KGI Broker Bridge 與一個 Windows
-runtime 中樞的公開原始碼。它採用 source-only monorepo：七個 MCP 元件維持各自的依賴、
+這個 repository 保存八個本機 MCP 專案、一個非 MCP 的 KGI Broker Bridge 與一個 Windows
+runtime 中樞的公開原始碼。它採用 source-only monorepo：各 MCP 元件維持各自的依賴、
 啟動方式、測試、PID authority 與安全邊界，不把程式碼攤平成單一套件，也不由中樞接管
 domain data 或 component lifecycle。
 
-目前 workspace release 為 `1.1.0`。各元件依自己的 application SemVer 獨立演進：OMI Search 為 `1.2.0`、Project Reading 為 `1.5.0`、English Study 為 `0.3.0`，其餘 application／package 為 `1.1.0`。MCP protocol、schema、registry 與 domain contract 版本維持各自獨立演進，不隨 workspace release 重新編號。
+目前 workspace release 為 `1.1.0`。各元件依自己的 application SemVer 獨立演進；實際版本以各元件 manifest 為準，新增的 Listening Audio 為 `0.1.0`。MCP protocol、schema、registry 與 domain contract 版本維持各自獨立演進，不隨 workspace release 重新編號。
 
 > 這是 source-only repository。個人資料、SQLite、DPAPI 密文、tunnel profile、
 > token、log、PID、cache、虛擬環境、編譯輸出、下載的 executable，以及本機 Agent／Codex
@@ -19,6 +19,7 @@ domain data 或 component lifecycle。
 | [`Memory Core`](./Memory%20Core/) | local-first 個人記憶 API、MCP 與 candidate review system of record | Python / FastAPI / SQLite | 正式資料只存在本機且不進 Git |
 | [`japanese_study`](./japanese_study/) | Japanese Study Hub 的 bounded MCP adapter | TypeScript / Node.js | 需要 Japanese Study Hub HTTP API |
 | [`english_study`](./english_study/) | English Study Hub 的獨立 bounded MCP adapter | TypeScript / Node.js | 需要 `C:\project\english-study-hub` HTTP API；第一版不含音訊，tunnel 由元件自行管理 |
+| [`listening_audio`](./listening_audio/) | 日文聽力考試與音訊的 bounded MCP adapter | TypeScript / Node.js | 需要 Listening Trainer `listening-trainer-v1` API；沿用其 GPT-SoVITS，tunnel／Trainer／MCP 由元件 controller 管理 |
 | [`project_reading`](./project_reading/) | explicit allowlist、多 root、read-only workspace MCP | TypeScript / Node.js | 需要使用者自行設定允許讀取的本機 roots |
 | [`codex_bridge`](./codex_bridge/) | ChatGPT MCP Apps 到本機 Codex App Server 的受控工作交接 | TypeScript / Node.js | 需要可執行且已登入的 Codex CLI、專案 allowlist 與專屬 tunnel id |
 | [`personal-asset-os`](./personal-asset-os/) | local-first 個人資產帳本、dashboard 與唯讀 MCP | Python / FastAPI / React / SQLite | 正式財務資料只存在 `%LOCALAPPDATA%\PersonalAssetOS`，不進 Git |
@@ -30,7 +31,11 @@ domain data 或 component lifecycle。
 
 ## 目前架構狀態
 
-- 七個 MCP component controller 採用 `unified-lifecycle-v3`，由元件自己持有固定 action、
+- `listening_audio` 是新增的本機元件，目前提供 HTTP／STDIO 與唯讀 WAV resource。
+  它只透過 Trainer API 操作考試，不讀資料目錄、不複製模型、不寫日英 Study DB。
+  已透過獨立 controller 接入 Control Center，Trainer／MCP／tunnel 分別使用 `18811`／`18810`／`18812`。
+
+- 八個 MCP component controller 採用 `unified-lifecycle-v3`，由元件自己持有固定 action、
   mutex、PID／owner metadata、listener 與 process lineage 判斷。
 - PID 只是 locator，不是 process identity。可變更 runtime 前必須取得同一個 native process
   instance handle，核對 executable、start time、owner metadata 與 lineage，並透過同一 handle
@@ -59,10 +64,11 @@ domain data 或 component lifecycle。
 
 ## 元件邊界
 
-七個元件可分開維護與測試，但目前的 Windows 本機 runtime 有兩類明確相依：
+各元件可分開維護與測試，但目前的 Windows 本機 runtime 有兩類明確相依：
 
 - `OMI_search` 是 OMI backend 的薄 adapter，不持有市場資料或 freshness 邏輯。
 - `japanese_study` 是 Japanese Study Hub 的薄 adapter，不直接讀取教材、Anki 或 Hub database。
+- `listening_audio` 重用 `project_reading` 的 tunnel client 與 DPAPI key 儲存路徑；profile、PID 與 log 獨立，Trainer 持有考試與音訊資料。
 - `english_study` 是 English Study Hub 的獨立薄 adapter，不共用 Japanese Study 的 API、database、PID 或 port。
 - `OMI_search` 與 `Memory Core` 的部分 Windows lifecycle script 會重用
   `project_reading` 的 tunnel client／key-store 安裝位置。這是本機 runtime 資源重用，
@@ -73,10 +79,10 @@ domain data 或 component lifecycle。
   executable 與正式財務資料仍維持 Git-ignored／repo-external。
 - `personal-asset-os/kgi_broker_bridge` 是 PAOS-owned、non-MCP、read-only process boundary。
   它不寫 PAOS Ledger／database，不向其他元件暴露個人持倉，也不提供下單能力；`kgisuperpy`、
-  CA、credential 與 session 必須留在獨立 runtime。目前尚未登錄 Control Center 或接入正式帳號。
+  CA、credential 與 session 必須留在獨立 runtime。它由 PAOS server 依本機設定啟動，尚未登錄 Control Center。
 
 Control Center 另外提供唯讀的
-[`tunnel-runtime-inventory-v1`](mcp_control_center/docs/ChildProcessNetworkPolicy.md)，列出七個
+[`tunnel-runtime-inventory-v1`](mcp_control_center/docs/ChildProcessNetworkPolicy.md)，列出八個
 production component 實際使用的 executable path、version、SHA-256 與來源 cohort。候選共用位置
 是 `runtime\tunnel-client\`，但 repository 不包含 binary，也不會自動下載、升級或切換；各元件
 保留 explicit `TunnelClientPath` override，採用前必須逐元件完成相容性與 rollback 驗證。
@@ -85,7 +91,7 @@ production component 實際使用的 executable path、version、SHA-256 與來�
 bypass `127.0.0.1`／`localhost`；parent shell 與 Windows 全域 proxy 不會被修改。需要企業 outbound
 proxy 時，必須使用 component-owned 明確設定，不依賴啟動 session 的隱含環境。
 
-因此，在同一台既有 Windows 主機上應保留目前七個頂層目錄名稱。若日後要把其中一個
+因此，在同一台既有 Windows 主機上應保留目前八個頂層目錄名稱。若日後要把其中一個
 元件拆成獨立 repository，應先把該元件的 runtime 安裝依賴改成 self-contained，
 再更新 README、啟動捷徑與驗證命令。
 
@@ -124,6 +130,10 @@ npm test
 cd C:\GPT_MCPtool\english_study
 npm test
 
+cd C:\GPT_MCPtool\listening_audio
+npm test
+npm run smoke:http
+
 cd C:\GPT_MCPtool\project_reading
 npm test
 
@@ -149,7 +159,7 @@ Live backend、tunnel 與 browser／ChatGPT connector smoke 不是單純 source 
 
 ## Windows 托盤與統一 lifecycle
 
-目前七個正式元件都以 `unified-lifecycle-v3` component controller 接入單一可見的
+目前八個正式元件都以 `unified-lifecycle-v3` component controller 接入單一可見的
 `MCP Control Center` tray。中樞統一提供狀態、ensure、connectivity repair、core restart、
 full reload、逐元件 shutdown，以及由 `component-menu-v1` 接回的舊托盤功能；不提供 Stop All，
 也不以 process name 廣泛終止程序。
@@ -164,7 +174,7 @@ English Study 已完成本機 lifecycle、MCP 與固定埠驗證，現在由 Con
 KGI Broker Bridge 已具備隔離式 read-only live adapter，並完成正式 KGI credential／CA
 qualification；它由 PAOS server 依設定啟動與消費，仍不是 Control Center component，且不保存
 原始持倉 snapshot 或提供交易能力。
-這個統一只涵蓋 lifecycle contract，不合併元件實作。七個 MCP 仍各自在頂層資料夾內
+這個統一只涵蓋 lifecycle contract，不合併元件實作。八個 MCP 仍各自在頂層資料夾內
 持有依賴、資料、測試、安全界線、PID authority 與 primary/domain UI；個別差異由 descriptor
 traits/capabilities 與 component-owned controller module 表達。舊 `unified-always-on-v2` tray、
 launcher、Startup／restore artifact 目前保留作 rollback，但不再是正式常駐入口。
@@ -173,7 +183,7 @@ launcher、Startup／restore artifact 目前保留作 rollback，但不再是正
 仍需在 host 端 Refresh Actions／重新連線或開新對話；不要把本機 process restart 當成
 host action snapshot 已更新的證據。
 
-`mcp_control_center` 從 registry 載入 component-owned descriptor、集中檢查七條 enabled always-on
+`mcp_control_center` 從 registry 載入 component-owned descriptor、集中檢查八條 enabled always-on
 chain、保存 boot／status／action 事件，並以可回復流程把 Startup 收斂成一個入口。
 `config/components.json` rollback manifest 仍保留。New Component Kit 提供單一 base template、
 read-only validator，以及 SHA-guarded Plan／Apply／receipt／rollback 註冊流程；新 entry 固定

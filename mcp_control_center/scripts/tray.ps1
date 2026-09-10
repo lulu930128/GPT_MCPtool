@@ -46,6 +46,8 @@ if ($SelfTest) {
         replaceExistingSupported = $true
         autoReconcile = [bool]$AutoReconcile
         healthDetailIndependent = $true
+        reconcileProgressContract = "mcpcc-reconcile-progress-v1"
+        reconcileProgressPolling = $true
     } | ConvertTo-Json -Depth 6
     if (-not $selfTestResult.ok -or -not (Test-Path -LiteralPath $controllerPath -PathType Leaf) -or -not (Test-Path -LiteralPath $healthDetailPath -PathType Leaf)) { exit 1 }
     exit 0
@@ -100,6 +102,7 @@ Add-Type -AssemblyName System.Drawing
 
 $script:ControllerProcess = $null
 $script:PendingLabel = $null
+$script:PendingOperationId = $null
 $script:SecondsSinceRefresh = 0
 $script:Closing = $false
 $script:ComponentUi = @{}
@@ -111,6 +114,17 @@ function Set-NotifyText([string]$Text) {
 
 function Get-StatusLabel([string]$Status) {
     return [string](Get-McpCcStatusPresentation -Status $Status).label
+}
+
+function Get-ReconcileProgressPresentation([string]$Status) {
+    switch ($Status) {
+        "Pending" { return [pscustomobject]@{ symbol = [string][char]0x2026; label = "Pending" } }
+        "Running" { return [pscustomobject]@{ symbol = [string][char]0x2026; label = "Checking" } }
+        "Ready" { return [pscustomobject]@{ symbol = [string][char]0x2713; label = "Ready" } }
+        "Attention" { return [pscustomobject]@{ symbol = [string][char]0x26A0; label = "Needs attention" } }
+        "Failed" { return [pscustomobject]@{ symbol = [string][char]0x2715; label = "Failed" } }
+        default { return [pscustomobject]@{ symbol = "?"; label = "Unknown" } }
+    }
 }
 
 function Quote-ProcessArgument([string]$Value) {
@@ -144,6 +158,11 @@ function Start-ControllerAction {
         "-ManifestPath", $ManifestPath,
         "-RuntimeRoot", $RuntimeRoot
     )
+    $script:PendingOperationId = $null
+    if ($Action -eq "Reconcile") {
+        $script:PendingOperationId = [Guid]::NewGuid().ToString("D")
+        $arguments += @("-OperationId", $script:PendingOperationId)
+    }
     if (-not [string]::IsNullOrWhiteSpace($Component)) { $arguments += @("-Component", $Component) }
     $startInfo = New-Object Diagnostics.ProcessStartInfo
     $startInfo.FileName = (Get-Command powershell.exe -ErrorAction Stop).Source
@@ -155,6 +174,7 @@ function Start-ControllerAction {
     $script:PendingLabel = if ([string]::IsNullOrWhiteSpace($Component)) { $Action } else { "$Action / $Component" }
     $overallItem.Text = "MCP Control Center | Running: $($script:PendingLabel)"
     Set-NotifyText "$trayDisplayName | $($script:PendingLabel)"
+    if ($Action -eq "Reconcile") { Show-ReconcilePendingUi }
 }
 
 function Start-HealthDetail {
@@ -210,6 +230,46 @@ function Update-UiFromState {
     elseif ($state.overall -eq "Degraded") { $notifyIcon.Icon = [Drawing.SystemIcons]::Warning }
     else { $notifyIcon.Icon = [Drawing.SystemIcons]::Error }
     Set-NotifyText "$trayDisplayName | $overallLabel"
+}
+
+function Show-ReconcilePendingUi {
+    $overallItem.Text = "MCP Control Center | Running: Reconcile | 0/$(@($manifest.components).Count) complete"
+    $lastRefreshItem.Text = "Last update: $([DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss'))"
+    foreach ($component in @($manifest.components)) {
+        if (-not $script:ComponentUi.ContainsKey([string]$component.id)) { continue }
+        $ui = $script:ComponentUi[[string]$component.id]
+        $presentation = Get-ReconcileProgressPresentation -Status "Pending"
+        $ui.status.Text = "Reconcile: $($presentation.symbol) $($presentation.label)"
+        $ui.parent.Text = "$($presentation.symbol) $($component.displayName) - $($presentation.label)"
+        $ui.restartMcp.Enabled = $false
+        $ui.health.Enabled = $true
+    }
+    $notifyIcon.Icon = [Drawing.SystemIcons]::Warning
+    Set-NotifyText "$trayDisplayName | Reconcile 0/$(@($manifest.components).Count)"
+}
+
+function Update-UiFromReconcileProgress {
+    if ([string]::IsNullOrWhiteSpace($script:PendingOperationId)) { return $false }
+    $progress = Read-McpCcReconcileProgress -RuntimeRoot $RuntimeRoot -ExpectedOperationId $script:PendingOperationId
+    if ($null -eq $progress) { return $false }
+
+    $overallItem.Text = "MCP Control Center | Running: Reconcile | $([int]$progress.completedCount)/$([int]$progress.componentCount) complete"
+    $lastRefreshItem.Text = "Last update: $([DateTime]::Parse([string]$progress.updatedAt).ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss'))"
+    foreach ($component in @($progress.components)) {
+        if (-not $script:ComponentUi.ContainsKey([string]$component.id)) { continue }
+        $ui = $script:ComponentUi[[string]$component.id]
+        $presentation = Get-ReconcileProgressPresentation -Status ([string]$component.progressStatus)
+        $ui.status.Text = "Reconcile: $($presentation.symbol) $($presentation.label)"
+        $ui.parent.Text = "$($presentation.symbol) $($component.displayName) - $($presentation.label)"
+        $ui.restartMcp.Enabled = $false
+        $ui.health.Enabled = $true
+    }
+    if (@($progress.components | Where-Object { [string]$_.progressStatus -eq "Failed" }).Count -gt 0) {
+        $notifyIcon.Icon = [Drawing.SystemIcons]::Error
+    }
+    else { $notifyIcon.Icon = [Drawing.SystemIcons]::Warning }
+    Set-NotifyText "$trayDisplayName | Reconcile $([int]$progress.completedCount)/$([int]$progress.componentCount)"
+    return $true
 }
 
 $contextMenu = New-Object Windows.Forms.ContextMenu
@@ -321,11 +381,15 @@ $timer.add_Tick({
         $script:ControllerProcess.Dispose()
         $script:ControllerProcess = $null
         $script:PendingLabel = $null
+        $script:PendingOperationId = $null
         $script:SecondsSinceRefresh = 0
         Update-UiFromState
         if ($exitCode -ne 0) {
             $notifyIcon.ShowBalloonTip(1800, $trayDisplayName, "$completedLabel completed with an attention state.", [Windows.Forms.ToolTipIcon]::Warning)
         }
+    }
+    elseif ($null -ne $script:ControllerProcess -and $script:PendingLabel -eq "Reconcile") {
+        Update-UiFromReconcileProgress | Out-Null
     }
     elseif ($null -eq $script:ControllerProcess) {
         $script:SecondsSinceRefresh += 1

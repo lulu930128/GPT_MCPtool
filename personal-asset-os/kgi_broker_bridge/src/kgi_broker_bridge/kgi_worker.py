@@ -7,7 +7,10 @@ import io
 import json
 import math
 import os
+import queue
 import sys
+import threading
+import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
@@ -296,6 +299,88 @@ def run_positions(kgi_module: Any) -> dict[str, object]:
     }
 
 
+def _settlement_evidence(api: Any, selection: str | BaseException) -> dict[str, object]:
+    try:
+        if isinstance(selection, BaseException):
+            raise WorkerFailure("account_unavailable")
+        api.set_Account(selection)
+        rows = _dataframe_rows(api.Account.SettleAmt(FType="SS"))
+        fields = {"CURRENCY"} | {
+            f"{name}{slot}" for name in ("DealDate", "CDate", "CSRPAMT", "SettleMark")
+            for slot in (1, 2, 3)
+        }
+        return {"account_ref": selection, "rows": [
+            {key: value for key, value in row.items() if key in fields} for row in rows
+        ]}
+    except Exception:
+        return {"error_code": "settlement_fetch_failed"}
+
+
+def _liquidity_evidence(api: Any, selection: str | BaseException) -> dict[str, object]:
+    try:
+        if isinstance(selection, BaseException):
+            raise WorkerFailure("account_unavailable")
+        api.set_SubAccount(selection)
+        rows = _dataframe_rows(api.SubAccount.PositionDetailReport("USD"))
+        return {"account_ref": selection, "rows": [
+            {key: value for key, value in row.items()
+             if key in {"currency", "balance_twd", "pp3", "pp5"}}
+            for row in rows
+        ]}
+    except Exception:
+        return {"error_code": "liquidity_fetch_failed"}
+
+
+def collect_positions_v2(
+    api: object, stock_account: str | None, sub_account: str | None,
+    account_state: dict[str, object] | None = None,
+) -> dict[str, object]:
+    account_selections: dict[str, str | BaseException] = {}
+    try:
+        account_selections["TW"] = _stock_account(api, stock_account)
+    except BaseException as exc:
+        account_selections["TW"] = exc
+    try:
+        account_selections["US"] = _sub_account(api, sub_account)
+    except BaseException as exc:
+        account_selections["US"] = exc
+
+    if account_state is None:
+        account_state = _settlement_evidence(api, account_selections["TW"])
+        account_state["liquidity"] = _liquidity_evidence(api, account_selections["US"])
+        account_state["captured_at"] = datetime.now(UTC).isoformat()
+    scopes: list[dict[str, object]] = []
+    tw_selection = account_selections["TW"]
+    if isinstance(tw_selection, BaseException):
+        scopes.append(_unavailable_scope("TW", tw_selection))
+    else:
+        try:
+            scopes.append(_tw_scope(api, tw_selection))
+        except BaseException as exc:
+            scopes.append(_unavailable_scope("TW", exc))
+    us_selection = account_selections["US"]
+    if isinstance(us_selection, BaseException):
+        scopes.append(_unavailable_scope("US", us_selection))
+    else:
+        try:
+            scopes.append(_us_scope(api, us_selection))
+        except BaseException as exc:
+            scopes.append(_unavailable_scope("US", exc))
+    captured_at = datetime.now(UTC)
+    try:
+        package_version = importlib.metadata.version("kgisuperpy")
+    except importlib.metadata.PackageNotFoundError:
+        package_version = None
+    return {
+        "ok": True,
+        "captured_at": captured_at.isoformat(),
+        "scopes": scopes,
+        "account_state": account_state,
+        "warnings": ["one_shot_worker_session"],
+        "package_version": package_version,
+    }
+
+
 def run_positions_v2(kgi_module: Any) -> dict[str, object]:
     person_id = os.environ.pop("KGI_BRIDGE_PERSON_ID", "").strip()
     password = os.environ.pop("KGI_BRIDGE_PERSON_PASSWORD", "").strip()
@@ -317,33 +402,7 @@ def run_positions_v2(kgi_module: Any) -> dict[str, object]:
             captured_output
         ):
             api = kgi_module.login(person_id, password, simulation)
-            account_selections: dict[str, str | BaseException] = {}
-            try:
-                account_selections["TW"] = _stock_account(api, stock_account)
-            except BaseException as exc:
-                account_selections["TW"] = exc
-            try:
-                account_selections["US"] = _sub_account(api, sub_account)
-            except BaseException as exc:
-                account_selections["US"] = exc
-
-            scopes: list[dict[str, object]] = []
-            tw_selection = account_selections["TW"]
-            if isinstance(tw_selection, BaseException):
-                scopes.append(_unavailable_scope("TW", tw_selection))
-            else:
-                try:
-                    scopes.append(_tw_scope(api, tw_selection))
-                except BaseException as exc:
-                    scopes.append(_unavailable_scope("TW", exc))
-            us_selection = account_selections["US"]
-            if isinstance(us_selection, BaseException):
-                scopes.append(_unavailable_scope("US", us_selection))
-            else:
-                try:
-                    scopes.append(_us_scope(api, us_selection))
-                except BaseException as exc:
-                    scopes.append(_unavailable_scope("US", exc))
+            result = collect_positions_v2(api, stock_account, sub_account)
     except WorkerFailure:
         raise
     except BaseException as exc:
@@ -361,18 +420,7 @@ def run_positions_v2(kgi_module: Any) -> dict[str, object]:
                         pass
         captured_output.close()
 
-    captured_at = datetime.now(UTC)
-    try:
-        package_version = importlib.metadata.version("kgisuperpy")
-    except importlib.metadata.PackageNotFoundError:
-        package_version = None
-    return {
-        "ok": True,
-        "captured_at": captured_at.isoformat(),
-        "scopes": scopes,
-        "warnings": ["one_shot_worker_session"],
-        "package_version": package_version,
-    }
+    return result
 
 
 def _emit(payload: dict[str, object]) -> None:
@@ -384,8 +432,77 @@ def _emit(payload: dict[str, object]) -> None:
     output.flush()
 
 
+def run_session(kgi_module: Any) -> None:
+    person = os.environ.pop("KGI_BRIDGE_PERSON_ID", "").strip()
+    password = os.environ.pop("KGI_BRIDGE_PERSON_PASSWORD", "").strip()
+    stock = os.environ.pop("KGI_BRIDGE_STOCK_ACCOUNT", "").strip() or None
+    sub = os.environ.pop("KGI_BRIDGE_SUB_ACCOUNT", "").strip() or None
+    simulation = os.environ.pop("KGI_BRIDGE_SIMULATION", "false").casefold() in {
+        "true", "1", "yes", "on",
+    }
+    if not person or not password:
+        raise WorkerFailure("auth_failed")
+    commands: queue.Queue[str] = queue.Queue(maxsize=1)
+
+    def receive() -> None:
+        stream = sys.__stdin__
+        if stream is None:
+            commands.put("close")
+            return
+        while True:
+            line = stream.readline(128)
+            commands.put(line.strip() if line else "close")
+            if not line or line.strip() == "close":
+                return
+
+    threading.Thread(target=receive, daemon=True).start()
+    api = None
+    cache: dict[str, object] | None = None
+    cached_at = 0.0
+    with (
+        open(os.devnull, "w") as sink,
+        contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink),
+    ):
+        try:
+            started = time.monotonic()
+            while time.monotonic() - started < 1800:
+                try:
+                    command = commands.get(timeout=90)
+                except queue.Empty:
+                    break
+                if command != "read":
+                    break
+                if api is None:
+                    api = kgi_module.login(person, password, simulation)
+                    person = password = ""
+                    # Resolve both identities before the SDK mutates its selected account list.
+                    try:
+                        stock = _stock_account(api, stock)
+                    except WorkerFailure:
+                        pass
+                    try:
+                        sub = _sub_account(api, sub)
+                    except WorkerFailure:
+                        pass
+                if time.monotonic() - cached_at >= 60:
+                    cache = None
+                result = collect_positions_v2(api, stock, sub, cache)
+                if cache is None:
+                    raw_cache = result["account_state"]
+                    cache = raw_cache if isinstance(raw_cache, dict) else None
+                    cached_at = time.monotonic()
+                result["warnings"] = ["bounded_read_only_session"]
+                _emit(result)
+        finally:
+            if api is not None:
+                try:
+                    api.logout()
+                except Exception:
+                    pass
+
+
 def main() -> int:
-    if len(sys.argv) != 2 or sys.argv[1] not in {"positions", "positions-v2"}:
+    if len(sys.argv) != 2 or sys.argv[1] not in {"positions", "positions-v2", "positions-session"}:
         _emit({"ok": False, "error_code": "internal_error"})
         return 2
     try:
@@ -394,6 +511,9 @@ def main() -> int:
         _emit({"ok": False, "error_code": "sdk_unavailable"})
         return 3
     try:
+        if sys.argv[1] == "positions-session":
+            run_session(kgi)
+            return 0
         payload = run_positions(kgi) if sys.argv[1] == "positions" else run_positions_v2(kgi)
         _emit(payload)
     except WorkerFailure as exc:

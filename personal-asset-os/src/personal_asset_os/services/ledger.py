@@ -453,6 +453,8 @@ def record_transfer(
         raise ValidationError("轉出與轉入帳戶不可相同")
     if source.kind is not AccountKind.ASSET or destination.kind is not AccountKind.ASSET:
         raise ValidationError("一般轉帳只適用資產帳戶")
+    if any(account.subtype == AccountSubtype.INVESTMENT for account in (source, destination)):
+        raise ValidationError("投資帳戶不可直接互轉；請轉入券商現金，再使用投資買賣")
     value = positive_money(amount)
     if account_balance(session, source.id) < value:
         raise ValidationError("轉出帳戶餘額不足")

@@ -1,0 +1,146 @@
+{
+  "schemaVersion": 1,
+  "id": "listening_audio",
+  "displayName": "Listening Audio",
+  "runtimeMode": "component-controller",
+  "runtimeContract": "unified-lifecycle-v3",
+  "traits": [
+    "tunnel",
+    "multi-core",
+    "credential-sensitive",
+    "data-sensitive"
+  ],
+  "contractScript": "scripts\\runtime-control.ps1",
+  "capabilities": [
+    "ensure_running",
+    "repair_connectivity",
+    "restart_core",
+    "reload_runtime",
+    "shutdown_runtime"
+  ],
+  "lifecycle": {
+    "controller": {
+      "kind": "powershell",
+      "path": "scripts\\runtime-control.ps1"
+    }
+  },
+  "probes": [
+    {
+      "id": "trainer",
+      "label": "Listening Audio Trainer",
+      "role": "core",
+      "kind": "json",
+      "url": "http://127.0.0.1:18811/api/listening/v1/health",
+      "port": 18811,
+      "required": true,
+      "expected": {
+        "ok": true,
+        "contractVersion": "listening-trainer-v1"
+      },
+      "publicSummaryFields": [
+        "contractVersion"
+      ],
+      "ownership": {
+        "managedPidFile": ".tmp\\listening-trainer-v1.pid",
+        "managedCommandContains": [
+          "jlpt-listening-trainer\\.venv\\Scripts\\python.exe",
+          "-m jlpt_trainer.app"
+        ]
+      }
+    },
+    {
+      "id": "mcp",
+      "label": "Listening Audio MCP",
+      "role": "core",
+      "kind": "json",
+      "url": "http://127.0.0.1:18810/health",
+      "port": 18810,
+      "required": true,
+      "expected": {
+        "ok": true,
+        "service": "listening-audio-mcp"
+      },
+      "publicSummaryFields": [
+        "service",
+        "version",
+        "contractVersion",
+        "buildId",
+        "toolCount"
+      ],
+      "ownership": {
+        "managedPidFile": ".tmp\\listening-audio-mcp.pid",
+        "managedCommandContains": [
+          "listening_audio",
+          "dist\\src\\http-main.js"
+        ]
+      }
+    },
+    {
+      "id": "tunnel",
+      "label": "Secure MCP Tunnel",
+      "role": "connectivity",
+      "kind": "text",
+      "url": "http://127.0.0.1:18812/readyz",
+      "port": 18812,
+      "required": true,
+      "expectedText": [
+        "ready",
+        "ok"
+      ],
+      "ownership": {
+        "managedPidFile": ".tmp\\tunnel-client.pid",
+        "managedCommandContains": [
+          "listening_audio",
+          "tunnel-client",
+          "listening-audio"
+        ]
+      }
+    }
+  ],
+  "navigation": [
+    {
+      "id": "health",
+      "label": "Open health",
+      "kind": "probe",
+      "target": "mcp"
+    }
+  ],
+  "ui": {
+    "menuContract": "component-menu-v1",
+    "actionEntrypoint": {
+      "kind": "powershell",
+      "path": "scripts\\control-center-ui.ps1"
+    },
+    "menuActions": [
+      {
+        "id": "copy_mcp_url",
+        "label": "Copy MCP URL",
+        "group": "connection",
+        "confirmation": "none"
+      },
+      {
+        "id": "copy_health_url",
+        "label": "Copy health URL",
+        "group": "connection",
+        "confirmation": "none"
+      },
+      {
+        "id": "open_mcp_health",
+        "label": "Open MCP health",
+        "group": "connection",
+        "confirmation": "none"
+      },
+      {
+        "id": "open_runtime_logs",
+        "label": "Open runtime logs",
+        "group": "connection",
+        "confirmation": "none"
+      }
+    ]
+  },
+  "safety": {
+    "managerDomainDataAccess": "none",
+    "managerSecretAccess": "none",
+    "shutdownConfirmation": "required"
+  }
+}

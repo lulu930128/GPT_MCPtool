@@ -1,7 +1,7 @@
 {
   "name": "gpt-project-workspace-mcp",
   "version": "1.5.0",
-  "toolContractVersion": "2026-08-14.3",
+  "toolContractVersion": "2026-09-10.1",
   "description": "Read-only Streamable HTTP MCP server that exposes bounded multi-root workspace context to ChatGPT.",
   "type": "module",
   "bin": {

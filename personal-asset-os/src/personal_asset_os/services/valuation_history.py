@@ -211,6 +211,15 @@ def capture_daily_snapshot(
             "fx": _safe_fx_evidence(broker.get("fx")),
         },
     }
+    cash = broker.get("account_state")
+    if isinstance(cash, dict):
+        # Aggregate valuation evidence only: no account identifiers or raw response.
+        evidence["broker_cash"] = {
+            key: cash.get(key) for key in (
+                "captured_at", "freshness", "settled_cash_twd", "cash_valuation_included",
+                "cash_valuation_status", "cash_fx",
+            )
+        }
     broker_market_value = (
         None
         if broker_status in {"disabled", "unavailable"}

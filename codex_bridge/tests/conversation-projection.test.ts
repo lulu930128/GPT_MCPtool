@@ -59,6 +59,47 @@ test("thread/read hydrates ordered multi-turn history without raw reasoning", ()
   assert.doesNotMatch(JSON.stringify(hydrated), /hidden thought/);
 });
 
+test("large native histories keep item identity while bounding UI projection text", () => {
+  const output = "x".repeat(3_000);
+  const hydrated = hydrateConversationProjection(createConversationProjection("thread-large"), {
+    thread: {
+      id: "thread-large",
+      turns: [{
+        id: "turn-large",
+        items: [
+          { id: "user-old", type: "userMessage", content: [{ type: "text", text: "Old narrative remains visible." }] },
+          ...Array.from({ length: 1_050 }, (_, index) => ({
+            id: `command-${index}`,
+            type: "commandExecution",
+            command: `command ${index}`,
+            aggregatedOutput: output,
+            status: "completed",
+          })),
+          { id: "agent-new", type: "agentMessage", text: "New narrative remains visible." },
+        ],
+      }],
+    },
+  }, "2026-08-31T00:00:00.000Z", {
+    historyMode: "paginated",
+    synchronized: true,
+    sourceAvailability: "available",
+    lastMetadataCheckedAt: "2026-08-31T00:00:00.000Z",
+  });
+
+  const items = hydrated.turns[0]?.items ?? [];
+  const projectedTextChars = items.reduce((total, item) => total
+    + (item.command?.length ?? 0)
+    + (item.output?.length ?? 0), 0);
+  const commands = items.filter((item) => item.type === "commandExecution");
+  assert.equal(items.length, 1_052);
+  assert.equal(commands.every((item) => item.outputTruncated === true), true);
+  assert.equal(items.find((item) => item.id === "user-old")?.text, "Old narrative remains visible.");
+  assert.equal(items.find((item) => item.id === "agent-new")?.text, "New narrative remains visible.");
+  assert.equal(projectedTextChars <= 2_050_000, true);
+  assert.equal(hydrated.freshness?.projectionLimited, true);
+  assert.equal((hydrated.freshness?.projectionTruncatedItemCount ?? 0) >= commands.length, true);
+});
+
 test("authoritative hydration removes turns and items deleted at the source", () => {
   const initial = hydrateConversationProjection(createConversationProjection("thread-1"), {
     thread: {

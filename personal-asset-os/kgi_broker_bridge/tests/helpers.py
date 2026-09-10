@@ -82,6 +82,9 @@ def synthetic_v2_batch() -> RawBrokerSnapshotBatch:
 
 
 class FakeGateway:
+    def close(self) -> None:
+        pass
+
     def __init__(self, batch: RawInventoryBatch) -> None:
         self.batch = batch
         self.requested_book_codes: list[str] = []

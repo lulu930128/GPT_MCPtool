@@ -134,6 +134,10 @@ class BalanceObservationCreate(StrictModel):
         return ensure_utc(value)
 
 
+class ReconciliationConfirm(StrictModel):
+    expected_difference: Decimal
+
+
 class MonthCloseRequest(StrictModel):
     period_key: str = Field(pattern=r"^\d{4}-\d{2}$")
     as_of: datetime

@@ -1,6 +1,6 @@
 # 圖片、Office 與 PDF 檔案讀取
 
-目前提供八個 bounded reader tools，另提供一個原始檔案回傳 tool：
+目前提供八個 bounded reader tools，另提供原始檔案與音訊回傳 tools：
 
 - `inspect_asset`：查看圖片、`.xlsx`、`.docx`、`.pptx` 的基本資訊與容器安全結果。
 - `read_image`：回傳 JPEG、PNG、WebP 或 GIF 的安全預覽；GIF 固定轉為靜態 PNG。
@@ -8,6 +8,7 @@
 - `read_document`：讀取 `.docx` 的段落、標題與表格結構。
 - `read_presentation`：依簡報順序讀取 `.pptx` 的投影片標題與文字；講者備註需明確開啟。
 - `fetch_asset`：原封不動回傳通過相同 asset scope、path guard、deny policy 與大小限制的檔案 bytes。
+- `read_audio`：以 MCP AudioContent 回傳允許的原始音檔。
 - `inspect_pdf`：檢查 `.pdf` 頁數、metadata 與主動內容安全狀態。
 - `read_pdf_text`：擷取 bounded page window 的文字。
 - `read_pdf_page`：將單頁 bounded render 成 metadata-stripped PNG。
@@ -92,6 +93,17 @@ base64 blob，因此 payload 約比原始檔大三分之一。這個 contract �
 `window.openai.getFileDownloadUrl({ fileId })`，它需要 ChatGPT file id。不得假設 embedded
 blob 或 resource link 會自動變成 file id，也不得引用不存在的 `downloadFile()`。若 Phase 2 需要 UI，必須先
 證明 host 產生 tool file reference，否則另行設計經驗證的受控下載橋接。
+
+## 原始音訊 MVP
+
+`read_audio(scope, path)` 重用 `fetchAsset()` 的 original-file-return 授權、shared path
+guard、deny policy 與 bounded read，不新增 scope 或中繼檔。`codex` 維持文字 root，
+不得加入 asset/file-return scopes。支援 WAV (`audio/wav`)、MP3 (`audio/mpeg`)、
+OGG (`audio/ogg`)、FLAC (`audio/flac`)，不轉檔、不解碼；MIME 依副檔名推定，
+SHA-256 只識別回傳 bytes，不代表音訊有效或可播放。
+
+沿用原始檔大小限制。`content` 回傳 MCP AudioContent，metadata 使用 `transport=audio_content`。
+自訂播放器、診斷卡與 UI resource 已撤回；host 原生播放能力尚未確認。
 
 ## 安全行為
 

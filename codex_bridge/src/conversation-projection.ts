@@ -10,7 +10,10 @@ import type {
 
 const MAX_MESSAGE_CHARS = 100_000;
 const MAX_ACTIVITY_TEXT_CHARS = 20_000;
+const MAX_COMMAND_OUTPUT_CHARS = 2_000;
 const MAX_FILE_DIFF_CHARS = 8_000;
+const MAX_PROJECTED_TEXT_CHARS = 2_000_000;
+const TRUNCATION_MARKER = "\n[truncated]";
 
 export interface ConversationNotification {
   method: string;
@@ -41,7 +44,7 @@ export function hydrateConversationProjection(
     : [];
   const currentTurns = new Map(current.turns.map((turn) => [turn.turnId, turn]));
   const merged = hydratedTurns.map((turn) => mergeHydratedTurn(currentTurns.get(turn.turnId), turn));
-  return {
+  return applyProjectionLimits({
     schemaVersion: 1,
     threadId,
     status: threadStatus(thread.status) ?? current.status,
@@ -50,7 +53,7 @@ export function hydrateConversationProjection(
     updatedAt: at,
     hydratedAt: at,
     freshness: freshness ? structuredClone(freshness) : current.freshness,
-  };
+  });
 }
 
 export function reduceConversationNotification(
@@ -206,7 +209,7 @@ export function mergeConversationMessages(
   // Once App Server history has synchronized successfully, it is authoritative.
   // Unmatched Bridge records may carry metadata, but must not recreate source-deleted
   // messages or overwrite source text by ordinal position.
-  if (next.freshness?.synchronized) return next;
+  if (next.freshness?.synchronized) return applyProjectionLimits(next);
 
   for (const message of messages) {
     if (matchedMessageIds.has(message.id)) continue;
@@ -231,7 +234,7 @@ export function mergeConversationMessages(
       inputArtifacts: structuredClone(message.inputArtifacts ?? []),
     }, true);
   }
-  return next;
+  return applyProjectionLimits(next);
 }
 
 function normalizeTurn(raw: Record<string, unknown>, at: string): ConversationTurnProjection {
@@ -283,8 +286,8 @@ function normalizeItem(
   } else if (rawType === "commandExecution") {
     base.command = bounded(stringValue(raw.command) ?? "", MAX_ACTIVITY_TEXT_CHARS);
     base.cwd = bounded(stringValue(raw.cwd) ?? "", 2_000);
-    base.output = bounded(stringValue(raw.aggregatedOutput) ?? "", MAX_ACTIVITY_TEXT_CHARS);
-    base.outputTruncated = (stringValue(raw.aggregatedOutput)?.length ?? 0) > MAX_ACTIVITY_TEXT_CHARS;
+    base.output = bounded(stringValue(raw.aggregatedOutput) ?? "", MAX_COMMAND_OUTPUT_CHARS);
+    base.outputTruncated = (stringValue(raw.aggregatedOutput)?.length ?? 0) > MAX_COMMAND_OUTPUT_CHARS;
     base.exitCode = numberValue(raw.exitCode);
     base.durationMs = numberValue(raw.durationMs);
   } else if (rawType === "fileChange") {
@@ -498,6 +501,72 @@ function changed(projection: ConversationThreadProjection, at: string): Conversa
 function bounded(value: string, maxChars: number): string {
   const redacted = redactString(value);
   return redacted.length > maxChars ? `${redacted.slice(0, maxChars)}\n[truncated]` : redacted;
+}
+
+function applyProjectionLimits(projection: ConversationThreadProjection): ConversationThreadProjection {
+  const items = projection.turns.flatMap((turn) => turn.items);
+  const truncatedItems = new Set<string>();
+  let remaining = MAX_PROJECTED_TEXT_CHARS;
+
+  const consume = (
+    item: ConversationItemProjection,
+    key: "text" | "context" | "command" | "output" | "progress" | "error",
+  ): void => {
+    const value = item[key];
+    if (typeof value !== "string" || !value) return;
+    if (value.length <= remaining) {
+      remaining -= value.length;
+      return;
+    }
+    item[key] = truncateToBudget(value, remaining);
+    remaining = 0;
+    truncatedItems.add(item.id);
+    if (key === "output") item.outputTruncated = true;
+  };
+
+  const consumeChanges = (item: ConversationItemProjection): void => {
+    for (const change of item.changes ?? []) {
+      const value = change.diffPreview;
+      if (!value) continue;
+      if (value.length <= remaining) {
+        remaining -= value.length;
+        continue;
+      }
+      change.diffPreview = truncateToBudget(value, remaining);
+      change.diffTruncated = true;
+      remaining = 0;
+      truncatedItems.add(item.id);
+    }
+  };
+
+  // Preserve the newest user-visible narrative first. Technical activity remains present by
+  // stable id and status, while its verbose text is the first payload eligible for bounding.
+  const newestFirst = items.slice().reverse();
+  for (const item of newestFirst.filter((candidate) => ["userMessage", "agentMessage", "plan"].includes(candidate.type))) {
+    consume(item, "text");
+    consume(item, "context");
+  }
+  for (const item of newestFirst.filter((candidate) => !["userMessage", "agentMessage", "plan"].includes(candidate.type))) {
+    consume(item, "text");
+    consume(item, "command");
+    consume(item, "output");
+    consume(item, "progress");
+    consume(item, "error");
+    consumeChanges(item);
+  }
+
+  for (const item of items) if (item.outputTruncated === true) truncatedItems.add(item.id);
+  const existingCount = projection.freshness?.projectionTruncatedItemCount ?? 0;
+  if (truncatedItems.size > 0 && projection.freshness) {
+    projection.freshness.projectionLimited = true;
+    projection.freshness.projectionTruncatedItemCount = Math.max(existingCount, truncatedItems.size);
+  }
+  return projection;
+}
+
+function truncateToBudget(value: string, available: number): string {
+  if (available <= TRUNCATION_MARKER.length) return "[truncated]";
+  return `${value.slice(0, available - TRUNCATION_MARKER.length)}${TRUNCATION_MARKER}`;
 }
 
 function timestamp(value: unknown): string | undefined {

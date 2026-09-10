@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from kgi_broker_bridge.account_state import AccountState
 from kgi_broker_bridge.contracts import (
     BrokerHealth,
     BrokerPositionSnapshot,
@@ -14,6 +15,9 @@ from kgi_broker_bridge.ports import BrokerAdapter
 class BrokerBridgeService:
     adapter: BrokerAdapter
 
+    def close(self) -> None:
+        self.adapter.close()
+
     def get_health(self) -> BrokerHealth:
         return self.adapter.get_health()
 
@@ -22,3 +26,6 @@ class BrokerBridgeService:
 
     def get_positions_v2(self) -> BrokerPositionSnapshotV2:
         return self.adapter.get_positions_v2()
+
+    def get_account_state(self) -> AccountState:
+        return self.adapter.get_account_state()

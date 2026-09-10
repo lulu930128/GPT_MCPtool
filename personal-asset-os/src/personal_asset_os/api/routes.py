@@ -25,6 +25,7 @@ from personal_asset_os.api.schemas import (
     MonthCloseRequest,
     OpeningBalanceRequest,
     PriceCreate,
+    ReconciliationConfirm,
     ReservedCashUpdate,
     ReversalRequest,
     TradeRequest,
@@ -51,6 +52,7 @@ from personal_asset_os.models import (
 )
 from personal_asset_os.services import (
     activity_fund,
+    broker_accounts,
     financial_events,
     ledger,
     mobile_sync,
@@ -255,6 +257,7 @@ def get_dashboard(
         broker_read=broker_reader.read(),
         broker_investment_account_id=settings.broker_investment_account_id,
         broker_us_investment_account_id=settings.broker_us_investment_account_id,
+        broker_cash_account_id=settings.broker_cash_account_id,
         fx_provider=fx_reader,
         reporting_timezone=settings.reporting_timezone,
     )
@@ -324,6 +327,13 @@ def add_account(
 ) -> dict[str, object]:
     account = ledger.create_account(session, **payload.model_dump())
     return {"id": account.id, "name": account.name, "kind": account.kind.value}
+
+
+@router.post("/broker/accounts/setup")
+def setup_broker_accounts(
+    session: Session = Depends(get_session), settings: Settings = Depends(get_settings),
+) -> dict[str, str]:
+    return broker_accounts.setup(session, settings.broker_cash_account_id)
 
 
 @router.get("/activity-fund")
@@ -648,6 +658,16 @@ def add_reconciliation(
 ) -> dict[str, object]:
     observation = reporting.record_balance_observation(session, **payload.model_dump())
     return {"id": observation.id, "account_id": observation.account_id}
+
+
+@router.post("/reconciliations/{observation_id}/confirm")
+def confirm_reconciliation(
+    observation_id: str, payload: ReconciliationConfirm,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return reporting.confirm_balance_observation(
+        session, observation_id, expected_difference=payload.expected_difference,
+    )
 
 
 @router.put("/settings/reserved-cash")

@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -18,6 +19,7 @@ from kgi_broker_bridge.ports import (
     RawInventoryBatch,
     RawMarketInventoryScope,
 )
+from kgi_broker_bridge.session_process import SessionProcess
 
 RESULT_PREFIX = "KGI_BRIDGE_RESULT_V1="
 MAX_WORKER_OUTPUT_CHARS = 2_000_000
@@ -87,6 +89,35 @@ class KGISuperPySubprocessGateway:
     _package_version: str | None = field(default=None, init=False, repr=False)
     _last_success_at: datetime | None = field(default=None, init=False, repr=False)
     _warning: str = field(default="live_inventory_check_not_run", init=False, repr=False)
+    _batch: RawBrokerSnapshotBatch | None = field(default=None, init=False, repr=False)
+    _batch_at: float = field(default=0, init=False, repr=False)
+    _session: SessionProcess | None = field(default=None, init=False, repr=False)
+
+    def close(self) -> None:
+        with self._lock:
+            if self._session is not None:
+                self._session.close()
+                self._session = None
+            self._batch = None
+
+    def _read_v2_process(self) -> subprocess.CompletedProcess[str]:
+        if self.process_runner is not _run_worker_process:
+            return self.process_runner(
+                self._command("positions-v2"), env=self._worker_environment(),
+                cwd=self.working_directory, timeout_seconds=self.timeout_seconds,
+            )
+        if self._session is not None and self._session.process.poll() is not None:
+            self.close()
+        if self._session is None:
+            self._session = SessionProcess(
+                self._command("positions-session"), self._worker_environment(),
+                self.working_directory,
+            )
+        try:
+            return self._session.read(self.timeout_seconds)
+        except (OSError, subprocess.TimeoutExpired):
+            self.close()
+            raise
 
     def get_health(self) -> BrokerHealth:
         with self._lock:
@@ -186,13 +217,10 @@ class KGISuperPySubprocessGateway:
 
     def read_positions_v2(self) -> RawBrokerSnapshotBatch:
         with self._lock:
+            if self._batch is not None and time.monotonic() - self._batch_at < 15:
+                return self._batch
             try:
-                completed = self.process_runner(
-                    self._command("positions-v2"),
-                    env=self._worker_environment(),
-                    cwd=self.working_directory,
-                    timeout_seconds=self.timeout_seconds,
-                )
+                completed = self._read_v2_process()
             except subprocess.TimeoutExpired as exc:
                 self._record_failure("timeout")
                 raise KGIUpstreamError("timeout") from exc
@@ -270,12 +298,18 @@ class KGISuperPySubprocessGateway:
             partial = any(scope.error_code for scope in scopes)
             self._status = HealthStatus.DEGRADED if partial else HealthStatus.HEALTHY
             self._last_success_at = captured_at.astimezone(UTC)
-            self._warning = "partial_market_scope" if partial else "one_shot_worker_session"
-            return RawBrokerSnapshotBatch(
+            self._warning = "partial_market_scope" if partial else "bounded_read_only_session"
+            account_state = payload.get("account_state", {})
+            if not isinstance(account_state, dict):
+                account_state = {}
+            self._batch = RawBrokerSnapshotBatch(
                 captured_at=captured_at.astimezone(UTC),
                 scopes=tuple(scopes),
                 warnings=tuple(raw_warnings),
+                account_state=account_state,
             )
+            self._batch_at = time.monotonic()
+            return self._batch
 
     def _command(self, worker_command: str = "positions") -> tuple[str, ...]:
         return (
