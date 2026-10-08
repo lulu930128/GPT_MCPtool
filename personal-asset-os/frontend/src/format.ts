@@ -65,6 +65,7 @@ export function qualityLabel(value: string | null | undefined): string {
     manual: "手動價格",
     broker_live: "KGI 即時",
     broker_stale: "KGI 資料過舊",
+    persistent_fallback: "KGI 本機最後有效快照（非即時）",
     broker_derived: "KGI 價格暫估",
     ledger_only: "僅帳本",
     matched: "數量相符",

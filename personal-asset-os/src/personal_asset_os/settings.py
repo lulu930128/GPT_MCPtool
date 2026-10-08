@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     broker_bridge_startup_timeout_seconds: float = Field(default=8.0, gt=0, le=30)
     broker_cache_ttl_seconds: float = Field(default=20.0, ge=0, le=300)
     broker_memory_fallback_seconds: float = Field(default=300.0, ge=0, le=3600)
+    broker_empty_confirmation_count: int = Field(default=3, ge=1, le=20)
     broker_price_max_age_seconds: float = Field(default=300.0, gt=0, le=86400)
     broker_investment_account_id: str | None = None
     broker_us_investment_account_id: str | None = None

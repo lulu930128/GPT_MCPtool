@@ -297,8 +297,7 @@ def record_price(
 def buy(
     session: Session,
     *,
-    instrument_id: str,
-    investment_account_id: str,
+    instrument_id: str,    investment_account_id: str,
     cash_account_id: str,
     quantity: Decimal,
     execution_price: Decimal,
@@ -597,8 +596,7 @@ def portfolio_read_model(
                 "accounts": [],
                 "markets": [],
                 "captured_at": None,
-                "source_as_of": None,
-                "market_value": ZERO,
+                "source_as_of": None,                "market_value": ZERO,
                 "native_market_values": {},
                 "fx": None,
                 "position_count": 0,
@@ -750,7 +748,11 @@ def portfolio_read_model(
             ]
             if native_market_value is None or market_value is None:
                 valuation_status = "missing"
-            elif read.status == "stale" or (fx_read and fx_read.status == "stale"):
+            elif (
+                scope.market in read.stale_markets
+                or (read.status == "stale" and not read.stale_markets)
+                or (scope.market == "US" and fx_read and fx_read.status == "stale")
+            ):
                 valuation_status = "broker_stale"
             elif derived:
                 valuation_status = "broker_derived"
@@ -893,12 +895,18 @@ def portfolio_read_model(
             "status": scope.status,
         }
         for scope in scopes
-        if scope.account is not None
-    ]
+        if scope.account is not None    ]
     markets = [
         {
             "market": scope.market,
             "status": scope.status,
+            "read_mode": (
+                "persistent_fallback" if scope.market in read.fallback_markets
+                else "unavailable" if scope.status == "unavailable"
+                else "memory_cache" if read.cache_hit or read.read_mode == "memory_cache"
+                else "live"
+            ),
+            "stale": scope.market in read.stale_markets,
             "source": scope.source,
             "source_as_of": scope.source_as_of,
             "position_count": len(scope.positions),

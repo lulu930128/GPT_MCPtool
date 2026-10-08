@@ -8,7 +8,7 @@ from decimal import Decimal
 from typing import Literal, Protocol, Self
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from personal_asset_os.services.broker_account_state import AccountState
 from personal_asset_os.settings import Settings
@@ -17,7 +17,9 @@ from personal_asset_os.temporal import ensure_utc, utc_now
 BrokerReadStatus = Literal[
     "disabled", "unavailable", "complete", "partial", "explicit_empty", "stale"
 ]
-BrokerReadMode = Literal["disabled", "live", "memory_cache", "memory_fallback", "unavailable"]
+BrokerReadMode = Literal[
+    "disabled", "live", "memory_cache", "memory_fallback", "persistent_fallback", "unavailable"
+]
 
 
 def _utc(value: datetime) -> datetime:
@@ -279,6 +281,10 @@ class BrokerMarketScopeV2(_BrokerContract):
             return self
         if not self.positions:
             raise ValueError("complete scope requires positions")
+        if any(item.market != self.market for item in self.positions) or any(
+            item.market != self.market for item in self.valuations
+        ):
+            raise ValueError("broker scope contains facts from another market")
         symbols = {item.symbol for item in self.positions}
         valuation_symbols = {item.symbol for item in self.valuations}
         if symbols != valuation_symbols or len(valuation_symbols) != len(self.valuations):
@@ -291,8 +297,7 @@ class BrokerMarketScopeV2(_BrokerContract):
 
 class BrokerSnapshotV2(_BrokerContract):
     schema_version: Literal["broker.position.v2"]
-    broker: Literal["KGI"]
-    captured_at: datetime
+    broker: Literal["KGI"]    captured_at: datetime
     status: Literal["complete", "partial", "explicit_empty"]
     scopes: tuple[BrokerMarketScopeV2, ...]
     warnings: tuple[str, ...]
@@ -320,6 +325,9 @@ class BrokerReadResult:
     snapshot: BrokerSnapshot | BrokerSnapshotV2 | None = None
     warnings: tuple[str, ...] = ()
     account_state: AccountState | None = None
+    fallback_markets: tuple[str, ...] = ()
+    stale_markets: tuple[str, ...] = ()
+    cache_hit: bool = False
 
     @classmethod
     def disabled(cls, *, now: datetime | None = None) -> BrokerReadResult:
@@ -351,12 +359,17 @@ class BrokerBridgeClient:
         )
         self._timeout = settings.broker_bridge_timeout_seconds
         self._cache_ttl = settings.broker_cache_ttl_seconds
-        self._fallback_ttl = settings.broker_memory_fallback_seconds
         self._max_source_age = settings.broker_price_max_age_seconds
         self._transport = transport
         self._lock = threading.Lock()
         self._cached: BrokerReadResult | None = None
         self._cached_monotonic: float | None = None
+        from personal_asset_os.services.broker_snapshot_guard import BrokerSnapshotGuard
+
+        self._guard = BrokerSnapshotGuard(
+            settings.runtime_dir / "broker-last-good-v1.json",
+            empty_confirmations=settings.broker_empty_confirmation_count,
+        )
 
     def read(self, *, now: datetime | None = None) -> BrokerReadResult:
         checked_at = ensure_utc(now or utc_now())
@@ -366,41 +379,26 @@ class BrokerBridgeClient:
             monotonic_now = time.monotonic()
             cache_age = self._cache_age(monotonic_now)
             if self._cached and cache_age is not None and cache_age <= self._cache_ttl:
-                return BrokerReadResult(
-                    status=self._cached.status,
-                    read_mode="memory_cache",
+                return replace(
+                    self._cached,
+                    read_mode=(
+                        "persistent_fallback" if self._cached.fallback_markets else "memory_cache"
+                    ),
                     retrieved_at=checked_at,
-                    snapshot=self._cached.snapshot,
-                    warnings=self._cached.warnings,
-                    account_state=self._cached.account_state,
+                    cache_hit=True,
                 )
             try:
                 result = self._read_live(checked_at)
             except Exception as exc:
                 warning = self._safe_failure_warning(exc)
-                if (
-                    self._cached
-                    and self._cached.snapshot is not None
-                    and cache_age is not None
-                    and cache_age <= self._fallback_ttl
-                ):
-                    result = BrokerReadResult(
-                        status="stale",
-                        read_mode="memory_fallback",
-                        retrieved_at=checked_at,
-                        snapshot=self._cached.snapshot,
-                        warnings=self._cached.warnings
-                        + (warning, "KGI 即時讀取失敗，暫用本次 PAOS 程序記憶體內的上次成功快照"),
-                    )
-                else:
-                    result = BrokerReadResult(
-                        status="unavailable", read_mode="unavailable",
-                        retrieved_at=checked_at, warnings=(warning,),
-                    )
+                result = BrokerReadResult(
+                    status="unavailable", read_mode="unavailable",
+                    retrieved_at=checked_at, warnings=(warning,),
+                )
+            result = self._guard.apply(result)
             result = replace(result, account_state=self._read_account_state())
-            if result.read_mode == "live":
-                self._cached = result
-                self._cached_monotonic = monotonic_now
+            self._cached = result
+            self._cached_monotonic = time.monotonic()
             return result
 
     def _read_account_state(self) -> AccountState | None:
@@ -440,7 +438,7 @@ class BrokerBridgeClient:
             response.raise_for_status()
         payload = response.json()
         if payload.get("schema_version") == "broker.position.v2":
-            v2_snapshot = BrokerSnapshotV2.model_validate(payload)
+            v2_snapshot = self._parse_v2(payload)
             snapshot: BrokerSnapshot | BrokerSnapshotV2 = v2_snapshot
             source_times = [
                 scope.source_as_of
@@ -470,7 +468,47 @@ class BrokerBridgeClient:
             retrieved_at=checked_at,
             snapshot=snapshot,
             warnings=warnings,
+            stale_markets=tuple(
+                scope.market for scope in snapshot.scopes
+                if scope.source_as_of is not None
+                and (checked_at - scope.source_as_of).total_seconds() > self._max_source_age
+            ) if isinstance(snapshot, BrokerSnapshotV2) else (("TW",) if stale else ()),
         )
+
+    @staticmethod
+    def _parse_v2(payload: object) -> BrokerSnapshotV2:
+        try:
+            return BrokerSnapshotV2.model_validate(payload)
+        except ValidationError:
+            # Only isolate scope failures when the envelope and market identity are valid.
+            if not isinstance(payload, dict):
+                raise
+            raw_scopes = payload.get("scopes")
+            if (
+                not isinstance(raw_scopes, list) or len(raw_scopes) != 2
+                or not all(isinstance(scope, dict) for scope in raw_scopes)
+                or {scope.get("market") for scope in raw_scopes} != {"TW", "US"}
+                or payload.get("status") not in {"complete", "partial", "explicit_empty"}
+            ):
+                raise
+            from personal_asset_os.services.broker_snapshot_guard import unavailable_scope
+
+            scopes = []
+            failed = False
+            for scope in raw_scopes:
+                try:
+                    scopes.append(BrokerMarketScopeV2.model_validate(scope))
+                except ValidationError:
+                    failed = True
+                    scopes.append(unavailable_scope(scope["market"]).model_copy(update={
+                        "error_code": "contract_invalid",
+                        "warnings": (f"KGI {scope['market']} 回傳格式不符合契約，未推定空倉",),
+                    }))
+            if not failed:
+                raise
+            return BrokerSnapshotV2.model_validate(
+                {**payload, "scopes": scopes, "status": "partial"},
+            )
 
     @staticmethod
     def _safe_failure_warning(exc: Exception) -> str:

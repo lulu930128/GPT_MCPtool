@@ -50,7 +50,35 @@ KGI 原始 snapshot、即時價、匯率與逐筆持倉不會寫成交易、Ledg
 參考值，不冒充即時成交匯率。期交所超齡或失敗時依序嘗試央行 `BP01D01` 的
 `official_close`、臺銀 USD 即期買賣中價 `bank_spot_mid`。三者均失敗或超齡時，USD 原幣市值
 仍顯示，但 TWD 市值為 `null`
-且不納入總資產。所有 cache/fallback 僅存在目前 PAOS 程序記憶體。
+且不納入總資產。FX 與券商現金仍沿用既有記憶體快取；券商持倉使用下述本機保底。
+
+### KGI TW／US 最後有效持倉保底
+
+自 2026-10-08 起，撤銷舊的「KGI snapshot 永不持久化、只用 RAM fallback」決策。
+PAOS 的 `BrokerBridgeClient` 在 `%LOCALAPPDATA%\PersonalAssetOS\runtime\broker-last-good-v1.json`
+（自訂 `PAOS_DATA_DIR` 時為其 `runtime` 子目錄）保存版本化 normalized last-known-good
+持倉證據。它不是 Ledger、交易歷史、`trades`、`prices` 或第二套 portfolio truth；不寫資料庫。
+只保存 TW／US 各自的必要 normalized position／valuation facts、原始來源／價格時間、
+opaque account identity 與空倉確認 metadata；不保存帳號尾碼、credential、raw SDK payload
+或上游 warning 文字。檔案屬私人 runtime state，不得加入 Git。
+
+- 每個市場的 `complete` 立即更新該市場最後有效 scope，並清除 pending empty 計數。
+- 成功的 live `explicit_empty` 預設連續 3 次才接受空倉，並清除該市場 persistent last-good。
+  `PAOS_BROKER_EMPTY_CONFIRMATION_COUNT` 可設定 1–20（預設 3）；RAM cache 命中不計次。
+  timeout、HTTP／contract error、`unavailable` 都將該市場連續計數歸零；另一市場不受影響。
+- pending empty 與 last-good 一起持久化，重啟不會洗掉計數。沒有 last-good 時只回實際空資料
+  與「尚無最後有效快照／空倉待確認」warning，不虛構持倉。已知帳戶 identity 改變時停用舊帳戶保底。
+- 失敗或未確認空倉時，可使用該市場最後有效快照；整體 `read_mode=persistent_fallback`、
+  `status=stale`，`broker.markets` 另列各市場 `read_mode`／`stale`。另一市場可保留 live 資料，
+  舊 `source_as_of`／`price_as_of` 不刷新；warning 明示 TW／US 哪個市場回退。
+- 持倉保底不受舊 `PAOS_BROKER_MEMORY_FALLBACK_SECONDS` 限制；該設定保留相容但不再控制
+  持倉保底期限。舊證據可能長期過期，必須以 stale 解讀，不能據此宣稱目前仍持有。
+  USD/TWD 匯率仍必須通過原 freshness 規則；缺匯率時 TWD 估值維持缺資料。
+- 檔案先驗證 schema，再以同目錄暫存檔、flush／fsync、atomic replace 發布；格式損壞、
+  版本不相容或無法讀取時忽略整個檔案並 warning。無法保存時不拖垮讀取，會警告重啟恢復
+  未保證；若無法保存空倉清除結果，繼續保留舊持倉。runtime 由官方 lifecycle 維持單一 owner。
+
+狀態轉換與驗證方式見 [KGI 持倉保底](docs/KgiLastGood.md)。
 
 本機 `.env` 需設定：
 
@@ -269,8 +297,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\validate.ps1 -Runtim
 
 postings 採 debit-positive：
 
-- 資產與費用增加為正數。
-- 負債、權益與收入增加為負數。
+- 資產與費用增加為正數。- 負債、權益與收入增加為負數。
 - 每筆交易的基準幣別總額必須為零。
 
 例如信用卡消費 500 元：費用 `+500`、信用卡負債 `-500`。繳款時銀行 `-500`、信用卡負債 `+500`，不會再新增支出。

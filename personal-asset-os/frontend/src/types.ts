@@ -278,7 +278,7 @@ export interface Dashboard {
     schema_version: "paos.broker_valuation.v2";
     enabled: boolean;
     status: "disabled" | "unavailable" | "complete" | "partial" | "explicit_empty" | "stale";
-    read_mode: "disabled" | "live" | "memory_cache" | "memory_fallback" | "unavailable";
+    read_mode: "disabled" | "live" | "memory_cache" | "memory_fallback" | "persistent_fallback" | "unavailable";
     broker: "KGI";
     account: {
       market: "TW" | "US";
@@ -297,6 +297,7 @@ export interface Dashboard {
     markets: Array<{
       market: "TW" | "US";
       status: "complete" | "explicit_empty" | "unavailable";
+      read_mode: "live" | "memory_cache" | "persistent_fallback" | "unavailable";      stale: boolean;
       source: "kgi.inventory_sum" | "kgi.stock_position_report";
       source_as_of: string | null;
       position_count: number;

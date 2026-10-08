@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import httpx
 import pytest
@@ -12,6 +13,11 @@ from personal_asset_os.settings import Settings
 
 NOW = datetime(2026, 8, 20, 2, 0, tzinfo=UTC)
 TOKEN = "synthetic-local-token-that-is-long-enough"
+
+
+@pytest.fixture(autouse=True)
+def isolated_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PAOS_DATA_DIR", str(tmp_path))
 
 
 def payload(*, source_as_of: datetime = NOW) -> dict[str, object]:
@@ -177,9 +183,10 @@ def test_malformed_snapshot_fails_soft_instead_of_becoming_zero_holdings() -> No
         settings(broker_cache_ttl_seconds=0), transport=httpx.MockTransport(handler)
     ).read(now=NOW)
 
-    assert result.status == "unavailable"
-    assert result.snapshot is None
-    assert "格式不符合契約" in result.warnings[0]
+    assert result.status == "partial"
+    assert result.snapshot is not None
+    assert result.snapshot.scopes[0].status == "unavailable"  # type: ignore[union-attr]
+    assert any("格式不符合契約" in warning for warning in result.warnings)
 
 
 def test_broker_configuration_rejects_non_loopback_and_short_token() -> None:

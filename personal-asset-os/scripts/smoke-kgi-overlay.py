@@ -39,6 +39,21 @@ def file_hash(path: Path) -> str:
     return digest.hexdigest()
 
 
+def database_content_hash(path: Path) -> str:
+    """Include committed WAL contents; never print financial rows or SQL."""
+    connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("BEGIN")
+        digest = hashlib.sha256()
+        for statement in connection.iterdump():
+            digest.update(statement.encode("utf-8"))
+            digest.update(b"\n")
+        return digest.hexdigest()
+    finally:
+        connection.close()
+
+
 def require_mapping(value: Any, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise RuntimeError(f"{label} is not an object")
@@ -59,6 +74,7 @@ def main() -> int:
         raise SystemExit("PAOS database is missing")
     before_counts = database_counts(settings.database_path)
     before_hash = file_hash(settings.database_path)
+    before_content_hash = database_content_hash(settings.database_path)
     if args.database_fingerprint:
         count_bytes = json.dumps(before_counts, sort_keys=True).encode("utf-8")
         print(
@@ -66,6 +82,7 @@ def main() -> int:
                 {
                     "table_counts_hash": hashlib.sha256(count_bytes).hexdigest(),
                     "database_file_hash": before_hash,
+                    "database_content_hash": before_content_hash,
                 }
             )
         )
@@ -103,9 +120,14 @@ def main() -> int:
     )
     after_counts = database_counts(settings.database_path)
     after_hash = file_hash(settings.database_path)
+    after_content_hash = database_content_hash(settings.database_path)
+    markets = broker.get("markets", [])
+    fallback_markets = [
+        item["market"] for item in markets if item.get("read_mode") == "persistent_fallback"
+    ]
 
     checks = {
-        "broker_read_usable": broker.get("status") in {"complete", "partial"},
+        "broker_read_usable": broker.get("status") in {"complete", "partial", "stale"},
         "broker_schema_v2": broker.get("schema_version") == "paos.broker_valuation.v2",
         "market_statuses_present": bool(broker.get("markets")),
         "source_time_present": bool(broker.get("source_as_of")),
@@ -120,12 +142,29 @@ def main() -> int:
         ),
         "database_table_counts_unchanged": before_counts == after_counts,
         "database_file_unchanged": before_hash == after_hash,
+        "database_content_including_wal_unchanged": before_content_hash == after_content_hash,
+        "market_guard_contract_adopted": all(
+            item.get("read_mode") in {"live", "memory_cache", "persistent_fallback", "unavailable"}
+            and isinstance(item.get("stale"), bool) for item in markets
+        ),
+        "fallback_is_non_live": not fallback_markets or (
+            broker.get("read_mode") == "persistent_fallback"
+            and broker.get("status") == "stale"
+            and all(item["stale"] for item in markets if item["market"] in fallback_markets)
+            and bool(dashboard.get("warnings"))
+        ),
     }
     result = {
         "ok": all(checks.values()),
         "broker_status": broker.get("status"),
         "dashboard_read_mode": broker.get("read_mode"),
         "position_count": len(broker_positions),
+        "markets": [
+            {key: item.get(key) for key in ("market", "status", "read_mode", "stale")}
+            for item in markets
+        ],
+        "fallback_markets": fallback_markets,
+        "warnings_present": bool(dashboard.get("warnings")),
         "checks": checks,
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))

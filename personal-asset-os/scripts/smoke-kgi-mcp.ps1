@@ -69,20 +69,36 @@ try {
         seven_read_only_tools_visible = $toolNames.Count -eq 7
         overview_tool_visible = $toolNames -contains 'get_asset_overview'
         positions_tool_visible = $toolNames -contains 'list_asset_positions'
-        overview_broker_usable = @('complete', 'partial') -contains [string]$overview.broker.status
+        overview_broker_usable = @('complete', 'partial', 'stale') -contains [string]$overview.broker.status
         overview_broker_schema_v2 = [string]$overview.broker.schema_version -eq 'paos.broker_valuation.v2'
         overview_market_statuses_present = @($overview.broker.markets).Count -gt 0
         overview_broker_applied = [decimal]$overview.metrics.broker_market_value -gt 0
-        positions_broker_usable = @('complete', 'partial') -contains [string]$positionResult.broker.status
+        positions_broker_usable = @('complete', 'partial', 'stale') -contains [string]$positionResult.broker.status
         broker_positions_visible = $kgiPositions.Count -gt 0
         database_table_counts_unchanged = [string]$before.table_counts_hash -eq [string]$after.table_counts_hash
         database_file_unchanged = [string]$before.database_file_hash -eq [string]$after.database_file_hash
+        database_content_including_wal_unchanged = [string]$before.database_content_hash -eq [string]$after.database_content_hash
+        market_guard_contract_adopted = @($overview.broker.markets | Where-Object {
+            $_.read_mode -notin @('live', 'memory_cache', 'persistent_fallback', 'unavailable') -or
+            $_.stale -isnot [bool]
+        }).Count -eq 0
+        fallback_is_non_live = (
+            [string]$overview.broker.read_mode -ne 'persistent_fallback' -or (
+                [string]$overview.broker.status -eq 'stale' -and @($overview.warnings).Count -gt 0
+            )
+        )
     }
     $ok = -not ($checks.Values -contains $false)
     [pscustomobject]@{
         ok = $ok
         tool_count = $toolNames.Count
         broker_position_count = $kgiPositions.Count
+        broker_status = [string]$overview.broker.status
+        broker_read_mode = [string]$overview.broker.read_mode
+        fallback_markets = @($overview.broker.markets | Where-Object {
+            $_.read_mode -eq 'persistent_fallback'
+        } | ForEach-Object { [string]$_.market })
+        warnings_present = @($overview.warnings).Count -gt 0
         checks = $checks
     } | ConvertTo-Json -Depth 5
     if (-not $ok) { exit 1 }
