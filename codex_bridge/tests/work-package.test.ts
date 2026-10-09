@@ -34,6 +34,16 @@ test("preview rejects an unsupported approval reviewer", () => {
   }), /Unsupported approvalReviewer/);
 });
 
+test("preview preserves explicit reviewers and binds reviewer choice to the digest", () => {
+  const input = { projectId: "omi", title: "Reviewer", objective: "Inspect files" };
+  const automatic = previewWorkPackage({ ...input, approvalReviewer: "auto_review" });
+  const manual = previewWorkPackage({ ...input, approvalReviewer: "user" });
+  assert.equal(automatic.workPackage.approvalReviewer, "auto_review");
+  assert.equal(manual.workPackage.approvalReviewer, "user");
+  assert.equal(previewWorkPackage(input).previewDigest, automatic.previewDigest);
+  assert.notEqual(manual.previewDigest, automatic.previewDigest);
+});
+
 test("redaction hides secret-bearing keys and values", () => {
   const fakeSecret = ["sk", "fixture".repeat(4)].join("-");
   const sanitized = sanitizeForStorage({

@@ -1711,6 +1711,90 @@
         background: #151e27;
       }
       body[data-theme="night-shift"] * { scrollbar-color: #40505d transparent; }
+      /* Workspace UX v2: quiet controls; each column owns one vertical scroller. */
+      body[data-ledger="project-ledger"][data-theme="night-shift"] {
+        --ledger-blue: #91aaa9;
+        --ledger-blue-soft: #253334;
+        --ledger-muted: #a0abb4;
+      }
+      body[data-ledger="project-ledger"] .sidebar-head,
+      body[data-ledger="project-ledger"] .rail-controls,
+      body[data-ledger="project-ledger"] .project-row,
+      body[data-ledger="project-ledger"] .inspector-head,
+      body[data-ledger="project-ledger"] .inspector-summary {
+        position: sticky;
+        top: 0;
+        z-index: 2;
+        background: var(--ledger-rail);
+      }
+      body[data-ledger="project-ledger"] .rail-controls { display: grid; gap: 9px; padding-bottom: 12px; letter-spacing: 0; }
+      #conversation-search { width: 100%; min-width: 0; padding: 8px 9px; border: 1px solid var(--ledger-line); border-radius: 7px; background: var(--ledger-rail-soft); color: var(--ledger-ink); font: 12px/1.4 "Segoe UI", sans-serif; }
+      body[data-ledger="project-ledger"] .conversation-copy { display: grid; min-width: 0; gap: 4px; text-align: left; }
+      body[data-ledger="project-ledger"] .conversation-copy small { overflow: hidden; color: var(--ledger-muted); font-size: 10px; font-weight: 400; white-space: nowrap; text-overflow: ellipsis; }
+      body[data-ledger="project-ledger"][data-theme="night-shift"] .conversation-item { min-height: 47px; transition: background-color 140ms ease; }
+      body[data-ledger="project-ledger"][data-theme="night-shift"] .conversation-item[aria-current="true"] { background: #243132; box-shadow: inset 0 0 0 1px #334243; }
+      body[data-ledger="project-ledger"][data-display-mode="fullscreen"] .chat { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+      body[data-ledger="project-ledger"][data-display-mode="fullscreen"] .chat-head {
+        position: sticky; top: 0; z-index: 5; height: auto; min-height: 92px; padding-block: 13px; align-items: flex-start; flex-wrap: wrap; gap: 10px;
+        background: var(--ledger-canvas); backdrop-filter: none;
+      }
+      body[data-ledger="project-ledger"][data-display-mode="fullscreen"] .chat-heading { flex-basis: 220px; }
+      body[data-ledger="project-ledger"] .thread-controls { display: flex; flex-wrap: wrap; gap: 5px 12px; margin-top: 8px; color: var(--ledger-muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+      .thread-controls > span { min-width: 0; }
+      .token-chip { display: inline-flex; flex-wrap: wrap; gap: 7px; align-items: center; }
+      .token-chip progress { width: 56px; height: 4px; accent-color: var(--ledger-blue); }
+      body[data-ledger="project-ledger"][data-display-mode="fullscreen"].header-compact .thread-controls { opacity: .68; }
+      body[data-ledger="project-ledger"][data-display-mode="fullscreen"].header-compact .chat-subtitle { opacity: .68; }
+      body[data-ledger="project-ledger"][data-display-mode="fullscreen"].header-compact .chat-head { min-height: 86px; padding-block: 10px; }
+      body[data-ledger="project-ledger"] .thread-controls, body[data-ledger="project-ledger"] .chat-subtitle { transition: opacity 160ms ease; }
+      body[data-ledger="project-ledger"][data-display-mode="inline"] .thread-controls { display: none; }
+      body[data-ledger="project-ledger"] .chat-actions { flex-wrap: wrap; gap: 5px; min-width: 0; max-width: 100%; }
+      body[data-ledger="project-ledger"] .inspector-head, body[data-ledger="project-ledger"] .inspector-summary { background: var(--ledger-inspector); }
+      body[data-ledger="project-ledger"] .turn-work { margin: 0 0 16px; padding-bottom: 14px; border-bottom: 1px solid var(--ledger-line); }
+      .turn-work-head { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; }
+      .turn-work-head span, .turn-work > p { color: var(--ledger-muted); font-size: 11px; line-height: 1.65; }
+      .turn-technical > summary { padding: 7px 0; color: var(--ledger-muted); cursor: pointer; font-size: 11px; }
+      .activity-card.recovered .activity-status, .activity-card.historical .activity-status,
+      .recovery-badge { color: var(--ledger-muted); }
+      .recovery-badge { margin-left: 8px; font-size: 10px; font-weight: 400; }
+      .compact-warning { border: 1px solid var(--ledger-line-strong); border-left: 2px solid var(--danger); padding: 8px 10px; margin-bottom: 9px; }
+      .compact-warning strong, .compact-warning small { display: block; overflow-wrap: anywhere; }
+      .compact-warning strong { font-size: 11px; }
+      .compact-warning small { color: var(--ledger-muted); font-size: 10px; }
+      body[data-ledger="project-ledger"] .workstream .activity-card { box-shadow: none; border-radius: 6px; }
+      body[data-ledger="project-ledger"] .artifact-result-list, .status-windows { display: flex; gap: 9px; overflow-x: auto; scroll-snap-type: x proximity; padding: 4px 2px 9px; }
+      body[data-ledger="project-ledger"] .artifact-result { flex: 0 0 220px; scroll-snap-align: start; }
+      .operator-drawer { position: fixed; inset: 16px 16px 16px auto; margin: 0; width: min(650px, calc(100% - 32px)); max-width: none; max-height: calc(100% - 32px); padding: 0; border: 1px solid var(--ledger-line-strong); border-radius: 12px; background: var(--ledger-surface); color: var(--ledger-ink); box-shadow: 0 12px 40px #0004; }
+      .operator-drawer[open] { display: flex; flex-direction: column; }
+      .operator-drawer::backdrop { background: #0005; }
+      .operator-head { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 18px; border-bottom: 1px solid var(--ledger-line); }
+      .operator-head > div { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+      .operator-head small { display: block; width: 100%; color: var(--ledger-muted); font-size: 11px; }
+      .operator-head button { border: 1px solid var(--ledger-line-strong); border-radius: 7px; padding: 7px 10px; background: transparent; color: var(--ledger-ink); cursor: pointer; }
+      .operator-note { margin: 12px 18px 0; color: var(--ledger-muted); font-size: 12px; }
+      .operator-content { min-height: 0; overflow-y: auto; padding: 0 18px 18px; }
+      .operator-content h2 { font-size: 13px; margin: 24px 0 10px; }
+      .status-card { padding: 12px 0; border-bottom: 1px solid var(--ledger-line); }
+      .status-card h3 { margin: 0 0 8px; font-size: 12px; font-weight: 600; }
+      .status-card dl { margin: 8px 0; font-size: 12px; }
+      .status-card dl > div { display: flex; gap: 14px; justify-content: space-between; padding: 3px 0; overflow-wrap: anywhere; }
+      .status-card dt, .status-card summary, .status-unavailable { color: var(--ledger-muted); }
+      .status-card dd { margin: 0; text-align: right; }
+      .status-card summary { padding: 8px 0 2px; cursor: pointer; font-size: 12px; }
+      .status-window { flex: 1 0 220px; padding: 10px; background: var(--ledger-canvas); border-radius: 8px; scroll-snap-align: start; font-size: 11px; }
+      .status-unavailable { font-size: 12px; }
+      button:focus-visible, input:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--ledger-blue); outline-offset: 3px; }
+      @keyframes message-reveal { from { opacity: .65; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+      .message-reveal { animation: message-reveal 160ms ease-out; }
+      @media (max-width: 760px) {
+        body[data-ledger="project-ledger"][data-display-mode="fullscreen"] .chat-head { padding: 12px; }
+        body[data-ledger="project-ledger"][data-display-mode="fullscreen"] .chat-heading { flex-basis: 100%; }
+        .operator-drawer { inset: 8px; width: calc(100% - 16px); max-height: calc(100% - 16px); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+        .status-windows, .artifact-result-list { scroll-snap-type: none !important; }
+      }
     </style>
   </head>
   <body data-display-mode="inline" data-ledger="project-ledger" data-theme="night-shift">
@@ -1725,7 +1809,7 @@
             </div>
           </div>
         </div>
-        <div class="rail-label">專案與對話</div>
+        <div class="rail-label rail-controls"><label for="conversation-search">專案與對話</label><input id="conversation-search" type="search" placeholder="搜尋對話或專案" aria-label="搜尋對話或專案" autocomplete="off" /></div>
         <nav class="project-tree" id="project-tree"></nav>
         <div class="sidebar-foot">
           <span class="presence" id="presence"></span>
@@ -1740,6 +1824,7 @@
           <div class="chat-heading">
             <h1 class="chat-title" id="chat-title">新對話</h1>
             <div class="chat-subtitle" id="chat-subtitle">選擇專案後開始</div>
+            <div class="thread-controls" id="thread-controls" aria-label="對話執行設定與用量"></div>
           </div>
           <div class="chat-actions" id="chat-actions"></div>
         </header>
@@ -1809,10 +1894,15 @@
           <button class="close-inspector" id="close-inspector" type="button" aria-label="關閉工作紀錄">×</button>
         </div>
         <div class="inspector-summary" id="inspector-summary"></div>
-        <div class="workstream" id="workstream"></div>
+        <div class="workstream" id="workstream" tabindex="0" aria-label="依回合整理的工作紀錄"></div>
       </aside>
     </div>
 
+    <dialog class="operator-drawer" id="operator-drawer" aria-labelledby="operator-title">
+      <div class="operator-head"><div><strong id="operator-title">Codex 狀態</strong><small id="operator-context"></small></div><div><button id="refresh-operator" type="button">重新讀取</button><button id="close-operator" type="button" aria-label="關閉 Codex 狀態">關閉</button></div></div>
+      <p class="operator-note">僅顯示本次讀取的摘要；各資料來源可能個別無法使用。</p>
+      <div id="operator-content" class="operator-content" aria-live="polite"></div>
+    </dialog>
     <section class="artifact" id="artifact" hidden>
       <div class="artifact-dialog" role="dialog" aria-modal="true" aria-labelledby="artifact-title">
         <div class="artifact-head">
@@ -1845,7 +1935,7 @@
       (() => {
         "use strict";
         const $ = (selector) => document.querySelector(selector);
-        const terminal = new Set(["completed", "failed", "interrupted", "cancelled"]);
+        const terminal = new Set(["completed", "failed", "interrupted", "cancelled", "declined"]);
         const state = {
           status: null,
           selectedJob: null,
@@ -1854,6 +1944,10 @@
           draft: {},
           busy: false,
           pollInFlight: false,
+          selectionGeneration: 0,
+          catchUpStartedAt: 0,
+          catchUpPages: 0,
+          recoverSnapshot: false,
           pollTimer: null,
           cancelArmedUntil: 0,
           expandedProjects: new Set(),
@@ -1877,6 +1971,10 @@
           registryRefreshGeneration: 0,
           registryRefreshInFlight: null,
           registryLoadMoreInFlight: null,
+          conversationFilter: "",
+          operatorRead: null,
+          actionRequests: new Map(),
+          revealedKeys: new Set(),
         };
         let rpcId = 0;
         const pendingRequests = new Map();
@@ -1922,6 +2020,7 @@
         function applyHostContext(context) {
           state.hostContext = Object.assign({}, state.hostContext, context || {});
           state.displayMode = state.hostContext.displayMode === "fullscreen" ? "fullscreen" : "inline";
+          if (state.displayMode === "inline" && $("#operator-drawer").open) $("#operator-drawer").close();
           document.body.dataset.displayMode = state.displayMode;
           $("#console").dataset.shell = state.displayMode === "fullscreen" ? "project-ledger" : "conversation-dock";
           $("#console").classList.remove("rail-open", "inspector-open");
@@ -2070,20 +2169,39 @@
           let merged = job;
           if (!changed) {
             const previous = state.selectedJob;
+            if (Number(job.nextConversationRevision || 0) < Number(previous.nextConversationRevision || 0)
+              || Number(job.stateVersion || 0) < Number(previous.stateVersion || 0)) return;
             merged = Object.assign({}, previous, job);
             if (!job.conversation && previous.conversation) merged.conversation = cloneValue(previous.conversation);
+            if (!merged.conversation && (job.conversationChanges || []).length) {
+              state.recoverSnapshot = true;
+              schedulePoll();
+              return;
+            }
             if (merged.conversation && Array.isArray(job.conversationChanges) && job.conversationChanges.length) {
-              applyConversationChanges(merged.conversation, job.conversationChanges);
+              if (!applyConversationChanges(merged.conversation, job.conversationChanges)) {
+                state.recoverSnapshot = true;
+                schedulePoll();
+                return;
+              }
             }
           }
           state.selectedJob = merged;
           if (!state.selectedConversation || state.selectedConversation.conversationId !== (merged.threadId || "job:" + merged.id)) {
             state.selectedConversation = summaryFromJob(merged);
+          } else if (state.selectedConversation.source === "bridge") {
+            state.selectedConversation = Object.assign({}, state.selectedConversation, summaryFromJob(merged));
+          } else {
+            state.selectedConversation = Object.assign({}, state.selectedConversation, { bridgeJob: merged });
           }
           upsertConversation(state.selectedConversation);
           state.selectedProjectId = merged.projectId;
           upsertRecentJob(merged);
           if (changed) {
+            state.selectionGeneration += 1;
+            state.catchUpStartedAt = 0;
+            state.catchUpPages = 0;
+            state.recoverSnapshot = false;
             state.messageSignature = "";
             state.workstreamSignature = "";
             state.timelineKeys = [];
@@ -2097,6 +2215,7 @@
 
         function selectNativeConversationView(thread) {
           const changed = !state.selectedJob || state.selectedJob.id !== thread.id;
+          if (changed) state.selectionGeneration += 1;
           state.selectedJob = thread;
           state.selectedProjectId = thread.projectId;
           state.expandedProjects.add(thread.projectId);
@@ -2159,15 +2278,22 @@
         }
 
         function applyConversationChanges(conversation, changes) {
+          let expected = Number(conversation.revision || 0) + 1;
+          for (const change of changes) {
+            if (change.revision !== expected++) return false;
+          }
           for (const change of changes) {
             if (change.replaceAll) conversation.turns = cloneValue(change.turns || []);
             if (change.threadId) conversation.threadId = change.threadId;
             if (change.status) conversation.status = change.status;
             if (change.hydratedAt) conversation.hydratedAt = change.hydratedAt;
             if (change.freshness) conversation.freshness = cloneValue(change.freshness);
+            if (change.tokenUsage) conversation.tokenUsage = cloneValue(change.tokenUsage);
+            if (change.modelRouting) conversation.modelRouting = cloneValue(change.modelRouting);
+            if (change.createdAt !== undefined) conversation.createdAt = change.createdAt || undefined;
+            conversation.updatedAt = change.updatedAt === undefined ? change.at : change.updatedAt || undefined;
             if (change.replaceAll) {
               conversation.revision = change.revision;
-              conversation.updatedAt = change.at;
               continue;
             }
             for (const turnPatch of change.turns || []) {
@@ -2177,7 +2303,7 @@
                 conversation.turns = conversation.turns || [];
                 conversation.turns.push(turn);
               }
-              ["status", "startedAt", "completedAt", "durationMs"].forEach((key) => {
+              ["status", "startedAt", "completedAt", "durationMs", "tokenUsage", "modelRouting"].forEach((key) => {
                 if (turnPatch[key] !== undefined) turn[key] = turnPatch[key];
               });
               for (const itemPatch of turnPatch.items || []) {
@@ -2189,12 +2315,12 @@
                 }
                 const index = (turn.items || []).findIndex((candidate) => candidate.id === itemPatch.id);
                 if (index < 0) turn.items.push(cloneValue(itemPatch));
-                else turn.items[index] = Object.assign({}, turn.items[index], cloneValue(itemPatch));
+                else turn.items[index] = cloneValue(itemPatch);
               }
             }
             conversation.revision = change.revision;
-            conversation.updatedAt = change.at;
           }
+          return true;
         }
 
         function cloneValue(value) {
@@ -2234,6 +2360,7 @@
         function startNewConversation(projectId) {
           const operableProjectId = isOperableProjectId(projectId) ? projectId : firstProjectId();
           state.selectedJob = null;
+          state.selectionGeneration += 1;
           state.selectedConversation = null;
           state.selectedProjectId = operableProjectId || firstProjectId();
           state.messageSignature = "";
@@ -2261,11 +2388,12 @@
         $("#close-inspector").addEventListener("click", () => $("#console").classList.remove("inspector-open"));
         $("#new-content").addEventListener("click", () => {
           state.newContentAvailable = false;
-          $("#transcript").scrollTo({ top: $("#transcript").scrollHeight, behavior: "smooth" });
+          $("#transcript").scrollTo({ top: $("#transcript").scrollHeight, behavior: reducedMotion() ? "auto" : "smooth" });
           updateNewContentButton();
         });
         $("#transcript").addEventListener("scroll", () => {
           const transcript = $("#transcript");
+          updateScrollState(transcript);
           if (transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 120 && state.newContentAvailable) {
             state.newContentAvailable = false;
             updateNewContentButton();
@@ -2280,6 +2408,16 @@
           else if (target.dataset.resultArtifact) loadArtifact(target.dataset.resultArtifact);
         });
         $("#refresh-status").addEventListener("click", () => withBusy(refreshStatus));
+        $("#conversation-search").addEventListener("input", (event) => {
+          state.conversationFilter = event.target.value.trim().toLocaleLowerCase("zh-TW");
+          renderProjectTree();
+        });
+        $("#close-operator").addEventListener("click", () => $("#operator-drawer").close());
+        $("#operator-drawer").addEventListener("close", () => {
+          const opener = $("#open-operator");
+          if (opener) { opener.setAttribute("aria-expanded", "false"); focusWithoutScroll(opener); }
+        });
+        $("#refresh-operator").addEventListener("click", () => loadOperatorStatus(true));
         $("#classification").addEventListener("change", () => {
           state.draftArtifacts.forEach((artifact) => {
             artifact.bundleId = "";
@@ -2447,20 +2585,39 @@
             return;
           }
           state.pollInFlight = true;
+          const generation = state.selectionGeneration;
+          const policy = job.conversationDelivery || {};
+          const recover = state.recoverSnapshot || !job.conversation || (state.catchUpStartedAt > 0 &&
+            (Date.now() - state.catchUpStartedAt >= (policy.maxCatchUpMs || 1500)
+              || state.catchUpPages >= (policy.maxCatchUpPages || 4)));
           try {
+            let response;
             if (!terminal.has(job.status) || catchUp || !state.selectedConversation) {
-              await callTool("codex_job_get", {
+              response = await callTool("codex_job_get", {
                 jobId: job.id,
                 afterSeq: Number(job.nextEventSeq || 0),
                 maxEvents: 20,
                 afterConversationRevision: Number(job.nextConversationRevision || 0),
-              });
+                ...(recover ? { recovery: "snapshot" } : {}),
+              }, { update: false, envelope: true });
             } else {
-              await callTool("codex_unified_conversation_get", {
+              response = await callTool("codex_unified_conversation_get", {
                 conversationId: state.selectedConversation.conversationId,
-              });
+              }, { update: false, envelope: true });
+            }
+            if (generation !== state.selectionGeneration || !state.selectedJob || state.selectedJob.id !== job.id) return;
+            state.recoverSnapshot = false;
+            updateFromResponse(response);
+            if (state.selectedJob.conversationHasMore) {
+              if (!state.catchUpStartedAt) state.catchUpStartedAt = Date.now();
+              state.catchUpPages += 1;
+            } else {
+              state.catchUpStartedAt = 0;
+              state.catchUpPages = 0;
             }
           } catch (error) {
+            if (generation !== state.selectionGeneration) return;
+            state.recoverSnapshot = true;
             showError(error && error.message || String(error));
           } finally {
             state.pollInFlight = false;
@@ -2470,6 +2627,7 @@
 
         document.addEventListener("visibilitychange", () => {
           if (!document.hidden) {
+            state.recoverSnapshot = true;
             void requestConversationRegistryRefresh().catch(() => undefined);
             if (state.selectedConversation) void pollSelectedJob();
           }
@@ -2516,22 +2674,26 @@
             Array.from(state.expandedProjects),
             Array.from(state.expandedConversationProjects),
             state.conversationCursor,
+            state.conversationFilter,
+            state.conversations.map((item) => [item.createdAt, item.threadStatus, item.bridgeJob && item.bridgeJob.status]),
           ]);
           if (signature === state.treeSignature) return;
           state.treeSignature = signature;
           $("#project-tree").innerHTML = projects.map((project) => {
             const allConversations = state.conversations
-              .filter((conversation) => conversation.projectId === project.id)
+              .filter((conversation) => conversation.projectId === project.id && matchesConversation(conversation, project, state.conversationFilter))
               .sort((left, right) => String(right.updatedAt || right.createdAt || "").localeCompare(String(left.updatedAt || left.createdAt || "")));
-            const expanded = state.expandedProjects.has(project.id);
-            const showAll = state.expandedConversationProjects.has(project.id);
+            if (state.conversationFilter && !allConversations.length) return "";
+            const expanded = Boolean(state.conversationFilter) || state.expandedProjects.has(project.id);
+            const showAll = Boolean(state.conversationFilter) || state.expandedConversationProjects.has(project.id);
             const visibleConversations = showAll ? allConversations : allConversations.slice(0, 8);
             const conversations = visibleConversations.length
               ? visibleConversations.map((item) => {
                   const selected = state.selectedConversation && state.selectedConversation.conversationId === item.conversationId;
                   return '<button class="conversation-item" type="button" data-conversation-id="' + escapeAttr(item.conversationId) + '" aria-current="' + String(Boolean(selected)) + '">' +
                     '<span class="conversation-dot ' + conversationDotClass(item.automationState || item.bridgeJob && item.bridgeJob.status || item.threadStatus) + '"></span>' +
-                    '<span class="conversation-title">' + escapeHtml(item.title) + '</span></button>';
+                    '<span class="conversation-copy"><span class="conversation-title">' + escapeHtml(item.title) + '</span><small>' +
+                    escapeHtml(conversationRowMeta(item)) + '</small></span></button>';
                 }).join("")
               : '<div class="empty-project">尚無對話</div>';
             const reveal = allConversations.length > 8
@@ -2550,7 +2712,7 @@
               '</div><div class="conversation-list">' + conversations + reveal + '</div></section>';
           }).join("") + (state.conversationCursor
             ? '<button class="load-conversations" type="button" data-load-local-history>載入更多對話</button>'
-            : "") || '<div class="empty-project">尚未找到本機 Codex 對話</div>';
+            : "") || '<div class="empty-project">' + (state.conversationFilter ? "沒有符合的對話" : "尚未找到本機 Codex 對話") + '</div>';
 
           document.querySelectorAll("[data-project-toggle]").forEach((button) => button.addEventListener("click", () => {
             const id = button.dataset.projectToggle;
@@ -2597,24 +2759,312 @@
           return allowlisted.concat(historyOnly);
         }
 
+        function matchesConversation(conversation, project, query) {
+          return !query || [conversation.title, project.name].filter(Boolean).join(" ").toLocaleLowerCase("zh-TW").includes(query);
+        }
+
+        function conversationRowMeta(item) {
+          const status = item.automationState || item.bridgeJob && item.bridgeJob.status || item.threadStatus;
+          const label = ({ idle: "待命", notLoaded: "歷史", active: "執行中", automation_active: "排程啟用", automation_paused: "排程暫停" })[status] || statusLabel(status);
+          const value = item.updatedAt || item.createdAt;
+          const date = new Date(value);
+          let time = "";
+          if (value && Number.isFinite(date.getTime())) {
+            const today = new Date();
+            const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+            time = date.toDateString() === today.toDateString() ? date.toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit", hour12: false })
+              : date.toDateString() === yesterday.toDateString() ? "昨天" : date.toLocaleDateString("zh-TW", { month: "numeric", day: "numeric" });
+          }
+          return [label, time].filter(Boolean).join(" · ");
+        }
+
+        function metric(value) {
+          return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value.toLocaleString("zh-TW") : "未知";
+        }
+
+        function tokenSummary(usage) {
+          if (!usage) return "";
+          const total = usage.total && usage.total.totalTokens;
+          const last = usage.last && usage.last.totalTokens;
+          const windowSize = usage.modelContextWindow;
+          const valid = typeof last === "number" && Number.isFinite(last) && last >= 0 && typeof windowSize === "number" && Number.isFinite(windowSize) && windowSize > 0;
+          return '<span class="token-chip" title="累計與最近一次用量；不代表剩餘 context 或壓力">累計 ' + escapeHtml(metric(total)) +
+            ' tokens · 最近 ' + escapeHtml(metric(last)) + ' / 視窗 ' + escapeHtml(metric(windowSize)) +
+            (valid ? '<progress aria-label="最近一次 token 用量相對模型視窗，非 context 壓力" max="' + windowSize + '" value="' + Math.min(last, windowSize) + '"></progress>' : "") + '</span>';
+        }
+
+        function renderThreadControls(job) {
+          if (!job) return "";
+          const routing = job.conversation && job.conversation.modelRouting;
+          const requested = job.model || routing && routing.requestedModel || "Codex 預設";
+          const fields = [job.executionMode === "plan" ? "Plan · 唯讀" : "Agent · 可修改",
+            job.approvalReviewer === "auto_review" ? "自動審核" : "每次詢問", "指定 " + requested,
+            "推理 " + (effortLabel(job.effort) || "預設"), "Controller " + controllerLabel(state.status && state.status.controller)];
+          if (routing && routing.executedModel) fields.push((routing.turnId && job.turnId && routing.turnId !== job.turnId ? "前次回合實際 " : "實際 ") + routing.executedModel + "（轉送自 " + routing.fromModel + "）");
+          return fields.map((text) => '<span>' + escapeHtml(text) + '</span>').join("") + tokenSummary(job.conversation && job.conversation.tokenUsage);
+        }
+
+        function actionIdentity(job) {
+          return job ? [job.id, job.threadId, job.turnId].join(":") : "";
+        }
+
+        function directActionEligible(job) {
+          return Boolean(job && job.directActionHistoryEligible === true && job.source !== "local" && !job.readOnly &&
+            job.threadId && job.turnId && terminal.has(job.status) && isOperableProjectId(job.projectId) &&
+            ["idle", "notLoaded"].includes(job.conversation && job.conversation.status) &&
+            !(job.approvals || []).some((approval) => approval.state === "pending") &&
+            !state.actionRequests.has(actionIdentity(job)) && !state.busy);
+        }
+
+        function runThreadAction(kind) {
+          const job = state.selectedJob;
+          if (!["review", "compact"].includes(kind) || !directActionEligible(job)) return;
+          const identity = actionIdentity(job);
+          const args = { jobId: job.id, expectedThreadId: job.threadId, expectedTurnId: job.turnId, requestId: makeId() };
+          const generation = state.selectionGeneration;
+          // Keep the exact receipt after ambiguous delivery; never auto-retry with a new id.
+          state.actionRequests.set(identity, args);
+          return withBusy(async () => {
+            state.headerSignature = "";
+            renderHeader();
+            try {
+              const receipt = await callTool("codex_direct_thread_" + kind, args, { update: false });
+              showNotice(receipt && receipt.accepted ? "要求已受理，等待工作紀錄回報執行結果。" : "尚未確認執行結果；請查看工作紀錄，不會自動重送。");
+            } finally {
+              if (generation === state.selectionGeneration && state.selectedJob && state.selectedJob.id === args.jobId) {
+                state.recoverSnapshot = true;
+                await pollSelectedJob();
+                schedulePoll();
+              }
+            }
+          });
+        }
+
+        function openOperatorStatus() {
+          if (state.displayMode !== "fullscreen") return;
+          const drawer = $("#operator-drawer");
+          if (!drawer.open) drawer.showModal();
+          $("#open-operator").setAttribute("aria-expanded", "true");
+          return loadOperatorStatus(false);
+        }
+
+        function loadOperatorStatus(force) {
+          if (!$("#operator-drawer").open) return Promise.resolve();
+          const projectId = state.selectedProjectId;
+          const previous = state.operatorRead;
+          if (previous && previous.projectId === projectId) {
+            if (previous.promise) { renderOperatorStatus(); return previous.promise; }
+            if (Date.now() - previous.startedAt < (force ? 5000 : 30000)) { renderOperatorStatus(); return Promise.resolve(); }
+          }
+          const read = { projectId, projectName: currentProject() && currentProject().name || "尚未選擇專案", startedAt: Date.now(), results: {}, promise: null };
+          state.operatorRead = read;
+          const configured = isOperableProjectId(projectId);
+          const tasks = [["usage", "codex_usage_status", {}], ["runtime", "codex_runtime_status", { projectId }], ["inventory", "codex_inventory", { projectId, kind: "all" }]];
+          read.promise = Promise.allSettled(tasks.map(async ([key, tool, args]) => {
+            if (key !== "usage" && !configured) { read.results[key] = { unavailable: "PROJECT_NOT_CONFIGURED" }; return; }
+            try { read.results[key] = await callTool(tool, args, { update: false }); }
+            catch { read.results[key] = { unavailable: "BACKEND_UNAVAILABLE" }; }
+          })).then(() => {
+            read.promise = null;
+            if (state.operatorRead === read) renderOperatorStatus();
+          });
+          renderOperatorStatus();
+          return read.promise;
+        }
+
+        function operatorPart(group, key) {
+          if (!group) return { status: "loading" };
+          return group.unavailable ? { status: "unavailable", code: group.unavailable } : group[key] || { status: "error", code: "INVALID_RESPONSE" };
+        }
+
+        function statusCard(title, result, renderData) {
+          let body;
+          if (result.status !== "available") {
+            body = '<p class="status-unavailable">' + escapeHtml(result.status === "loading" ? "讀取中…" : (result.status === "error" ? "資料錯誤" : "無法使用") + " · " + (result.code || "UNKNOWN")) + '</p>';
+          } else {
+            try { body = renderData(result.data) + (result.truncated ? '<p class="status-unavailable">已縮限，非完整清單</p>' : ""); }
+            catch { body = '<p class="status-unavailable">資料錯誤 · INVALID_RESPONSE</p>'; }
+          }
+          return '<section class="status-card"><h3>' + escapeHtml(title) + '</h3>' + body + '</section>';
+        }
+
+        function statusRows(rows) {
+          return '<dl>' + rows.map(([label, value]) => '<div><dt>' + escapeHtml(label) + '</dt><dd>' + escapeHtml(value) + '</dd></div>').join("") + '</dl>';
+        }
+
+        function statusDetails(label, rows) {
+          return '<details data-status-detail="' + escapeAttr(label) + '"><summary>' + escapeHtml(label) + '</summary>' + statusRows(rows) + '</details>';
+        }
+
+        function usageRateLimits(data) {
+          const limits = data.rateLimits;
+          const reset = data.rateLimitResetCredits;
+          const windows = [limits.primary, limits.secondary].map((window, index) => {
+            const rows = window ? [["使用", metric(window.usedPercent) + "%"], ["視窗", window.windowDurationMins == null ? "未知" : metric(window.windowDurationMins) + " 分鐘"],
+              ["重設", unixTime(window.resetsAt)]] : [["狀態", "未知"]];
+            return '<div class="status-window"><strong>' + (index ? "次要額度" : "主要額度") + '</strong>' + statusRows(rows) + '</div>';
+          }).join("");
+          return statusRows([["方案", limits.planType || "未知"], ["Reset credits", metric(reset && reset.availableCount)], ["一般用量", data.ordinaryUsageAllowed == null ? "未知" : data.ordinaryUsageAllowed ? "可用" : "受限"]]) +
+            '<div class="status-windows" tabindex="0" aria-label="額度視窗，可橫向捲動">' + windows + '</div>' +
+            (Array.isArray(data.rateLimitsByLimitId) ? statusDetails("其他額度", data.rateLimitsByLimitId.map((limit) => [limit.limitName || limit.limitId || "未命名", "主要 " + metric(limit.primary && limit.primary.usedPercent) + "% · 次要 " + metric(limit.secondary && limit.secondary.usedPercent) + "%"])) : "");
+        }
+
+        function unixTime(seconds) {
+          return typeof seconds === "number" && Number.isFinite(seconds) ? formatTime(seconds * 1000) || "未知" : "未知";
+        }
+
+        function renderOperatorStatus() {
+          const read = state.operatorRead;
+          if (!read || !$("#operator-drawer").open) return;
+          $("#operator-context").textContent = read.projectName + " · " + (read.promise ? "讀取中" : "讀取於 " + formatTime(read.startedAt));
+          $("#refresh-operator").disabled = Boolean(read.promise);
+          const { usage, runtime, inventory } = read.results;
+          const card = statusCard;
+          const part = operatorPart;
+          const html = '<h2>帳戶</h2>' + card("額度", part(usage, "rateLimits"), usageRateLimits) +
+            card("使用摘要", part(usage, "accountUsage"), (data) => statusRows([["累計 tokens", metric(data.summary.lifetimeTokens)], ["單日最高 tokens", metric(data.summary.peakDailyTokens)], ["連續使用天數", metric(data.summary.currentStreakDays)]])) +
+            '<h2>Runtime</h2>' + card("App Server", part(runtime, "server"), (data) => statusRows([["常駐記憶體", data.process.residentMemoryBytes == null ? "未知" : formatBytes(data.process.residentMemoryBytes)], ["診斷計量", metric(data.gauges.length)]]) + statusDetails("診斷摘要", data.gauges.map((gauge) => [gauge.name, String(gauge.value)]))) +
+            card("Windows sandbox", part(runtime, "windowsSandbox"), (data) => statusRows([["Readiness", data.status]])) +
+            card("Permission profiles", part(runtime, "permissionProfiles"), (data) => statusRows([["Profiles", metric(data.length)]]) + statusDetails("權限設定", data.map((profile) => [profile.id, profile.allowed ? "可用" : "不可用"]))) +
+            card("Provider capabilities", part(runtime, "modelProvider"), (data) => statusRows(["namespaceTools", "imageGeneration", "webSearch"].map((key) => [key, data[key] === true ? "支援" : data[key] === false ? "不支援" : "未知"]))) +
+            '<h2>專案 Inventory</h2>' + ["skills", "hooks"].map((key) => card(key === "skills" ? "Skills" : "Hooks", part(inventory, key), (data) => statusRows([["數量", metric(data.items.length)], ["Errors", metric(data.errorCount)], ["Warnings", metric(data.warningCount)]]) + statusDetails(key === "skills" ? "技能摘要" : "Hook 摘要", data.items.map((item) => [item.name || item.eventName, [item.scope || item.handlerType, item.enabled ? "啟用" : "停用", item.trustStatus].filter(Boolean).join(" · ")])))).join("") +
+            card("Codex MCP servers", part(inventory, "mcpServers"), (data) => statusRows([["Servers", metric(data.length)]]) + statusDetails("伺服器狀態", data.map((server) => [server.name, (server.runtimeStatus || "未知") + " · " + server.authStatus + (server.toolDiscoveryFailed ? " · 探索失敗" : "")])));
+          const content = $("#operator-content");
+          const opened = new Set(Array.from(content.querySelectorAll("details[open]"), (node) => node.dataset.statusDetail));
+          content.innerHTML = html;
+          content.querySelectorAll("details").forEach((node) => { node.open = opened.has(node.dataset.statusDetail); });
+        }
+
+        function isNarrative(item) { return item.type === "userMessage" || item.type === "agentMessage"; }
+        function isTechnicalItem(item) { return !isNarrative(item) && item.type !== "approval"; }
+
+        function needsApprovalAttention(item) {
+          return ["pending", "declined", "expired"].includes(item.approvalState) ||
+            (item.type === "approval" && ["pending", "declined", "expired"].includes(item.status));
+        }
+
+        function isFailedActivity(item) {
+          return isTechnicalItem(item) && (item.type === "error" || Boolean(item.error) ||
+            ["failed", "error", "declined", "expired", "interrupted", "cancelled"].includes(item.status) ||
+            (item.type === "commandExecution" && typeof item.exitCode === "number" && item.exitCode !== 0));
+        }
+
+        function isSuccessfulActivity(item) {
+          return isTechnicalItem(item) && item.status === "completed" && !item.isStreaming && !isFailedActivity(item) &&
+            !needsApprovalAttention(item) && (item.type !== "commandExecution" || item.exitCode === 0);
+        }
+
+        function reliableOperationValue(value) {
+          // Redacted/truncated values can collapse different operations to the same public label.
+          return typeof value === "string" && value.trim().length > 0 && !/\[(?:redacted|truncated)[^\]]*\]/i.test(value);
+        }
+
+        function sameTechnicalOperation(failed, later) {
+          if (failed.type !== later.type) return false;
+          if (failed.type === "mcpToolCall") return reliableOperationValue(failed.server) && reliableOperationValue(failed.tool) &&
+            failed.server === later.server && failed.tool === later.tool;
+          if (failed.type === "commandExecution") return reliableOperationValue(failed.command) && failed.command === later.command &&
+            failed.cwd === later.cwd && (!failed.cwd || reliableOperationValue(failed.cwd));
+          if (failed.type === "fileChange") {
+            const paths = (failed.changes || []).map((change) => change.path);
+            const covered = new Set((later.changes || []).map((change) => change.path).filter(reliableOperationValue));
+            return paths.length > 0 && paths.every((path) => reliableOperationValue(path) && covered.has(path));
+          }
+          return false;
+        }
+
+        function turnFailurePresentation(turn, job = {}, turns = [turn]) {
+          const items = turn.items || [];
+          const presentation = new Map();
+          const currentTurn = turns.find((candidate) => candidate.turnId === job.turnId) || turns[turns.length - 1];
+          const current = turn === currentTurn;
+          const stopped = ["failed", "interrupted", "declined", "cancelled"].includes(job.status);
+          const active = current && !terminal.has(job.status) && !terminal.has(turn.status);
+          for (let index = 0; index < items.length; index++) {
+            const item = items[index];
+            if (needsApprovalAttention(item)) { presentation.set(item.id, "unresolved"); continue; }
+            if (!isFailedActivity(item)) continue;
+            const recoverable = !["declined", "expired", "interrupted", "cancelled"].includes(item.status);
+            const recovered = recoverable && items.slice(index + 1).some((later) =>
+              // A container turn is the owner; explicit contradictory item lineage cannot prove recovery.
+              (!item.turnId || item.turnId === turn.turnId) && (!later.turnId || later.turnId === turn.turnId) &&
+              isSuccessfulActivity(later) && sameTechnicalOperation(item, later));
+            presentation.set(item.id, recovered ? "recovered" : "historical");
+          }
+          const failures = items.filter((item) => presentation.get(item.id) === "historical");
+          const latest = failures[failures.length - 1];
+          for (const item of failures) {
+            const index = items.indexOf(item);
+            const laterWork = items.slice(index + 1).some((later) => isTechnicalItem(later) &&
+              (isSuccessfulActivity(later) || later.status === "inProgress" || later.isStreaming));
+            if ((current && stopped && (item === latest || item.type === "error")) ||
+                (active && (item.type === "error" || (item === latest && !laterWork)))) presentation.set(item.id, "unresolved");
+          }
+          return presentation;
+        }
+
+        function turnWorkCounts(turn, presentation = turnFailurePresentation(turn)) {
+          const items = (turn.items || []).filter(isTechnicalItem);
+          return { total: items.length, success: items.filter(isSuccessfulActivity).length, failed: items.filter(isFailedActivity).length,
+            recovered: items.filter((item) => isFailedActivity(item) && presentation.get(item.id) === "recovered").length,
+            unresolved: items.filter((item) => presentation.get(item.id) === "unresolved").length };
+        }
+
+        function turnWorkSummary(turn, presentation) {
+          const counts = turnWorkCounts(turn, presentation);
+          return ["技術活動 " + counts.total, "成功 " + counts.success, "失敗 " + counts.failed, "已恢復 " + counts.recovered,
+            counts.unresolved ? "待處理 " + counts.unresolved : "",
+            formatDuration(turn.durationMs), turn.tokenUsage ? "最近 " + metric(turn.tokenUsage.last && turn.tokenUsage.last.totalTokens) + " tokens" : ""].filter(Boolean).join(" · ");
+        }
+
+        function renderTurnWorkstream(turn, index, job = {}, turns = [turn]) {
+          const technical = (turn.items || []).filter(isTechnicalItem);
+          const presentation = turnFailurePresentation(turn, job, turns);
+          const blocking = technical.filter((item) => presentation.get(item.id) === "unresolved");
+          const details = technical.filter((item) => presentation.get(item.id) !== "unresolved");
+          const key = "work-turn:" + turn.turnId;
+          const renderItem = (item) => renderConversationItem(item, null, "work:" + turn.turnId + ":" + item.id, presentation.get(item.id));
+          return '<section class="turn-work"><div class="turn-work-head"><strong>回合 ' + (index + 1) + '</strong><span>' + escapeHtml(projectionStatusLabel(turn.status)) + '</span></div><p>' + escapeHtml(turnWorkSummary(turn, presentation)) + '</p>' +
+            blocking.map(renderItem).join("") +
+            (details.length ? '<details class="turn-technical" data-timeline-key="' + escapeAttr(key) + '"><summary aria-label="展開此回合技術活動">技術活動 · ' + details.length + '</summary>' + details.map(renderItem).join("") + '</details>' : "") + '</section>';
+        }
+
+        function reducedMotion() { return Boolean(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches); }
+
+        function claimReveal(key) {
+          const identity = (state.selectedJob && state.selectedJob.id || "") + ":" + key;
+          if (state.revealedKeys.has(identity)) return false;
+          // Stop animating after the bounded set fills; never evict and replay history.
+          if (state.revealedKeys.size >= 20000) return false;
+          state.revealedKeys.add(identity);
+          return true;
+        }
+
+        function updateScrollState(transcript) {
+          document.body.classList.toggle("header-compact", state.displayMode === "fullscreen" && transcript.scrollTop > 36);
+        }
+
         function renderHeader() {
           const job = state.selectedJob;
           const project = currentProject();
           const signature = JSON.stringify(job
-            ? [job.id, job.title, job.status, job.hasDiff, job.hasResult, (job.artifacts || []).map((item) => [item.id, item.sha256]), state.cancelArmedUntil > Date.now(), state.displayMode]
+            ? [job.id, job.title, job.status, job.hasDiff, job.hasResult, (job.artifacts || []).map((item) => [item.id, item.sha256]), state.cancelArmedUntil > Date.now(), state.displayMode,
+              job.executionMode, job.approvalReviewer, job.model, job.effort, job.conversation && [job.conversation.tokenUsage, job.conversation.modelRouting], directActionEligible(job), state.status && state.status.controller]
             : ["new", state.selectedProjectId, state.displayMode]);
           if (signature === state.headerSignature) return;
           state.headerSignature = signature;
           $("#chat-title").textContent = job ? job.title : "新對話";
           $("#chat-subtitle").textContent = job
             ? (project && project.name || job.projectName) + (job.source === "local"
-              ? (job.readOnly ? " · 本機歷史 · 受保護" : " · 本機歷史 · 可續作")
+              ? (job.readOnly ? " · 本機歷史 · 受保護" : " · 本機歷史 · 可續作") + " · " + statusLabel(job.status)
               : " · " + statusLabel(job.status))
             : (project ? project.name + " · 新對話" : "選擇專案後開始");
           const active = job && !terminal.has(job.status);
+          $("#thread-controls").innerHTML = renderThreadControls(job);
           const actions = [];
           actions.push('<button class="head-button only-narrow" id="open-conversations" type="button" aria-label="開啟對話清單" title="對話清單">對話</button>');
           if (state.displayMode === "fullscreen") {
+            actions.push('<button class="head-button" id="open-operator" type="button" aria-haspopup="dialog" aria-controls="operator-drawer" aria-expanded="false">Codex · 狀態</button>');
             actions.push('<button class="head-button only-narrow" id="toggle-inspector" type="button" aria-label="開啟工作紀錄" title="工作紀錄">工作紀錄</button>');
           }
           actions.push('<button class="head-button" id="toggle-display" type="button" aria-label="' +
@@ -2631,6 +3081,7 @@
               '<button type="button" data-artifact="request">查看工作包</button>' +
               '<button type="button" data-artifact="response" ' + (job.artifacts && job.artifacts.some((item) => item.id === "response") ? "" : "disabled") + '>查看回覆</button>' +
               '<button type="button" data-artifact="diff" ' + (job.hasDiff ? "" : "disabled") + '>查看 Diff</button>' +
+              (directActionEligible(job) ? '<button type="button" data-thread-action="review">審查未提交變更</button><button type="button" data-thread-action="compact">壓縮對話</button>' : "") +
               '</div></details>');
           }
           $("#chat-actions").innerHTML = actions.join("");
@@ -2642,6 +3093,12 @@
           if (toggleInspector) toggleInspector.addEventListener("click", () => $("#console").classList.toggle("inspector-open"));
           const cancel = $("#cancel-chat");
           if (cancel) cancel.addEventListener("click", cancelConversation);
+          const operator = $("#open-operator");
+          if (operator) {
+            operator.setAttribute("aria-expanded", String($("#operator-drawer").open));
+            operator.addEventListener("click", openOperatorStatus);
+          }
+          document.querySelectorAll("[data-thread-action]").forEach((button) => button.addEventListener("click", () => runThreadAction(button.dataset.threadAction)));
           document.querySelectorAll("[data-artifact]").forEach((button) => button.addEventListener("click", () => loadArtifact(button.dataset.artifact)));
         }
 
@@ -2734,7 +3191,9 @@
         }
 
         function timelineElement(entry) {
-          return htmlElement(entry.html);
+          const node = htmlElement(entry.html);
+          if (claimReveal(entry.key) && !reducedMotion()) node.classList.add("message-reveal");
+          return node;
         }
 
         function conversationEntries(job) {
@@ -2746,22 +3205,23 @@
           const renderedApprovals = new Set();
           const entries = [];
           turns.forEach((turn, turnIndex) => {
+            const presentation = turnFailurePresentation(turn, job, turns);
             const visibleItems = (turn.items || []).filter((item) =>
-              item.type === "userMessage" || item.type === "agentMessage" || item.type === "error" ||
+              isNarrative(item) || presentation.get(item.id) === "unresolved" ||
               (item.type === "approval" && item.approvalId && approvalsById.has(item.approvalId))
             );
             if (!visibleItems.length) return;
             if (turns.length > 1) {
               const key = "turn:" + turn.turnId;
-              const label = "回合 " + (turnIndex + 1) + " · " + projectionStatusLabel(turn.status);
+              const label = ["回合 " + (turnIndex + 1), projectionStatusLabel(turn.status), formatTime(turn.startedAt), formatDuration(turn.durationMs)].filter(Boolean).join(" · ");
               entries.push({ key: key, signature: label, html: '<div class="turn-marker" data-timeline-key="' + escapeAttr(key) + '">' + escapeHtml(label) + '</div>' });
             }
             visibleItems.forEach((item) => {
               const approval = item.approvalId && approvalsById.get(item.approvalId);
               if (approval) renderedApprovals.add(approval.id);
               const key = "item:" + turn.turnId + ":" + item.id;
-              const signature = JSON.stringify([item, approval && [approval.id, approval.state, approval.summary]]);
-              entries.push({ key: key, signature: signature, html: renderConversationItem(item, approval, key) });
+              const signature = JSON.stringify([item, presentation.get(item.id), approval && [approval.id, approval.state, approval.summary]]);
+              entries.push({ key: key, signature: signature, html: renderConversationItem(item, approval, key, presentation.get(item.id)) });
             });
           });
           approvals.filter((approval) => !renderedApprovals.has(approval.id)).forEach((approval) => {
@@ -2782,8 +3242,12 @@
         }
 
         function compactConversationEntries(job, turns, approvals) {
-          const flattened = turns.flatMap((turn) => (turn.items || []).map((item) => ({ turn: turn, item: item })));
-          const narrative = flattened.filter(({ item }) => item.type === "userMessage" || item.type === "agentMessage").slice(-2);
+          const flattened = turns.flatMap((turn) => {
+            const presentation = turnFailurePresentation(turn, job, turns);
+            return (turn.items || []).map((item) => ({ turn, item, failure: presentation.get(item.id) }));
+          });
+          const lastNarrativeTurn = turns.slice().reverse().find((turn) => (turn.items || []).some(isNarrative));
+          const narrative = lastNarrativeTurn ? (lastNarrativeTurn.items || []).filter(isNarrative).map((item) => ({ turn: lastNarrativeTurn, item: item })) : [];
           const entries = narrative.map(({ turn, item }) => {
             const key = "dock:" + turn.turnId + ":" + item.id;
             return { key: key, signature: JSON.stringify(item), html: renderProjectedMessage(item, key) };
@@ -2795,17 +3259,31 @@
           const technical = flattened.filter(({ item }) =>
             item.type !== "userMessage" && item.type !== "agentMessage" && item.type !== "approval"
           );
-          const latestWork = technical.slice().reverse().find(({ item }) => item.status === "inProgress" || item.status === "pending")
-            || technical.at(-1);
+          const warnings = flattened.filter(({ item, failure }) => failure === "unresolved" &&
+            !(item.type === "approval" && approvals.some((approval) => approval.id === item.approvalId)));
+          if (warnings.length) {
+            const { turn, item } = warnings[warnings.length - 1];
+            const key = "dock-error:" + turn.turnId + ":" + item.id;
+            entries.push({ key, signature: JSON.stringify(warnings), html: renderCompactFailure(item, key, warnings.length) });
+          }
+          const latestWork = !terminal.has(job.status) && technical.slice().reverse().find(({ turn, item }) =>
+            turn.turnId === job.turnId && !isFailedActivity(item) && (item.isStreaming || item.status === "inProgress" || item.status === "pending"));
           if (latestWork) {
             const key = "dock-work:" + latestWork.turn.turnId + ":" + latestWork.item.id;
             entries.push({ key: key, signature: JSON.stringify(latestWork.item), html: renderDockWork(latestWork.item, key) });
-          } else if (!terminal.has(job.status)) {
+          } else if (!terminal.has(job.status) && !warnings.length) {
             const key = "dock-active";
             const item = { type: "activity", status: "inProgress", progress: "Codex 正在處理" };
             entries.push({ key: key, signature: job.status, html: renderDockWork(item, key) });
           }
           return entries;
+        }
+
+        function renderCompactFailure(item, key, count) {
+          const reason = publicFailureText(item);
+          return '<article class="compact-warning" role="status" data-timeline-key="' + escapeAttr(key) + '"><strong>' +
+            escapeHtml(activityTitle(item).slice(0, 140)) + '</strong><small>' + escapeHtml(reason.slice(0, 220)) +
+            (count > 1 ? ' · 共 ' + count + ' 項待處理，請放大查看' : '') + '</small></article>';
         }
 
         function renderDockWork(item, key) {
@@ -2835,35 +3313,34 @@
             return;
           }
           const conversation = job.conversation || legacyConversation(job.messages || []);
-          const technicalItems = (conversation.turns || []).flatMap((turn) => (turn.items || [])
-            .filter((item) => item.type !== "userMessage" && item.type !== "agentMessage" && item.type !== "approval")
-            .map((item) => ({ turnId: turn.turnId, item: item })));
+          const turns = conversation.turns || [];
           const artifacts = job.artifacts || [];
           const signature = JSON.stringify([
             job.id,
-            technicalItems.map(({ turnId, item }) => [turnId, item]),
+            job.status, job.turnId,
+            turns,
             artifacts.map((artifact) => [artifact.id, artifact.sha256]),
           ]);
           if (state.workstreamSignature === signature) return;
           state.workstreamSignature = signature;
-          const activeCount = technicalItems.filter(({ item }) => item.status === "inProgress" || item.status === "pending").length;
-          summary.textContent = (activeCount ? activeCount + " 項進行中 · " : "") + technicalItems.length + " 筆紀錄 · " + artifacts.length + " 份成品";
-          const itemHtml = technicalItems.map(({ turnId, item }) =>
-            renderConversationItem(item, null, "work:" + turnId + ":" + item.id)
-          ).join("");
+          summary.textContent = turns.length + " 個回合 · " + artifacts.length + " 份成品";
+          const itemHtml = turns.map((turn, index) => renderTurnWorkstream(turn, index, job, turns)).join("");
           const artifactHtml = renderArtifactResults(artifacts);
+          const opened = new Set(Array.from(workstream.querySelectorAll("details[open][data-timeline-key]"), (node) => node.dataset.timelineKey));
           workstream.innerHTML = itemHtml + artifactHtml || '<div class="empty-project">這個對話還沒有工作紀錄</div>';
+          workstream.querySelectorAll("details[data-timeline-key]").forEach((node) => { if (opened.has(node.dataset.timelineKey)) node.open = true; });
           workstream.querySelectorAll("[data-result-artifact]").forEach((button) => button.addEventListener("click", () => {
             loadArtifact(button.dataset.resultArtifact);
           }));
         }
 
         function legacyConversation(messages) {
-          return {
-            turns: (messages || []).map((message) => ({
-              turnId: message.turnId || "legacy:" + message.id,
-              status: message.resultStatus || "completed",
-              items: [{
+          const turns = new Map();
+          (messages || []).forEach((message) => {
+            const turnId = message.turnId || "legacy:" + message.id;
+            const turn = turns.get(turnId) || { turnId, status: "completed", items: [] };
+            turn.status = message.resultStatus || turn.status;
+            turn.items.push({
                 id: "legacy:" + message.id,
                 turnId: message.turnId || "legacy:" + message.id,
                 type: message.role === "user" ? "userMessage" : "agentMessage",
@@ -2873,19 +3350,21 @@
                 context: message.context,
                 inputArtifacts: message.inputArtifacts,
                 createdAt: message.at,
-              }],
-            })),
-          };
+              });
+            turns.set(turnId, turn);
+          });
+          return { turns: Array.from(turns.values()) };
         }
 
-        function renderConversationItem(item, approval, key) {
+        function renderConversationItem(item, approval, key, failure) {
           if (item.type === "userMessage" || item.type === "agentMessage") return renderProjectedMessage(item, key);
           if (item.type === "approval" && approval) return renderApproval(approval, key);
-          const detailsClass = "activity-card " + (item.type === "error" ? "error" : "");
-          const open = item.type === "error" || item.type === "plan" ? " open" : "";
+          const detailsClass = "activity-card " + (failure === "unresolved" ? "error" : failure || "");
+          const open = failure === "unresolved" ? " open" : "";
           return '<details class="' + detailsClass + '" data-timeline-key="' + escapeAttr(key) + '"' + open + '>' +
             '<summary><span class="activity-icon">' + escapeHtml(activityIcon(item.type)) + '</span>' +
-            '<span class="activity-heading"><span class="activity-title">' + escapeHtml(activityTitle(item)) + '</span>' +
+            '<span class="activity-heading"><span class="activity-title">' + escapeHtml(activityTitle(item)) +
+            (failure === "recovered" ? '<span class="recovery-badge">已恢復</span>' : '') + '</span>' +
             '<span class="activity-subtitle">' + escapeHtml(activitySubtitle(item)) + '</span></span>' +
             '<span class="activity-status ' + escapeAttr(activityStatusClass(item.status)) + '">' + escapeHtml(projectionStatusLabel(item.status)) + '</span></summary>' +
             '<div class="activity-body">' + activityBody(item, approval) + '</div></details>';
@@ -2895,7 +3374,7 @@
           const role = item.type === "userMessage" ? "user" : "assistant";
           const failed = ["failed", "interrupted", "declined"].includes(item.status);
           const meta = role === "user" ? "你" : "Codex";
-          const time = item.updatedAt || item.createdAt;
+          const time = formatTime(item.createdAt);
           const context = item.context
             ? '<details class="message-context"><summary>附加背景</summary><pre>' + escapeHtml(item.context) + '</pre></details>'
             : "";
@@ -2907,7 +3386,7 @@
             : "";
           const body = item.text || (item.isStreaming ? "" : projectionStatusLabel(item.status));
           return '<article class="message ' + role + (failed ? " failed" : "") + (item.isStreaming ? " streaming" : "") +
-            '" data-timeline-key="' + escapeAttr(key) + '"><div class="message-meta">' + escapeHtml(meta + (time ? " · " + formatTime(time) : "")) +
+            '" data-timeline-key="' + escapeAttr(key) + '"><div class="message-meta">' + escapeHtml(meta + (time ? " · " + time : "")) +
             (item.isStreaming ? " · 正在輸出" : "") + '</div><div class="message-body">' + escapeHtml(body) + '</div>' + inputArtifacts + context + '</article>';
         }
 
@@ -2925,9 +3404,20 @@
             parts.push('<pre>' + escapeHtml(item.text) + '</pre>');
           }
           if (item.progress) parts.push('<pre>' + escapeHtml(item.progress) + '</pre>');
-          if (item.error) parts.push('<pre>' + escapeHtml(item.error) + '</pre>');
+          if (typeof item.error === "string" && item.error.trim()) parts.push('<pre>' + escapeHtml(item.error) + '</pre>');
+          else if (isFailedActivity(item) || needsApprovalAttention(item)) parts.push('<span>' + escapeHtml(publicFailureText(item)) + '</span>');
           if (approval) parts.push(renderApproval(approval));
           return parts.join("") || '<span>沒有額外公開內容。</span>';
+        }
+
+        function publicFailureText(item) {
+          if (typeof item.error === "string" && item.error.trim()) return item.error;
+          if (item.type === "error" && typeof item.text === "string" && item.text.trim()) return item.text;
+          if (needsApprovalAttention(item) || ["declined", "expired"].includes(item.status)) return "核准狀態：" + projectionStatusLabel(item.approvalState || item.status);
+          if (item.type === "mcpToolCall") return "此工具呼叫失敗；詳細原因未公開";
+          if (item.type === "commandExecution") return "此命令未成功完成；" + (typeof item.exitCode === "number" ? "exit " + item.exitCode : "詳細原因未公開");
+          if (item.type === "fileChange") return "此檔案變更未成功完成；詳細原因未公開";
+          return "此技術活動未成功完成；詳細原因未公開";
         }
 
         function activityTitle(item) {
@@ -2938,12 +3428,13 @@
           if (item.type === "reasoningSummary") return "推理摘要";
           if (item.type === "diff") return "工作區 Diff 更新";
           if (item.type === "error") return "Codex 錯誤";
+          if (item.type === "approval") return "操作核准";
           return item.activityType || "Codex activity";
         }
 
         function activitySubtitle(item) {
           if (item.type === "commandExecution") return [item.cwd, formatDuration(item.durationMs), item.exitCode !== undefined ? "exit " + item.exitCode : ""].filter(Boolean).join(" · ");
-          if (item.type === "fileChange") return (item.changes || []).length + " 個檔案";
+          if (item.type === "fileChange") return (item.changes || []).map((change) => change.path).join(" · ") || "檔案路徑未公開";
           if (item.type === "mcpToolCall") return [item.progress, formatDuration(item.durationMs)].filter(Boolean).join(" · ");
           return formatDuration(item.durationMs);
         }
@@ -2965,6 +3456,7 @@
         }
 
         function formatDuration(value) {
+          if (value === null || value === undefined) return "";
           const duration = Number(value);
           if (!Number.isFinite(duration) || duration < 0) return "";
           return duration < 1000 ? Math.round(duration) + " ms" : (duration / 1000).toFixed(duration < 10000 ? 1 : 0) + " s";
@@ -2982,7 +3474,7 @@
 
         function renderArtifactResults(artifacts) {
           if (!artifacts.length) return "";
-          return '<article class="artifact-results"><div class="artifact-results-title">工作成品 · 點選預覽、複製或下載</div><div class="artifact-result-list">' +
+          return '<article class="artifact-results"><div class="artifact-results-title">工作成品 · 點選預覽、複製或下載</div><div class="artifact-result-list" tabindex="0" aria-label="工作成品，可橫向捲動">' +
             artifacts.map((artifact) => '<button class="artifact-result" type="button" data-result-artifact="' + escapeAttr(artifact.id) + '">' +
               '<span class="artifact-result-icon">▧</span><span class="artifact-result-copy"><strong>' + escapeHtml(artifact.name) +
               '</strong><span>' + escapeHtml(formatBytes(artifact.bytes)) + ' · SHA ' + escapeHtml(artifact.sha256.slice(0, 8)) + '</span></span></button>').join("") +
@@ -3391,12 +3883,11 @@
         }
 
         function formatTime(value) {
-          if (!value) return "";
-          try {
-            return new Date(value).toLocaleString("zh-TW", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
-          } catch {
-            return "";
-          }
+          if (value === undefined || value === null || value === "") return "";
+          const date = new Date(value);
+          if (!Number.isFinite(date.getTime())) return "";
+          const today = date.toDateString() === new Date().toDateString();
+          return date.toLocaleString("zh-TW", { ...(today ? {} : { month: "numeric", day: "numeric" }), hour: "2-digit", minute: "2-digit", hour12: false });
         }
 
         function makeId() {

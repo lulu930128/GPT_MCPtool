@@ -113,6 +113,10 @@ test("native history remains authoritative over a stale Bridge cache and unchang
   const job = jobSummary(threadId);
   const local = localSnapshot(threadId, "Native current text");
   const summary = localSummary(threadId);
+  const bridge = bridgeSnapshot(job, "Stale Bridge text");
+  const routing = { requestedModel: "requested", executedModel: "executed", fromModel: "requested", toModel: "executed", reason: "highRiskCyberActivity" as const, source: "model/rerouted" as const };
+  bridge.conversation!.modelRouting = { ...routing, turnId: bridge.conversation!.turns[0]!.turnId };
+  bridge.conversation!.turns[0]!.modelRouting = routing;
   let fullReads = 0;
   const controller = {
     readLocalThreadFresh: async (_threadId: string, knownFingerprint?: string) => {
@@ -124,7 +128,7 @@ test("native history remains authoritative over a stale Bridge cache and unchang
   const store = {
     listAll: () => [job],
     findByThreadId: () => job,
-    snapshot: async () => bridgeSnapshot(job, "Stale Bridge text"),
+    snapshot: async () => bridge,
   } as unknown as JobStore;
   const registry = new UnifiedConversationRegistry(testBridgeConfig(), store, controller, { list: async () => [] } as unknown as AutomationRegistry);
 
@@ -136,6 +140,8 @@ test("native history remains authoritative over a stale Bridge cache and unchang
   assert.equal(firstUser?.context, "Bridge context");
   assert.equal(secondUser?.text, "Native current text");
   assert.equal(fullReads, 1);
+  assert.equal(first.view.conversation?.modelRouting?.executedModel, "executed");
+  assert.equal(second.view.conversation?.turns[0]?.modelRouting?.requestedModel, "requested");
 });
 
 test("unified list preserves durable Bridge jobs when App Server inventory is unavailable", async () => {

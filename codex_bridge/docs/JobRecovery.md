@@ -20,8 +20,10 @@ jobs/<job_id>/
 ```
 
 Text staging uses a separate server-generated bundle directory. Validated attachments also have a
-server-generated, read-only mirror under `.local/codex-inbox/<job_id>/` for Codex file-path access.
+server-generated, read-only mirror under `.tmp/codex-inbox/<job_id>/` for Codex file-path access.
 These files are private runtime state and are not part of Git.
+Legacy `.local/codex-inbox` copies are retained but denied to sandboxed commands. On the next artifact
+read, JobStore verifies the durable inbox content and recreates the mirror at the current handoff root.
 
 ## Job states
 

@@ -14,11 +14,14 @@ try {
   assert.equal(health.ok, true);
   await client.connect(transport);
   const tools = (await client.listTools()).tools;
-  assert.equal(tools.length, 21);
+  assert.equal(tools.length, 32);
+  for (const name of ["codex_usage_status", "codex_runtime_status", "codex_inventory", "codex_direct_thread_compact", "codex_direct_thread_review", "codex_direct_thread_fork"]) {
+    assert.ok(tools.some((tool) => tool.name === name));
+  }
   const resources = await client.listResources();
-  assert.ok(resources.resources.some((resource) => resource.uri === "ui://codex-bridge/chat-workspace-v13.html"));
-  const resource = await client.readResource({ uri: "ui://codex-bridge/chat-workspace-v13.html" });
-  const widgetHtml = resource.contents.find((content) => content.uri === "ui://codex-bridge/chat-workspace-v13.html")?.text;
+  assert.ok(resources.resources.some((resource) => resource.uri === "ui://codex-bridge/chat-workspace-v15.html"));
+  const resource = await client.readResource({ uri: "ui://codex-bridge/chat-workspace-v15.html" });
+  const widgetHtml = resource.contents.find((content) => content.uri === "ui://codex-bridge/chat-workspace-v15.html")?.text;
   assert.equal(typeof widgetHtml, "string");
   assert.match(widgetHtml, /aria-label="專案與對話"/);
   assert.match(widgetHtml, /id="model"/);
@@ -35,7 +38,10 @@ try {
   assert.ok(!widgetHtml.includes("100vh") && !widgetHtml.includes("100dvh"), "live widget must not couple its height to the host iframe viewport");
   assert.ok(!widgetHtml.includes('class="event-list'), "live widget must not expose technical event logs in the chat UI");
   const statusResult = await client.callTool({ name: "codex_bridge_status", arguments: {} });
-  const models = statusResult.structuredContent?.models;
+  const modelResult = await client.callTool({ name: "codex_model_list", arguments: { forceRefresh: true } });
+  assert.notEqual(modelResult.isError, true);
+  assert.equal(modelResult.structuredContent?.cacheHit, false);
+  const models = modelResult.structuredContent?.models;
   assert.ok(Array.isArray(models) && models.length > 0, "live App Server must return at least one picker-visible model");
   const unifiedResult = await client.callTool({
     name: "codex_unified_conversation_list",
@@ -76,6 +82,7 @@ try {
     widgetBytes: Buffer.byteLength(widgetHtml),
     modelCount: models.length,
     models: models.map((model) => model.id),
+    astraEfforts: models.find((model) => model.id === "gpt-6-astra")?.supportedReasoningEfforts.map((option) => option.reasoningEffort),
     unifiedConversationCount: conversations.length,
     paginatedConversationCount: conversations.filter((conversation) => conversation.historyMode === "paginated").length,
     automationOverlayCount: automationOverlays.length,

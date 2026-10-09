@@ -66,6 +66,12 @@ for (const marker of [
 }
 assert.ok(!html.includes("http://") && !html.includes("https://"), "Widget must not depend on remote resources.");
 assert.ok(!html.includes("eval("), "Widget must not use eval.");
+assert.ok(!html.includes("isBlockingItem("), "Raw failure truth must not directly decide conversation visibility.");
+for (const helper of ["turnFailurePresentation", "sameTechnicalOperation", "turnWorkCounts", "renderCompactFailure"]) {
+  assert.ok(html.includes("function " + helper + "("), `Missing shared failure presentation helper: ${helper}`);
+}
+assert.match(html, /activity-card\.recovered \.activity-status/, "Recovered failures must use neutral status styling.");
+assert.match(html, /warnings\[warnings\.length - 1\]/, "Inline unresolved warnings must remain compact.");
 assert.ok(!html.includes("—"), "Widget visible text must not use em dashes.");
 assert.ok(!html.includes('class="status-strip"'), "Widget must not restore the redundant dashboard status strip.");
 assert.ok(!html.includes('class="event-list'), "Technical event logs must stay out of the primary widget UI.");
@@ -243,10 +249,67 @@ await loadMore;
 assert.equal(appliedRegistryResponses[1].options.allowAuthoritativeReset, false, "Load-more must ignore an unexpected reset marker.");
 
 const timelineStart = inlineScript.indexOf("        function reconcileTimeline");
+const pollStart = inlineScript.indexOf("        function schedulePoll()");
+const pollEnd = inlineScript.indexOf('        document.addEventListener("visibilitychange"', pollStart);
+const pollCalls = [];
+const pollApplied = [];
+const pollContext = {
+  state: {
+    selectedJob: { id: "job-a", status: "running", conversation: { revision: 1, turns: [] }, nextConversationRevision: 1, conversationHasMore: true },
+    selectedConversation: { conversationId: "thread-a" },
+    selectionGeneration: 1, pollInFlight: false, catchUpStartedAt: Date.now() - 2000, catchUpPages: 4,
+  },
+  terminal: new Set(["completed", "failed", "cancelled", "interrupted"]),
+  document: { hidden: false },
+  setTimeout: () => 1,
+  clearTimeout: () => undefined,
+  showError: () => undefined,
+  callTool: (...args) => { const request = deferred(); pollCalls.push({ args, request }); return request.promise; },
+  updateFromResponse: (response) => { pollApplied.push(response); pollContext.state.selectedJob = response.structuredContent; },
+};
+new Script(`${inlineScript.slice(pollStart, pollEnd)}\nglobalThis.poll = pollSelectedJob;`).runInNewContext(pollContext);
+const recovering = pollContext.poll();
+assert.equal(pollCalls[0].args[0], "codex_job_get");
+assert.equal(pollCalls[0].args[1].recovery, "snapshot", "Expired catch-up requests a snapshot, never sends a prompt.");
+assert.equal(pollCalls[0].args[2].update, false, "Polling must guard the response before applying it.");
+await pollContext.poll();
+assert.equal(pollCalls.length, 1, "Polling is single-flight.");
+pollCalls[0].request.resolve({ structuredContent: { id: "job-a", status: "running", conversation: { revision: 5000, turns: [] }, nextConversationRevision: 5000, conversationHasMore: false } });
+await recovering;
+assert.equal(pollContext.state.catchUpPages, 0);
+assert.equal(pollContext.state.selectedJob.nextConversationRevision, 5000);
+const stalePoll = pollContext.poll();
+pollContext.state.selectionGeneration += 2; // A -> B -> A while the request is in flight.
+pollCalls[1].request.resolve({ structuredContent: { id: "job-a", nextConversationRevision: 2 } });
+await stalePoll;
+assert.equal(pollApplied.length, 1, "An obsolete selection generation must not overwrite the current conversation.");
+const failedPoll = pollContext.poll();
+pollCalls[2].request.reject(new Error("temporary MCP timeout"));
+await failedPoll;
+assert.equal(pollContext.state.recoverSnapshot, true);
+const retryPoll = pollContext.poll();
+assert.equal(pollCalls[3].args[1].recovery, "snapshot");
+pollCalls[3].request.resolve({ structuredContent: { id: "job-a", status: "running", conversation: { revision: 5001, turns: [] }, nextConversationRevision: 5001, conversationHasMore: false } });
+await retryPoll;
+pollContext.document.hidden = true;
+await pollContext.poll();
+assert.equal(pollCalls.length, 4, "Hidden widgets do not poll.");
+
+const patchStart = inlineScript.indexOf("        function applyConversationChanges");
+const patchEnd = inlineScript.indexOf("        function cloneValue", patchStart);
+const patchContext = { cloneValue: structuredClone };
+new Script(`${inlineScript.slice(patchStart, patchEnd)}\nglobalThis.apply = applyConversationChanges;`).runInNewContext(patchContext);
+const patched = { revision: 10, turns: [] };
+assert.equal(patchContext.apply(patched, [{ revision: 12, turns: [] }]), false);
+assert.equal(patched.revision, 10, "A gap must not advance the client cursor.");
+assert.equal(patchContext.apply(patched, [{ revision: 11, turns: [] }, { revision: 12, turns: [] }]), true);
+assert.equal(patched.revision, 12);
+
 const timelineEnd = inlineScript.indexOf("        function conversationEntries", timelineStart);
 assert.ok(timelineStart >= 0 && timelineEnd > timelineStart, "Timeline reconciler source must be extractable for behavior checks.");
 const timelineContext = {
   state: { timelineSignatures: new Map() },
+  claimReveal: () => false,
   htmlElement: (source) => new FakeNode(
     source.match(/data-timeline-key="([^"]+)"/)?.[1],
     source.trimStart().startsWith("<details") ? "DETAILS" : "ARTICLE",

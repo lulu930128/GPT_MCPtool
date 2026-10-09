@@ -37,11 +37,13 @@ import {
 } from "./conversation-projection.js";
 import { renderRequestMarkdown } from "./work-package.js";
 import { sanitizeForStorage } from "./redaction.js";
+import { CONVERSATION_DELIVERY, RecentConversationChanges, isCoalescibleConversationNotification } from "./conversation-delivery.js";
 
 const ACTIVE_STATUSES = new Set<JobStatus>(["queued", "preparing", "running", "awaiting_approval"]);
 const HANDOFF_EXTENSIONS = new Set([".txt", ".md", ".log", ".json", ".yaml", ".yml", ".diff", ".patch"]);
 
 export interface CreateJobInput {
+  dispatchSource?: "app" | "model_direct";
   project: BridgeProject;
   workPackage: WorkPackage;
   previewDigest: string;
@@ -62,6 +64,7 @@ export interface AppendUserMessageInput {
 }
 
 export interface PrepareTurnInput {
+  controlAction?: JobRecord["controlAction"];
   executionMode: ExecutionMode;
   approvalReviewer: ApprovalReviewer;
   dataClassification: DataClassification;
@@ -111,6 +114,14 @@ export class JobStore {
   private readonly conversationDiagnostics = new Map<string, ConversationPersistenceDiagnostic[]>();
   private readonly conversationFailures = new Map<string, ConversationPersistenceError>();
   private readonly pendingConversationCheckpoints = new Set<string>();
+  private readonly recentConversationChanges = new RecentConversationChanges();
+  private readonly conversationLocks = new Map<string, Promise<void>>();
+  private readonly pendingConversations = new Map<string, ConversationThreadProjection>();
+  private readonly conversationTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly pendingDiffs = new Map<string, string>();
+  private readonly conversationInputCounts = new Map<string, number>();
+  private readonly conversationCommitCounts = new Map<string, number>();
+  private readonly conversationFlushFailures = new Set<string>();
   private lock: Promise<void> = Promise.resolve();
 
   constructor(
@@ -188,6 +199,7 @@ export class JobStore {
       const now = new Date().toISOString();
       const record: JobRecord = {
         schemaVersion: 1,
+        dispatchSource: input.dispatchSource ?? "app",
         id,
         idempotencyKey: input.idempotencyKey,
         previewDigest: input.previewDigest,
@@ -228,7 +240,7 @@ export class JobStore {
         inputArtifacts: record.inputArtifacts,
       };
       await writeFile(this.messagesPath(id), `${JSON.stringify(initialMessage)}\n`, "utf8");
-      const event: JobEvent = { seq: 1, at: now, type: "job.queued", message: "Work package queued." };
+      const event: JobEvent = { seq: 1, at: now, type: "job.queued", message: "Work package queued.", data: { source: input.dispatchSource ?? "app" } };
       await writeFile(this.eventsPath(id), `${JSON.stringify(event)}\n`, "utf8");
       const conversation = createConversationProjection(undefined, now);
       await this.writeInitialConversation(id, conversation);
@@ -340,21 +352,25 @@ export class JobStore {
     afterSeq = 0,
     maxEvents = 80,
     afterConversationRevision?: number,
+    forceSnapshot = false,
   ): Promise<JobSnapshot> {
     const record = this.requireJob(jobId);
     const persistenceFailure = this.conversationFailures.get(jobId);
     if (persistenceFailure) throw persistenceFailure;
     const events = await this.readEvents(jobId, afterSeq, maxEvents);
-    const messages = await this.readMessages(jobId);
+    const allMessages = await this.readAllMessages(jobId);
+    const messages = allMessages.slice(-200);
     const nextEventSeq = events.at(-1)?.seq ?? Math.max(0, afterSeq);
     const storedConversation = this.conversations.get(jobId) ?? createConversationProjection(record.threadId, record.updatedAt);
-    let conversation = afterConversationRevision === undefined
+    let conversation = afterConversationRevision === undefined || forceSnapshot
       ? mergeConversationMessages(storedConversation, messages)
       : undefined;
-    let conversationChanges = afterConversationRevision === undefined
+    const recent = afterConversationRevision === undefined || forceSnapshot ? []
+      : this.recentConversationChanges.read(jobId, afterConversationRevision, storedConversation.revision);
+    let conversationChanges = afterConversationRevision === undefined || forceSnapshot
       ? []
-      : await this.readConversationChanges(jobId, afterConversationRevision, 40);
-    let nextConversationRevision = afterConversationRevision ?? storedConversation.revision;
+      : recent ?? [];
+    let nextConversationRevision = conversation ? storedConversation.revision : afterConversationRevision ?? storedConversation.revision;
     if (conversationChanges.length > 0) {
       const expectedFirst = Math.max(0, afterConversationRevision ?? 0) + 1;
       if (conversationChanges[0]?.revision !== expectedFirst) {
@@ -370,12 +386,28 @@ export class JobStore {
     }
     return {
       ...toSummary(record),
+      directActionHistoryEligible: !record.idempotencyKey.startsWith("local-thread:") && !(await this.hasCompanyHistory(jobId, allMessages)),
       messages,
-      conversation,
-      conversationChanges,
+      conversation: conversation ? mergeConversationMessages(conversation, allMessages, true) : undefined,
+      conversationChanges: conversationChanges.map((patch) => ({
+        ...patch,
+        turns: mergeConversationMessages({ ...storedConversation, turns: patch.turns }, allMessages, true).turns,
+      })),
       nextConversationRevision,
       serverConversationRevision: storedConversation.revision,
       conversationHasMore: nextConversationRevision < storedConversation.revision,
+      conversationDelivery: {
+        mode: conversation ? "snapshot" : nextConversationRevision < storedConversation.revision ? "catch_up" : "delta",
+        reason: forceSnapshot ? "client_recovery" : recent === undefined ? "cursor_outside_replay_budget" : undefined,
+        lag: Math.max(0, storedConversation.revision - nextConversationRevision),
+        maxCatchUpMs: CONVERSATION_DELIVERY.maxCatchUpMs,
+        maxCatchUpPages: CONVERSATION_DELIVERY.maxCatchUpPages,
+        pending: this.pendingConversations.has(jobId),
+        flushFailed: this.conversationFlushFailures.has(jobId),
+        inputNotifications: this.conversationInputCounts.get(jobId) ?? 0,
+        durableCommits: this.conversationCommitCounts.get(jobId) ?? 0,
+        ...this.recentConversationChanges.diagnostics(jobId),
+      },
       conversationDiagnostics: structuredClone(this.conversationDiagnostics.get(jobId) ?? []),
       events,
       nextEventSeq,
@@ -399,6 +431,12 @@ export class JobStore {
       if (persistenceFailure) throw persistenceFailure;
       const ids = this.messageClientIds.get(jobId) ?? new Set<string>();
       if (ids.has(input.clientMessageId)) {
+        const existing = (await this.readAllMessages(jobId)).find((message) => message.clientMessageId === input.clientMessageId);
+        const fingerprint = (message: Pick<ConversationMessage, "content" | "context" | "executionMode" | "approvalReviewer" | "dataClassification" | "model" | "effort" | "inputArtifacts">) => JSON.stringify([
+          message.content, message.context || "", message.executionMode, message.approvalReviewer,
+          message.dataClassification, message.model, message.effort, (message.inputArtifacts ?? []).map(({ id, sha256 }) => [id, sha256]),
+        ]);
+        if (!existing || fingerprint(existing) !== fingerprint(input)) throw new Error("The client message id was already used for different content or settings.");
         return { record: structuredClone(record), created: false };
       }
       const message: ConversationMessage = {
@@ -438,6 +476,7 @@ export class JobStore {
 
   async prepareTurn(jobId: string, input: PrepareTurnInput): Promise<JobRecord> {
     return this.mutate(jobId, (record) => {
+      record.controlAction = input.controlAction;
       record.status = "preparing";
       record.turnId = undefined;
       record.currentExecutionMode = input.executionMode;
@@ -450,6 +489,21 @@ export class JobStore {
         message: "Preparing the next Codex turn.",
         data: { executionMode: input.executionMode, approvalReviewer: input.approvalReviewer, model: input.model, effort: input.effort },
       };
+    });
+  }
+
+  async hasCompanyHistory(jobId: string, messages?: ConversationMessage[]): Promise<boolean> {
+    const job = this.requireJob(jobId);
+    return job.workPackage.dataClassification === "company_approved" ||
+      job.currentDataClassification === "company_approved" ||
+      (messages ?? await this.readAllMessages(jobId)).some((message) => message.dataClassification === "company_approved");
+  }
+
+  async recordDirectRequest(jobId: string, key: string, digest: string, state: "pending" | "completed" | "unknown", inputVersion?: 2): Promise<JobRecord> {
+    return this.mutate(jobId, (record) => {
+      record.directRequests ??= {};
+      record.directRequests[key] = { digest, state, ...(inputVersion ? { inputVersion } : {}) };
+      return { type: "operator.direct_request", message: "Direct operation receipt updated.", data: { source: "model_direct", requestId: key, state } };
     });
   }
 
@@ -536,8 +590,51 @@ export class JobStore {
     jobId: string,
     notification: ConversationNotification,
     at = new Date().toISOString(),
+    coalesce = false,
   ): Promise<ConversationThreadProjection> {
+    this.conversationInputCounts.set(jobId, (this.conversationInputCounts.get(jobId) ?? 0) + 1);
+    if (coalesce && isCoalescibleConversationNotification(notification.method)) {
+      return this.withConversationLock(jobId, async () => {
+        this.requireJob(jobId);
+        const failure = this.conversationFailures.get(jobId);
+        if (failure) throw failure;
+        const current = this.pendingConversations.get(jobId) ?? this.conversations.get(jobId)!;
+        const next = reduceConversationNotification(current, notification, at);
+        if (next === current) return structuredClone(current);
+        // Pending state is never exposed with a durable cursor.
+        next.revision = current.revision;
+        this.pendingConversations.set(jobId, next);
+        if (notification.method === "turn/diff/updated") {
+          const diff = notification.params?.diff ?? notification.params?.unifiedDiff;
+          if (typeof diff === "string") this.pendingDiffs.set(jobId, diff.length > 2_000_000 ? `${diff.slice(0, 2_000_000)}\n[diff truncated]\n` : diff);
+        }
+        if (!this.conversationTimers.has(jobId)) {
+          const timer = setTimeout(() => {
+            this.conversationTimers.delete(jobId);
+            void this.flushConversation(jobId).catch(() => {
+              // Expose failure even for a diff IO error; do not retry in a tight loop.
+              this.conversationFlushFailures.add(jobId);
+            });
+          }, CONVERSATION_DELIVERY.coalesceMs);
+          timer.unref();
+          this.conversationTimers.set(jobId, timer);
+        }
+        return structuredClone(next);
+      });
+    }
     return this.updateConversation(jobId, (current) => reduceConversationNotification(current, notification, at));
+  }
+
+  async flushConversation(jobId: string): Promise<void> {
+    await this.updateConversation(jobId, (current) => current);
+  }
+
+  async flushConversations(): Promise<void> {
+    await Promise.all([...this.pendingConversations.keys()].map((jobId) => this.flushConversation(jobId)));
+  }
+
+  conversationRevision(jobId: string): number {
+    return this.conversations.get(jobId)?.revision ?? 0;
   }
 
   async hydrateConversation(
@@ -557,11 +654,11 @@ export class JobStore {
       ...current,
       freshness: structuredClone(freshness),
       revision: current.revision + 1,
-      updatedAt: freshness.lastMetadataCheckedAt,
     }));
   }
 
   async complete(jobId: string, result: JobResult): Promise<JobRecord> {
+    await this.flushConversation(jobId);
     return this.exclusive(async () => {
       await writeFile(this.resultPath(jobId), `${JSON.stringify(result, null, 2)}\n`, "utf8");
       await writeFile(this.responsePath(jobId), result.output || result.message, "utf8");
@@ -721,12 +818,15 @@ export class JobStore {
   }
 
   private async readMessages(jobId: string, maxMessages = 200): Promise<ConversationMessage[]> {
+    return (await this.readAllMessages(jobId)).slice(-Math.max(1, Math.min(maxMessages, 500)));
+  }
+
+  private async readAllMessages(jobId: string): Promise<ConversationMessage[]> {
     const content = await readFile(this.messagesPath(jobId), "utf8");
     return content
       .split(/\r?\n/)
       .filter(Boolean)
-      .map((line) => JSON.parse(line) as ConversationMessage)
-      .slice(-Math.max(1, Math.min(maxMessages, 500)));
+      .map((line) => JSON.parse(line) as ConversationMessage);
   }
 
   private async readConversation(
@@ -838,7 +938,7 @@ export class JobStore {
     jobId: string,
     update: (current: ConversationThreadProjection) => ConversationThreadProjection,
   ): Promise<ConversationThreadProjection> {
-    return this.exclusive(async () => {
+    return this.withConversationLock(jobId, async () => {
       const record = this.requireJob(jobId);
       const persistenceFailure = this.conversationFailures.get(jobId);
       if (persistenceFailure) throw persistenceFailure;
@@ -853,10 +953,19 @@ export class JobStore {
           current.revision,
         ));
       }
-      let next = update(structuredClone(current));
-      if (next.revision <= current.revision) {
-        next = { ...next, revision: current.revision + 1, updatedAt: new Date().toISOString() };
+      const pending = this.pendingConversations.get(jobId);
+      const diff = this.pendingDiffs.get(jobId);
+      if (diff !== undefined) {
+        await this.setDiff(jobId, diff);
+        this.pendingDiffs.delete(jobId);
       }
+      const base = pending ?? current;
+      let next = update(base);
+      if (next === current && !pending) {
+        this.conversationFlushFailures.delete(jobId);
+        return structuredClone(current);
+      }
+      next = { ...next, revision: current.revision + 1 };
       const patch = conversationPatch(current, next);
       try {
         await this.appendConversationJournal(jobId, patch);
@@ -868,8 +977,18 @@ export class JobStore {
           next.revision,
         );
         this.addConversationDiagnostic(jobId, failure);
-        throw new ConversationPersistenceError(failure.code, failure.message, [failure]);
+        const error = new ConversationPersistenceError(failure.code, failure.message, [failure]);
+        this.conversationFailures.set(jobId, error);
+        throw error;
       }
+      // Journal commit is the cursor publication boundary, even if checkpoint promotion fails.
+      this.pendingConversations.delete(jobId);
+      clearTimeout(this.conversationTimers.get(jobId));
+      this.conversationTimers.delete(jobId);
+      this.conversations.set(jobId, structuredClone(next));
+      this.pendingConversationCheckpoints.add(jobId);
+      this.recentConversationChanges.add(jobId, patch);
+      this.conversationCommitCounts.set(jobId, (this.conversationCommitCounts.get(jobId) ?? 0) + 1);
       try {
         await this.writeConversation(jobId, next);
       } catch {
@@ -886,6 +1005,7 @@ export class JobStore {
       }
       this.conversations.set(jobId, structuredClone(next));
       this.pendingConversationCheckpoints.delete(jobId);
+      this.conversationFlushFailures.delete(jobId);
       return structuredClone(next);
     });
   }
@@ -983,27 +1103,6 @@ export class JobStore {
       await handle.sync();
     } finally {
       await handle.close();
-    }
-  }
-
-  private async readConversationChanges(
-    jobId: string,
-    afterRevision: number,
-    maxChanges: number,
-  ): Promise<ConversationProjectionPatch[]> {
-    try {
-      const journal = await this.readConversationJournal(jobId);
-      for (const diagnostic of journal.diagnostics) this.addConversationDiagnostic(jobId, diagnostic);
-      return journal.patches
-        .filter((change) => change.revision > Math.max(0, afterRevision))
-        .slice(0, Math.max(1, Math.min(maxChanges, 100)));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-      if (error instanceof ConversationPersistenceError) {
-        this.conversationFailures.set(jobId, error);
-        this.conversationDiagnostics.set(jobId, dedupePersistenceDiagnostics(error.diagnostics));
-      }
-      throw error;
     }
   }
 
@@ -1207,6 +1306,15 @@ export class JobStore {
     return run;
   }
 
+  private async withConversationLock<T>(jobId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.conversationLocks.get(jobId) ?? Promise.resolve();
+    const run = previous.then(operation, operation);
+    const settled = run.then(() => undefined, () => undefined);
+    this.conversationLocks.set(jobId, settled);
+    try { return await run; }
+    finally { if (this.conversationLocks.get(jobId) === settled) this.conversationLocks.delete(jobId); }
+  }
+
   private jobDir(jobId: string): string {
     return join(this.jobsDir, jobId);
   }
@@ -1323,7 +1431,7 @@ function validateConversationProjection(value: unknown): asserts value is Conver
   if (!Number.isSafeInteger(value.revision) || Number(value.revision) < 0) {
     throw new TypeError("Invalid conversation projection revision.");
   }
-  if (typeof value.updatedAt !== "string" || !Array.isArray(value.turns)) {
+  if ((value.updatedAt !== undefined && typeof value.updatedAt !== "string") || !Array.isArray(value.turns)) {
     throw new TypeError("Invalid conversation projection shape.");
   }
   if (!new Set(["unknown", "notLoaded", "idle", "active", "systemError"]).has(String(value.status))) {
@@ -1369,6 +1477,8 @@ function applyConversationPatch(
   if (patch.status !== undefined) next.status = patch.status;
   if (patch.hydratedAt !== undefined) next.hydratedAt = patch.hydratedAt;
   if (patch.freshness !== undefined) next.freshness = structuredClone(patch.freshness);
+  if (patch.tokenUsage !== undefined) next.tokenUsage = structuredClone(patch.tokenUsage);
+  if (patch.modelRouting !== undefined) next.modelRouting = structuredClone(patch.modelRouting);
   if (!patch.replaceAll) {
     for (const turnPatch of patch.turns) {
       let turn = next.turns.find((candidate) => candidate.turnId === turnPatch.turnId);
@@ -1380,6 +1490,8 @@ function applyConversationPatch(
       if (turnPatch.startedAt !== undefined) turn.startedAt = turnPatch.startedAt;
       if (turnPatch.completedAt !== undefined) turn.completedAt = turnPatch.completedAt;
       if (turnPatch.durationMs !== undefined) turn.durationMs = turnPatch.durationMs;
+      if (turnPatch.tokenUsage !== undefined) turn.tokenUsage = structuredClone(turnPatch.tokenUsage);
+      if (turnPatch.modelRouting !== undefined) turn.modelRouting = structuredClone(turnPatch.modelRouting);
       for (const itemPatch of turnPatch.items) {
         if (itemPatch.clientMessageId) {
           turn.items = turn.items.filter((candidate) => !(
@@ -1388,12 +1500,15 @@ function applyConversationPatch(
         }
         const index = turn.items.findIndex((candidate) => candidate.id === itemPatch.id);
         if (index < 0) turn.items.push(structuredClone(itemPatch));
-        else turn.items[index] = { ...turn.items[index], ...structuredClone(itemPatch) };
+        else turn.items[index] = structuredClone(itemPatch);
       }
     }
   }
   next.revision = patch.revision;
-  next.updatedAt = patch.at;
+  if (patch.createdAt !== undefined) next.createdAt = patch.createdAt ?? undefined;
+  // Legacy journal records used at for the revision clock. New records always
+  // carry activity time explicitly, including null when native time is unknown.
+  next.updatedAt = patch.updatedAt === undefined ? patch.at : patch.updatedAt ?? undefined;
   validateConversationProjection(next);
   return next;
 }
@@ -1516,11 +1631,15 @@ function conversationPatch(
       startedAt: previousTurn.startedAt,
       completedAt: previousTurn.completedAt,
       durationMs: previousTurn.durationMs,
+      tokenUsage: previousTurn.tokenUsage,
+      modelRouting: previousTurn.modelRouting,
     }) !== JSON.stringify({
       status: nextTurn.status,
       startedAt: nextTurn.startedAt,
       completedAt: nextTurn.completedAt,
       durationMs: nextTurn.durationMs,
+      tokenUsage: nextTurn.tokenUsage,
+      modelRouting: nextTurn.modelRouting,
     });
     if (items.length || metadataChanged) {
       turns.push({ ...structuredClone(nextTurn), items: structuredClone(items) });
@@ -1529,7 +1648,9 @@ function conversationPatch(
   }
   return {
     revision: next.revision,
-    at: next.updatedAt,
+    at: new Date().toISOString(),
+    createdAt: next.createdAt ?? null,
+    updatedAt: next.updatedAt ?? null,
     threadId: previous.threadId !== next.threadId ? next.threadId : undefined,
     status: previous.status !== next.status ? next.status : undefined,
     hydratedAt: previous.hydratedAt !== next.hydratedAt ? next.hydratedAt : undefined,
@@ -1537,6 +1658,8 @@ function conversationPatch(
       ? structuredClone(next.freshness)
       : undefined,
     replaceAll: replaceAll || undefined,
+    tokenUsage: JSON.stringify(previous.tokenUsage) !== JSON.stringify(next.tokenUsage) ? next.tokenUsage : undefined,
+    modelRouting: JSON.stringify(previous.modelRouting) !== JSON.stringify(next.modelRouting) ? next.modelRouting : undefined,
     turns,
   };
 }

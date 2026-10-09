@@ -1,7 +1,7 @@
 import type { AutomationRegistry } from "./automation-registry.js";
 import type { BridgeConfig } from "./config.js";
 import type { CodexBridgeController } from "./controller.js";
-import { mergeConversationMessages } from "./conversation-projection.js";
+import { mergeConversationMessages, mergeConversationProjectionMetadata } from "./conversation-projection.js";
 import type { JobStore } from "./job-store.js";
 import type {
   AutomationOverlay,
@@ -308,7 +308,11 @@ function summaryFromLocal(local: LocalThreadSnapshot): LocalThreadSummary {
 }
 
 function nativeBackedJobView(local: LocalThreadSnapshot, bridgeView: JobSnapshot): JobSnapshot {
-  const conversation = local.conversation ? mergeConversationMessages(local.conversation, bridgeView.messages) : undefined;
+  const conversation = local.conversation ? mergeConversationMessages(
+    mergeConversationProjectionMetadata(local.conversation, bridgeView.conversation), bridgeView.messages,
+  ) : undefined;
+  // Native history owns content. Notification-only telemetry is retained from the durable
+  // Bridge projection by exact thread/turn identity; it never replaces native messages.
   return {
     ...bridgeView,
     conversation,

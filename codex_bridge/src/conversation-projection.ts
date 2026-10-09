@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { redactString } from "./redaction.js";
+import { modelRerouteSchema, threadTokenUsageSchema } from "./control-plane.js";
 import type {
   ConversationFreshness,
   ConversationItemProjection,
@@ -20,13 +21,14 @@ export interface ConversationNotification {
   params?: Record<string, unknown>;
 }
 
-export function createConversationProjection(threadId?: string, at = new Date().toISOString()): ConversationThreadProjection {
+export function createConversationProjection(threadId?: string, at?: string): ConversationThreadProjection {
   return {
     schemaVersion: 1,
     threadId,
     status: "unknown",
     turns: [],
     revision: 0,
+    createdAt: at,
     updatedAt: at,
   };
 }
@@ -40,7 +42,7 @@ export function hydrateConversationProjection(
   const thread = isObject(response.thread) ? response.thread : response;
   const threadId = stringValue(thread.id) ?? current.threadId;
   const hydratedTurns = Array.isArray(thread.turns)
-    ? thread.turns.flatMap((turn) => isObject(turn) ? [normalizeTurn(turn, at)] : [])
+    ? thread.turns.flatMap((turn) => isObject(turn) ? [normalizeTurn(turn)] : [])
     : [];
   const currentTurns = new Map(current.turns.map((turn) => [turn.turnId, turn]));
   const merged = hydratedTurns.map((turn) => mergeHydratedTurn(currentTurns.get(turn.turnId), turn));
@@ -50,9 +52,13 @@ export function hydrateConversationProjection(
     status: threadStatus(thread.status) ?? current.status,
     turns: merged,
     revision: current.revision + 1,
-    updatedAt: at,
+    createdAt: timestamp(thread.createdAt) ?? merged.find((turn) => turn.startedAt)?.startedAt,
+    updatedAt: timestamp(thread.updatedAt) ?? merged.flatMap((turn) => [turn.completedAt, turn.startedAt, ...turn.items.map((item) => item.updatedAt ?? item.createdAt)])
+      .filter((value): value is string => Boolean(value)).sort().at(-1),
     hydratedAt: at,
     freshness: freshness ? structuredClone(freshness) : current.freshness,
+    tokenUsage: current.tokenUsage,
+    modelRouting: current.modelRouting,
   });
 }
 
@@ -72,7 +78,7 @@ export function reduceConversationNotification(
   if (notification.method === "turn/started") {
     const rawTurn = isObject(params.turn) ? params.turn : params;
     const turnId = stringValue(rawTurn.id) ?? stringValue(params.turnId);
-    if (turnId) upsertTurn(next, normalizeTurn({ ...rawTurn, id: turnId }, at));
+    if (turnId) upsertTurn(next, normalizeTurn({ ...rawTurn, id: turnId, startedAt: rawTurn.startedAt ?? at }, at));
     next.status = "active";
     return changed(next, at);
   }
@@ -80,7 +86,7 @@ export function reduceConversationNotification(
     const rawTurn = isObject(params.turn) ? params.turn : params;
     const turnId = stringValue(rawTurn.id) ?? stringValue(params.turnId);
     if (turnId) {
-      const normalized = normalizeTurn({ ...rawTurn, id: turnId }, at);
+      const normalized = normalizeTurn({ ...rawTurn, id: turnId, completedAt: rawTurn.completedAt ?? at }, at);
       const turn = upsertTurn(next, normalized);
       turn.status = stringValue(rawTurn.status) ?? "completed";
       turn.completedAt = timestamp(rawTurn.completedAt) ?? at;
@@ -100,6 +106,26 @@ export function reduceConversationNotification(
   const turnId = stringValue(params.turnId) ?? nestedId(params, "turn");
   if (!turnId) return current;
   const turn = ensureTurn(next, turnId, at);
+
+  if (notification.method === "thread/tokenUsage/updated") {
+    const parsed = threadTokenUsageSchema.safeParse(params.tokenUsage);
+    if (!parsed.success) return current;
+    turn.tokenUsage = parsed.data;
+    next.tokenUsage = { ...parsed.data, turnId };
+    return changed(next, at);
+  }
+  if (notification.method === "model/rerouted") {
+    const parsed = modelRerouteSchema.safeParse(params);
+    if (!parsed.success) return current;
+    turn.modelRouting = {
+      ...parsed.data,
+      requestedModel: turn.modelRouting?.requestedModel ?? (typeof params.requestedModel === "string" ? bounded(params.requestedModel, 160) : null),
+      executedModel: parsed.data.toModel,
+      source: "model/rerouted",
+    };
+    next.modelRouting = { ...turn.modelRouting, turnId };
+    return changed(next, at);
+  }
 
   if (notification.method === "bridge/approval") {
     const itemId = stringValue(params.itemId) ?? `approval:${stringValue(params.approvalId) ?? turnId}`;
@@ -176,6 +202,7 @@ export function reduceConversationNotification(
       isStreaming: false,
       createdAt: at,
       updatedAt: at,
+      timestampSource: "live",
     }, true);
     return changed(next, at);
   }
@@ -186,8 +213,21 @@ export function reduceConversationNotification(
 export function mergeConversationMessages(
   projection: ConversationThreadProjection,
   messages: ConversationMessage[],
+  metadataOnly = false,
 ): ConversationThreadProjection {
   const next = structuredClone(projection);
+  // Legacy checkpoints predate lineage. Their item clocks may be hydration time;
+  // only recover native turn-level time until a fresh native item can prove more.
+  for (const turn of next.turns) for (const item of turn.items) {
+    if (item.timestampSource) continue;
+    const turnAt = item.type === "agentMessage"
+      ? timestamp(turn.completedAt) ?? timestamp(turn.startedAt)
+      : item.type === "userMessage" ? timestamp(turn.startedAt)
+      : timestamp(turn.startedAt) ?? timestamp(turn.completedAt);
+    item.createdAt = turnAt;
+    item.updatedAt = turnAt;
+    item.timestampSource = turnAt ? "turn" : undefined;
+  }
   const projectedItems = flattenItems(next);
   const projectedUsersByClientId = new Map(
     projectedItems
@@ -201,6 +241,11 @@ export function mergeConversationMessages(
     const item = projectedUsersByClientId.get(message.clientMessageId);
     if (!item) continue;
     matchedMessageIds.add(message.id);
+    const durableAt = timestamp(message.at);
+    if (durableAt && item.timestampSource !== "native") {
+      item.createdAt = durableAt;
+      item.timestampSource = "bridge";
+    }
     item.context = message.context ? bounded(message.context, MAX_MESSAGE_CHARS) : undefined;
     item.inputArtifacts = structuredClone(message.inputArtifacts ?? []);
     item.clientMessageId = message.clientMessageId;
@@ -209,7 +254,7 @@ export function mergeConversationMessages(
   // Once App Server history has synchronized successfully, it is authoritative.
   // Unmatched Bridge records may carry metadata, but must not recreate source-deleted
   // messages or overwrite source text by ordinal position.
-  if (next.freshness?.synchronized) return applyProjectionLimits(next);
+  if (metadataOnly || next.freshness?.synchronized) return applyProjectionLimits(next);
 
   for (const message of messages) {
     if (matchedMessageIds.has(message.id)) continue;
@@ -230,6 +275,7 @@ export function mergeConversationMessages(
       isStreaming: false,
       createdAt: message.at,
       updatedAt: message.at,
+      timestampSource: "bridge",
       clientMessageId: message.clientMessageId,
       inputArtifacts: structuredClone(message.inputArtifacts ?? []),
     }, true);
@@ -237,21 +283,40 @@ export function mergeConversationMessages(
   return applyProjectionLimits(next);
 }
 
-function normalizeTurn(raw: Record<string, unknown>, at: string): ConversationTurnProjection {
-  const turnId = stringValue(raw.id) ?? stringValue(raw.turnId) ?? `unknown:${at}`;
+// Used by the unified registry too: native content wins, while exact item ids may
+// retain proven observation times and notification-only turn telemetry.
+export function mergeConversationProjectionMetadata(
+  native: ConversationThreadProjection,
+  observed?: ConversationThreadProjection,
+): ConversationThreadProjection {
+  if (!observed || !native.threadId || native.threadId !== observed.threadId) return structuredClone(native);
+  return {
+    ...structuredClone(native),
+    tokenUsage: observed.tokenUsage,
+    modelRouting: observed.modelRouting,
+    turns: native.turns.map((turn) => mergeHydratedTurn(observed.turns.find((candidate) => candidate.turnId === turn.turnId), turn)),
+  };
+}
+
+function normalizeTurn(raw: Record<string, unknown>, liveAt?: string): ConversationTurnProjection {
+  const turnId = stringValue(raw.id) ?? stringValue(raw.turnId) ?? `unknown:${createHash("sha256").update(JSON.stringify(raw)).digest("hex").slice(0, 16)}`;
+  const startedAt = timestamp(raw.startedAt);
+  const completedAt = timestamp(raw.completedAt);
   return {
     turnId,
     status: stringValue(raw.status) ?? "unknown",
     items: Array.isArray(raw.items)
       ? raw.items.flatMap((item) => {
           if (!isObject(item)) return [];
-          const normalized = normalizeItem(item, turnId, "hydrated", at);
+          const fallback = item.type === "agentMessage" ? completedAt ?? startedAt
+            : item.type === "userMessage" ? startedAt : startedAt ?? completedAt;
+          const normalized = normalizeItem(item, turnId, "hydrated", liveAt, fallback);
           return normalized ? [normalized] : [];
         })
       : [],
-    startedAt: timestamp(raw.startedAt),
-    completedAt: timestamp(raw.completedAt),
-    durationMs: numberValue(raw.durationMs),
+    startedAt,
+    completedAt,
+    durationMs: numberValue(raw.durationMs) ?? (startedAt && completedAt ? Math.max(0, Date.parse(completedAt) - Date.parse(startedAt)) : undefined),
   };
 }
 
@@ -259,24 +324,31 @@ function normalizeItem(
   raw: Record<string, unknown>,
   turnId: string,
   phase: "started" | "completed" | "hydrated",
-  at: string,
+  at?: string,
+  turnAt?: string,
 ): ConversationItemProjection | undefined {
   const rawType = stringValue(raw.type);
   const id = stringValue(raw.id);
   if (!rawType || !id) return undefined;
   const completed = phase !== "started";
+  const nativeAt = timestamp(raw.createdAt) ?? timestamp(raw.timestamp);
+  const createdAt = nativeAt ?? at ?? turnAt;
   const base: ConversationItemProjection = {
     id,
     turnId,
     type: projectionType(rawType),
     status: stringValue(raw.status) ?? (completed ? "completed" : "inProgress"),
     isStreaming: !completed,
-    createdAt: at,
-    updatedAt: at,
+    createdAt,
+    updatedAt: timestamp(raw.updatedAt) ?? at ?? createdAt,
+    timestampSource: nativeAt ? "native" : at ? "live" : turnAt ? "turn" : undefined,
   };
   if (rawType === "userMessage") {
     base.text = bounded(userInputText(raw.content), MAX_MESSAGE_CHARS);
     base.clientMessageId = stringValue(raw.clientId);
+  } else if (rawType === "enteredReviewMode" || rawType === "exitedReviewMode") {
+    base.activityType = rawType;
+    base.text = bounded(stringValue(raw.review) ?? "", MAX_MESSAGE_CHARS);
   } else if (rawType === "agentMessage" || rawType === "plan") {
     base.text = bounded(stringValue(raw.text) ?? "", MAX_MESSAGE_CHARS);
   } else if (rawType === "reasoning") {
@@ -316,6 +388,8 @@ function mergeTurn(current: ConversationTurnProjection | undefined, hydrated: Co
     startedAt: hydrated.startedAt ?? current.startedAt,
     completedAt: hydrated.completedAt ?? current.completedAt,
     durationMs: hydrated.durationMs ?? current.durationMs,
+    tokenUsage: current.tokenUsage,
+    modelRouting: current.modelRouting,
   };
 }
 
@@ -327,14 +401,28 @@ function mergeHydratedTurn(
   return {
     turnId: hydrated.turnId,
     status: hydrated.status === "unknown" ? current.status : hydrated.status,
-    items: hydrated.items.map((item) => mergeItem(
-      current.items.find((candidate) => candidate.id === item.id),
-      item,
-      true,
-    )),
+    items: hydrated.items.map((item) => {
+      const previous = current.items.find((candidate) => candidate.id === item.id);
+      const merged: ConversationItemProjection = {
+        ...item,
+        context: previous?.context,
+        inputArtifacts: previous?.inputArtifacts,
+        approvalId: previous?.approvalId,
+        approvalState: previous?.approvalState,
+      };
+      // Old checkpoints lack lineage and may contain the hydration-clock defect.
+      // Keep proven live/durable/native times only; never resurrect old source text.
+      const keepPrevious = previous?.timestampSource && previous.timestampSource !== "turn" && item.timestampSource !== "native";
+      merged.createdAt = keepPrevious ? previous.createdAt : item.createdAt;
+      merged.timestampSource = keepPrevious ? previous.timestampSource : item.timestampSource;
+      merged.updatedAt = keepPrevious ? previous.updatedAt ?? item.updatedAt : item.updatedAt;
+      return merged;
+    }),
     startedAt: hydrated.startedAt ?? current.startedAt,
     completedAt: hydrated.completedAt ?? current.completedAt,
     durationMs: hydrated.durationMs ?? current.durationMs,
+    tokenUsage: current.tokenUsage,
+    modelRouting: current.modelRouting,
   };
 }
 
@@ -375,11 +463,13 @@ function mergeItem(current: ConversationItemProjection | undefined, incoming: Co
       ...(current ?? {}),
       ...incoming,
       createdAt: current?.createdAt ?? incoming.createdAt,
+      timestampSource: current?.createdAt ? current.timestampSource : incoming.timestampSource,
       isStreaming: authoritative ? false : incoming.isStreaming,
       lastDelta: authoritative ? undefined : incoming.lastDelta,
     };
   }
-  return { ...current, ...incoming, createdAt: current.createdAt ?? incoming.createdAt };
+  return { ...current, ...incoming, createdAt: current.createdAt ?? incoming.createdAt,
+    timestampSource: current.createdAt ? current.timestampSource : incoming.timestampSource };
 }
 
 function ensureItem(
@@ -398,6 +488,7 @@ function ensureItem(
     isStreaming: true,
     createdAt: at,
     updatedAt: at,
+    timestampSource: "live",
   };
   turn.items.push(item);
   return item;
@@ -413,7 +504,7 @@ function appendDelta(
 ): void {
   if (!delta) return;
   const item = ensureItem(turn, itemId, type, at);
-  if (item.lastDelta === delta) return;
+  // Text equality is not an event identity: repeated tokens are legitimate output.
   item.text = bounded(`${item.text ?? ""}${delta}`, maxChars);
   item.lastDelta = delta;
   item.status = "inProgress";
@@ -422,7 +513,7 @@ function appendDelta(
 }
 
 function appendItemOutput(item: ConversationItemProjection, delta: string, at: string): void {
-  if (!delta || item.lastDelta === delta) return;
+  if (!delta) return;
   const combined = `${item.output ?? ""}${delta}`;
   item.output = bounded(combined, MAX_ACTIVITY_TEXT_CHARS);
   item.outputTruncated = combined.length > MAX_ACTIVITY_TEXT_CHARS || item.outputTruncated === true;
@@ -570,9 +661,10 @@ function truncateToBudget(value: string, available: number): string {
 }
 
 function timestamp(value: unknown): string | undefined {
-  if (typeof value === "string" && value) return value;
-  if (typeof value === "number" && Number.isFinite(value)) return new Date(value * 1_000).toISOString();
-  return undefined;
+  const millis = typeof value === "number" ? value * 1_000
+    : typeof value === "string" && value.trim() ? Date.parse(value) : NaN;
+  const date = new Date(millis);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
 }
 
 function stringArray(value: unknown): string[] {

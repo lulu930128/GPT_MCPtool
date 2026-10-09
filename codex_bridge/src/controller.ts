@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
+import { DirectOperationError } from "./direct-operation-error.js";
+import { ControlPlaneReader } from "./control-plane.js";
 import { realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, normalize, parse, relative } from "node:path";
@@ -14,6 +16,7 @@ import { buildCodexUserInput, buildInitialTurnUserInput } from "./conversation-i
 import { createConversationProjection, hydrateConversationProjection } from "./conversation-projection.js";
 import { ThreadHistoryReader } from "./thread-history-reader.js";
 import { redactString, sanitizeForStorage } from "./redaction.js";
+import { CONVERSATION_DELIVERY, isCoalescibleConversationNotification } from "./conversation-delivery.js";
 import type {
   ApprovalKind,
   ApprovalState,
@@ -34,6 +37,7 @@ import { digestWorkPackage, type WorkPackagePreview } from "./work-package.js";
 const MAX_LOCAL_THREAD_INVENTORY = 10_000;
 
 export interface DispatchInput {
+  source?: "app" | "model_direct";
   preview: WorkPackagePreview;
   previewDigest: string;
   idempotencyKey: string;
@@ -43,6 +47,10 @@ export interface ConversationSendInput extends AppendUserMessageInput {
   jobId: string;
   inputBundleIds?: string[];
 }
+
+export type DirectConversationSendInput = Omit<ConversationSendInput, "approvalReviewer"> & {
+  approvalReviewer?: ConversationSendInput["approvalReviewer"];
+};
 
 export interface LocalConversationSendInput extends AppendUserMessageInput {
   localThreadId: string;
@@ -65,6 +73,8 @@ interface LiveApproval {
 }
 
 export class CodexBridgeController {
+  private readonly backgroundTasks = new Set<Promise<void>>();
+  private backgroundFailure?: unknown;
   private readonly jobsByThread = new Map<string, string>();
   private readonly jobsByTurn = new Map<string, string>();
   private readonly liveApprovals = new Map<string, LiveApproval>();
@@ -72,6 +82,7 @@ export class CodexBridgeController {
   private readonly diagnosticSignaturesByJob = new Map<string, Set<string>>();
   private readonly jobLocks = new Map<string, Promise<void>>();
   private readonly historyReader: ThreadHistoryReader;
+  private readonly controlPlane: ControlPlaneReader;
   private readonly threadSyncStates = new Map<string, {
     fingerprint: string;
     lastFullReadAt: number;
@@ -79,6 +90,12 @@ export class CodexBridgeController {
   }>();
   private readonly hydrationRetryAfter = new Map<string, number>();
   private readonly discoveredProjects = new Map<string, BridgeProject>();
+  private readonly notificationEpochs = new Map<string, number>();
+  private readonly lastNotificationAt = new Map<string, number>();
+  private readonly activeRecoveries = new Map<string, Promise<boolean>>();
+  private readonly activeRecoveryAfter = new Map<string, number>();
+  private readonly recoveryDiagnostics = new Map<string, { lastAttemptAt: string; outcome: string }>();
+  private unmatchedNotificationCount = 0;
   private modelCache?: { expiresAt: number; models: CodexModelOption[] };
 
   constructor(
@@ -88,21 +105,38 @@ export class CodexBridgeController {
     private readonly appServer: AppServerTransport,
   ) {
     this.historyReader = new ThreadHistoryReader(appServer);
-    this.appServer.on("notification", (message) => void this.handleNotification(message));
-    this.appServer.on("serverRequest", (message) => void this.handleServerRequest(message));
-    this.appServer.on("stderr", (line) => void this.handleStderr(line));
-    this.appServer.on("exit", (error) => void this.handleExit(error));
+    this.controlPlane = new ControlPlaneReader(appServer);
+    this.appServer.on("notification", (message) => this.trackBackground(this.handleNotification(message)));
+    this.appServer.on("serverRequest", (message) => this.trackBackground(this.handleServerRequest(message)));
+    this.appServer.on("stderr", (line) => this.trackBackground(this.handleStderr(line)));
+    this.appServer.on("exit", (error) => this.trackBackground(this.handleExit(error)));
   }
 
   get status(): AppServerTransport["status"] {
-    return this.appServer.status;
+    return this.backgroundFailure ? "unavailable" : this.appServer.status;
   }
 
   async close(): Promise<void> {
+    while (this.backgroundTasks.size) await Promise.allSettled([...this.backgroundTasks]);
     await this.appServer.close();
+    while (this.backgroundTasks.size) await Promise.allSettled([...this.backgroundTasks]);
+    await this.store.flushConversations();
+    if (this.backgroundFailure) throw this.backgroundFailure;
+  }
+
+  private trackBackground(task: Promise<void>): void {
+    this.backgroundTasks.add(task);
+    void task.then(() => this.backgroundTasks.delete(task), (error) => {
+      this.backgroundTasks.delete(task);
+      this.backgroundFailure ??= error;
+    });
   }
 
   async hydrateConversation(jobId: string, force = false): Promise<boolean> {
+    const selected = requireJob(this.store, jobId);
+    if (selected.threadId && this.jobsByThread.get(selected.threadId) === jobId && !isTerminal(selected.status)) {
+      return this.recoverActiveConversation(jobId, force);
+    }
     return this.withJobLock(jobId, async () => {
       const job = requireJob(this.store, jobId);
       if (!job.threadId) return false;
@@ -156,15 +190,95 @@ export class CodexBridgeController {
     });
   }
 
+  /** Native reads never hold the notification lock across App Server IO. */
+  async recoverActiveConversation(jobId: string, requested = true): Promise<boolean> {
+    const existing = this.activeRecoveries.get(jobId);
+    if (existing) return existing;
+    const job = requireJob(this.store, jobId);
+    if (!job.threadId || !job.turnId || isTerminal(job.status)) return false;
+    const now = Date.now();
+    if ((this.activeRecoveryAfter.get(jobId) ?? 0) > now) return false;
+    if (!requested && now - (this.lastNotificationAt.get(jobId) ?? Date.parse(job.updatedAt)) < CONVERSATION_DELIVERY.activeQuietMs) return false;
+    this.activeRecoveryAfter.set(jobId, now + CONVERSATION_DELIVERY.nativeRetryMs);
+    this.recoveryDiagnostics.set(jobId, { lastAttemptAt: new Date(now).toISOString(), outcome: "reading" });
+    const recovery = this.readActiveConversation(jobId, job.threadId, job.turnId);
+    this.activeRecoveries.set(jobId, recovery);
+    try {
+      const applied = await recovery;
+      this.recoveryDiagnostics.set(jobId, { lastAttemptAt: new Date(now).toISOString(), outcome: applied ? "applied" : "deferred" });
+      return applied;
+    }
+    catch (error) {
+      this.recoveryDiagnostics.set(jobId, { lastAttemptAt: new Date(now).toISOString(), outcome: "persistence_failed" });
+      throw error;
+    }
+    finally { this.activeRecoveries.delete(jobId); }
+  }
+
+  conversationRecoveryDiagnostics(jobId: string) {
+    return { ...this.recoveryDiagnostics.get(jobId), unmatchedNotificationCount: this.unmatchedNotificationCount };
+  }
+
+  private async readActiveConversation(jobId: string, threadId: string, turnId: string): Promise<boolean> {
+    const baseline = await this.withJobLock(jobId, async () => {
+      await this.store.flushConversation(jobId);
+      return { epoch: this.notificationEpochs.get(jobId) ?? 0, revision: this.store.conversationRevision(jobId) };
+    });
+    const checkedAt = new Date().toISOString();
+    let history;
+    try {
+      history = await this.historyReader.read(threadId);
+    } catch {
+      await this.store.appendEvent(jobId, "conversation.recovery.deferred", "Native conversation recovery is temporarily unavailable; the committed projection was preserved.")
+        .catch(() => undefined);
+      return false;
+    }
+    return this.withJobLock(jobId, async () => {
+      const job = requireJob(this.store, jobId);
+      if (job.threadId !== threadId || job.turnId !== turnId || isTerminal(job.status)
+        || (this.notificationEpochs.get(jobId) ?? 0) !== baseline.epoch
+        || this.store.conversationRevision(jobId) !== baseline.revision) return false;
+      const thread = history.response.thread as Record<string, unknown> | undefined;
+      const turns = Array.isArray(thread?.turns) ? thread.turns : [];
+      // An active read may be valid but not yet contain the current turn. Never erase it.
+      const activeTurn = turns.find((turn) => isObject(turn) && turn.id === turnId);
+      if (thread?.id !== threadId || !isObject(activeTurn)) return false;
+      const projection = await this.store.hydrateConversation(jobId, history.response, checkedAt, {
+        historyMode: history.metadata.historyMode, synchronized: true, sourceAvailability: "available",
+        lastMetadataCheckedAt: checkedAt, lastHydratedAt: checkedAt, sourceFingerprint: history.sourceFingerprint,
+      });
+      await this.store.appendEvent(jobId, "conversation.recovery.completed", "Active conversation synchronized from native history.", {
+        previousRevision: baseline.revision, revision: this.store.conversationRevision(jobId),
+      });
+      if (["completed", "failed", "interrupted"].includes(String(activeTurn.status))) {
+        const output = projection.turns.find((turn) => turn.turnId === turnId)?.items.filter((item) => item.type === "agentMessage").at(-1)?.text;
+        await this.store.complete(jobId, resultFor(job, completionStatus({ turn: activeTurn }), "Recovered the completed native turn without retrying it.", output));
+        this.removeMappings(job);
+        this.finalOutputByJob.delete(jobId);
+      }
+      return true;
+    });
+  }
+
   async listModels(force = false): Promise<CodexModelOption[]> {
     if (!force && this.modelCache && this.modelCache.expiresAt > Date.now()) {
       return structuredClone(this.modelCache.models);
     }
-    const response = await this.appServer.request<Record<string, unknown>>("model/list", {
-      limit: 100,
-      includeHidden: false,
-    });
-    const models = (Array.isArray(response.data) ? response.data : [])
+    const data: unknown[] = [];
+    const cursors = new Set<string>();
+    let cursor: string | undefined;
+    do {
+      const response = await this.appServer.request<Record<string, unknown>>("model/list", {
+        limit: 100, includeHidden: false, ...(cursor ? { cursor } : {}),
+      });
+      if (!Array.isArray(response.data)) throw new DirectOperationError("MODEL_LIST_INVALID_RESPONSE");
+      if (response.nextCursor != null && typeof response.nextCursor !== "string") throw new DirectOperationError("MODEL_LIST_INVALID_RESPONSE");
+      data.push(...response.data);
+      cursor = stringValue(response.nextCursor);
+      if (cursor && (cursors.has(cursor) || cursors.size >= 100)) throw new DirectOperationError("MODEL_LIST_INCOMPLETE");
+      if (cursor) cursors.add(cursor);
+    } while (cursor);
+    const models = data
       .flatMap((value) => {
         if (!isObject(value)) return [];
         const id = stringValue(value.id) ?? stringValue(value.model);
@@ -189,6 +303,12 @@ export class CodexBridgeController {
       });
     this.modelCache = { expiresAt: Date.now() + 5 * 60_000, models };
     return structuredClone(models);
+  }
+
+  async modelListDiagnostics(force = false) {
+    const cacheHit = !force && Boolean(this.modelCache && this.modelCache.expiresAt > Date.now());
+    const models = await this.listModels(force);
+    return { models, cacheHit, fetchedAt: new Date(this.modelCache!.expiresAt - 5 * 60_000).toISOString(), appServerIdentity: { transport: "controller-owned-stdio", status: this.appServer.status, bridgeBuildId: this.config.buildId } };
   }
 
   async listLocalThreads(cursor?: string, maxThreads = MAX_LOCAL_THREAD_INVENTORY): Promise<LocalThreadListPage> {
@@ -380,6 +500,10 @@ export class CodexBridgeController {
   }
 
   async dispatch(input: DispatchInput): Promise<{ record: JobRecord; created: boolean }> {
+    if (input.source === "model_direct") {
+      this.requireDirectProject(input.preview.workPackage.projectId);
+      if (input.preview.workPackage.dataClassification === "company_approved") throw new DirectOperationError("DIRECT_COMPANY_AUTHORIZATION_REQUIRES_APP");
+    }
     const actualDigest = digestWorkPackage(input.preview.workPackage);
     if (input.previewDigest !== input.preview.previewDigest || input.previewDigest !== actualDigest) {
       throw new Error("The work package changed after preview; preview it again before dispatch.");
@@ -393,20 +517,24 @@ export class CodexBridgeController {
       input.preview.workPackage.dataClassification,
     );
     const created = await this.store.create({
+      dispatchSource: input.source,
       project,
       workPackage: input.preview.workPackage,
       previewDigest: input.previewDigest,
-      idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey),
+      idempotencyKey: input.source === "model_direct" ? `direct:${createHash("sha256").update(normalizeIdempotencyKey(input.idempotencyKey)).digest("hex")}` : normalizeIdempotencyKey(input.idempotencyKey),
       inputArtifacts,
     });
     if (created.created) {
-      void this.execute(created.record.id);
+      this.trackBackground(this.execute(created.record.id));
     }
     return created;
   }
 
   async sendMessage(input: ConversationSendInput): Promise<ConversationSendResult> {
-    return this.withJobLock(input.jobId, async () => {
+    return this.withJobLock(input.jobId, () => this.sendMessageLocked(input));
+  }
+
+  private async sendMessageLocked(input: ConversationSendInput, source: "app" | "model_direct" = "app"): Promise<ConversationSendResult> {
       let job = requireJob(this.store, input.jobId);
       await this.assertProjectStillOperable(job.project);
       const active = ["running", "awaiting_approval"].includes(job.status);
@@ -459,6 +587,7 @@ export class CodexBridgeController {
           }) }],
         });
         const record = await this.store.appendEvent(job.id, "operator.steered", "Operator sent a conversation message.", {
+          source,
           characterCount: input.content.length,
         });
         return { record, accepted: true, delivery: "steer" };
@@ -467,9 +596,150 @@ export class CodexBridgeController {
         throw new Error("This legacy conversation has no Codex thread id and cannot be resumed.");
       }
       const prepared = await this.store.prepareTurn(job.id, input);
-      void this.resumeAndExecute(prepared.id, resolvedInput);
+      await this.store.appendEvent(job.id, "operator.message", "Conversation message accepted.", { source });
+      this.trackBackground(this.resumeAndExecute(prepared.id, resolvedInput));
       return { record: prepared, accepted: true, delivery: "turn" };
+  }
+
+  requireDirectProject(projectId: string): BridgeProject {
+    const project = this.config.projects.get(projectId);
+    if (!project) throw new DirectOperationError("DIRECT_PROJECT_NOT_ALLOWLISTED");
+    return structuredClone(project);
+  }
+
+  usageStatus() { return this.controlPlane.usage(); }
+
+  async runtimeStatus(projectId: string) {
+    const project = this.requireDirectProject(projectId);
+    return { projectId, controller: this.status, ...await this.controlPlane.runtime(project.path) };
+  }
+
+  async inventory(projectId: string, kind: "all" | "skills" | "hooks" | "mcp" = "all") {
+    const project = this.requireDirectProject(projectId);
+    return { projectId, ...await this.controlPlane.inventory(project.path, kind) };
+  }
+
+  async directThreadAction(kind: "compact" | "review" | "fork", input: {
+    jobId: string; requestId: string; expectedThreadId: string; expectedTurnId: string;
+  }) {
+    return this.withJobLock(input.jobId, async () => {
+      const job = requireJob(this.store, input.jobId);
+      await this.assertDirectJob(job, false);
+      if (job.threadId !== input.expectedThreadId) throw new DirectOperationError("DIRECT_THREAD_CHANGED");
+      // 0.154.0 allocates the fork id remotely without a replay key. A lost response or crash
+      // cannot be reconciled atomically with JobStore/UnifiedConversationRegistry ownership.
+      if (kind === "fork") throw new DirectOperationError("DIRECT_FORK_OWNERSHIP_UNSUPPORTED",
+        "Fork is blocked: protocol 0.154.0 cannot guarantee recoverable Bridge ownership after a lost response.");
+      return this.runDirectRequest(job, `${kind}:${normalizeIdempotencyKey(input.requestId)}`, {
+        expectedThreadId: input.expectedThreadId, expectedTurnId: input.expectedTurnId,
+      }, async () => {
+        if (job.turnId !== input.expectedTurnId) throw new DirectOperationError("DIRECT_TURN_CHANGED");
+        if (!isTerminal(job.status) || job.approvals.some((approval) => approval.state === "pending")) throw new DirectOperationError("DIRECT_THREAD_BUSY");
+        const projectPath = await realpath(job.project.path);
+        if (comparablePath(projectPath) !== comparablePath(job.project.path)) throw new DirectOperationError("DIRECT_PROJECT_CHANGED");
+        const metadata = await this.historyReader.readMetadata(input.expectedThreadId);
+        if (typeof metadata.rawThread.cwd !== "string" || comparablePath(await realpath(metadata.rawThread.cwd)) !== comparablePath(projectPath)) {
+          throw new DirectOperationError("DIRECT_THREAD_PROJECT_MISMATCH");
+        }
+        const nativeStatus = isObject(metadata.rawThread.status) ? metadata.rawThread.status.type : metadata.rawThread.status;
+        if (nativeStatus !== "idle" && nativeStatus !== "notLoaded") throw new DirectOperationError("DIRECT_THREAD_BUSY");
+        const executionMode = kind === "review" ? "plan" : job.currentExecutionMode ?? job.workPackage.executionMode;
+        const approvalReviewer = job.currentApprovalReviewer ?? job.workPackage.approvalReviewer ?? "user";
+        const permissions = await this.selectPermissionProfile(job, executionMode);
+        const resumed = await this.appServer.request("thread/resume", {
+          threadId: input.expectedThreadId, cwd: projectPath, runtimeWorkspaceRoots: [projectPath],
+          approvalPolicy: "on-request", approvalsReviewer: approvalReviewer, permissions, excludeTurns: true,
+        });
+        if (nestedId(resumed, "thread") !== input.expectedThreadId) throw new DirectOperationError("DIRECT_THREAD_CHANGED");
+        await this.store.prepareTurn(job.id, {
+          executionMode, approvalReviewer, dataClassification: job.currentDataClassification ?? job.workPackage.dataClassification,
+          model: job.model, effort: job.effort, controlAction: { kind, priorTurnId: input.expectedTurnId },
+        });
+        this.jobsByThread.set(input.expectedThreadId, job.id);
+        this.threadSyncStates.delete(input.expectedThreadId);
+        this.finalOutputByJob.delete(job.id);
+        // A timeout leaves the preparing job + durable unknown receipt in place. Notifications
+        // can still settle it; no second action or automatic retry can run over uncertain work.
+        if (kind === "compact") {
+          await this.appServer.request("thread/compact/start", { threadId: input.expectedThreadId });
+        } else {
+          const response = await this.appServer.request("review/start", {
+            threadId: input.expectedThreadId, target: { type: "uncommittedChanges" }, delivery: "inline",
+          });
+          const turnId = nestedId(response, "turn");
+          if (response.reviewThreadId !== input.expectedThreadId || !turnId || turnId === input.expectedTurnId) throw new DirectOperationError("DIRECT_REVIEW_IDENTITY_MISMATCH");
+          this.jobsByTurn.set(turnId, job.id);
+          await this.store.setTurn(job.id, turnId);
+          await this.store.applyConversationNotification(job.id, { method: "turn/started", params: { threadId: input.expectedThreadId, turn: response.turn } });
+        }
+        await this.store.appendEvent(job.id, `codex.${kind}.accepted`, `Codex ${kind} accepted; completion is reported separately.`, { threadId: input.expectedThreadId });
+      }).catch((error) => {
+        if (error instanceof DirectOperationError) throw error;
+        throw new DirectOperationError("DIRECT_ACTION_UNAVAILABLE", "Action delivery could not be confirmed. Inspect the job; do not retry with a new request id.");
+      });
     });
+  }
+
+  async directMessage(input: DirectConversationSendInput, expectedTurnId?: string, steerOnly = false) {
+    return this.withJobLock(input.jobId, async () => {
+      const job = requireJob(this.store, input.jobId);
+      await this.assertDirectJob(job, false);
+      if (input.dataClassification === "company_approved") throw new DirectOperationError("DIRECT_COMPANY_AUTHORIZATION_REQUIRES_APP");
+      const key = `${steerOnly ? "steer" : "send"}:${normalizeIdempotencyKey(input.clientMessageId)}`;
+      return this.runDirectRequest(job, key, { ...input, expectedTurnId }, async () => {
+        if (expectedTurnId && (!["running", "awaiting_approval"].includes(job.status) || job.turnId !== expectedTurnId)) throw new DirectOperationError("DIRECT_TURN_CHANGED");
+        if (steerOnly && !["running", "awaiting_approval"].includes(job.status)) throw new DirectOperationError("DIRECT_TURN_NOT_ACTIVE");
+        if ((steerOnly || ["running", "awaiting_approval"].includes(job.status)) && (!expectedTurnId || job.turnId !== expectedTurnId)) throw new DirectOperationError("DIRECT_TURN_CHANGED");
+        await this.sendMessageLocked({
+          ...input,
+          approvalReviewer: input.approvalReviewer ?? job.currentApprovalReviewer ?? job.workPackage.approvalReviewer ?? "user",
+          model: input.model ?? job.model ?? job.workPackage.model,
+          effort: input.effort ?? job.effort ?? job.workPackage.effort,
+        }, "model_direct");
+      }, input.approvalReviewer === undefined ? { ...input, approvalReviewer: "user", expectedTurnId } : undefined);
+    });
+  }
+
+  async directCancel(jobId: string, requestId: string, expectedTurnId: string) {
+    return this.withJobLock(jobId, async () => {
+      const job = requireJob(this.store, jobId);
+      await this.assertDirectJob(job, true);
+      return this.runDirectRequest(job, `cancel:${normalizeIdempotencyKey(requestId)}`, { expectedTurnId }, async () => {
+        if (job.turnId !== expectedTurnId) throw new DirectOperationError("DIRECT_TURN_CHANGED");
+        await this.cancelLocked(jobId);
+      });
+    });
+  }
+
+  private async assertDirectJob(job: JobRecord, stopOnly: boolean): Promise<void> {
+    const project = this.requireDirectProject(job.project.id);
+    if (comparablePath(project.path) !== comparablePath(job.project.path)) throw new DirectOperationError("DIRECT_PROJECT_CHANGED");
+    if (stopOnly) return;
+    if (job.idempotencyKey.startsWith("local-thread:")) throw new DirectOperationError("DIRECT_HISTORY_CLASSIFICATION_UNKNOWN");
+    if (await this.store.hasCompanyHistory(job.id)) throw new DirectOperationError("DIRECT_COMPANY_AUTHORIZATION_REQUIRES_APP");
+  }
+
+  private async runDirectRequest(job: JobRecord, key: string, payload: unknown, operation: () => Promise<void>, legacyPayload?: unknown) {
+    const digest = createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+    const prior = job.directRequests?.[key];
+    if (prior) {
+      // Before reviewer selection was exposed, the MCP adapter injected user into every message.
+      // Match that old receipt only for a retry with an omitted reviewer; never redeliver it.
+      const legacyMatch = prior.inputVersion === undefined && legacyPayload !== undefined &&
+        prior.digest === createHash("sha256").update(JSON.stringify(legacyPayload)).digest("hex");
+      if (prior.digest !== digest && !legacyMatch) throw new DirectOperationError("DIRECT_REQUEST_CONFLICT");
+      return { jobId: job.id, accepted: false, delivery: prior.state === "completed" ? "duplicate" : "unknown" };
+    }
+    if (Object.keys(job.directRequests ?? {}).length >= 10_000) throw new DirectOperationError("DIRECT_REQUEST_LIMIT");
+    await this.store.recordDirectRequest(job.id, key, digest, "pending", 2);
+    try {
+      await operation();
+      await this.store.recordDirectRequest(job.id, key, digest, "completed", 2);
+      return { jobId: job.id, accepted: true, delivery: "accepted" };
+    } catch (error) {
+      await this.store.recordDirectRequest(job.id, key, digest, "unknown", 2);
+      throw error;
+    }
   }
 
   async sendLocalThreadMessage(input: LocalConversationSendInput): Promise<ConversationSendResult> {
@@ -530,6 +800,14 @@ export class CodexBridgeController {
   }
 
   async cancel(jobId: string): Promise<JobRecord> {
+    this.notificationEpochs.set(jobId, (this.notificationEpochs.get(jobId) ?? 0) + 1);
+    return this.withJobLock(jobId, async () => {
+      await this.store.appendEvent(jobId, "operator.cancel", "Cancellation requested.", { source: "app" });
+      return this.cancelLocked(jobId);
+    });
+  }
+
+  private async cancelLocked(jobId: string): Promise<JobRecord> {
     const job = requireJob(this.store, jobId);
     if (isTerminal(job.status)) {
       return job;
@@ -549,6 +827,10 @@ export class CodexBridgeController {
   }
 
   async steer(jobId: string, message: string): Promise<JobRecord> {
+    return this.withJobLock(jobId, () => this.steerLocked(jobId, message));
+  }
+
+  private async steerLocked(jobId: string, message: string): Promise<JobRecord> {
     const job = requireJob(this.store, jobId);
     if (!job.threadId || !job.turnId || !["running", "awaiting_approval"].includes(job.status)) {
       throw new Error("Only a running Codex turn can be steered.");
@@ -563,11 +845,21 @@ export class CodexBridgeController {
       input: [{ type: "text", text }],
     });
     return this.store.appendEvent(jobId, "operator.steered", "Operator sent steering guidance.", {
+      source: "app",
       characterCount: text.length,
     });
   }
 
   async decideApproval(
+    jobId: string,
+    approvalId: string,
+    decision: "accept" | "decline" | "cancel",
+  ): Promise<JobRecord> {
+    this.notificationEpochs.set(jobId, (this.notificationEpochs.get(jobId) ?? 0) + 1);
+    return this.withJobLock(jobId, () => this.decideApprovalLocked(jobId, approvalId, decision));
+  }
+
+  private async decideApprovalLocked(
     jobId: string,
     approvalId: string,
     decision: "accept" | "decline" | "cancel",
@@ -718,7 +1010,7 @@ export class CodexBridgeController {
     }
   }
 
-  private async validateModelSelection(model?: string, effort?: string): Promise<void> {
+  async validateModelSelection(model?: string, effort?: string): Promise<void> {
     if (!model && !effort) {
       return;
     }
@@ -727,6 +1019,7 @@ export class CodexBridgeController {
       ? models.find((candidate) => candidate.id === model)
       : models.find((candidate) => candidate.isDefault) ?? models[0];
     if (!selected) {
+      if (model === "gpt-6-astra") throw new DirectOperationError("GPT6_MODEL_NOT_EXPOSED_BY_APP_SERVER");
       throw new Error(model ? `Codex model '${model}' is not available.` : "Codex did not return a default model.");
     }
     if (effort && !selected.supportedReasoningEfforts.some((option) => option.reasoningEffort === effort)) {
@@ -778,22 +1071,38 @@ export class CodexBridgeController {
 
   private async handleNotification(message: JsonRpcNotification): Promise<void> {
     const params = message.params ?? {};
-    const jobId = this.findJobId(params);
+    const telemetry = message.method === "thread/tokenUsage/updated" || message.method === "model/rerouted";
+    const jobId = this.findJobId(params) ?? (telemetry && typeof params.threadId === "string" ? this.store.findByThreadId(params.threadId)?.id : undefined);
     if (!jobId) {
+      if (/^(item|turn)\//.test(message.method)) this.unmatchedNotificationCount += 1;
       return;
     }
+    // Count at ingress, before locks: a queued delta invalidates an in-flight native read too.
+    this.notificationEpochs.set(jobId, (this.notificationEpochs.get(jobId) ?? 0) + 1);
+    this.lastNotificationAt.set(jobId, Date.now());
     await this.withJobLock(jobId, async () => {
       const job = this.store.get(jobId);
-      if (!job || isTerminal(job.status)) return;
+      if (!job) return;
+      const eventThreadId = stringValue(params.threadId) ?? nestedId(params, "thread");
+      const eventTurnId = stringValue(params.turnId) ?? nestedId(params, "turn");
+      if (eventThreadId && eventThreadId !== job.threadId) return;
+      if (telemetry) {
+        if (eventThreadId !== job.threadId || !eventTurnId || eventTurnId !== job.turnId) return;
+        await this.store.applyConversationNotification(jobId, message.method === "model/rerouted"
+          ? { ...message, params: { ...params, requestedModel: job.model ?? job.workPackage.model ?? null } } : message);
+        return;
+      }
+      if (isTerminal(job.status)) return;
+      if (job.controlAction) {
+        if (eventTurnId === job.controlAction.priorTurnId) return;
+        if (!job.turnId && message.method === "turn/started" && eventTurnId) {
+          this.jobsByTurn.set(eventTurnId, jobId);
+          await this.store.setTurn(jobId, eventTurnId);
+        } else if (eventTurnId && eventTurnId !== job.turnId) return;
+      }
       try {
-        await this.store.applyConversationNotification(jobId, message);
-        if (message.method === "turn/diff/updated") {
-          const diff = stringValue(params.diff) ?? stringValue(params.unifiedDiff);
-          if (diff !== undefined) {
-            await this.store.setDiff(jobId, diff);
-          }
-          return;
-        }
+        await this.store.applyConversationNotification(jobId, message, new Date().toISOString(), true);
+        if (isCoalescibleConversationNotification(message.method)) return;
         if (message.method === "turn/completed") {
           const status = completionStatus(params);
           const output = finalAgentOutput(params) ?? this.finalOutputByJob.get(jobId);
@@ -849,32 +1158,36 @@ export class CodexBridgeController {
       return;
     }
 
-    const approval: PendingApproval = {
-      id: randomUUID(),
-      kind,
-      state: "pending",
-      method: message.method,
-      createdAt: new Date().toISOString(),
-      summary: summarizeApproval(kind, params),
-    };
-    this.liveApprovals.set(approval.id, { jobId, requestId: message.id });
-    try {
-      await this.store.addApproval(jobId, approval);
-      await this.store.applyConversationNotification(jobId, {
-        method: "bridge/approval",
-        params: {
-          threadId: stringValue(params.threadId),
-          turnId: stringValue(params.turnId),
-          itemId: stringValue(params.itemId),
-          approvalId: approval.id,
-          state: approval.state,
-          kind: approval.kind,
-        },
-      });
-    } catch (error) {
-      this.liveApprovals.delete(approval.id);
-      this.appServer.respond(message.id, { decision: "decline" });
-    }
+    this.notificationEpochs.set(jobId, (this.notificationEpochs.get(jobId) ?? 0) + 1);
+    await this.withJobLock(jobId, async () => {
+      const approval: PendingApproval = {
+        id: randomUUID(),
+        kind,
+        state: "pending",
+        method: message.method,
+        createdAt: new Date().toISOString(),
+        summary: summarizeApproval(kind, params),
+      };
+      this.liveApprovals.set(approval.id, { jobId, requestId: message.id });
+      try {
+        await this.store.flushConversation(jobId);
+        await this.store.addApproval(jobId, approval);
+        await this.store.applyConversationNotification(jobId, {
+          method: "bridge/approval",
+          params: {
+            threadId: stringValue(params.threadId),
+            turnId: stringValue(params.turnId),
+            itemId: stringValue(params.itemId),
+            approvalId: approval.id,
+            state: approval.state,
+            kind: approval.kind,
+          },
+        });
+      } catch (error) {
+        this.liveApprovals.delete(approval.id);
+        this.appServer.respond(message.id, { decision: "decline" });
+      }
+    });
   }
 
   private async handleStderr(line: string): Promise<void> {
@@ -1127,6 +1440,9 @@ export function isSafeDiscoveredProjectPath(candidate: string, config: BridgeCon
     config.jobsDir,
     config.handoffDir,
     join(config.projectRoot, ".local"),
+    join(config.projectRoot, ".secrets"),
+    join(config.projectRoot, ".tunnel-client"),
+    join(config.projectRoot, "..", "project_reading", ".secrets"),
     join(userHome, ".codex"),
     join(userHome, ".ssh"),
     join(userHome, ".aws"),

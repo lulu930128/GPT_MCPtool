@@ -55,7 +55,7 @@ export function previewWorkPackage(input: WorkPackageInput): WorkPackagePreview 
     warnings.push("Confirm that sending this exact payload to the private home controller is permitted by company policy.");
   }
   if (workPackage.executionMode === "workspace_write") {
-    warnings.push("This mode may modify files in the selected exact project after Codex approval requests are accepted.");
+    warnings.push("This mode may modify files in the selected exact project. The selected reviewer handles approval only when Codex requests it.");
   }
 
   return {

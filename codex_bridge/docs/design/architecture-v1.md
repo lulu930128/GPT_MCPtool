@@ -14,8 +14,9 @@ ChatGPT tool result 只是投影，不是 system of record。
 3. Job UUID、目錄與 artifact 路徑全部由 server 建立。
 4. Codex App Server 只透過 child-process stdio 存取，不直接暴露網路 listener。
 5. Bridge 啟動 App Server 時建立兩個狹窄的 inline permission profiles。`codex-bridge-read-only`
-   繼承 `:read-only`，`codex-bridge-workspace` 繼承 `:workspace`；兩者只額外允許唯讀存取固定的
-   `.local/codex-inbox`，永遠不選擇 `:danger-full-access`，runtime workspace roots 只有目前再次驗證的 exact project。
+   繼承 `:read-only`，`codex-bridge-workspace` 繼承 `:workspace`；兩者允許唯讀存取固定的
+   `.tmp/codex-inbox`，並拒絕本機設定與秘密路徑。永遠不選擇 `:danger-full-access`；runtime roots
+   使用目前再次驗證的 exact project，profile 可加入本機 `sharedWorkspaceProjectIds` 指定的已驗證 roots。
 6. `turn/start`／`turn/steer` 的文字只由使用者明確輸入與標記為資料的 context、criteria、constraints、
    text artifact 區段組成。Bridge 不把 audit 模板或自訂行為提示注入模型；durable `request.md` 只供
    Bridge 稽核，job folder 不授權給 Codex。
@@ -24,7 +25,7 @@ ChatGPT tool result 只是投影，不是 system of record。
 9. 文字文件只能經 app-only begin／append／finalize contract 進入 server-owned staging。檔名只作 metadata，
    實際路徑永遠使用 Bridge UUID；每段與整體 SHA-256、character count、UTF-8 byte count 均需吻合。
 10. finalized bundle 綁定 project id 與 data classification；Job Store 把通過綁定的內容複製到 job
-    `inbox/` 與 `.local/codex-inbox/<job_id>/`。Controller 重新驗證 hash 後，把 server-generated
+    `inbox/` 與 `.tmp/codex-inbox/<job_id>/`。Controller 重新驗證 hash 後，把 server-generated
     唯讀路徑與 verified inline fallback 一起放入 turn。`C:\CodexBridge` 與 `codex-inbox` 都不加入
     Codex runtime roots。
 11. Widget 的大型成品讀取使用 app-only `codex_artifact_read_chunk`，內容只放 tool result `_meta`；

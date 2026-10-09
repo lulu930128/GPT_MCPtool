@@ -4,8 +4,93 @@ import {
   createConversationProjection,
   hydrateConversationProjection,
   mergeConversationMessages,
+  mergeConversationProjectionMetadata,
   reduceConversationNotification,
 } from "../src/conversation-projection.js";
+
+test("historical timestamp lineage is independent of hydration clock and repairs legacy checkpoints", () => {
+  const startedAt = "2026-10-08T01:00:00.000Z";
+  const completedAt = "2026-10-08T01:05:00.000Z";
+  const nativeAt = "2026-10-08T01:01:00.000Z";
+  const response = { thread: { id: "thread-time", createdAt: startedAt, updatedAt: completedAt, turns: [
+    { id: "turn-time", startedAt, completedAt, status: "completed", items: [
+      { id: "u", type: "userMessage", clientId: "client-time", content: [{ type: "text", text: "native" }] },
+      { id: "a", type: "agentMessage", text: "fallback" },
+      { id: "a-native", type: "agentMessage", timestamp: nativeAt, text: "precise" },
+      { id: "cmd", type: "commandExecution", command: "fixture" },
+    ] },
+    { id: "unknown", items: [{ id: "unknown-a", type: "agentMessage", text: "unknown", createdAt: "invalid", updatedAt: 1e30 }] },
+    { id: "started-only", startedAt, items: [{ id: "start-a", type: "agentMessage", text: "start only" }] },
+    { id: "completed-only", completedAt, items: [{ id: "unknown-user", type: "userMessage", content: [] }] },
+  ] } };
+  const first = hydrateConversationProjection(createConversationProjection(), response, "2026-10-09T02:00:00.000Z");
+  const second = hydrateConversationProjection(first, response, "2026-10-10T03:00:00.000Z");
+  assert.deepEqual(JSON.parse(JSON.stringify(second.turns)), JSON.parse(JSON.stringify(first.turns)));
+  assert.equal(second.updatedAt, completedAt);
+  assert.equal(second.createdAt, startedAt);
+  assert.deepEqual(first.turns[0]!.items.map((item) => item.createdAt), [startedAt, completedAt, nativeAt, startedAt]);
+  assert.equal(first.turns[0]!.durationMs, 300000);
+  assert.equal(first.turns[1]!.items[0]!.createdAt, undefined);
+  assert.equal(first.turns[1]!.items[0]!.updatedAt, undefined);
+  assert.equal(first.turns[2]!.items[0]!.createdAt, startedAt);
+  assert.equal(first.turns[3]!.items[0]!.createdAt, undefined, "A user message cannot borrow the later completion time.");
+  const legacy = structuredClone(first);
+  for (const turn of legacy.turns) for (const item of turn.items) {
+    delete item.timestampSource;
+    item.createdAt = item.updatedAt = "2026-10-09T02:00:00.000Z";
+  }
+  assert.deepEqual(JSON.parse(JSON.stringify(hydrateConversationProjection(legacy, response).turns)), JSON.parse(JSON.stringify(first.turns)));
+});
+
+test("exact durable user time supplements native content, not native item time or deleted text", () => {
+  const native = hydrateConversationProjection(createConversationProjection(), { thread: { id: "t", turns: [{ id: "turn", startedAt: 1700000000, items: [
+    { id: "u", type: "userMessage", clientId: "exact", content: [] },
+    { id: "u-native", type: "userMessage", clientId: "native", createdAt: 1700000001, content: [] },
+  ] }] } });
+  const at = "2023-11-14T22:13:25.000Z";
+  const merged = mergeConversationMessages(native, [
+    { id: "b", role: "user", clientMessageId: "exact", at, content: "deleted source text" },
+    { id: "n", role: "user", clientMessageId: "native", at, content: "stale" },
+    { id: "missing", role: "user", clientMessageId: "other", at, content: "must not append" },
+  ], true);
+  assert.equal(merged.turns[0]!.items[0]!.createdAt, at);
+  assert.equal(merged.turns[0]!.items[0]!.timestampSource, "bridge");
+  assert.equal(merged.turns[0]!.items[0]!.text, "");
+  assert.equal(merged.turns[0]!.items[1]!.createdAt, "2023-11-14T22:13:21.000Z");
+  assert.equal(merged.turns[0]!.items.length, 2);
+});
+
+test("streaming and registry hydration preserve proven createdAt while updatedAt advances", () => {
+  const createdAt = "2026-10-08T01:00:00.000Z";
+  const updatedAt = "2026-10-08T01:01:00.000Z";
+  let observed = reduceConversationNotification(createConversationProjection("thread"), {
+    method: "item/started", params: { turnId: "turn", item: { id: "a", type: "agentMessage", text: "" } },
+  }, createdAt);
+  observed = reduceConversationNotification(observed, {
+    method: "item/agentMessage/delta", params: { turnId: "turn", itemId: "a", delta: "hello" },
+  }, updatedAt);
+  assert.equal(observed.turns[0]!.items[0]!.createdAt, createdAt);
+  assert.equal(observed.turns[0]!.items[0]!.updatedAt, updatedAt);
+  const response = { thread: { id: "thread", turns: [{ id: "turn", completedAt: updatedAt, items: [{ id: "a", type: "agentMessage", text: "native final" }] }] } };
+  const hydrated = hydrateConversationProjection(observed, response);
+  const registry = mergeConversationProjectionMetadata(hydrateConversationProjection(createConversationProjection(), response), observed);
+  for (const projection of [hydrated, registry]) {
+    assert.equal(projection.turns[0]!.items[0]!.createdAt, createdAt);
+    assert.equal(projection.turns[0]!.items[0]!.updatedAt, updatedAt);
+    assert.equal(projection.turns[0]!.items[0]!.text, "native final");
+  }
+});
+
+test("legacy checkpoint clocks are not displayed as proven time when native history is unavailable", () => {
+  const legacy = createConversationProjection("thread");
+  legacy.turns = [{ turnId: "turn", status: "completed", items: [{ id: "old", turnId: "turn", type: "agentMessage", text: "kept", status: "completed", isStreaming: false,
+    createdAt: "2026-10-09T00:00:00.000Z", updatedAt: "2026-10-09T00:00:00.000Z" }] }];
+  assert.equal(mergeConversationMessages(legacy, []).turns[0]!.items[0]!.createdAt, undefined);
+  legacy.turns[0]!.completedAt = "2026-10-08T00:00:00.000Z";
+  const recovered = mergeConversationMessages(legacy, []);
+  assert.equal(recovered.turns[0]!.items[0]!.createdAt, "2026-10-08T00:00:00.000Z");
+  assert.equal(recovered.turns[0]!.items[0]!.timestampSource, "turn");
+});
 
 test("Bridge message metadata joins by exact client id without overwriting App Server text", () => {
   const native = hydrateConversationProjection(createConversationProjection("thread-1"), {
@@ -142,7 +227,7 @@ test("agent deltas reconcile to one authoritative completed message", () => {
       params: { threadId: "thread-1", turnId: "turn-1", itemId: "agent-1", delta },
     });
   }
-  assert.equal(projection.turns[0]?.items[0]?.text, "Hello");
+  assert.equal(projection.turns[0]?.items[0]?.text, "Hellolo", "Equal adjacent text is not a duplicate event id.");
   assert.equal(projection.turns[0]?.items[0]?.isStreaming, true);
 
   projection = reduceConversationNotification(projection, {

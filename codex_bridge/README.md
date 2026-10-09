@@ -17,8 +17,24 @@ Codex Handoff Bridge 是私人、allowlist-first 的 MCP Apps 對話工作區。
 - [Job Recovery](docs/JobRecovery.md)：持久化狀態、interrupted job、artifact、重啟與保留原則。
 - [Architecture v1](docs/design/architecture-v1.md)：第一版產品決策、state model 與 non-goals。
 - [Conversation Model](docs/ConversationModel.md)：App Server history、live item 投影、cursor、reconnect 與 prompt-neutral input 契約。
+- [Control Plane Contract](docs/ControlPlaneContract.md)：0.154.0 usage／diagnostics／inventory、通知投影與 compact／review／fork 安全邊界。
 
 ## 第一版能力
+
+- 使用者明確要求時，ChatGPT 可用 `codex_direct_job_dispatch`、`codex_direct_conversation_send`、
+  `codex_direct_job_steer`、`codex_direct_job_cancel` 直接操作設定 allowlist 內的工作。
+  新工作預設 plan、reviewer=auto_review，可明確選 user；資料僅限 personal/public。原有 Widget actions 保留。
+- Direct dispatch 必須提供穩定的 `idempotencyKey`；send/steer 必須提供 `clientMessageId`，
+  active send/steer 與 cancel 必須指定 `expectedTurnId`，cancel 另帶 `requestId`。
+  同 key 不同內容拒絕；不明 delivery 不重送。Receipt 持久保存，每 job 上限 10,000，達限拒絕新 direct 請求。
+- `codex_model_list(forceRefresh?)` 回傳模型、efforts、fetchedAt、cacheHit 與 controller identity。
+  CLI 精確釘版 `0.154.0`；Astra 可用性與 effort 以實際 App Server 回傳為準。
+  模型清單會讀取全部分頁；不完整或失敗不偽裝成空清單。
+- Direct content 可操作 user/auto_review job；續接或 steer 省略 reviewer 時沿用既有設定，
+  歷史工作缺少 reviewer 時沿用 user。只有使用者明確要求且在 turn 之間才能變更 reviewer。
+  含公司資料歷史或分類不可證明的 native import 仍由 Widget 操作。
+  Direct cancel 為 stop-only，可停止 allowlist 內的 user/auto_review 工作。
+  `user` reviewer 只處理 App Server 實際提出的 approval，不代表每次 workspace 寫入都需要點擊。
 
 - MCP Apps 內嵌對話工作區，使用標準 `ui/initialize`、`tools/call` 與 tool-result bridge。
 - Fullscreen 使用 Project Ledger 三區工作區：左側由 server-side unified registry 將 Codex App Server thread、
@@ -29,7 +45,8 @@ Codex Handoff Bridge 是私人、allowlist-first 的 MCP Apps 對話工作區。
   按需覆蓋層，不會持續擠壓 ChatGPT 畫面。Raw reasoning chain-of-thought 不會投影或保存。
 - History reader 先讀 metadata，再依 `historyMode` 選擇 legacy `thread/read(includeTurns=true)` 或 paginated
   `thread/turns/list(itemsView="full")`。Paginated snapshot 讀取前後必須有相同 fingerprint；若中途新增 turn 會完整
-  重試一次，仍不一致則保留上一份已驗證 projection。Active job 以 900 ms poll，待補頁以 25 ms catch-up；terminal
+  重試一次，仍不一致則保留上一份已驗證 projection。Active job 以 900 ms poll，待補頁以 25 ms catch-up；
+  落後超過 200 revisions、超出 hot buffer 或補頁超過 1.5 秒／4 頁時改取完整 Bridge snapshot。Terminal
   thread 每 20 秒、active automation target 每 4 秒只先核對 metadata fingerprint，只有來源變更才抓完整 history。
 - Native history 仍會完整讀取並作為權威來源；送往 Widget 的 projection 另有 2,000,000 字元總文字預算，
   每筆 command output 最多 2,000 字元。超限只縮限 UI 技術輸出、保留 item identity／status，並回報
@@ -39,6 +56,11 @@ Codex Handoff Bridge 是私人、allowlist-first 的 MCP Apps 對話工作區。
   以 bounded diagnostic 顯示，不讓單一 adapter 故障清空整個 Project Ledger。
 - Assistant／plan delta 會更新同一個 item；`item/completed` 是 authoritative final state，不會另外產生
   第二個回覆 bubble。中斷或失敗仍保留已收到的 partial output。
+- Streaming 通知在每 job 的記憶體 projection 合併，約每 150 ms 提交一次 journal/checkpoint；完成、核准與
+  lifecycle 事件立即 flush。對外 cursor 只代表 durable revision。Live polling 使用 count/byte bounded
+  recent revision cache，不再每次掃整份 conversation journal。
+- Active job 靜默 15 秒後，普通 poll 可嘗試唯讀 native 校正，每 job 至少間隔 30 秒；讀取期間若有新通知、
+  revision 或 turn identity 改變，就保留 live projection。恢復不呼叫 `thread/resume` 或 `turn/start`。
 - 同一個 job 可透過 `thread/resume` 與 `turn/start` 繼續既有 Codex thread；執行中的補充訊息使用
   `turn/steer`。
 - Initial turn、follow-up 與 steer 只由使用者明確輸入和純資料標記區段組成。Bridge 仍產生
@@ -46,7 +68,7 @@ Codex Handoff Bridge 是私人、allowlist-first 的 MCP Apps 對話工作區。
 - 模型與推理強度由 App Server `model/list` 動態提供，並與執行模式一起放在輸入框下方。
 - `plan` 唯讀與 `workspace_write` 兩種執行模式。
 - 權限 reviewer 可依對話選擇 `auto_review` 或 `user`；預設自動審核，但 `approvalPolicy`、sandbox、
-  network 與目前選定的 exact workspace 不會因此放寬。
+  network 與本機 allowlist 設定的 workspace 範圍不會因此放寬。
 - Widget 可透過 MCP Apps 標準 display-mode request 在 inline 與 fullscreen 間切換；inline 寬度跟隨
   host 對話容器，高度以寬度的 1.12 倍等比例計算並限制在 640 至 960 px，只有 host 確認 fullscreen 後才顯示
   Project Ledger 三區工作區。低於 1080 px 時工作紀錄改為抽屜，低於 760 px 時專案清單也改為覆蓋層。
@@ -54,10 +76,10 @@ Codex Handoff Bridge 是私人、allowlist-first 的 MCP Apps 對話工作區。
   避免 iframe 自動尺寸回授。
 - 輸入框可加入最多 8 份命名純文字文件；Widget 會分段傳送，Bridge 驗證每段與整體 SHA-256、
   UTF-8 大小、MIME、專案及資料分類後，才將內容交給 Codex。
-- Bridge 會把驗證後文字複製到 ignored 的 `.local/codex-inbox/<job_id>/`，用 server-generated path
+- Bridge 會把驗證後文字複製到 ignored 的 `.tmp/codex-inbox/<job_id>/`，用 server-generated path
   唯讀交給 Codex，並在 turn 保留相同內容的 verified inline fallback。
-- Codex 不會取得 staging 或 job 目錄權限；runtime workspace roots 只有目前明確選定且再次驗證的 exact project，
-  `codex-inbox` 也不會成為可寫 workspace root。
+- Codex 不會取得 staging 或 job 目錄權限；runtime workspace roots 使用目前選定的 exact project，
+  profile 另可加入本機設定的 shared workspace roots。`codex-inbox` 永遠維持唯讀。
 - request、final response 與 aggregated diff 會顯示在 fullscreen 工作紀錄區。Widget 按需分段讀取，內容放在
   app-only tool result `_meta`，不會因預覽而自動灌入 ChatGPT transcript。
 - 成品可複製；host 支援 MCP Apps `ui/download-file` 時可下載，否則自動改為複製。也可明確送出
@@ -129,6 +151,20 @@ Copy-Item config\projects.example.json .local\projects.json
 ```
 
 路徑必須是現存的絕對目錄。filesystem root、相對路徑、未知 id 與重複 id 會被拒絕。
+
+若同一個工作需要跨專案操作，可在這份本機設定加入 `sharedWorkspaceProjectIds`，例如
+`"sharedWorkspaceProjectIds": ["projects", "mcp_tools"]`。每個 id 必須已存在於 `projects`，
+並各自映射到操作者授權的根目錄。省略時不新增 shared roots；設定後所有 Bridge 工作的
+permission profile 都會加入這些 roots，`plan` 仍唯讀，`workspace_write` 才可寫。
+
+兩個 profile 都拒絕讀寫本元件的 `.local`、`.env`／`.env.*`、`.secrets`、`.tunnel-client`、
+實際 projects allowlist、`CODEX_BRIDGE_DATA_DIR` 與共用的 `project_reading/.secrets`。
+原始碼與 `package.json` 沿用 workspace 權限。Windows 僅對 Bridge child process 設定
+`windows.sandbox="elevated"`，以支援讀取拒絕規則；不修改使用者全域 Codex 設定。
+`.env.*` 採原生 glob 規則，匹配於 sandbox 啟動前展開；執行期間新增秘密檔後應重載再啟動工作。
+
+附件鏡像使用 `.tmp/codex-inbox`，避開 Windows 無法在拒絕存取的父目錄中重新開放子目錄的限制。
+舊 `.local/codex-inbox` 副本保留；續接附件時 JobStore 由已驗證的 inbox 內容重建新位置。
 
 可選的 `.local/tray-settings.json`：
 
@@ -277,16 +313,37 @@ Control Center Status 讀取限額 8192 bytes，驗證固定 contract／allowlis
 | `codex_job_steer` | app-only action | 對 running turn 補充方向 |
 | `codex_job_cancel` | app-only action | 中斷 running turn |
 | `codex_approval_decide` | app-only action | 決定單次 command 或 file change 核准 |
+| `codex_model_list` | model-visible read | 完整模型分頁、efforts 與 cache metadata |
+| `codex_direct_job_dispatch` | model-visible action | 使用者明確指令；固定 user reviewer、設定 allowlist 與防重送 |
+| `codex_direct_conversation_send` | model-visible action | 續接符合 direct 資格的 Bridge job；active 時核對 exact turn |
+| `codex_direct_job_steer` | model-visible action | 對 exact active turn 補充；共用 send 的資格與防重送檢查 |
+| `codex_direct_job_cancel` | model-visible action | 明確停止 exact turn；request receipt 防止重試取消後續回合 |
+| `codex_usage_status` | read-only | bounded rate limits、reset credits、account usage；不可用不偽裝成零 |
+| `codex_runtime_status` | read-only | 統一 server／permission／sandbox／provider／feature diagnostics；分項降級 |
+| `codex_inventory` | read-only | configured project skills／hooks 與 server-wide MCP 狀態；不提供 call／reload |
+| `codex_direct_thread_compact` | model-visible action | 明確 compact idle job/thread，exact identity 與持久 receipt |
+| `codex_direct_thread_review` | model-visible action | inline uncommitted changes review，plan 權限與既有 history owner |
+| `codex_direct_thread_fork` | blocked action | 0.154.0 無可復原的跨 owner fork transaction；不建立 native thread |
 
 `plan` 模式即使收到 file change request 也不能核准。公司資料分類另外要求控制台中的明確授權勾選。
 Bridge 對所有 turn 保持 `approvalPolicy=on-request`。`auto_review` 只替換 App Server reviewer，
 不是提高權限，也可能拒絕高風險操作；`user` 則把實際提出的 request 送回 Widget 逐次決定。
 Bridge 啟動 App Server 時會在既有 profile 上加入兩個狹窄的 inline permission profiles：
 `plan` 使用繼承 `:read-only` 的 `codex-bridge-read-only`，`workspace_write` 使用繼承 `:workspace`
-的 `codex-bridge-workspace`。兩者只額外允許讀取固定的 `.local/codex-inbox`；Bridge 會先用
+的 `codex-bridge-workspace`。兩者允許唯讀存取 `.tmp/codex-inbox`、拒絕本機設定與秘密路徑，
+並加入明確設定的 shared workspace roots；Bridge 會先用
 `permissionProfile/list` 驗證 profile 存在，且永遠不選擇 `:danger-full-access`。
 
 ## 驗證
+
+MCP Apps Workspace UX v2 使用 `ui://codex-bridge/chat-workspace-v15.html`。歷史 message time 有 native／Bridge／turn／live lineage，
+一般訊息只顯示 createdAt；未知時間不顯示。Fullscreen 提供 rail 搜尋、thread controls、turn summary 與按需讀取的 Codex 狀態 drawer；
+Review/Compact 沿用既有 exact-identity direct actions，accepted 後仍看 job lifecycle，沒有 fork UI。
+資料流與相容性見 [`docs/ConversationModel.md`](docs/ConversationModel.md)。
+
+離線視覺 fixture 可用 `node scripts/preview-workspace-fixture.mjs`，只綁定隨機 loopback port、使用合成 MCP host 回覆，
+不連接 live Bridge/App Server。`npm test` 同時執行 projection、journal 與 widget deterministic fixtures。
+Source/fixture checks 不代表 live adoption；本輪驗證與 browser 限制記錄於 [`WorkspaceUXv2.md`](docs/WorkspaceUXv2.md)。
 
 ```powershell
 npm test
@@ -309,7 +366,7 @@ npm run doctor:app-server -- "C:\GPT_MCPtool"
 npm run smoke:codex -- --confirm-live-codex
 ```
 
-`smoke:http` 會驗證 21 個工具、13 個 app-only actions／reads、MCP Apps MIME、resource 內容、HTTP bearer
+`smoke:http` 會驗證 32 個工具、13 個 app-only actions／reads、MCP Apps MIME、resource 內容、HTTP bearer
 拒絕、文字 staging 完整週期與 preview 不建立 job。它不會啟動實際 Codex turn。
 
 ## Runtime 資料
@@ -337,12 +394,12 @@ C:\CodexBridge\staging\<bundle_id>\
   content.txt
   chunks\
 
-C:\GPT_MCPtool\codex_bridge\.local\codex-inbox\<job_id>\
+C:\GPT_MCPtool\codex_bridge\.tmp\codex-inbox\<job_id>\
   manifest.json
   <server_generated_artifact_id>.<validated_text_extension>
 ```
 
-這些是本機 runtime state，不屬於 source archive；`.local/codex-inbox` 由 Bridge 自動建立，且受 repo
+這些是本機 runtime state，不屬於 source archive；`.tmp/codex-inbox` 由 Bridge 自動建立，且受 repo
 根目錄 `.gitignore` 保護。若 server 在 job 未完成時重啟，該 job 會標為 `interrupted`，不會自動再送
 一次可能有 side effect 的 turn。
 

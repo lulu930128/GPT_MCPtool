@@ -130,6 +130,7 @@ export interface ConversationItemProjection {
   isStreaming: boolean;
   createdAt?: string;
   updatedAt?: string;
+  timestampSource?: "native" | "bridge" | "turn" | "live";
   text?: string;
   context?: string;
   clientMessageId?: string;
@@ -158,6 +159,17 @@ export interface ConversationTurnProjection {
   startedAt?: string;
   completedAt?: string;
   durationMs?: number;
+  tokenUsage?: import("./control-plane.js").ThreadTokenUsage;
+  modelRouting?: ModelRoutingProjection;
+}
+
+export interface ModelRoutingProjection {
+  requestedModel: string | null;
+  executedModel: string;
+  fromModel: string;
+  toModel: string;
+  reason: import("./control-plane.js").ModelReroute["reason"];
+  source: "model/rerouted";
 }
 
 export interface ConversationThreadProjection {
@@ -166,9 +178,12 @@ export interface ConversationThreadProjection {
   status: "unknown" | "notLoaded" | "idle" | "active" | "systemError";
   turns: ConversationTurnProjection[];
   revision: number;
-  updatedAt: string;
+  createdAt?: string;
+  updatedAt?: string;
   hydratedAt?: string;
   freshness?: ConversationFreshness;
+  tokenUsage?: import("./control-plane.js").ThreadTokenUsage & { turnId: string };
+  modelRouting?: ModelRoutingProjection & { turnId: string };
 }
 
 export interface ConversationFreshness {
@@ -187,12 +202,17 @@ export interface ConversationFreshness {
 
 export interface ConversationProjectionPatch {
   revision: number;
+  // Journal observation time is separate from conversation activity time.
   at: string;
+  createdAt?: string | null;
+  updatedAt?: string | null;
   replaceAll?: boolean;
   threadId?: string;
   status?: ConversationThreadProjection["status"];
   hydratedAt?: string;
   freshness?: ConversationFreshness;
+  tokenUsage?: ConversationThreadProjection["tokenUsage"];
+  modelRouting?: ConversationThreadProjection["modelRouting"];
   turns: ConversationTurnProjection[];
 }
 
@@ -246,6 +266,9 @@ export interface JobResult {
 }
 
 export interface JobRecord {
+  controlAction?: { kind: "compact" | "review"; priorTurnId: string };
+  dispatchSource?: "app" | "model_direct";
+  directRequests?: Record<string, { digest: string; state: "pending" | "completed" | "unknown"; inputVersion?: 2 }>;
   schemaVersion: 1;
   id: string;
   idempotencyKey: string;
@@ -323,12 +346,29 @@ export interface LocalThreadFreshRead {
 }
 
 export interface JobSnapshot extends JobSummary {
+  directActionHistoryEligible?: boolean;
   messages: ConversationMessage[];
   conversation?: ConversationThreadProjection;
   conversationChanges: ConversationProjectionPatch[];
   nextConversationRevision: number;
   serverConversationRevision: number;
   conversationHasMore: boolean;
+  conversationDelivery?: {
+    mode: "snapshot" | "catch_up" | "delta";
+    reason?: string;
+    lag: number;
+    maxCatchUpMs: number;
+    maxCatchUpPages: number;
+    pending: boolean;
+    flushFailed: boolean;
+    inputNotifications: number;
+    durableCommits: number;
+    hotBufferEntries: number;
+    hotBufferBytes: number;
+    hotBufferOldestRevision?: number;
+    hotBufferNewestRevision?: number;
+  };
+  conversationRecovery?: { lastAttemptAt?: string; outcome?: string; unmatchedNotificationCount: number };
   conversationDiagnostics: ConversationPersistenceDiagnostic[];
   events: JobEvent[];
   nextEventSeq: number;

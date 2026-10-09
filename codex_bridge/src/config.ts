@@ -26,6 +26,7 @@ export interface BridgeConfig {
 
 interface ProjectsFileShape {
   projects?: Array<{ id?: unknown; name?: unknown; path?: unknown }>;
+  sharedWorkspaceProjectIds?: unknown;
 }
 
 const COMPONENT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -39,10 +40,12 @@ export async function loadBridgeConfig(env: NodeJS.ProcessEnv = process.env): Pr
     env.CODEX_BRIDGE_DATA_DIR?.trim() ||
       (process.platform === "win32" ? "C:\\CodexBridge" : join(homedir(), ".codex-bridge")),
   );
-  const handoffDir = join(projectRoot, ".local", "codex-inbox");
+  // Keep handoffs outside the denied settings subtree: Windows deny ACLs cannot
+  // safely reopen a readable child below a denied parent.
+  const handoffDir = join(projectRoot, ".tmp", "codex-inbox");
   const codexHome = resolve(env.CODEX_HOME?.trim() || join(homedir(), ".codex"));
-  const projects = await loadProjects(projectsFile);
-  const codexLaunch = await resolveCodexLaunch(projectRoot, handoffDir, env);
+  const { projects, sharedWorkspaceRoots } = await loadProjectPolicy(projectsFile);
+  const codexLaunch = await resolveCodexLaunch(projectRoot, handoffDir, projectsFile, dataDir, sharedWorkspaceRoots, env);
 
   return {
     projectRoot,
@@ -65,6 +68,13 @@ export async function loadBridgeConfig(env: NodeJS.ProcessEnv = process.env): Pr
 }
 
 export async function loadProjects(projectsFile: string): Promise<Map<string, BridgeProject>> {
+  return (await loadProjectPolicy(projectsFile)).projects;
+}
+
+async function loadProjectPolicy(projectsFile: string): Promise<{
+  projects: Map<string, BridgeProject>;
+  sharedWorkspaceRoots: string[];
+}> {
   let raw: string;
   try {
     raw = await readFile(projectsFile, "utf8");
@@ -85,12 +95,13 @@ export async function loadProjects(projectsFile: string): Promise<Map<string, Br
     throw new Error(`Invalid JSON in project allowlist ${projectsFile}: ${errorMessage(error)}`);
   }
 
-  if (!Array.isArray(parsed.projects) || parsed.projects.length === 0) {
+  if (!parsed || !Array.isArray(parsed.projects) || parsed.projects.length === 0) {
     throw new Error(`Project allowlist ${projectsFile} must contain at least one project.`);
   }
 
   const projects = new Map<string, BridgeProject>();
   for (const entry of parsed.projects) {
+    if (!entry || typeof entry !== "object") throw new Error(`Invalid project entry in ${projectsFile}.`);
     const id = typeof entry.id === "string" ? entry.id.trim() : "";
     const name = typeof entry.name === "string" ? entry.name.trim() : "";
     const configuredPath = typeof entry.path === "string" ? entry.path.trim() : "";
@@ -122,7 +133,12 @@ export async function loadProjects(projectsFile: string): Promise<Map<string, Br
     }
     projects.set(id, { id, name, path: resolvedPath });
   }
-  return projects;
+  const sharedIds = parsed.sharedWorkspaceProjectIds === undefined ? [] : parsed.sharedWorkspaceProjectIds;
+  if (!Array.isArray(sharedIds) || sharedIds.some((id) => typeof id !== "string" || !projects.has(id))) {
+    throw new Error("sharedWorkspaceProjectIds must contain only configured project ids.");
+  }
+  const sharedWorkspaceRoots = [...new Set(sharedIds.map((id: string) => projects.get(id)!.path))];
+  return { projects, sharedWorkspaceRoots };
 }
 
 export function requireProject(config: BridgeConfig, projectId: string): BridgeProject {
@@ -185,11 +201,16 @@ function parseCommandArgs(raw: string | undefined): string[] | undefined {
 async function resolveCodexLaunch(
   projectRoot: string,
   handoffDir: string,
+  projectsFile: string,
+  dataDir: string,
+  sharedWorkspaceRoots: string[],
   env: NodeJS.ProcessEnv,
 ): Promise<{ command: string; args: string[] }> {
   const configuredCommand = env.CODEX_BRIDGE_CODEX_COMMAND?.trim();
   const configuredArgs = parseCommandArgs(env.CODEX_BRIDGE_CODEX_ARGS);
-  const args = withHandoffPermissionProfiles(configuredArgs ?? ["app-server"], handoffDir);
+  const args = withHandoffPermissionProfiles(configuredArgs ?? ["app-server"], {
+    projectRoot, handoffDir, projectsFile, dataDir, sharedWorkspaceRoots,
+  });
   if (configuredCommand) {
     return { command: configuredCommand, args };
   }
@@ -206,20 +227,46 @@ async function resolveCodexLaunch(
   return { command: "codex", args };
 }
 
-function withHandoffPermissionProfiles(args: string[], handoffDir: string): string[] {
+function withHandoffPermissionProfiles(args: string[], policy: {
+  projectRoot: string;
+  handoffDir: string;
+  projectsFile: string;
+  dataDir: string;
+  sharedWorkspaceRoots: string[];
+}): string[] {
   if (!args.includes("app-server")) {
     throw new Error("CODEX_BRIDGE_CODEX_ARGS must launch the Codex app-server subcommand.");
   }
-  const pathKey = JSON.stringify(handoffDir);
+  const { projectRoot, handoffDir, projectsFile, dataDir, sharedWorkspaceRoots } = policy;
+  const deniedPaths = [
+    join(projectRoot, ".local"),
+    join(projectRoot, ".env"),
+    join(projectRoot, ".env.*"),
+    join(projectRoot, ".secrets"),
+    join(projectRoot, ".tunnel-client"),
+    projectsFile,
+    dataDir,
+    // The Bridge's tunnel uses the shared Project Reading credential store.
+    join(dirname(projectRoot), "project_reading", ".secrets"),
+  ];
+  const filesystem = [
+    ...[...new Set(deniedPaths)].map((path) => `${JSON.stringify(path)} = "deny"`),
+    `${JSON.stringify(handoffDir)} = "read"`,
+  ].join(", ");
+  const workspaceRoots = sharedWorkspaceRoots.map((path) => `${JSON.stringify(path)} = true`).join(", ");
   const readOnlyProfile = [
     'description = "Read-only Codex Bridge project and text handoff access."',
     'extends = ":read-only"',
-    `filesystem = { ${pathKey} = "read" }`,
+    `workspace_roots = { ${workspaceRoots} }`,
+    `filesystem = { ${filesystem} }`,
+    'network = { enabled = false }',
   ].join(", ");
   const workspaceProfile = [
-    'description = "Project write access with read-only Codex Bridge text handoff access."',
+    'description = "Approved workspace writes with protected Bridge settings and read-only text handoff."',
     'extends = ":workspace"',
-    `filesystem = { ${pathKey} = "read" }`,
+    `workspace_roots = { ${workspaceRoots} }`,
+    `filesystem = { ${filesystem} }`,
+    'network = { enabled = false }',
   ].join(", ");
   return [
     ...args,
@@ -229,6 +276,9 @@ function withHandoffPermissionProfiles(args: string[], handoffDir: string): stri
     `permissions.codex-bridge-read-only={ ${readOnlyProfile} }`,
     "-c",
     `permissions.codex-bridge-workspace={ ${workspaceProfile} }`,
+    // Native Windows deny-read carveouts require this backend. This is scoped
+    // to the Bridge child process; it does not change the user's global config.
+    ...(process.platform === "win32" ? ["-c", 'windows.sandbox="elevated"'] : []),
   ];
 }
 

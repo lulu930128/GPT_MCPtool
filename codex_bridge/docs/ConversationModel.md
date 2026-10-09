@@ -10,9 +10,43 @@ raw reasoning、任意本機路徑或未授權資料暴露給 client。
 
 1. Codex App Server thread／turn／item 是 conversation history 的 authoritative source。
 2. `conversation.json` 是 Bridge 的 durable、bounded、redacted UI projection；它不是新的 agent runtime。
-3. `conversation-events.jsonl` 是 monotonic revision patch log，讓 Widget 不必每 900 ms 重抓整段 history。
+3. `conversation-events.jsonl` 是 durable monotonic revision patch log，供 startup recovery／稽核；
+   live polling 使用 process-memory recent revision cache，超出 cache 則回完整 Bridge snapshot。
 4. `messages.jsonl` 保留使用者輸入 metadata、附件摘要與舊版相容，不再獨自代表完整 transcript。
 5. `events.jsonl` 是 Bridge 操作／稽核事件；它與 user-visible conversation projection 分開。
+
+## Workspace UX v2 時間與 UI 投影
+
+- Thread `createdAt` / `updatedAt` 是 native 建立／最後活動時間，無 native 值時僅以已知 turn/item 時間補足；未知可省略。
+  `hydratedAt`、freshness check 與 journal `at` 是讀取／觀察時間，不是訊息時間。新 patch 明確帶 `createdAt` / `updatedAt`（未知為 null），舊 patch 仍可 replay。
+- Item `timestampSource` 僅區分 `native`、`bridge`、`turn`、`live`，用於避免把舊 checkpoint 的 hydration 時刻當成可靠歷史時間。
+  Native `createdAt` / `timestamp` 優先；user 可依 exact `clientMessageId` 使用 durable message.at；否則使用 turn.startedAt。
+  Assistant 無 native time 時使用 completedAt，再用 startedAt。沒有可靠時間就省略，不讀 hydration clock。
+- Live item 的 createdAt 固定，delta/status 僅更新 updatedAt。一般 message UI 只顯示 createdAt，以 zh-TW local time 顯示；跨日帶日期。
+  Legacy 無 lineage 的 item clock 在 snapshot 輸出時降為可靠 turn time 或 unknown；native hydration 再校正 checkpoint。
+- Native hydration 的內容仍 authoritative，Bridge 僅以 exact identity 補 context/artifact/time/approval metadata；來源已刪除的文字不復活。
+  Unified registry 沿用 projection 的 metadata merge，snapshot 與 delta 皆補 durable metadata。訊息清單與未同步 fallback 維持原有 200 筆上限。
+- 單檔 App `chat-workspace-v15.html` 的 rail 搜尋是 client-side；選取、project grouping、protected history 與 bounded scroll 保留。
+  Header 區分 requested/executed model，delta 同步 tokenUsage/modelRouting。Token chip 僅比較最近一次用量與已知模型視窗，不宣稱 current context pressure。
+- Fullscreen Workstream 依 turn 顯示技術活動、成功、真實失敗、已恢復與非零待處理數，另保留 duration / 可用 tokens；
+  成功只計 completed 且無 error、非 streaming 的 technical items，command 還須 exitCode=0；未知結果不補成成功。
+  已恢復是失敗的子集，不修改 item.status/error，也不改 App Server / JobStore 真相。
+- 前端 `turnFailurePresentation` 共用於主對話、Workstream 與 inline。Recovery 只認同 turn 內後續已確認成功：
+  MCP 必須同 server/tool；command 必須 exact command 與相同 cwd；fileChange 必須非空 failed path set 全被單一 later success 覆蓋。
+  缺失、redacted / truncated identity、跨 turn、error/diagnostic 無可靠 identity，以及 declined/expired/interrupted/cancelled 不推定 recovered。
+- Completed turn/job 的一般技術失敗歸 historical，留在預設折疊的技術活動；recovered 卡用中性 secondary badge，原始「失敗」status 仍保留。
+  Current turn 使用 job.turnId，找不到時取最後 turn。Active current turn 的最新 failure 若後面沒有確認成功或進行中的其他工作，維持 unresolved；
+  其他工作有進展只能使它成 historical，不能稱 recovered。無 operation identity 的 active error 保守維持 unresolved。
+  Failed/interrupted/declined/cancelled job 的 current turn 保留最新未恢復 failure 與 error，包含 turn 已 completed 的狀態組合。
+  Pending/declined/expired approval 不參與 transient recovery，核准沿用主對話 owner；unresolved 技術活動在 Workstream 預設展開。
+- Inline 選最後一個有 narrative 的 turn，保留全部 user/agent entries，再加 approval/active work；recovered/historical failure 不插入 narrative。
+  Unresolved failure 最多一張有操作 label 的 compact warning，額外項目以待處理數提示放大查看。缺少公開原因時用中性說明，不讀取 raw error.data。
+- Operator drawer 僅在 fullscreen 明確開啟時讀 usage/runtime/inventory，single-flight、30 秒 cache、手動刷新至少間隔 5 秒；render/job polling 不觸發這三個 tools。
+  分項 available/unavailable/error 保留；只 render safe selected fields，未知不轉成零。Native dialog 提供 focus containment、Escape 與返回 opener。
+- Review/Compact 由 click 觸發，以 exact job/thread/turn 及新 requestId 呼叫既有 direct action。
+  JobStore 的 `directActionHistoryEligible` 只投影既有 history classification 規則，UI 再檢查 terminal/idle/pending approval；Controller 仍是 action precondition owner。
+  同一 identity 的 receipt 留在 App session，ambiguous delivery 不換 ID 自動重試。Accepted 後回既有 polling/history，不推定完成。
+- Sticky 各 column controls；主聊天維持垂直閱讀。只有 artifact/額度小卡可橫向 proximity snap。新 keyed message 160ms/6px reveal 一次，已看過不重播；reduced-motion 停用 animation、smooth scroll 與 snap。
 
 ## Shared App Server ownership
 
@@ -29,6 +63,12 @@ approval 期間的 component restart 仍由 approval-sensitive lifecycle guard �
 
 - Revision 先 append 到 `conversation-events.jsonl` 並完成 file sync，才允許更新 process memory；checkpoint
   promotion 失敗時該 revision 仍可重播，且後續 revision 會先修復 pending checkpoint。
+- Streaming pending projection 是尚未提交的獨立記憶體狀態，約 150 ms 合併一次 durable revision；
+  `item/completed`、`turn/completed`、approval、error、cancel 與其他非 streaming 事件立即 flush。
+  此 timer 是排程目標，不是磁碟阻塞下的延遲保證。Widget 只接收已 fsync 的 revisions，不會把 pending
+  cursor 當成 durable。突然斷電可能失去尚未 flush 的暫態輸出，後續以 native history 校正；不重送 turn。
+- Conversation 寫入依 job 分鎖；pending diff 只保存有上限的最新值，flush 時沿用既有 artifact 寫入。
+  相同連續 delta 字串仍視為兩次通知，不能以文字相等判定重複。`item/completed` 負責最終內容取代。
 - `conversation.json` 只由已完整寫入並驗證的同目錄 temp promotion；Windows `EPERM`／`EEXIST` fallback
   先保留一份已驗證 `conversation.json.bak`，再用 bounded swap 取代 primary，不會 copy 覆寫 active file。
 - 啟動時先驗證 primary／backup schema 與 revision，再讀取 journal。Checkpoint 落後時只重播連續缺少
@@ -41,6 +81,36 @@ approval 期間的 component restart 仍由 approval-sensitive lifecycle guard �
 
 Journal compaction／rotation 必須等 verified checkpoint 已涵蓋被移除 revisions，並在 crash 中保留至少一份
 可恢復狀態。目前尚未實作，列為 P2 storage/performance debt。
+
+## 補頁與 active recovery
+
+政策集中在 `src/conversation-delivery.ts`：每 job 最多 256 patches／4 MB，全 process hot cache
+最多 32 MB；單次 delta response 最多 40 revisions／512 KB。Count/byte 是序列化 payload 預算，
+不是 JavaScript heap 的精確上限。落後超過 200 revisions、cursor 不連續、cache miss 或單一 patch
+超過 delta 預算時，回傳完整既有 projection，而非掃 journal 或逐頁重播。
+
+`codex_job_get` 保留原參數，新增 optional `recovery: "snapshot" | "native"`：
+
+- `snapshot`：直接讀已提交 Bridge projection，不讀 native history。
+- `native`：有 cooldown 與 single-flight 的 active thread 唯讀校正，之後回完整 Bridge snapshot；
+  失敗或競態時仍回最後已提交 projection，`conversationRecovery.outcome` 區分 applied／deferred。
+- 普通 active poll 在最後通知後 15 秒可啟動校正，每 job 至少間隔 30 秒。
+
+Native 讀取不持有 notification lock。套用前核對 ingress epoch、durable revision、threadId 與 turnId；
+讀取期間有新通知（包括仍排隊的通知）、cancel 或 approval 時，不套用舊 native snapshot。Native history
+缺少 active turn 也不能清空 projection。若 native 明確顯示原 turn 已完成，則修復漏掉的 terminal state，
+仍不新增 user message、resume 或 turn/start。持續輸出造成 snapshot 一直變動時會延後 native 校正，
+client backlog 則仍可立即用 Bridge snapshot 恢復。
+
+Widget 超過 server 回傳的 1.5 秒／4 頁補頁預算、MCP call 失敗或 visibility restore 時改取 snapshot。
+單一 poll flight、selection generation、monotonic cursor 與 patch continuity guard 防止舊回應覆蓋
+新對話。`conversationDelivery` 回報 lag、pending、flushFailed、inputNotifications、durableCommits
+與 hot cache bounds；`conversationRecovery` 只含時間、固定 outcome 及 unmatched notification count，
+不輸出 transcript 或原始 notification payload。
+
+本次維持既有 MCP Apps `tools/call` 與 tool-result bridge：
+[官方 MCP server 文件](https://developers.openai.com/plugins/build/mcp-server)、
+[官方 Widget 文件](https://developers.openai.com/plugins/build/chatgpt-ui)。
 
 ## Prompt-neutral input
 
@@ -77,10 +147,12 @@ flowchart LR
     C2 --> C
     C --> D[conversation.json]
     E[App Server notifications] --> F[per-job serialized reducer]
-    F --> D
-    F --> G[conversation-events.jsonl]
+    F --> W[150 ms 合併或 critical flush]
+    W --> G[conversation-events.jsonl fsync]
+    G --> D
+    G --> R[bounded recent revision cache]
     D --> H[codex_job_get snapshot]
-    G --> H
+    R --> H
     H --> I[Widget keyed timeline]
 ```
 
@@ -172,3 +244,11 @@ App Server schema 並跑 controller tests，不把 ChatKit Threads API 視為同
 本版採 MCP tool polling，目標是 reliable reconnect 與 durable progress，而不是複製 Codex Desktop 的私有
 render cadence。未來可在相同 revision contract 上加入 authenticated SSE；SSE 只改 delivery transport，
 不改 Job Store、allowlist、sandbox、approval 或 prompt-neutral input 邊界。
+
+## Control-plane telemetry
+
+See [Control Plane Contract](ControlPlaneContract.md) for the 0.154.0 notification contract.
+`conversation.tokenUsage` and per-turn `tokenUsage` retain total/last/modelContextWindow without estimating missing values.
+`modelRouting` distinguishes the requested model from the native reroute destination, retains its reason and exact turn id,
+and survives journal replay, hydration and unified native-history reads. Existing `job.model` remains a requested/configured model.
+Inline review entered/exitedReviewMode content is preserved in the existing conversation projection.

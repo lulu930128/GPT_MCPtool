@@ -7,6 +7,230 @@ import test from "node:test";
 import { ConversationPersistenceError, JobStore } from "../src/job-store.js";
 import { previewWorkPackage } from "../src/work-package.js";
 
+test("timestamp lineage survives delta delivery, metadata refresh and journal-only replay", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-bridge-time-lineage-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { store, jobId } = await createConversationFixture(root, "time-lineage");
+  const initial = await store.snapshot(jobId);
+  const durable = initial.messages.find((message) => message.role === "user")!;
+  const response = { thread: { id: "thread-1", turns: [{ id: "turn-1", status: "completed", startedAt: "2026-10-08T01:00:00.000Z", completedAt: "2026-10-08T01:05:00.000Z", items: [
+    { id: "user", type: "userMessage", clientId: durable.clientMessageId, content: [{ type: "text", text: "native only" }] },
+    { id: "agent", type: "agentMessage", text: "native answer" },
+  ] }] } };
+  await store.hydrateConversation(jobId, response, "2026-10-09T01:00:00.000Z");
+  const first = await store.snapshot(jobId);
+  const delta = await store.snapshot(jobId, 0, 80, initial.serverConversationRevision);
+  const user = delta.conversationChanges.flatMap((patch) => patch.turns.flatMap((turn) => turn.items)).find((item) => item.id === "user")!;
+  assert.equal(user.createdAt, durable.at);
+  assert.equal(user.timestampSource, "bridge");
+  assert.equal(user.text, "native only");
+  await store.markConversationFreshness(jobId, { historyMode: "legacy", synchronized: true, sourceAvailability: "available", lastMetadataCheckedAt: "2026-10-10T01:00:00.000Z" });
+  assert.equal((await store.snapshot(jobId)).conversation?.updatedAt, first.conversation?.updatedAt);
+  await store.hydrateConversation(jobId, response, "2026-10-11T01:00:00.000Z");
+  await unlink(join(root, jobId, "conversation.json"));
+  await unlink(join(root, jobId, "conversation.json.bak"));
+  const restarted = new JobStore(root);
+  await restarted.initialize();
+  const replayed = await restarted.snapshot(jobId);
+  assert.equal(replayed.conversation?.updatedAt, first.conversation?.updatedAt);
+  assert.equal(replayed.conversation?.turns[0]?.items[1]?.createdAt, "2026-10-08T01:05:00.000Z");
+  assert.equal(replayed.conversation?.turns[0]?.items[0]?.createdAt, durable.at);
+  assert.equal(replayed.directActionHistoryEligible, true);
+});
+
+test("ten thousand streaming deltas coalesce, preserve repeated text and flush before completion", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-bridge-coalesce-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { store, jobId } = await createConversationFixture(root, "coalesced-stream");
+  for (let index = 0; index < 10_000; index++) {
+    await store.applyConversationNotification(jobId, {
+      method: "item/agentMessage/delta",
+      params: { threadId: "thread-1", turnId: "turn-1", itemId: "agent-1", delta: "x" },
+    }, undefined, true);
+  }
+  await store.applyConversationNotification(jobId, {
+    method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } },
+  }, undefined, true);
+  const snapshot = await store.snapshot(jobId);
+  assert.equal(snapshot.conversation?.turns[0]?.items[0]?.text, "x".repeat(10_000));
+  assert.equal(snapshot.conversation?.turns[0]?.items[0]?.isStreaming, false);
+  assert.ok(snapshot.serverConversationRevision < 100, "Durable writes must not track individual tokens.");
+  assert.equal(snapshot.conversationDelivery?.pending, false);
+  const journal = (await readFile(join(root, jobId, "conversation-events.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(journal.map((patch) => patch.revision), Array.from({ length: journal.length }, (_, i) => i + 1));
+  const restarted = new JobStore(root);
+  await restarted.initialize();
+  assert.equal((await restarted.snapshot(jobId)).conversation?.turns[0]?.items[0]?.text, "x".repeat(10_000));
+});
+
+test("telemetry survives delta delivery, native hydration and journal-only restart recovery", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-bridge-telemetry-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { store, jobId } = await createConversationFixture(root, "telemetry-journal");
+  const initial = await store.snapshot(jobId);
+  const usage = { total: { totalTokens: 23, inputTokens: 12, cachedInputTokens: 4, cacheWriteInputTokens: 1, outputTokens: 11, reasoningOutputTokens: 2 }, last: { totalTokens: 4, inputTokens: 2, cachedInputTokens: 1, cacheWriteInputTokens: 0, outputTokens: 2, reasoningOutputTokens: 0 }, modelContextWindow: null };
+  await store.applyConversationNotification(jobId, { method: "thread/tokenUsage/updated", params: { threadId: "thread-1", turnId: "turn-1", tokenUsage: usage } });
+  await store.applyConversationNotification(jobId, { method: "model/rerouted", params: { threadId: "thread-1", turnId: "turn-1", fromModel: "requested", toModel: "executed", requestedModel: "requested", reason: "highRiskCyberActivity" } });
+  const delta = await store.snapshot(jobId, 0, 80, initial.serverConversationRevision);
+  assert.ok(delta.conversationChanges.some((patch) => patch.tokenUsage?.total.totalTokens === 23));
+  assert.ok(delta.conversationChanges.some((patch) => patch.turns[0]?.modelRouting?.executedModel === "executed"));
+  await store.hydrateConversation(jobId, { thread: { id: "thread-1", turns: [{ id: "turn-1", status: "completed", items: [] }] } });
+  const snapshot = await store.snapshot(jobId);
+  assert.deepEqual(snapshot.conversation?.turns[0]?.tokenUsage, usage);
+  assert.equal(snapshot.conversation?.modelRouting?.requestedModel, "requested");
+  assert.equal(snapshot.conversation?.turns[0]?.modelRouting?.executedModel, "executed");
+  await unlink(join(root, jobId, "conversation.json"));
+  await unlink(join(root, jobId, "conversation.json.bak"));
+  const restarted = new JobStore(root);
+  await restarted.initialize();
+  const recovered = await restarted.snapshot(jobId);
+  assert.deepEqual(recovered.conversation?.tokenUsage, snapshot.conversation?.tokenUsage);
+  assert.deepEqual(recovered.conversation?.turns[0]?.modelRouting, snapshot.conversation?.turns[0]?.modelRouting);
+  const beforeInvalid = recovered.serverConversationRevision;
+  await restarted.applyConversationNotification(jobId, { method: "thread/tokenUsage/updated", params: { threadId: "thread-1", turnId: "turn-1", tokenUsage: { ...usage, total: { ...usage.total, totalTokens: -1 } } } });
+  assert.equal((await restarted.snapshot(jobId)).serverConversationRevision, beforeInvalid);
+});
+
+test("live cursor delivery does not read the disk journal and evicted cursors get a snapshot", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-bridge-hot-read-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { store, jobId } = await createConversationFixture(root, "hot-read");
+  await store.applyConversationNotification(jobId, { method: "item/agentMessage/delta", params: {
+    threadId: "thread-1", turnId: "turn-1", itemId: "agent-1", delta: "committed",
+  } });
+  const journal = join(root, jobId, "conversation-events.jsonl");
+  await rename(journal, `${journal}.offline`);
+  const delta = await store.snapshot(jobId, 0, 20, 0);
+  assert.equal(delta.conversationChanges.length, 1);
+  assert.equal(delta.conversationChanges[0]?.turns[0]?.items[0]?.text, "committed");
+  const reset = await store.snapshot(jobId, 0, 20, 0, true);
+  assert.equal(reset.conversationDelivery?.mode, "snapshot");
+  assert.equal(reset.conversationHasMore, false);
+  assert.equal(reset.nextConversationRevision, 1);
+  await rename(`${journal}.offline`, journal);
+  const restarted = new JobStore(root);
+  await restarted.initialize();
+  const cold = await restarted.snapshot(jobId, 0, 20, 0);
+  assert.ok(cold.conversation);
+  assert.equal(cold.conversationChanges.length, 0);
+  assert.equal(cold.nextConversationRevision, cold.serverConversationRevision);
+});
+
+test("the coalescing timer publishes partial output without requiring another notification", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-bridge-timer-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { store, jobId } = await createConversationFixture(root, "timer-flush");
+  await store.applyConversationNotification(jobId, { method: "item/agentMessage/delta", params: {
+    threadId: "thread-1", turnId: "turn-1", itemId: "agent", delta: "partial",
+  } }, undefined, true);
+  assert.equal((await store.snapshot(jobId)).conversationDelivery?.pending, true);
+  const deadline = Date.now() + 2000;
+  while (store.conversationRevision(jobId) === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(store.conversationRevision(jobId) > 0, "The timer must commit without an explicit flush.");
+  await store.flushConversation(jobId); // Join any checkpoint promotion before removing the fixture.
+  const snapshot = await store.snapshot(jobId);
+  assert.equal(snapshot.conversation?.turns[0]?.items[0]?.text, "partial");
+  assert.equal(snapshot.conversationDelivery?.pending, false);
+});
+
+test("a restarted five-thousand-revision journal converges in one full snapshot", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-bridge-backlog-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { store, jobId } = await createConversationFixture(root, "backlog-5000");
+  await store.applyConversationNotification(jobId, { method: "item/agentMessage/delta", params: {
+    threadId: "thread-1", turnId: "turn-1", itemId: "agent", delta: "seed",
+  } });
+  const path = join(root, jobId, "conversation-events.jsonl");
+  const seed = JSON.parse((await readFile(path, "utf8")).trim());
+  await writeFile(path, Array.from({ length: 5000 }, (_, index) => {
+    const patch = structuredClone(seed);
+    patch.revision = index + 1;
+    patch.turns[0].items[0].text = `revision ${index + 1}`;
+    return JSON.stringify(patch);
+  }).join("\n") + "\n", "utf8");
+  const restarted = new JobStore(root);
+  await restarted.initialize();
+  const page = await restarted.snapshot(jobId, 0, 20, 1);
+  assert.equal(page.nextConversationRevision, 5000);
+  assert.equal(page.serverConversationRevision, 5000);
+  assert.equal(page.conversation?.turns[0]?.items[0]?.text, "revision 5000");
+  assert.equal(page.conversationChanges.length, 0);
+  assert.equal(page.conversationHasMore, false);
+});
+
+test("a coalesced journal commit survives a failed checkpoint promotion", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-bridge-coalesced-failure-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  let fail = false;
+  const store = new JobStore(root, join(root, "inbox"), async (source, destination) => {
+    if (fail && destination.endsWith("conversation.json")) throw Object.assign(new Error("fixture write failure"), { code: "EIO" });
+    await rename(source, destination);
+  });
+  await store.initialize();
+  const { jobId } = await createConversationFixture(root, "coalesced-failure", store);
+  await store.applyConversationNotification(jobId, { method: "item/agentMessage/delta", params: {
+    threadId: "thread-1", turnId: "turn-1", itemId: "agent", delta: "durable partial",
+  } }, undefined, true);
+  fail = true;
+  await assert.rejects(store.flushConversation(jobId), ConversationPersistenceError);
+  const committed = await store.snapshot(jobId);
+  assert.equal(committed.conversation?.turns[0]?.items[0]?.text, "durable partial");
+  assert.ok(committed.conversationDiagnostics.some((diagnostic) => diagnostic.code === "conversation_checkpoint_write_failed"));
+  const restarted = new JobStore(root);
+  await restarted.initialize();
+  assert.equal((await restarted.snapshot(jobId)).conversation?.turns[0]?.items[0]?.text, "durable partial");
+});
+
+test("a blocked checkpoint in one job does not block another job conversation", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-bridge-isolation-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  let blockedJob = "";
+  let release!: () => void;
+  let entered!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const waiting = new Promise<void>((resolve) => { entered = resolve; });
+  const store = new JobStore(root, join(root, "inbox"), async (source, destination) => {
+    if (blockedJob && destination === join(root, blockedJob, "conversation.json")) { entered(); await gate; }
+    await rename(source, destination);
+  });
+  await store.initialize();
+  const first = await createConversationFixture(root, "blocked-job", store);
+  const second = await createConversationFixture(root, "healthy-job", store);
+  blockedJob = first.jobId;
+  const notification = { method: "item/agentMessage/delta", params: { threadId: "thread-1", turnId: "turn-1", itemId: "a", delta: "hello" } };
+  const blocked = store.applyConversationNotification(first.jobId, notification);
+  await waiting;
+  try {
+    const healthy = await Promise.race([
+      store.applyConversationNotification(second.jobId, notification),
+      new Promise<never>((_, reject) => { const timer = setTimeout(() => reject(new Error("Cross-job blockage")), 2000); timer.unref(); }),
+    ]);
+    assert.equal(healthy.turns[0]?.items[0]?.text, "hello");
+  } finally { release(); await blocked; }
+});
+
+test("coalesced command, diff and approval retain final state with bounded technical projection", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-bridge-technical-stream-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { store, jobId } = await createConversationFixture(root, "technical-stream");
+  for (let i = 0; i < 20; i++) {
+    await store.applyConversationNotification(jobId, { method: "item/commandExecution/outputDelta", params: {
+      threadId: "thread-1", turnId: "turn-1", itemId: "command", delta: "output".repeat(1000),
+    } }, undefined, true);
+    await store.applyConversationNotification(jobId, { method: "turn/diff/updated", params: {
+      threadId: "thread-1", turnId: "turn-1", diff: `revision ${i}\n${"diff".repeat(100_000)}`,
+    } }, undefined, true);
+  }
+  await store.applyConversationNotification(jobId, { method: "bridge/approval", params: {
+    threadId: "thread-1", turnId: "turn-1", itemId: "command", approvalId: "approval", state: "pending", kind: "command",
+  } }, undefined, true);
+  const snapshot = await store.snapshot(jobId);
+  assert.equal(snapshot.conversationDelivery?.pending, false);
+  assert.ok(snapshot.conversation?.turns[0]?.items.find((item) => item.id === "command")?.outputTruncated);
+  assert.match(await store.readArtifact(jobId, "diff"), /^revision 19/);
+  assert.ok(snapshot.serverConversationRevision < 10);
+});
+
 test("job store is idempotent and persists bounded job artifacts", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "codex-bridge-store-"));
   context.after(() => rm(root, { recursive: true, force: true }));

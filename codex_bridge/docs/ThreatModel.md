@@ -28,7 +28,7 @@ ChatGPT host
   -> project capability gate + job/staging stores + ignored codex-inbox
   -> local controller
   -> Codex App Server over stdio
-  -> one server-resolved exact project workspace + exact read-only codex-inbox path
+  -> selected project + optional operator-configured shared roots + read-only codex-inbox
 ```
 
 - ChatGPT and the widget are outside the local filesystem trust boundary.
@@ -53,7 +53,7 @@ override an employer or workspace policy.
 | Threat | Control | Residual risk |
 | --- | --- | --- |
 | Arbitrary local path access | Ignored project allowlist, validated project ids, realpath directory checks, filesystem-root rejection, and a fixed server-generated handoff root | An overly broad approved project still exposes that workspace to Codex |
-| Model dispatches or approves its own work | Dispatch, steer, cancel, and approval are app-only actions requiring explicit UI action | Host integration must keep app-only actions out of autonomous model reach |
+| Model exceeds user intent or approves its own work | Direct actions require explicit user intent, configured projects and personal/public history; user reviewer uses app-only decisions, auto_review delegates to Codex's separate native reviewer with unchanged sandbox | Host/model interprets natural language; server cannot prove user intent from tool arguments. Native auto-review is not a deterministic security guarantee; app-only visibility requires host enforcement |
 | Session-wide approval | Exact `jobId` + `approvalId`; no session-wide accept | A user can still approve a risky exact request without reading it |
 | Replay or duplicate dispatch | Preview digest and idempotency key | A compromised widget session may replay still-valid exact input |
 | Text corruption during upload | Per-chunk and whole-bundle SHA-256, length, MIME, filename, project, and classification checks | SHA-256 proves transport integrity, not that content is safe |
@@ -73,7 +73,7 @@ override an employer or workspace policy.
 - Each chunk is bounded and indexed; finalization checks declared size, complete chunk set, and
   full SHA-256.
 - Staging, job, and handoff paths are server-generated. Callers cannot choose a local destination.
-- Codex receives a server-generated `.local/codex-inbox/<job_id>/...` path plus the same validated text
+- Codex receives a server-generated `.tmp/codex-inbox/<job_id>/...` path plus the same validated text
   as an inline fallback. The selected profile makes the handoff root read-only; staging and job directories
   remain inaccessible and the handoff root is not a runtime workspace root.
 
@@ -88,6 +88,16 @@ govern whether text is treated as context or a request.
   read access, and keeps approval policy `on-request` with network access disabled by default.
 - The Bridge never selects `danger-full-access`.
 
+The optional `sharedWorkspaceProjectIds` setting adds only validated allowlist paths as profile-defined
+workspace roots. It applies to every Bridge job; it does not make plan mode writable. Both profiles deny
+the component's `.local`, `.env`/`.env.*`, `.secrets`, `.tunnel-client`, the actual projects file,
+the job data directory, and the shared `project_reading/.secrets` tunnel credential store. These protected
+directories cannot be selected through native workspace discovery. Source files remain editable.
+Native Windows requires the elevated sandbox backend, selected only for the Bridge child process.
+Deny globs are expanded before sandbox startup; newly created secret files require a reload before new work.
+Profiles constrain sandboxed local execution; separately approved escalations and external MCP tools have
+their own controls. Editable Bridge source is trusted operator code, not an immutable security boundary.
+
 `workspace_write` does not guarantee a prompt before every individual file edit. Use `plan` first
 when strict diff-before-apply review is required.
 
@@ -98,7 +108,7 @@ content, and does not retain model reasoning/token streams. It stores user messa
 responses, bounded technical events, and artifacts needed for the job record.
 
 Do not place credentials in a bundle or rely on redaction. Do not share `.local/projects.json`,
-`.local/codex-inbox`, job folders, staging content, tunnel profiles, tokens, logs, or full environment variables.
+`.tmp/codex-inbox`, job folders, staging content, tunnel profiles, tokens, logs, or full environment variables.
 
 ## Deployment checklist
 
@@ -106,10 +116,10 @@ Do not place credentials in a bundle or rely on redaction. Do not share `.local/
 2. Keep App Server local over stdio.
 3. Keep Bridge and tunnel listeners loopback-bound where applicable.
 4. Use a dedicated tunnel id; do not reuse another component's id.
-5. Keep dispatch and approval tools app-only.
+5. Keep interactive dispatch and manual approval tools app-only; direct tools cannot decide approvals.
 6. Use `plan` for first inspection of unfamiliar work.
 7. Review exact command/file-change approval text before accepting.
-8. Treat job, staging, and `.local/codex-inbox` folders as private data and back them up only when necessary.
+8. Treat job, staging, and `.tmp/codex-inbox` folders as private data and back them up only when necessary.
 
 ## Out of scope
 
