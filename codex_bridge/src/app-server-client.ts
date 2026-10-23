@@ -21,6 +21,7 @@ export interface AppServerTransport {
   notify(method: string, params?: Record<string, unknown>): void;
   respond(id: string | number, result: Record<string, unknown>): void;
   on(event: "notification", listener: (message: JsonRpcNotification) => void): this;
+  off(event: "notification", listener: (message: JsonRpcNotification) => void): this;
   on(event: "serverRequest", listener: (message: JsonRpcServerRequest) => void): this;
   on(event: "stderr", listener: (line: string) => void): this;
   on(event: "exit", listener: (error: Error) => void): this;
@@ -37,6 +38,8 @@ interface AppServerClientOptions {
   command: string;
   args: string[];
   requestTimeoutMs?: number;
+  environment?: NodeJS.ProcessEnv;
+  beforeSpawn?: () => Promise<void>;
 }
 
 export class CodexAppServerClient extends EventEmitter implements AppServerTransport {
@@ -58,6 +61,7 @@ export class CodexAppServerClient extends EventEmitter implements AppServerTrans
   }
 
   async ensureStarted(): Promise<void> {
+    if (this.closing) throw new Error("APP_SERVER_CLOSING");
     if (this.currentStatus === "ready" && this.child && !this.child.killed) {
       return;
     }
@@ -75,17 +79,23 @@ export class CodexAppServerClient extends EventEmitter implements AppServerTrans
   /** Component-scoped shutdown for the one App Server shared by every Bridge thread and turn. */
   async close(): Promise<void> {
     const child = this.child;
-    this.child = undefined;
     this.closing = true;
-    this.currentStatus = "idle";
-    if (!child || child.killed) {
+    if (!child) {
       this.closing = false;
       return;
     }
-    const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
-    child.kill();
-    await Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, 2_000))]);
-    this.closing = false;
+    // EOF closes the owned stdio transport. Windows child.kill() is forced
+    // termination, not a graceful close; an uncertain child must remain owned.
+    await new Promise<void>((resolve, reject) => {
+      const done = () => { clearTimeout(timer); this.child = undefined; this.currentStatus = "idle"; this.closing = false; resolve(); };
+      const timer = setTimeout(() => {
+        child.off("exit", done);
+        reject(new Error("APP_SERVER_CLOSE_UNKNOWN"));
+      }, 5000);
+      if (child.exitCode !== null || child.signalCode !== null) { done(); return; }
+      child.once("exit", done);
+      child.stdin.end();
+    });
   }
 
   async request<T = Record<string, unknown>>(
@@ -128,10 +138,11 @@ export class CodexAppServerClient extends EventEmitter implements AppServerTrans
     this.currentStatus = "starting";
     let child: ChildProcessWithoutNullStreams;
     try {
+      await this.options.beforeSpawn?.();
       child = spawn(this.options.command, this.options.args, {
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
-        env: process.env,
+        env: this.options.environment ?? process.env,
       });
     } catch (error) {
       this.currentStatus = "unavailable";

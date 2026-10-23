@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { redactString } from "./redaction.js";
+import { redactString, sanitizeForStorage } from "./redaction.js";
 import { modelRerouteSchema, threadTokenUsageSchema } from "./control-plane.js";
 import type {
   ConversationFreshness,
+  CommandFailureDiagnostics,
   ConversationItemProjection,
   ConversationMessage,
   ConversationThreadProjection,
@@ -19,6 +20,44 @@ const TRUNCATION_MARKER = "\n[truncated]";
 export interface ConversationNotification {
   method: string;
   params?: Record<string, unknown>;
+}
+
+// Inspect only the saved projection supplied by JobStore, never command/output text.
+// Absence of entries is not proof of successful execution or complete history.
+export function projectCommandFailures(
+  jobId: string,
+  threadId: string | undefined,
+  conversation: ConversationThreadProjection,
+): CommandFailureDiagnostics {
+  const result: CommandFailureDiagnostics = {
+    evidenceStatus: "UNVERIFIED", cause: "UNKNOWN", permissionAttribution: "UNVERIFIED",
+    scope: "bounded_saved_conversation", scannedItems: 0, truncated: false, failures: [],
+  };
+  const safeId = (id: string) => /^[A-Za-z0-9_-]{1,128}$/.test(id) && sanitizeForStorage(id) === id;
+  if (!safeId(jobId) || !threadId || conversation.threadId !== threadId) return result;
+  result.truncated = conversation.turns.length > 200;
+  outer: for (const turn of conversation.turns.slice(-200).reverse()) {
+    for (let index = turn.items.length - 1; index >= 0; index--) {
+      if (result.scannedItems === 2000 || result.failures.length === 50) {
+        result.truncated = true;
+        break outer;
+      }
+      result.scannedItems++;
+      const item = turn.items[index]!;
+      if (item.type !== "commandExecution" || item.commandCompletionObserved !== true ||
+          item.commandCompletionThreadId !== threadId ||
+          item.status !== "completed" || item.isStreaming || item.turnId !== turn.turnId ||
+          !safeId(turn.turnId) || !safeId(item.id) ||
+          !Number.isSafeInteger(item.exitCode) || item.exitCode === 0) continue;
+      result.failures.push({
+        jobId, turnId: turn.turnId, itemId: item.id, exitCode: item.exitCode!,
+        observedStatus: "completed", evidenceStatus: "OBSERVED_NONZERO",
+        cause: "UNKNOWN", permissionAttribution: "UNVERIFIED",
+      });
+    }
+  }
+  if (result.failures.length) result.evidenceStatus = "OBSERVED_NONZERO";
+  return result;
 }
 
 export function createConversationProjection(threadId?: string, at?: string): ConversationThreadProjection {
@@ -42,7 +81,7 @@ export function hydrateConversationProjection(
   const thread = isObject(response.thread) ? response.thread : response;
   const threadId = stringValue(thread.id) ?? current.threadId;
   const hydratedTurns = Array.isArray(thread.turns)
-    ? thread.turns.flatMap((turn) => isObject(turn) ? [normalizeTurn(turn)] : [])
+    ? thread.turns.flatMap((turn) => isObject(turn) ? [normalizeTurn(turn, undefined, stringValue(thread.id))] : [])
     : [];
   const currentTurns = new Map(current.turns.map((turn) => [turn.turnId, turn]));
   const merged = hydratedTurns.map((turn) => mergeHydratedTurn(currentTurns.get(turn.turnId), turn));
@@ -144,7 +183,10 @@ export function reduceConversationNotification(
     const rawItem = isObject(params.item) ? params.item : params;
     const phase = notification.method === "item/completed" ? "completed" : "started";
     const item = normalizeItem(rawItem, turnId, phase, at);
-    if (item) upsertItem(turn, item, phase === "completed");
+    if (item) {
+      if (item.type === "commandExecution") item.commandCompletionThreadId = stringValue(params.threadId);
+      upsertItem(turn, item, phase === "completed");
+    }
     return changed(next, at);
   }
 
@@ -298,7 +340,7 @@ export function mergeConversationProjectionMetadata(
   };
 }
 
-function normalizeTurn(raw: Record<string, unknown>, liveAt?: string): ConversationTurnProjection {
+function normalizeTurn(raw: Record<string, unknown>, liveAt?: string, sourceThreadId?: string): ConversationTurnProjection {
   const turnId = stringValue(raw.id) ?? stringValue(raw.turnId) ?? `unknown:${createHash("sha256").update(JSON.stringify(raw)).digest("hex").slice(0, 16)}`;
   const startedAt = timestamp(raw.startedAt);
   const completedAt = timestamp(raw.completedAt);
@@ -311,6 +353,7 @@ function normalizeTurn(raw: Record<string, unknown>, liveAt?: string): Conversat
           const fallback = item.type === "agentMessage" ? completedAt ?? startedAt
             : item.type === "userMessage" ? startedAt : startedAt ?? completedAt;
           const normalized = normalizeItem(item, turnId, "hydrated", liveAt, fallback);
+          if (normalized?.type === "commandExecution") normalized.commandCompletionThreadId = sourceThreadId;
           return normalized ? [normalized] : [];
         })
       : [],
@@ -356,6 +399,10 @@ function normalizeItem(
     base.text = bounded(stringArray(raw.summary).join("\n\n"), MAX_ACTIVITY_TEXT_CHARS);
     if (!base.text) return undefined;
   } else if (rawType === "commandExecution") {
+    // Do not treat the generic hydrated/completed status fallback as evidence.
+    // Old checkpoints without this marker remain unverified until rehydrated.
+    base.commandCompletionObserved = phase !== "started" && raw.status === "completed" &&
+      (raw.turnId === undefined || raw.turnId === turnId);
     base.command = bounded(stringValue(raw.command) ?? "", MAX_ACTIVITY_TEXT_CHARS);
     base.cwd = bounded(stringValue(raw.cwd) ?? "", 2_000);
     base.output = bounded(stringValue(raw.aggregatedOutput) ?? "", MAX_COMMAND_OUTPUT_CHARS);

@@ -17,9 +17,7 @@ Import-Module $modulePath -Force
 if ([string]::IsNullOrWhiteSpace($ManifestPath)) { $ManifestPath = Get-McpCcDefaultManifestPath }
 if ([string]::IsNullOrWhiteSpace($RuntimeRoot)) { $RuntimeRoot = Get-McpCcDefaultRuntimeRoot }
 $manifest = Read-McpCcManifest -Path $ManifestPath
-if (Test-McpCcPathWithinRoot -Path $RuntimeRoot -Root $manifest.workspaceRoot) {
-    throw "RuntimeRoot must be outside the source workspace."
-}
+Assert-McpCcRuntimeRoot -Manifest $manifest -RuntimeRoot $RuntimeRoot
 $definition = Get-McpCcComponent -Manifest $manifest -Id $Component
 $uiProperty = $definition.PSObject.Properties["ui"]
 $declaredActionIds = if ($null -ne $uiProperty -and $null -ne $uiProperty.Value) {

@@ -140,6 +140,8 @@ export interface ConversationItemProjection {
   output?: string;
   outputTruncated?: boolean;
   exitCode?: number;
+  commandCompletionObserved?: boolean;
+  commandCompletionThreadId?: string;
   durationMs?: number;
   changes?: ConversationFileChangeProjection[];
   server?: string;
@@ -345,7 +347,27 @@ export interface LocalThreadFreshRead {
   snapshot?: LocalThreadSnapshot;
 }
 
+export interface CommandFailureDiagnostics {
+  evidenceStatus: "UNVERIFIED" | "OBSERVED_NONZERO";
+  cause: "UNKNOWN";
+  permissionAttribution: "UNVERIFIED";
+  scope: "bounded_saved_conversation";
+  scannedItems: number;
+  truncated: boolean;
+  failures: Array<{
+    jobId: string;
+    turnId: string;
+    itemId: string;
+    exitCode: number;
+    observedStatus: "completed";
+    evidenceStatus: "OBSERVED_NONZERO";
+    cause: "UNKNOWN";
+    permissionAttribution: "UNVERIFIED";
+  }>;
+}
+
 export interface JobSnapshot extends JobSummary {
+  commandFailureDiagnostics?: CommandFailureDiagnostics;
   directActionHistoryEligible?: boolean;
   messages: ConversationMessage[];
   conversation?: ConversationThreadProjection;

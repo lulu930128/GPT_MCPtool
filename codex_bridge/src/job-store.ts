@@ -32,6 +32,7 @@ import {
   createConversationProjection,
   hydrateConversationProjection,
   mergeConversationMessages,
+  projectCommandFailures,
   reduceConversationNotification,
   type ConversationNotification,
 } from "./conversation-projection.js";
@@ -123,6 +124,30 @@ export class JobStore {
   private readonly conversationCommitCounts = new Map<string, number>();
   private readonly conversationFlushFailures = new Set<string>();
   private lock: Promise<void> = Promise.resolve();
+  private selfReloadLease: { requestId: string; expiresAt: string } | undefined;
+
+  get selfReloadDrain() { return this.selfReloadLease ? { ...this.selfReloadLease } : null; }
+
+  async beginSelfReload(requestId: string, expiresAt: string): Promise<void> {
+    // Same admission lock as create/append/prepare: health cannot report a lease
+    // until every earlier admission has become visible in the complete job map.
+    await this.exclusive(async () => {
+      if (this.selfReloadLease && this.selfReloadLease.requestId !== requestId) throw new Error("SELF_RELOAD_BUSY");
+      this.selfReloadLease = { requestId, expiresAt };
+    });
+  }
+
+  async endSelfReload(requestId: string, canRelease: () => boolean = () => true): Promise<void> {
+    await this.exclusive(async () => {
+      // Evaluate inside the admission queue: a delayed refusal must not release
+      // a drain whose cooperative shutdown observation already timed out.
+      if (this.selfReloadLease?.requestId === requestId && canRelease()) this.selfReloadLease = undefined;
+    });
+  }
+
+  private assertAdmissionOpen(): void {
+    if (this.selfReloadLease) throw new Error("SELF_RELOAD_DRAINING");
+  }
 
   constructor(
     private readonly jobsDir: string,
@@ -186,6 +211,7 @@ export class JobStore {
 
   async create(input: CreateJobInput): Promise<{ record: JobRecord; created: boolean }> {
     return this.exclusive(async () => {
+      this.assertAdmissionOpen();
       const existingId = this.idempotencyIndex.get(input.idempotencyKey);
       if (existingId) {
         const existing = this.requireJob(existingId);
@@ -255,6 +281,7 @@ export class JobStore {
 
   async importLocalThread(input: ImportLocalThreadInput): Promise<{ record: JobRecord; created: boolean }> {
     return this.exclusive(async () => {
+      this.assertAdmissionOpen();
       const existing = Array.from(this.jobs.values()).find((record) => record.threadId === input.threadId);
       if (existing) return { record: structuredClone(existing), created: false };
 
@@ -384,9 +411,12 @@ export class JobStore {
       conversation = mergeConversationMessages(storedConversation, messages);
       nextConversationRevision = storedConversation.revision;
     }
+    const directActionHistoryEligible = !record.idempotencyKey.startsWith("local-thread:") && !(await this.hasCompanyHistory(jobId, allMessages));
     return {
       ...toSummary(record),
-      directActionHistoryEligible: !record.idempotencyKey.startsWith("local-thread:") && !(await this.hasCompanyHistory(jobId, allMessages)),
+      directActionHistoryEligible,
+      commandFailureDiagnostics: directActionHistoryEligible
+        ? projectCommandFailures(record.id, record.threadId, storedConversation) : undefined,
       messages,
       conversation: conversation ? mergeConversationMessages(conversation, allMessages, true) : undefined,
       conversationChanges: conversationChanges.map((patch) => ({
@@ -426,6 +456,7 @@ export class JobStore {
     input: AppendUserMessageInput,
   ): Promise<{ record: JobRecord; created: boolean }> {
     return this.exclusive(async () => {
+      this.assertAdmissionOpen();
       const record = this.requireJob(jobId);
       const persistenceFailure = this.conversationFailures.get(jobId);
       if (persistenceFailure) throw persistenceFailure;
@@ -476,6 +507,7 @@ export class JobStore {
 
   async prepareTurn(jobId: string, input: PrepareTurnInput): Promise<JobRecord> {
     return this.mutate(jobId, (record) => {
+      this.assertAdmissionOpen();
       record.controlAction = input.controlAction;
       record.status = "preparing";
       record.turnId = undefined;

@@ -1,8 +1,11 @@
+param([switch]$CanonicalBuildId)
+
 Set-StrictMode -Version 3.0
 $ErrorActionPreference='Stop'
 $projectRoot=(Resolve-Path -LiteralPath(Join-Path $PSScriptRoot '..')).Path
-$tempBase=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
-$testRoot=Join-Path $tempBase("codex-bridge-runtime-test-"+[Guid]::NewGuid().ToString('N'))
+$tempBase=Join-Path $projectRoot '.tmp'
+$fixtureRoot=Join-Path $tempBase("codex-bridge-runtime-test-"+[Guid]::NewGuid().ToString('N'))
+$testRoot=Join-Path $fixtureRoot 'codex_bridge'
 $utf8=New-Object Text.UTF8Encoding($false);$script:Passed=0;$previousKey=$env:CONTROL_PLANE_API_KEY;$previousTunnelId=$env:CODEX_BRIDGE_TUNNEL_ID;$foreign=$null;$staleForeign=$null
 
 function Assert-True([bool]$Condition,[string]$Message){if(-not$Condition){throw "Assertion failed: $Message"};$script:Passed+=1}
@@ -14,22 +17,34 @@ function Stop-TestProcess([Diagnostics.Process]$Process){if($null-eq$Process){re
 function Invoke-TestController{
   param([Parameter(Mandatory=$true)][string]$Action,[bool]$ExpectSuccess=$true,[string[]]$ExtraArguments=@())
   $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $testRoot 'scripts\runtime-control.ps1'),'-Action',$Action,'-ProjectRoot',$testRoot,'-Port',[string]$serverPort,'-ProjectsFile',(Join-Path $testRoot '.local\projects.json'),'-DataDir',(Join-Path $testRoot 'runtime-data'),'-NodePath',$nodePath,'-TunnelClientPath',$fakeTunnelPath,'-TunnelProfileDir',(Join-Path $testRoot '.tunnel-client'),'-TunnelProfile','test-profile','-TunnelHealthUrl',"http://127.0.0.1:$tunnelPort",'-KeyStorePath',(Join-Path $testRoot 'scripts\key-store.ps1'),'-SecretPath',(Join-Path $testRoot '.secrets\test.dpapi'),'-ExpectedBuildId','test-build','-TestActiveFlag',$activeFlag,'-ServerReadyTimeoutSeconds','5','-TunnelRecoveryDelaysSeconds','2')
+  if($CanonicalBuildId){$index=[Array]::IndexOf($arguments,'-ExpectedBuildId');$arguments=@($arguments[0..($index-1)])+@($arguments[($index+2)..($arguments.Length-1)])}
+  $arguments+=@('-CodexCommand',$nodePath)
   $arguments+=$ExtraArguments
-  $output=@(& powershell.exe @arguments 2>&1);$exitCode=$LASTEXITCODE;$document=($output-join[Environment]::NewLine)|ConvertFrom-Json
+  $output=@(& 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' @arguments 2>&1);$exitCode=$LASTEXITCODE;$document=($output-join[Environment]::NewLine)|ConvertFrom-Json
   if($ExpectSuccess-and$exitCode-ne 0){throw "Controller $Action failed unexpectedly with $($document.errorCode): $($document.message)"};if(-not$ExpectSuccess-and$exitCode-eq 0){throw "Controller $Action unexpectedly succeeded."};return [pscustomobject]@{exitCode=$exitCode;document=$document}
 }
 
 try{
-  New-Item -ItemType Directory -Force -Path(Join-Path $testRoot 'scripts'),(Join-Path $testRoot 'dist\src'),(Join-Path $testRoot 'vendor\tunnel-client'),(Join-Path $testRoot '.tunnel-client'),(Join-Path $testRoot '.local'),(Join-Path $testRoot 'web')|Out-Null
-  foreach($name in @('runtime-control.ps1','component-runtime.psm1','codex-bridge-runtime.psm1','remote-connectivity.ps1')){Copy-Item -LiteralPath(Join-Path $projectRoot "scripts\$name")-Destination(Join-Path $testRoot "scripts\$name")}
-  Copy-Item -LiteralPath 'C:\GPT_MCPtool\project_reading\scripts\key-store.ps1' -Destination(Join-Path $testRoot 'scripts\key-store.ps1')
+  New-Item -ItemType Directory -Force -Path(Join-Path $testRoot 'scripts'),(Join-Path $testRoot 'dist\src'),(Join-Path $testRoot 'src'),(Join-Path $testRoot 'vendor\tunnel-client'),(Join-Path $testRoot '.tunnel-client'),(Join-Path $testRoot '.local'),(Join-Path $testRoot 'web')|Out-Null
+  foreach($name in @('OwnedProcess.Native.cs','cooperative-shutdown-host.ps1','process-identity.ps1','runtime-control.ps1','component-runtime.psm1','codex-bridge-runtime.psm1','remote-connectivity.ps1','runtime-build-id.mjs')){Copy-Item -LiteralPath(Join-Path $projectRoot "scripts\$name")-Destination(Join-Path $testRoot "scripts\$name")}
+  $nativeFixture=Join-Path $fixtureRoot 'mcp_control_center\src'
+  New-Item -ItemType Directory -Force -Path $nativeFixture|Out-Null
+  foreach($name in @('NormalOperator.Native.cs','RemoteSelfReload.Native.cs')){
+    Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $projectRoot) "mcp_control_center\src\$name") -Destination (Join-Path $nativeFixture $name)
+  }
+  Copy-Item -LiteralPath(Join-Path $projectRoot 'dist\src\config.js') -Destination(Join-Path $testRoot 'dist\src\config.js')
+  Copy-Item -LiteralPath(Join-Path $projectRoot 'dist\src\installed-runtime.js') -Destination(Join-Path $testRoot 'dist\src\installed-runtime.js')
+  Copy-Item -Path (Join-Path $projectRoot 'dist\src\*') -Destination (Join-Path $testRoot 'dist\src') -Recurse -Force
+  Copy-Item -LiteralPath (Join-Path $projectRoot 'web\codex-console.html'),(Join-Path $projectRoot 'web\self-reload.html') -Destination (Join-Path $testRoot 'web')
+  [IO.File]::WriteAllText((Join-Path $testRoot 'scripts\key-store.ps1'),'function Set-ControlPlaneApiKeyEnvFromSecret { param($ProjectRoot,$SecretPath) $env:CONTROL_PLANE_API_KEY="isolated-test-placeholder" }',$utf8)
   [IO.File]::WriteAllText((Join-Path $testRoot 'package.json'),'{}',$utf8);[IO.File]::WriteAllText((Join-Path $testRoot '.local\projects.json'),'{"projects":[{"id":"test","name":"Test","path":"C:\\\\GPT_MCPtool"}]}',$utf8);[IO.File]::WriteAllText((Join-Path $testRoot '.local\tray-settings.json'),'{"tunnelId":"tunnel_fixture_123"}',$utf8);[IO.File]::WriteAllText((Join-Path $testRoot 'web\widget.html'),'test',$utf8)
   $serverSource=@'
-const fs=require("fs");
-const http=require("http");
+import fs from "node:fs";
+import http from "node:http";
+import { computeRuntimeBuildId } from "./config.js";
 const port=Number(process.env.CODEX_BRIDGE_HTTP_PORT);
 const activeFlag=process.env.CODEX_BRIDGE_TEST_ACTIVE_FLAG;
-const buildId=process.env.CODEX_BRIDGE_EXPECTED_TEST_BUILD;
+const buildId=process.env.CODEX_BRIDGE_EXPECTED_TEST_BUILD || await computeRuntimeBuildId(process.cwd());
 http.createServer((request,response)=>{
   if(request.url==="/health"){
     const mode=activeFlag&&fs.existsSync(activeFlag)?fs.readFileSync(activeFlag,"utf8").trim():"idle";
@@ -42,6 +57,8 @@ http.createServer((request,response)=>{
 }).listen(port,"127.0.0.1");
 '@
   [IO.File]::WriteAllText((Join-Path $testRoot 'dist\src\http-main.js'),$serverSource,$utf8)
+  [IO.File]::WriteAllText((Join-Path $testRoot 'package.json'),'{"type":"module"}',$utf8)
+  (Get-Item -LiteralPath(Join-Path $testRoot 'dist\src\http-main.js')).LastWriteTimeUtc=[DateTime]::UtcNow
   $fakeTunnelPath=Join-Path $testRoot 'vendor\tunnel-client\fake-tunnel.exe'
   $tunnelSource=@'
 using System;using System.Diagnostics;using System.IO;using System.Net;using System.Net.Sockets;using System.Text;
@@ -52,6 +69,8 @@ public static class FakeTunnel{public static int Main(string[] args){if(args.Len
   $serverPort=Get-FreeTcpPort;do{$tunnelPort=Get-FreeTcpPort}while($tunnelPort-eq$serverPort);[IO.File]::WriteAllText((Join-Path $testRoot '.tunnel-client\test-port.txt'),[string]$tunnelPort,$utf8)
   $activeFlag=Join-Path $testRoot 'active-work.flag';$nodePath=(Get-Command node -ErrorAction Stop).Source;$env:CONTROL_PLANE_API_KEY='isolated-test-placeholder';$env:CODEX_BRIDGE_TUNNEL_ID='tunnel_fixture_123'
 
+  $firstStatus=Invoke-TestController -Action Status
+  Assert-True (-not(Test-Path (Join-Path $testRoot '.tmp\runtime-control.jsonl'))) 'first readonly status creates no audit'
   $self=Invoke-TestController -Action SelfTest;Assert-Equal $self.document.runtimeContract 'unified-lifecycle-v3' 'SelfTest contract is v3';Assert-True(@($self.document.capabilities).Count-eq 6)'controller declares six capabilities';Assert-Equal $self.document.activeWorkMutationBlocked $true 'active work mutation guard is declared';Assert-Equal $self.document.approvalDecisionsDelegated $false 'controller cannot decide approvals';Assert-Equal $self.document.tunnelIdentityConsistencyEnforced $true 'controller declares tunnel identity consistency';Assert-Equal $self.document.tunnelIdentity.status 'Ready' 'settings environment and profile identity match';Assert-Equal $self.document.tunnelIdentity.sourceCount 3 'three implicit identity sources are compared'
   $explicitSelf=Invoke-TestController -Action SelfTest -ExtraArguments @('-TunnelId','tunnel_fixture_123');Assert-Equal $explicitSelf.document.tunnelIdentity.status 'Ready' 'matching explicit identity is accepted';Assert-Equal $explicitSelf.document.tunnelIdentity.sourceCount 4 'explicit settings environment and profile are all compared';Assert-True((($explicitSelf.document|ConvertTo-Json -Depth 8).IndexOf('tunnel_fixture_123',[StringComparison]::Ordinal)-lt 0))'controller identity summary excludes the tunnel id value'
   $sourceBoundary=[IO.File]::ReadAllText((Join-Path $testRoot 'scripts\codex-bridge-runtime.psm1'))+[IO.File]::ReadAllText((Join-Path $testRoot 'scripts\runtime-control.ps1'))+[IO.File]::ReadAllText((Join-Path $testRoot 'scripts\remote-connectivity.ps1'));foreach($forbidden in @('codex_job_dispatch','turn/start','codex_approval_decide','decideApproval')){Assert-True($sourceBoundary.IndexOf($forbidden,[StringComparison]::OrdinalIgnoreCase)-lt 0)"lifecycle source excludes $forbidden"};Assert-True($sourceBoundary.IndexOf('http://127.0.0.1:18829',[StringComparison]::OrdinalIgnoreCase)-ge 0)'controller defaults use the isolated tunnel admin port';Assert-True($sourceBoundary.IndexOf('http://127.0.0.1:8829',[StringComparison]::OrdinalIgnoreCase)-lt 0)'controller defaults no longer use the conflicted tunnel admin port'
@@ -69,25 +88,59 @@ public static class FakeTunnel{public static int Main(string[] args){if(args.Len
   $env:CODEX_BRIDGE_TUNNEL_ID='tunnel_fixture_123';[IO.File]::WriteAllText((Join-Path $testRoot '.local\tray-settings.json'),'{"tunnelId":"tunnel_fixture_123"}',$utf8);[IO.File]::WriteAllText((Join-Path $testRoot '.tunnel-client\test-profile.yaml'),"tunnel_id: `"tunnel_fixture_123`"`ntunnel_id: `"tunnel_fixture_123`"",$utf8);$invalidProfile=Invoke-TestController -Action Status;Assert-Equal $invalidProfile.document.after.status 'Misconfigured' 'duplicated profile identity is rejected';Assert-Equal $invalidProfile.document.after.tunnelIdentity.errorCode 'TUNNEL_PROFILE_INVALID' 'invalid profile has a bounded code'
   [IO.File]::WriteAllText((Join-Path $testRoot '.tunnel-client\test-profile.yaml'),"tunnel_id: `"tunnel_fixture_123`"`ntest: true",$utf8)
   $initial=Invoke-TestController -Action Status;Assert-Equal $initial.document.after.status 'Stopped' 'isolated runtime starts stopped'
+  New-Item -ItemType Directory -Force -Path (Join-Path $testRoot '.tmp') | Out-Null
   $staleForeign=Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 120') -WindowStyle Hidden -PassThru
   $staleServerPidFile=Join-Path $testRoot '.tmp\codex-bridge-http-server.pid';$staleServerOwnerFile=Join-Path $testRoot '.tmp\codex-bridge-http-server.owner.json';[IO.File]::WriteAllText($staleServerPidFile,[string]$staleForeign.Id,$utf8);[IO.File]::WriteAllText($staleServerOwnerFile,'{}',$utf8)
-  $staleStatus=Invoke-TestController -Action Status;Assert-Equal $staleStatus.document.after.status 'Stopped' 'listener-free reboot-reused PID is classified stale';Assert-True(-not(Test-Path -LiteralPath $staleServerPidFile))'stale PID file is removed';Assert-True(-not(Test-Path -LiteralPath $staleServerOwnerFile))'stale owner metadata is removed';Assert-True($null-ne(Get-Process -Id $staleForeign.Id -ErrorAction SilentlyContinue))'unrelated process behind stale PID is untouched';Stop-TestProcess -Process $staleForeign;$staleForeign=$null
+  $staleStatus=Invoke-TestController -Action Status;Assert-Equal $staleStatus.document.after.status 'Stopped' 'listener-free reboot-reused PID is classified stale';Assert-True(Test-Path -LiteralPath $staleServerPidFile)'readonly status preserves stale PID file';Assert-True(Test-Path -LiteralPath $staleServerOwnerFile)'readonly status preserves stale owner metadata';Assert-True($null-ne(Get-Process -Id $staleForeign.Id -ErrorAction SilentlyContinue))'unrelated process behind stale PID is untouched';Stop-TestProcess -Process $staleForeign;$staleForeign=$null
   [IO.File]::WriteAllText((Join-Path $testRoot '.tunnel-client\fail-first.flag'),'1',$utf8)
-  $retryContext=New-CodexBridgeRuntimeContext -ProjectRoot $testRoot -Port $serverPort -ProjectsFile(Join-Path $testRoot '.local\projects.json')-DataDir(Join-Path $testRoot 'runtime-data')-NodePath $nodePath -TunnelClientPath $fakeTunnelPath -TunnelProfileDir(Join-Path $testRoot '.tunnel-client')-TunnelProfile 'test-profile' -SettingsTunnelId 'tunnel_fixture_123' -EnvironmentTunnelId $env:CODEX_BRIDGE_TUNNEL_ID -TunnelHealthUrl "http://127.0.0.1:$tunnelPort" -KeyStorePath(Join-Path $testRoot 'scripts\key-store.ps1')-SecretPath(Join-Path $testRoot '.secrets\test.dpapi')-ExpectedBuildId 'test-build' -TestActiveFlag $activeFlag -ServerReadyTimeoutSeconds 5 -TunnelRecoveryDelaysSeconds @(1,2)
+  $buildOverride=@{};if(-not$CanonicalBuildId){$buildOverride.ExpectedBuildId='test-build'}
+  $retryContext=New-CodexBridgeRuntimeContext -ProjectRoot $testRoot -Port $serverPort -ProjectsFile(Join-Path $testRoot '.local\projects.json')-DataDir(Join-Path $testRoot 'runtime-data')-NodePath $nodePath -TunnelClientPath $fakeTunnelPath -TunnelProfileDir(Join-Path $testRoot '.tunnel-client')-TunnelProfile 'test-profile' -SettingsTunnelId 'tunnel_fixture_123' -EnvironmentTunnelId $env:CODEX_BRIDGE_TUNNEL_ID -TunnelHealthUrl "http://127.0.0.1:$tunnelPort" -KeyStorePath(Join-Path $testRoot 'scripts\key-store.ps1')-SecretPath(Join-Path $testRoot '.secrets\test.dpapi') @buildOverride -CodexCommand $nodePath -TestActiveFlag $activeFlag -ServerReadyTimeoutSeconds 5 -TunnelRecoveryDelaysSeconds @(1,2)
   Invoke-CodexBridgeLifecycleAction -Context $retryContext -Action EnsureRunning
   $ensureAfter=Get-CodexBridgeRuntimeStatus -Context $retryContext;Remove-Item -LiteralPath(Join-Path $testRoot '.tunnel-client\fail-first.flag')-Force -ErrorAction SilentlyContinue;Assert-Equal $ensureAfter.status 'Ready' 'ensure starts server and tunnel';Assert-Equal ([IO.File]::ReadAllText((Join-Path $testRoot '.tunnel-client\test-attempt-count.txt')).Trim()) 2 'component-owned bounded recovery succeeds on the second tunnel attempt';$serverPid1=[int]$ensureAfter.server.pid;$tunnelPid1=[int]$ensureAfter.tunnel.pid;Assert-True($serverPid1-gt 0-and$tunnelPid1-gt 0)'both owned PIDs are recorded'
   $repair=Invoke-TestController -Action RepairConnectivity;Assert-Equal $repair.document.after.server.pid $serverPid1 'repair preserves core';Assert-Equal $repair.document.after.tunnel.pid $tunnelPid1 'repair preserves tunnel'
   [IO.File]::WriteAllText($activeFlag,'active',$utf8);$blocked=Invoke-TestController -Action RestartCore -ExpectSuccess $false;Assert-Equal $blocked.document.errorCode 'ACTIVE_WORK_PRESENT' 'active work blocks core restart';Assert-Equal $blocked.document.after.server.pid $serverPid1 'blocked restart preserves core PID';Assert-Equal $blocked.document.after.tunnel.pid $tunnelPid1 'blocked restart preserves tunnel PID';Assert-True($null-ne(Get-Process -Id $serverPid1 -ErrorAction SilentlyContinue))'blocked restart leaves core alive';Remove-Item -LiteralPath $activeFlag -Force
-  [IO.File]::WriteAllText($activeFlag,'ready',$utf8);$restart=Invoke-TestController -Action RestartCore;Remove-Item -LiteralPath $activeFlag -Force;$serverPid2=[int]$restart.document.after.server.pid;Assert-Equal $restart.document.after.status 'Ready' 'initialized but inactive core restart returns ready';Assert-True($serverPid2-ne$serverPid1)'initialized but inactive core restart replaces core';Assert-Equal $restart.document.after.tunnel.pid $tunnelPid1 'core restart preserves tunnel'
-  $reload=Invoke-TestController -Action ReloadRuntime;Assert-Equal $reload.document.after.status 'Ready' 'idle full reload returns ready';Assert-True([int]$reload.document.after.server.pid-ne$serverPid2)'reload replaces core';Assert-True([int]$reload.document.after.tunnel.pid-ne$tunnelPid1)'reload replaces tunnel'
-  $shutdown=Invoke-TestController -Action ShutdownRuntime;Assert-Equal $shutdown.document.after.status 'Stopped' 'shutdown stops owned runtime';Assert-True(@($shutdown.document.after.ownedPids).Count-eq 0)'shutdown leaves no owned PID';$shutdownAgain=Invoke-TestController -Action ShutdownRuntime;Assert-Equal $shutdownAgain.document.after.status 'Stopped' 'shutdown is idempotent when runtime is already stopped'
-
+  # Real production controller, real fixture PIDs and canonical startup helper.
+  # A running-core happy reload is intentionally BLOCKED, not a simulated PASS.
+  $entry=Join-Path $testRoot 'dist\src\http-main.js'
+  $sourceFile=Join-Path $testRoot 'src\stale.ts'
+  [IO.File]::WriteAllText($sourceFile,'// fixture source',$utf8)
+  (Get-Item -LiteralPath $sourceFile).LastWriteTimeUtc=(Get-Item -LiteralPath $entry).LastWriteTimeUtc.AddSeconds(30)
+  foreach($action in @('RestartCore','ReloadRuntime')){
+    $stale=Invoke-TestController -Action $action -ExpectSuccess $false
+    Assert-Equal $stale.document.errorCode 'BUILD_STALE' "$action refuses stale build before stop"
+    Assert-Equal $stale.document.after.server.pid $serverPid1 "$action preserves core PID"
+    Assert-Equal $stale.document.after.tunnel.pid $tunnelPid1 "$action preserves tunnel PID"
+    Assert-True ($null-ne(Get-Process -Id $serverPid1 -ErrorAction SilentlyContinue)) 'core fixture remains alive'
+    Assert-True ($null-ne(Get-Process -Id $tunnelPid1 -ErrorAction SilentlyContinue)) 'tunnel fixture remains alive'
+  }
+  (Get-Item -LiteralPath $sourceFile).LastWriteTimeUtc=(Get-Item -LiteralPath $entry).LastWriteTimeUtc.AddSeconds(-1)
+  foreach($action in @('RestartCore','ReloadRuntime','ShutdownRuntime')){
+    $blocked=Invoke-TestController -Action $action -ExpectSuccess $false
+    Assert-Equal $blocked.document.errorCode 'BLOCKED_GRACEFUL_SHUTDOWN_UNAVAILABLE' "$action blocks unavailable cooperative delivery"
+    Assert-Equal $blocked.document.after.server.pid $serverPid1 'blocked delivery preserves core'
+    Assert-Equal $blocked.document.after.tunnel.pid $tunnelPid1 'blocked delivery preserves tunnel'
+  }
+  $auditPath=Join-Path $testRoot '.tmp\runtime-control.jsonl'
+  $auditBefore=[IO.File]::ReadAllText($auditPath)
+  $pidBefore=[IO.File]::ReadAllText($staleServerPidFile)
+  $ownerBefore=[IO.File]::ReadAllText($staleServerOwnerFile)
+  $status=Invoke-TestController -Action Status
+  $adoptStatus=Invoke-TestController -Action Status -ExpectSuccess $false -ExtraArguments @('-AdoptLegacyExactListeners')
+  Assert-Equal $adoptStatus.document.errorCode 'READONLY_ADOPTION_REJECTED' 'Status cannot adopt'
+  Assert-Equal ([IO.File]::ReadAllText($auditPath)) $auditBefore 'successful and rejected Status append no audit'
+  Assert-Equal ([IO.File]::ReadAllText($staleServerPidFile)) $pidBefore 'Status leaves PID bytes intact'
+  Assert-Equal ([IO.File]::ReadAllText($staleServerOwnerFile)) $ownerBefore 'Status leaves owner bytes intact'
+  # Explicit fixture-only teardown, never a production lifecycle fallback.
+  foreach($id in @($serverPid1,$tunnelPid1)){Stop-TestProcess -Process (Get-Process -Id $id)}
+  Remove-Item -LiteralPath $staleServerPidFile,$staleServerOwnerFile,(Join-Path $testRoot '.tmp\tunnel-client.pid'),(Join-Path $testRoot '.tmp\tunnel-client.owner.json')
+  $shutdownAgain=Invoke-TestController -Action ShutdownRuntime
+  Assert-Equal $shutdownAgain.document.after.status 'Stopped' 'shutdown is idempotent when already stopped'
   $oldPort=$env:CODEX_BRIDGE_HTTP_PORT;$oldBuild=$env:CODEX_BRIDGE_EXPECTED_TEST_BUILD;$oldFlag=$env:CODEX_BRIDGE_TEST_ACTIVE_FLAG;$env:CODEX_BRIDGE_HTTP_PORT=[string]$serverPort;$env:CODEX_BRIDGE_EXPECTED_TEST_BUILD='test-build';$env:CODEX_BRIDGE_TEST_ACTIVE_FLAG=$activeFlag
   $staleForeign=Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 120') -WindowStyle Hidden -PassThru;[IO.File]::WriteAllText($staleServerPidFile,[string]$staleForeign.Id,$utf8);[IO.File]::WriteAllText($staleServerOwnerFile,'{}',$utf8)
   $foreign=Start-Process -FilePath $nodePath -ArgumentList "`"$(Join-Path $testRoot 'dist\src\http-main.js')`"" -WorkingDirectory $testRoot -WindowStyle Hidden -PassThru;Assert-True(Wait-TcpPort -Port $serverPort -Open $true)'foreign exact listener starts';$foreignShutdown=Invoke-TestController -Action ShutdownRuntime -ExpectSuccess $false;Assert-Equal $foreignShutdown.document.errorCode 'OWNERSHIP_MISMATCH' 'listener conflict with stale PID remains fail closed';Assert-True((Get-Content -LiteralPath $staleServerPidFile -Raw).Trim()-eq[string]$staleForeign.Id)'listener conflict preserves stale evidence for diagnosis';Assert-True($null-ne(Get-Process -Id $foreign.Id -ErrorAction SilentlyContinue))'foreign listener remains untouched';Assert-True($null-ne(Get-Process -Id $staleForeign.Id -ErrorAction SilentlyContinue))'unrelated stale PID process remains untouched during conflict';Stop-TestProcess -Process $foreign;$foreign=$null;Stop-TestProcess -Process $staleForeign;$staleForeign=$null;Remove-Item -LiteralPath $staleServerPidFile,$staleServerOwnerFile -Force
   if($null-eq$oldPort){Remove-Item Env:\CODEX_BRIDGE_HTTP_PORT -ErrorAction SilentlyContinue}else{$env:CODEX_BRIDGE_HTTP_PORT=$oldPort};if($null-eq$oldBuild){Remove-Item Env:\CODEX_BRIDGE_EXPECTED_TEST_BUILD -ErrorAction SilentlyContinue}else{$env:CODEX_BRIDGE_EXPECTED_TEST_BUILD=$oldBuild};if($null-eq$oldFlag){Remove-Item Env:\CODEX_BRIDGE_TEST_ACTIVE_FLAG -ErrorAction SilentlyContinue}else{$env:CODEX_BRIDGE_TEST_ACTIVE_FLAG=$oldFlag}
   $audit=Join-Path $testRoot '.tmp\runtime-control.jsonl';Assert-True(Test-Path -LiteralPath $audit -PathType Leaf)'action audit exists';$auditText=[IO.File]::ReadAllText($audit);Assert-True($auditText.IndexOf('isolated-test-placeholder',[StringComparison]::Ordinal)-lt 0)'audit excludes secret';Assert-True($auditText.IndexOf((Join-Path $testRoot 'runtime-data'),[StringComparison]::OrdinalIgnoreCase)-lt 0)'audit excludes data path';Assert-True($auditText.IndexOf((Join-Path $testRoot '.local\projects.json'),[StringComparison]::OrdinalIgnoreCase)-lt 0)'audit excludes allowlist path'
-  [pscustomobject]@{ok=$true;assertions=$script:Passed;actions=@('SelfTest','Status','EnsureRunning','RepairConnectivity','ActiveWorkGuard','RestartCore','ReloadRuntime','ShutdownRuntime','ForeignOwnerGuard')}|ConvertTo-Json -Depth 4
+  [pscustomobject]@{ok=$true;assertions=$script:Passed;canonicalBuildId=[bool]$CanonicalBuildId;actions=@('SelfTest','Status','EnsureRunning','RepairConnectivity','ActiveWorkGuard','RestartCore','ReloadRuntime','ShutdownRuntime','ForeignOwnerGuard')}|ConvertTo-Json -Depth 4
 }
 finally{
   Stop-TestProcess -Process $foreign
@@ -95,5 +148,5 @@ finally{
   foreach($pair in @(@('.tmp\codex-bridge-http-server.pid','.tmp\codex-bridge-http-server.owner.json'),@('.tmp\tunnel-client.pid','.tmp\tunnel-client.owner.json'))){$pidPath=Join-Path $testRoot $pair[0];$ownerPath=Join-Path $testRoot $pair[1];if(-not(Test-Path -LiteralPath $pidPath -PathType Leaf)-or-not(Test-Path -LiteralPath $ownerPath -PathType Leaf)){continue};try{$value=0;if(-not[int]::TryParse(([IO.File]::ReadAllText($pidPath).Trim()),[ref]$value)){continue};$metadata=[IO.File]::ReadAllText($ownerPath)|ConvertFrom-Json;$process=Get-Process -Id $value -ErrorAction Stop;if([IO.Path]::GetFullPath([string]$process.Path).Equals([IO.Path]::GetFullPath([string]$metadata.executablePath),[StringComparison]::OrdinalIgnoreCase)-and$process.StartTime.ToUniversalTime().ToString('o')-eq[string]$metadata.startTimeUtc){Stop-Process -Id $value -Force -ErrorAction Stop;$null=$process.WaitForExit(5000)}}catch{}}
   if($null-eq$previousKey){Remove-Item Env:\CONTROL_PLANE_API_KEY -ErrorAction SilentlyContinue}else{$env:CONTROL_PLANE_API_KEY=$previousKey}
   if($null-eq$previousTunnelId){Remove-Item Env:\CODEX_BRIDGE_TUNNEL_ID -ErrorAction SilentlyContinue}else{$env:CODEX_BRIDGE_TUNNEL_ID=$previousTunnelId}
-  $resolved=[IO.Path]::GetFullPath($testRoot);if($env:CODEX_BRIDGE_TEST_KEEP_TEMP-eq'1'){Write-Host "Preserved test root: $resolved"}elseif($resolved.StartsWith($tempBase+'\',[StringComparison]::OrdinalIgnoreCase)-and(Test-Path -LiteralPath $resolved)){for($attempt=0;$attempt-lt 10;$attempt++){try{Remove-Item -LiteralPath $resolved -Recurse -Force;break}catch{if($attempt-eq 9){throw};Start-Sleep -Milliseconds 300}}}
+  $resolved=[IO.Path]::GetFullPath($fixtureRoot);if($env:CODEX_BRIDGE_TEST_KEEP_TEMP-eq'1'){Write-Host "Preserved fixture root: $resolved"}elseif($resolved.StartsWith($tempBase+'\',[StringComparison]::OrdinalIgnoreCase)-and(Test-Path -LiteralPath $resolved)){for($attempt=0;$attempt-lt 10;$attempt++){try{Remove-Item -LiteralPath $resolved -Recurse -Force;break}catch{if($attempt-eq 9){throw};Start-Sleep -Milliseconds 300}}}
 }

@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>不可執行的指令審閱</title>
+<style>
+:root{color-scheme:light dark;font:15px/1.6 "Segoe UI","Microsoft JhengHei",sans-serif;color:#243548;background:#f8fafc;--muted:#52667a;--line:#c5d0dc;--panel:#edf2f7;--accent:#245e94}
+*{box-sizing:border-box}body{margin:0;padding:20px;max-width:880px}h1{font-size:21px;line-height:1.4;margin:0 0 8px}h2{font-size:16px;margin:22px 0 8px}p{margin:8px 0;color:var(--muted)}.boundary{border-left:4px solid var(--accent);padding:10px 14px;background:var(--panel)}.boundary strong{display:block}
+dl{display:grid;grid-template-columns:125px minmax(0,1fr);gap:8px 16px;margin:16px 0}dt{color:var(--muted)}dd{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:Consolas,"Cascadia Mono",monospace}pre{padding:14px;background:var(--panel);border:1px solid var(--line);white-space:pre-wrap;overflow-wrap:anywhere;tab-size:4;font:13px/1.65 Consolas,"Cascadia Mono",monospace;margin:8px 0}
+button,input{font:inherit}button{border:1px solid var(--line);border-radius:5px;padding:9px 14px;background:var(--panel);color:inherit;cursor:pointer}button:disabled{opacity:.5;cursor:default}button:focus-visible,input:focus-visible,summary:focus-visible{outline:3px solid var(--accent);outline-offset:3px}#accept{background:var(--accent);color:#fff;border-color:var(--accent)}.actions{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}label{display:block;margin-top:18px}input{margin-right:8px}#status{white-space:pre-wrap;overflow-wrap:anywhere;margin-top:18px}summary{cursor:pointer;color:var(--muted)}[hidden]{display:none!important}
+@media(max-width:480px){body{padding:14px}dl{grid-template-columns:1fr;gap:2px}dd{margin-bottom:10px}.actions button{flex:1}}
+@media(prefers-color-scheme:dark){:root{color:#e1e9f2;background:#121923;--muted:#b5c5d6;--line:#45576b;--panel:#1c2a3a;--accent:#396e9d}}
+</style></head><body>
+<h1>審閱這一筆指令提案</h1>
+<div class="boundary"><strong>只記錄意見，不執行指令</strong><span>同意不授予作業系統權限，也不會啟動或續接工作。NORMAL / ADMIN 均為 OFF。</span></div>
+<div id="status" role="status" aria-live="polite">等待這次工具呼叫的審閱請求…</div>
+<section id="proposal" hidden>
+<dl id="details"></dl><h2>完整指令快照</h2><pre id="script"></pre>
+<details><summary>查看精確字串（含換行與跳脫字元）</summary><pre id="exact-script"></pre></details>
+<p>以下風險與副作用由提案提供，尚未獨立驗證。故障原因 UNKNOWN；權限歸因 UNVERIFIED。</p>
+<dl id="risk"></dl>
+<label><input id="confirm" type="checkbox" disabled>我已檢視完整提案，這次只記錄我的審閱意見。</label>
+<div class="actions"><button id="accept" disabled>同意提案（不執行）</button><button id="decline" disabled>拒絕提案</button><button id="refresh">重新讀取收據</button></div>
+</section>
+<script>
+(() => {
+  'use strict';
+  const $ = id => document.getElementById(id), pending = new Map();
+  let binding = null, receipt = null, loaded = false, busy = false, sequence = 0, hostOrigin = '', expiryQueried = false;
+  function notice(message) { $('status').textContent = message; }
+  function controls() {
+    const enabled = loaded && !busy && receipt?.decisionAllowed === true && receipt.effectiveState === 'PENDING' && receipt.expiresAt > Date.now();
+    $('confirm').disabled = !enabled;
+    $('accept').disabled = $('decline').disabled = !enabled || !$('confirm').checked;
+    $('refresh').disabled = busy || !binding;
+  }
+  function rpc(method, params) {
+    return new Promise((resolve, reject) => {
+      const id = ++sequence, timer = setTimeout(() => { pending.delete(id); reject(new Error('連線逾時；請重新讀取同一筆收據，確認是否已記錄。')); }, 15000);
+      pending.set(id, { resolve, reject, timer });
+      window.parent.postMessage({ jsonrpc: '2.0', id, method, params }, hostOrigin || '*');
+    });
+  }
+  window.addEventListener('message', event => {
+    if (event.source !== window.parent || (hostOrigin && event.origin !== hostOrigin)) return;
+    const message = event.data;
+    if (!message || message.jsonrpc !== '2.0') return;
+    const call = pending.get(message.id);
+    if (call) {
+      if (!hostOrigin) hostOrigin = event.origin;
+      pending.delete(message.id); clearTimeout(call.timer);
+      if (message.error) call.reject(new Error('MCP host 拒絕操作；未確認決策已記錄。'));
+      else call.resolve(message.result);
+    }
+    if (message.method === 'ui/notifications/tool-result') receive(message.params?.structuredContent);
+  });
+  const ready = window.openai?.callTool ? Promise.resolve() : rpc('ui/initialize', {
+    appInfo: { name: 'codex-powershell-review', version: '1.0.0' }, appCapabilities: {}, protocolVersion: '2026-01-26',
+  }).then(() => window.parent.postMessage({ jsonrpc: '2.0', method: 'ui/notifications/initialized', params: {} }, hostOrigin));
+  async function call(operation, args) {
+    await ready;
+    const name = 'codex_powershell_review_' + operation;
+    let timer;
+    const invocation = window.openai?.callTool ? window.openai.callTool(name, args) : rpc('tools/call', { name, arguments: args });
+    const result = await Promise.race([invocation, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('連線逾時；請重新讀取同一筆收據，確認是否已記錄。')), 15000);
+    })]).finally(() => clearTimeout(timer));
+    if (!result || result.isError) throw new Error(result?.structuredContent?.error?.code || '讀取失敗；請重新讀取同一筆收據。');
+    return result;
+  }
+  function fields(element, entries) {
+    element.replaceChildren();
+    for (const [label, value] of entries) {
+      const dt = document.createElement('dt'), dd = document.createElement('dd');
+      dt.textContent = label; dd.textContent = String(value); element.append(dt, dd);
+    }
+  }
+  function showStatus(value) {
+    if (value?.kind !== 'REVIEW_ONLY_NONEXECUTABLE' || value.requestId !== binding.requestId || value.digest !== binding.digest
+      || value.executionDispatched !== false || value.productionAuthorized !== false
+      || value.executionPolicy?.NORMAL !== 'OFF' || value.executionPolicy?.ADMIN !== 'OFF') throw new Error('收據不符合此筆不可執行提案。');
+    receipt = value;
+    const labels = { PENDING: '等待本人審閱', ACCEPTED: '已記錄同意，沒有執行', DECLINED: '已記錄拒絕', EXPIRED: '已過期，不能再決策' };
+    notice((labels[value.effectiveState] || '未知狀態') + '\n' + value.effectiveReason
+      + (value.effectiveState !== value.state ? '\n持久化狀態：' + value.state + '（唯讀查詢未寫入過期事件）' : '') + '\n收據：' + value.receiptId);
+    controls();
+  }
+  async function load() {
+    if (!binding || busy) return;
+    busy = true; loaded = false; $('confirm').checked = false; controls();
+    try {
+      const result = await call('get', binding), request = result._meta?.review?.request;
+      if (!request || request.requestId !== binding.requestId || request.evidence !== 'REVIEW_ONLY_NONEXECUTABLE')
+        throw new Error('尚未取得完整儲存快照；禁止決策。');
+      showStatus(result.structuredContent);
+      fields($('details'), [['Request ID', request.requestId], ['Digest', binding.digest], ['來源', request.origin],
+        ['專案', request.projectId], ['資料分類', request.dataClassification], ['Job / Turn', request.origin === 'DIRECT' ? '無（DIRECT）' : request.jobId + ' / ' + request.turnId],
+        ['目標', request.target], ['提案模式', request.executionMode + '（執行 OFF）'], ['工作目錄', request.cwd], ['參數（JSON）', JSON.stringify(request.args)],
+        ['建立時間', new Date(request.createdAt).toISOString()], ['到期時間', new Date(request.expiresAt).toISOString()], ['TTL', request.ttlMs + ' ms'],
+        ['Script SHA-256', request.scriptSha256], ['編碼', request.scriptEncoding]]);
+      $('script').textContent = request.scriptSnapshot;
+      $('exact-script').textContent = JSON.stringify(request.scriptSnapshot);
+      fields($('risk'), [['風險', request.risk], ['副作用', request.sideEffects]]);
+      $('proposal').hidden = false; loaded = true;
+    } catch (error) { notice(error.message); }
+    finally { busy = false; controls(); }
+  }
+  function receive(value) {
+    if (value?.kind !== 'REVIEW_ONLY_NONEXECUTABLE' || !value.requestId || !value.digest) return;
+    if (binding) return; // Never replace a proposal underneath a pending human click.
+    binding = { requestId: value.requestId, digest: value.digest };
+    void load();
+  }
+  async function decide(event, decision) {
+    // No startup action, message handler or synthetic DOM click can decide.
+    if (!event.isTrusted || busy || !loaded || !$('confirm').checked || receipt?.decisionAllowed !== true || receipt.effectiveState !== 'PENDING' || receipt.expiresAt <= Date.now()) return;
+    busy = true; $('confirm').checked = false; controls();
+    try { showStatus((await call('decide', { ...binding, decision })).structuredContent); }
+    catch (error) { loaded = false; notice(error.message + '\n請重新讀取收據；系統不會自動重送決策。'); }
+    finally { busy = false; controls(); }
+  }
+  $('accept').onclick = event => decide(event, 'ACCEPTED');
+  $('decline').onclick = event => decide(event, 'DECLINED');
+  $('confirm').onchange = controls;
+  $('refresh').onclick = () => load();
+  window.addEventListener('openai:set_globals', event => receive(event.detail?.globals?.toolOutput ?? window.openai?.toolOutput));
+  ready.then(() => receive(window.openai?.toolOutput)).catch(error => notice(error.message));
+  setInterval(() => {
+    controls();
+    if (receipt?.state === 'PENDING' && receipt.expiresAt <= Date.now() && !busy && !expiryQueried) {
+      expiryQueried = true; notice('提案已到期；正在確認持久化收據…'); void load();
+    }
+  }, 1000);
+})();
+</script></body></html>

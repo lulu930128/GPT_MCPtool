@@ -8,6 +8,7 @@ param(
     [string]$RuntimeRoot,
     [string]$OperationId,
     [switch]$PlanOnly,
+    [switch]$PublishObservation,
     [switch]$NoInitialDelay
 )
 
@@ -15,6 +16,13 @@ Set-StrictMode -Version 3.0
 $ErrorActionPreference = "Stop"
 
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+$installedPhysical=Test-Path -LiteralPath (Join-Path $projectRoot 'config\installed-release.json')
+$physicalRegistry=Join-Path $projectRoot 'config\registry.json'
+if(-not $installedPhysical -and (Test-Path -LiteralPath $physicalRegistry)){
+    if((Get-Item -LiteralPath $physicalRegistry).Length -le 65536){
+        try{$installedPhysical=(Get-Content -LiteralPath $physicalRegistry -Raw -Encoding UTF8|ConvertFrom-Json).schemaVersion -eq 4}catch{}
+    }
+}
 $modulePath = Join-Path $projectRoot "src\McpControlCenter.Core.psm1"
 Import-Module $modulePath -Force
 
@@ -72,11 +80,35 @@ function Publish-ReconcileProgressBestEffort {
 $bootId = $null
 $lastActionRoutedAction = $null
 $reconcileProgress = $null
+$manifest = $null
 try {
     $manifest = Read-McpCcManifest -Path $ManifestPath
-    if (Test-McpCcPathWithinRoot -Path $RuntimeRoot -Root $manifest.workspaceRoot) {
-        throw "RuntimeRoot must be outside the source workspace."
+    if ($manifest.schemaVersion -eq 4 -and $manifest.installedRelease.schemaVersion -lt 3) {
+        # Static diagnostics only, before controller/probe/log/state/startup access.
+        [pscustomobject]@{ok=$false;schemaVersion=4;action=$Action;planOnly=[bool]$PlanOnly;
+            code='INSTALLED_LIFECYCLE_BINDINGS_REQUIRED';componentLaunches=0;
+            releaseId=$manifest.installedRelease.releaseId;components=@($manifest.registryEntries | Select-Object id,resolvedRoot)} | ConvertTo-Json -Depth 5
+        if ($Action -in @('Status','Doctor') -or $PlanOnly) { exit 0 }
+        exit 1
     }
+    if ($manifest.schemaVersion -eq 4) {
+        Import-Module (Join-Path $projectRoot 'src\McpControlCenter.InstalledRelease.psm1')
+        Assert-McpCcInstalledActivation $manifest
+        if ($RuntimeRoot -ine (Get-McpCcInstalledStateRoot $manifest.installedRelease)) { throw 'INSTALLED_CALLER_OVERRIDE_REJECTED' }
+        # These routes are inspection only, including on a selected release.
+        if ($PlanOnly) {
+            [pscustomobject]@{ok=$true;action=$Action;planOnly=[bool]$PlanOnly;schemaVersion=4;
+                releaseId=$manifest.installedRelease.releaseId;activation='VERIFIED';componentLaunches=0;
+                components=@($manifest.registryEntries | Select-Object id,resolvedRoot)} | ConvertTo-Json -Depth 5
+            exit 0
+        }
+        if ($Action -in @('Status','Doctor') -and -not $PublishObservation) {
+            Get-McpCcSystemState -Manifest $manifest -BootId (Get-McpCcBootId) | ConvertTo-Json -Depth 12
+            exit 0
+        }
+        if ($PublishObservation -and $Action -ne 'Status') { throw 'INSTALLED_OBSERVATION_ACTION_INVALID' }
+    }
+    Assert-McpCcRuntimeRoot -Manifest $manifest -RuntimeRoot $RuntimeRoot
     $bootId = Get-McpCcBootId
 
     switch ($Action) {
@@ -340,7 +372,9 @@ try {
                             ok = $true; errorCode = $null; message = "Component was already ready."
                         }
                     }
-                    $singleComponentManifest = [pscustomobject]@{ settings=$manifest.settings; components=@($definition) }
+                    # Preserve schema and installed-release context for the ownership audit.
+                    $singleComponentManifest = $manifest.PSObject.Copy()
+                    $singleComponentManifest.components = @($definition)
                     $freshControllerAudit = Get-McpCcControllerAudit -Manifest $singleComponentManifest -RuntimeRoot $RuntimeRoot
                     $controllerEntry = @($freshControllerAudit.entries | Select-Object -First 1)[0]
                     $controllerGate = Get-McpCcControllerMutationGate -ControllerEntry $controllerEntry
@@ -438,6 +472,12 @@ try {
 }
 catch {
     $message = ([string]$_.Exception.Message -replace '[\r\n]+', ' ').Trim()
+    if($installedPhysical -or ($null -ne $manifest -and $manifest.schemaVersion -eq 4) -or $message -match '^INSTALLED_'){
+        # Failed installed gates must not fall through to legacy error writers with a
+        # caller-selected RuntimeRoot. Component runtime receipts own attempted actions.
+        [pscustomobject]@{ok=$false;action=$Action;component=$Component;error=$message}|ConvertTo-Json -Depth 4
+        exit 1
+    }
     if ($Action -eq "Reconcile" -and $null -ne $reconcileProgress -and [string]$reconcileProgress.status -eq "Running") {
         try {
             Complete-McpCcReconcileProgress -Progress $reconcileProgress -Status "Failed" | Out-Null

@@ -31,9 +31,11 @@ async function fixture(t: test.TestContext, sharedWorkspaceProjectIds?: unknown)
   return { component, project, projectsFile, dataDir, policy, env };
 }
 
-test("shared roots are opt-in and both execution profiles protect local Bridge state", async (t) => {
+test("Full Access is the default; plan and the rollback profile retain sandbox rules", async (t) => {
   const f = await fixture(t);
   const config = await loadBridgeConfig(f.env);
+  assert.ok(config.codexArgs.includes('default_permissions=":danger-full-access"'));
+  assert.ok(!config.codexArgs.some((arg) => arg.includes('extends = ":danger-full-access"')));
   for (const name of ["read-only", "workspace"]) {
     const profile = config.codexArgs.find((arg) => arg.startsWith(`permissions.codex-bridge-${name}=`))!;
     assert.ok(profile);
@@ -49,6 +51,15 @@ test("shared roots are opt-in and both execution profiles protect local Bridge s
     assert.ok(!profile.includes("package.json"));
   }
   if (process.platform === "win32") assert.ok(config.codexArgs.includes('windows.sandbox="elevated"'));
+});
+
+test("Windows default data belongs to the component local runtime", { skip: process.platform !== "win32" }, async (t) => {
+  const f = await fixture(t);
+  const expected = join(f.component, ".local", "runtime");
+  await mkdir(expected, { recursive: true });
+  const config = await loadBridgeConfig({ ...f.env, CODEX_BRIDGE_DATA_DIR: undefined });
+  assert.equal(config.dataDir, expected);
+  assert.equal(config.jobsDir, join(expected, "jobs"));
 });
 
 test("shared roots resolve only configured project ids and do not duplicate roots", async (t) => {

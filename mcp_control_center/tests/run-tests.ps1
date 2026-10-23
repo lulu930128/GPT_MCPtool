@@ -28,6 +28,10 @@ function Assert-Throws([scriptblock]$Action, [string]$Message) {
 
 $captureRegression = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "test-controller-capture.ps1")) | ConvertFrom-Json
 Assert-True ($LASTEXITCODE -eq 0 -and $captureRegression.ok) "controller capture regression passes"
+$reloadRegression = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "test-self-reload.ps1")) | ConvertFrom-Json
+Assert-True ($LASTEXITCODE -eq 0 -and $reloadRegression.ok) "remote self reload native IPC and owner guards pass"
+$reconcileContextRegression = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "test-reconcile-context.ps1")) | ConvertFrom-Json
+Assert-True ($LASTEXITCODE -eq 0 -and $reconcileContextRegression.ok) "canonical reconciliation preserves manifest context and ownership gates"
 
 function Copy-JsonDocument($Value) {
     return (($Value | ConvertTo-Json -Depth 30) | ConvertFrom-Json)
@@ -477,9 +481,9 @@ $invalidRemote = ConvertTo-McpCcRemoteConnectivityEvidence -Evidence ([pscustomo
 Assert-Equal $invalidRemote.status "Unknown" "invalid remote evidence fails closed to Unknown"
 Assert-Equal $invalidRemote.errorCode "REMOTE_EVIDENCE_INVALID" "invalid remote evidence uses a fixed safe code"
 
-$stoppedPlan = Get-McpCcReconcilePlan -Manifest ([pscustomobject]@{ components = @($omiSearch) }) -State ([pscustomobject]@{ components = @([pscustomobject]@{ id = "omi_search"; status = "Stopped" }) })
+$stoppedPlan = Get-McpCcReconcilePlan -Manifest ([pscustomobject]@{ schemaVersion = 2; components = @($omiSearch) }) -State ([pscustomobject]@{ components = @([pscustomobject]@{ id = "omi_search"; status = "Stopped" }) })
 Assert-Equal $stoppedPlan[0].decision "Start" "reconcile starts a dependency-aware component whose owned core is stopped"
-$blockedPlan = Get-McpCcReconcilePlan -Manifest ([pscustomobject]@{ components = @($omiSearch) }) -State ([pscustomobject]@{ components = @([pscustomobject]@{ id = "omi_search"; status = "BlockedUpstream" }) })
+$blockedPlan = Get-McpCcReconcilePlan -Manifest ([pscustomobject]@{ schemaVersion = 2; components = @($omiSearch) }) -State ([pscustomobject]@{ components = @([pscustomobject]@{ id = "omi_search"; status = "BlockedUpstream" }) })
 Assert-Equal $blockedPlan[0].decision "WaitForDependency" "reconcile preserves a running component blocked only by its upstream"
 
 $repairableStatus = [pscustomobject]@{
@@ -500,7 +504,7 @@ Assert-Equal $repairDecision.classification "LocalTransientConnectivity" "repair
 Assert-Equal $repairDecision.managerAttemptLimit 1 "manager delegates at most one repair attempt"
 Assert-Equal $repairDecision.retryOwner "component_controller" "bounded retry ownership remains in the component"
 Assert-Equal $repairDecision.controllerTimeoutSeconds 180 "manager keeps the registry controller timeout bound"
-$repairPlanManifest = [pscustomobject]@{ settings = $registryManifest.settings; components = @($registryCodex) }
+$repairPlanManifest = [pscustomobject]@{ schemaVersion = 3; settings = $registryManifest.settings; components = @($registryCodex) }
 $repairPlan = Get-McpCcReconcilePlan -Manifest $repairPlanManifest -State ([pscustomobject]@{ components = @($repairableStatus) })
 Assert-Equal $repairPlan[0].decision "RepairConnectivity" "reconcile plans a scoped local connectivity repair"
 Assert-Equal $repairPlan[0].managerAttemptLimit 1 "reconcile plan exposes the one-attempt manager bound"
@@ -578,7 +582,7 @@ $codexPaosState = [pscustomobject]@{
         [pscustomobject]@{ id = "personal_asset_os"; status = "Stopped" }
     )
 }
-$codexPaosPlan = @(Get-McpCcReconcilePlan -Manifest ([pscustomobject]@{ components = @($registryCodex, $registryPaos) }) -State $codexPaosState)
+$codexPaosPlan = @(Get-McpCcReconcilePlan -Manifest ([pscustomobject]@{ schemaVersion = 3; components = @($registryCodex, $registryPaos) }) -State $codexPaosState)
 Assert-Equal (@($codexPaosPlan.decision) -join ",") "ManualAttention,Start" "ownership mismatch remains non-mutating while PAOS still plans Start"
 $codexPaosActions = @(Invoke-McpCcReconcileItems -Plan $codexPaosPlan -ItemExecutor {
     param($Item)
@@ -636,9 +640,9 @@ foreach ($statusName in @("OwnershipMismatch", "OwnershipUnknown", "Misconfigure
 }
 $unknownGate = Get-McpCcControllerMutationGate -ControllerEntry ([pscustomobject]@{ status="OwnershipUnknown"; manageable=$false; errorCode=$null })
 Assert-True (-not $unknownGate.allowed -and $unknownGate.decision -eq "ManualAttention" -and $unknownGate.errorCode -eq "OWNERSHIP_UNKNOWN") "controller ownership unknown blocks automatic mutation"
-$controllerGuardPlan = @(Get-McpCcReconcilePlan -Manifest ([pscustomobject]@{ components=@($registryPaos) }) -State ([pscustomobject]@{ components=@([pscustomobject]@{ id="personal_asset_os"; status="Stopped" }) }) -ControllerAudit ([pscustomobject]@{ entries=@([pscustomobject]@{ component="personal_asset_os"; status="OwnershipUnknown"; manageable=$false; errorCode=$null }) }))
+$controllerGuardPlan = @(Get-McpCcReconcilePlan -Manifest ([pscustomobject]@{ schemaVersion=3; components=@($registryPaos) }) -State ([pscustomobject]@{ components=@([pscustomobject]@{ id="personal_asset_os"; status="Stopped" }) }) -ControllerAudit ([pscustomobject]@{ entries=@([pscustomobject]@{ component="personal_asset_os"; status="OwnershipUnknown"; manageable=$false; errorCode=$null }) }))
 Assert-True ($controllerGuardPlan.Count -eq 1 -and $controllerGuardPlan[0].decision -eq "ManualAttention" -and $controllerGuardPlan[0].reasonCode -eq "OWNERSHIP_UNKNOWN") "reconcile never auto-starts a component whose controller reports ownership unknown"
-$readyNoActionPlan = @(Get-McpCcReconcilePlan -Manifest ([pscustomobject]@{ components=@($registryOmi) }) -State ([pscustomobject]@{ components=@([pscustomobject]@{ id="omi_search"; status="Ready" }) }) -ControllerAudit ([pscustomobject]@{ entries=@([pscustomobject]@{ component="omi_search"; status="ControllerError"; manageable=$false; errorCode="CONTROLLER_STATUS_FAILED" }) }))
+$readyNoActionPlan = @(Get-McpCcReconcilePlan -Manifest ([pscustomobject]@{ schemaVersion=3; components=@($registryOmi) }) -State ([pscustomobject]@{ components=@([pscustomobject]@{ id="omi_search"; status="Ready" }) }) -ControllerAudit ([pscustomobject]@{ entries=@([pscustomobject]@{ component="omi_search"; status="ControllerError"; manageable=$false; errorCode="CONTROLLER_STATUS_FAILED" }) }))
 Assert-Equal $readyNoActionPlan[0].decision "NoAction" "a Ready component does not require a mutation gate and cannot become false attention"
 $monitorDecision = Get-McpCcRestartMcpDecision -ComponentStatus ([pscustomobject]@{
     status = "Unhealthy"

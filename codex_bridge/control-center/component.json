@@ -41,7 +41,7 @@
       "port": 18828,
       "required": true,
       "expected": { "ok": true, "service": "codex-handoff-bridge" },
-      "publicSummaryFields": ["service", "version", "buildId"],
+      "publicSummaryFields": ["service", "version", "buildId", "jobs.active", "jobs.awaitingApproval", "jobs.scope", "controller"],
       "ownership": {
         "managedPidFile": ".tmp\\codex-bridge-http-server.pid",
         "managedCommandContains": ["codex_bridge", "dist\\src\\http-main.js"]

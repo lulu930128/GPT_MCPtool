@@ -9,6 +9,12 @@ $ErrorActionPreference = "Stop"
 $menuContract = "component-menu-v1"
 $supportedActions = @("copy_mcp_url", "copy_health_url", "copy_tunnel_id", "open_mcp_health", "open_tunnel_ui", "open_runtime_logs", "open_jobs_folder")
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+$installedModule=Import-Module (Join-Path $PSScriptRoot 'codex-bridge-runtime.psm1') -PassThru
+$installed=& $installedModule {Test-CbInstalledLayout}
+if ($installed) {
+    $installedContext=New-CodexBridgeRuntimeContext -ProjectRoot $projectRoot
+    & $installedModule {param($c) Assert-CbInstalledMutationBlocked $c} $installedContext
+}
 if ($SelfTest) {
     [pscustomobject]@{ ok = $true; menuContract = $menuContract; actions = $supportedActions; managerDomainDataAccess = "none"; managerSecretAccess = "none" } | ConvertTo-Json -Depth 4
     exit 0
@@ -16,8 +22,12 @@ if ($SelfTest) {
 $mcpUrl = "http://127.0.0.1:18828/mcp"
 $healthUrl = "http://127.0.0.1:18828/health"
 $tunnelUiUrl = "http://127.0.0.1:18829/ui"
+if ($installed) {
+    $runtimeDir=$installedContext.runtimeDir;$dataDir=$installedContext.dataDir
+    $tunnelId=$installedContext.tunnelIdentity.resolvedTunnelId
+} else {
 $runtimeDir = Join-Path $projectRoot ".tmp"
-$dataDir = "C:\CodexBridge"
+$dataDir = Join-Path $projectRoot '.local\runtime'
 $tunnelId = [string]$env:CODEX_BRIDGE_TUNNEL_ID
 $localSettingsPath = Join-Path $projectRoot ".local\tray-settings.json"
 if (Test-Path -LiteralPath $localSettingsPath -PathType Leaf) {
@@ -31,7 +41,9 @@ if ([string]::IsNullOrWhiteSpace($tunnelId) -and (Test-Path -LiteralPath $tunnel
         if ($line -match '^\s*tunnel_id\s*:\s*"?([^"#\s]+)') { $tunnelId = $matches[1]; break }
     }
 }
+}
 $jobsDir = Join-Path $dataDir "jobs"
+$explorer=if($installed){'C:\Windows\explorer.exe'}else{'explorer.exe'}
 
 if ([string]::IsNullOrWhiteSpace($Action)) { throw "Specify -Action or -SelfTest." }
 
@@ -53,11 +65,11 @@ try {
         "open_tunnel_ui" { Start-Process $tunnelUiUrl | Out-Null }
         "open_runtime_logs" {
             New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
-            Start-Process explorer.exe -ArgumentList "`"$runtimeDir`"" | Out-Null
+            Start-Process $explorer -ArgumentList "`"$runtimeDir`"" | Out-Null
         }
         "open_jobs_folder" {
             New-Item -ItemType Directory -Force -Path $jobsDir | Out-Null
-            Start-Process explorer.exe -ArgumentList "`"$jobsDir`"" | Out-Null
+            Start-Process $explorer -ArgumentList "`"$jobsDir`"" | Out-Null
         }
     }
     [pscustomobject]@{ ok = $true; action = $Action; errorCode = $null; message = "Component-owned UI action completed." } | ConvertTo-Json -Compress

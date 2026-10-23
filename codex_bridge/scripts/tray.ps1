@@ -3,7 +3,7 @@ param(
   [string]$HostName = "127.0.0.1",
   [int]$Port = 18828,
   [string]$ProjectsFile,
-  [string]$DataDir = "C:\CodexBridge",
+  [string]$DataDir,
   [string]$Token = $env:CODEX_BRIDGE_HTTP_TOKEN,
   [string]$CodexCommand = "",
   [string]$CodexArgs = "",
@@ -23,6 +23,10 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 $TrayDisplayName = $(if($DiagnosticOnly){"Codex Bridge MCP Diagnostics"}else{"Codex Bridge MCP"})
+$installedModule=Import-Module (Join-Path $PSScriptRoot 'codex-bridge-runtime.psm1') -PassThru
+if (& $installedModule {Test-CbInstalledLayout}) {
+  throw 'INSTALLED_USE_SINGLE_CONTROL_CENTER: Use the installed Control Center owner; the legacy diagnostic tray does not own installed state.'
+}
 
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
   $ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
@@ -70,6 +74,10 @@ if (Test-Path -LiteralPath $localSettingsPath) {
   if (-not [string]::IsNullOrWhiteSpace([string]$settingsValue)) { $settingsTunnelId = [string]$settingsValue }
 }
 
+if ([string]::IsNullOrWhiteSpace($DataDir)) {
+  $DataDir = Join-Path $ProjectRoot '.local\runtime'
+  if (-not $SelfTest -and (Test-Path -LiteralPath 'C:\CodexBridge') -and -not (Test-Path -LiteralPath $DataDir)) { throw 'RUNTIME_MIGRATION_REQUIRED' }
+}
 $HttpEntry = Join-Path $ProjectRoot "dist\src\http-main.js"
 $McpUrl = "http://${HostName}:${Port}/mcp"
 $HealthUrl = "http://${HostName}:${Port}/health"

@@ -34,7 +34,7 @@ try {
     readPages("permissionProfile/list", { cwd: projectPath }),
     readPages("model/list", { includeHidden: false }),
   ]);
-  for (const id of ["codex-bridge-read-only", "codex-bridge-workspace"]) {
+  for (const id of ["codex-bridge-read-only", ":danger-full-access"]) {
     if (!profiles.some((profile) => profile.id === id && profile.allowed)) throw new Error(`Missing allowed profile: ${id}`);
   }
   const reader = new ControlPlaneReader(client);
@@ -48,7 +48,7 @@ try {
   }
   console.log(JSON.stringify({ ok: true, verification: "isolated-read-only-capabilities", realTurnStarted: false,
     controlPlane,
-    profiles: profiles.filter((profile) => profile.id.startsWith("codex-bridge-")).map(({ id, allowed }) => ({ id, allowed })),
+    profiles: profiles.filter((profile) => profile.id.startsWith("codex-bridge-") || profile.id === ":danger-full-access").map(({ id, allowed }) => ({ id, allowed })),
     models: models.map((model) => ({ id: model.id, isDefault: model.isDefault, efforts: model.supportedReasoningEfforts?.map((option) => option.reasoningEffort) })),
   }, null, 2));
 } catch (error) {

@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Codex Bridge 重載</title>
+<style>
+  :root{color-scheme:dark;font:15px/1.6 "Segoe UI","Microsoft JhengHei",sans-serif;color:#e0e6ee;background:#121923}
+  *{box-sizing:border-box}body{margin:0;padding:20px;max-width:760px}h1{font-size:21px;margin:0 0 8px}p{color:#b7c3d2;margin:8px 0 18px}
+  button,input{font:inherit}button{padding:8px 13px;background:#233950;border:1px solid #527298;border-radius:5px;color:inherit;cursor:pointer}
+  button:disabled{opacity:.45;cursor:default}button:focus-visible,input:focus-visible{outline:2px solid #93c2f2;outline-offset:3px}
+  .actions{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0}dl{display:grid;grid-template-columns:minmax(85px,1fr) minmax(0,3fr);gap:8px;margin:18px 0}
+  dt{color:#b7c3d2}dd{margin:0;overflow-wrap:anywhere;font-family:Consolas,monospace}#notice{white-space:pre-wrap;overflow-wrap:anywhere;border-left:3px solid #ac8954;padding-left:12px}
+  #receipt{padding-top:12px;border-top:1px solid #344152}label{display:block;margin:16px 0}input[type=text]{max-width:100%;width:100%;padding:8px;background:#182330;border:1px solid #527298;color:inherit}
+  pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}summary{cursor:pointer}small{color:#b7c3d2} [hidden]{display:none!important}
+  @media(max-width:400px){body{padding:12px}dl{grid-template-columns:1fr}dd{margin-bottom:8px}}
+</style></head><body>
+<h1>重載 Codex Bridge</h1>
+<p>由獨立的 MCP Control Center 等待所有工作結束後執行。重載會短暫中斷連線；重新連線後可查同一筆收據。</p>
+<div id="notice" role="status" aria-live="polite">正在檢查獨立 owner…</div>
+<p id="host-readiness" role="status">HOST_NOT_VERIFIED · 尚無真實 host 驗證證據。</p>
+<pre id="host-diagnostics"></pre>
+<button id="check-host">檢查 host 條件（不建立憑證）</button>
+<div class="actions"><button id="preview">檢查重載內容</button><button id="request" disabled>建立待確認請求</button></div>
+<dl id="details"></dl>
+<section id="confirmation" hidden><label><input type="checkbox" id="exact"> 我確認以上這一筆請求，等待全部 jobs idle 後重載。</label>
+<button id="approve" disabled>用 passkey 確認這一筆</button>
+<p><small>需要此 MCP host 明確允許 WebAuthn，以及已註冊的 RP、origin 與 topOrigin。瀏覽器有 API 不代表 host 已支援。</small></p></section>
+<section id="receipt"><label for="receipt-id">收據 ID（可在重新連線後貼上）</label><input id="receipt-id" type="text" autocomplete="off" spellcheck="false">
+<div class="actions"><button id="query">查詢收據</button><button id="copy">複製收據 ID</button><button id="new-request" disabled>開始新的一筆</button></div></section>
+<details><summary>一次性 passkey 登錄資料（僅產生公開金鑰）</summary>
+<p>本機 operator 核對實際 host／RP 後，將公開金鑰納入受保護的 Control Center policy。此步不核准任何重載，也不安裝服務。</p>
+<button id="enroll" disabled>建立此 host 的 passkey（等待 host 驗證）</button><pre id="enrollment"></pre></details>
+<script>
+(() => {
+  'use strict';
+  const $=id=>document.getElementById(id), pending=new Map();
+  let sequence=0, hostOrigin='', preview=null, receipt=null, busy=false, retry=null;
+  const storeKey='codex-self-reload-r1';
+  try { retry=JSON.parse(localStorage.getItem(storeKey)||'null'); if(retry?.requestId) $('receipt-id').value=retry.requestId; } catch {}
+  function save(){try{localStorage.setItem(storeKey,JSON.stringify(retry));}catch{}}
+  function notice(text){$('notice').textContent=text;}
+  function rpc(method,params){return new Promise((resolve,reject)=>{const id=++sequence;
+    const timer=setTimeout(()=>{pending.delete(id);reject(new Error('連線中斷或逾時；請查詢收據，不要建立新的重載請求。'));},15000);
+    pending.set(id,{resolve,reject,timer});window.parent.postMessage({jsonrpc:'2.0',id,method,params},hostOrigin||'*');});}
+  window.addEventListener('message',event=>{
+    if(event.source!==window.parent || (hostOrigin && event.origin!==hostOrigin))return;
+    const message=event.data;if(!message || message.jsonrpc!=='2.0')return;
+    if(pending.has(message.id)){if(!hostOrigin)hostOrigin=event.origin;const p=pending.get(message.id);pending.delete(message.id);clearTimeout(p.timer);
+      if(message.error)p.reject(new Error('MCP host 拒絕此操作；請更新工具 schema 或重新連線。'));else p.resolve(message.result);}
+    if(message.method==='ui/notifications/tool-result' && message.params?.structuredContent?.requestId) showReceipt(message.params.structuredContent);
+  });
+  const ready=rpc('ui/initialize',{appInfo:{name:'codex-self-reload',version:'1.0.0'},appCapabilities:{},protocolVersion:'2026-01-26'})
+    .then(()=>window.parent.postMessage({jsonrpc:'2.0',method:'ui/notifications/initialized',params:{}},hostOrigin));
+  async function call(op,args){await ready;const r=await rpc('tools/call',{name:'codex_self_reload_'+op,arguments:args});
+    if(r.isError)throw new Error(r.structuredContent?.error?.code||'操作未完成；請查收據。');return r.structuredContent;}
+  function showDetails(value){const fields=[['動作','codex_bridge / reload_runtime'],['舊 PID',value.oldPid],['目前 Build',value.oldBuildId],['目標 Build',value.targetBuildId],['Digest',value.digest||value.previewDigest],['到期',value.expiresAt],['狀態',value.state]];
+    $('details').replaceChildren();for(const [label,text] of fields){if(text===undefined)continue;const dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=label;dd.textContent=String(text);$('details').append(dt,dd);}}
+  function showReceipt(value){receipt=value;showDetails(value);$('receipt-id').value=value.requestId;
+    retry={...(retry||{}),requestId:value.requestId};save();$('exact').checked=false;$('approve').disabled=true;
+    $('confirmation').hidden=value.state!=='accepted';$('new-request').disabled=!canStartNew(value);
+    notice(value.state+' · '+value.code+(value.state==='unknown'?'\n結果未知，禁止重送；需本機 operator 核對。':''));}
+  function canStartNew(value){return value?.state==='completed' || (value?.state==='failed' && Array.isArray(value.history) && !value.history.some(step=>['dispatching','running','unknown'].includes(step.state)));}
+  function inspectHost(){
+    const policy=document.permissionsPolicy||document.featurePolicy;
+    const allows=kind=>{try{return typeof policy?.allowsFeature==='function' && policy.allowsFeature('publickey-credentials-'+kind)===true;}catch{return false;}};
+    const diagnostics={status:'HOST_NOT_VERIFIED',secureContext:window.isSecureContext===true,
+      getApi:typeof navigator.credentials?.get==='function' && !!window.PublicKeyCredential,
+      createApi:typeof navigator.credentials?.create==='function' && !!window.PublicKeyCredential,
+      permissionsPolicyGet:allows('get'),permissionsPolicyCreate:allows('create'),
+      observedOrigin:location.origin,observedParentOrigin:hostOrigin||null,
+      rpBinding:'UNVERIFIED',topOriginBinding:'UNVERIFIED',realCeremony:'UNVERIFIED'};
+    // Capability observations and ui/initialize metadata are never an operator grant.
+    // This source candidate has no trusted host-evidence channel; keep mutations closed.
+    $('host-diagnostics').textContent=JSON.stringify(diagnostics,null,2);
+    $('host-readiness').textContent='HOST_NOT_VERIFIED · 需人工核對 RP／origin／topOrigin 與真實 ceremony；API 與 Permissions Policy 允許不代表已驗證。';
+    $('request').disabled=true;$('approve').disabled=true;$('enroll').disabled=true;
+    return diagnostics;
+  }
+  function assertWebAuthn(){inspectHost();throw new Error('HOST_NOT_VERIFIED：尚無可信的真實 host 驗證證據；未建立請求、憑證或核准。');}
+  $('check-host').onclick=()=>inspectHost();
+  function decode(value){return Uint8Array.from(atob(value.replace(/-/g,'+').replace(/_/g,'/')),c=>c.charCodeAt(0));}
+  function encode(value){return btoa(String.fromCharCode(...new Uint8Array(value))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
+  async function perform(action){if(busy)return;busy=true;try{await action();}catch(error){notice(error.message==='NotAllowedError'?'BLOCKED：host 或使用者未允許 passkey；未核准重載。':String(error.message));}finally{busy=false;}}
+  $('preview').onclick=()=>perform(async()=>{const status=await call('status',{});if(status.deployment!=='DEPLOYED'){notice('NOT_DEPLOYED · '+status.error?.code);return;}
+    preview=await call('preview',{});showDetails(preview);inspectHost();notice('HOST_NOT_VERIFIED · 已取得唯讀 preview，尚未允許建立或核准請求。');});
+  $('request').onclick=()=>perform(async()=>{if(!preview)return;
+    if(retry?.requestId){showReceipt(await call('receipt',{requestId:retry.requestId}));return;}
+    assertWebAuthn();
+    if(!retry?.idempotencyKey){retry={idempotencyKey:crypto.randomUUID(),previewDigest:preview.previewDigest,ttlSeconds:900};save();}
+    showReceipt(await call('request',{idempotencyKey:retry.idempotencyKey,previewDigest:retry.previewDigest,ttlSeconds:retry.ttlSeconds}));});
+  $('exact').onchange=()=>{inspectHost();};
+  $('approve').onclick=()=>perform(async()=>{if(!$('exact').checked||receipt?.state!=='accepted')return;assertWebAuthn('get');
+    const exact=receipt;const challenge=await call('challenge',{requestId:exact.requestId,digest:exact.digest});
+    if(challenge.receipt.digest!==exact.digest || challenge.receipt.expiresAt!==exact.expiresAt || Date.parse(exact.expiresAt)<=Date.now())throw new Error('請求已改變或過期；請重新預覽。');
+    const key=challenge.publicKey;const credential=await navigator.credentials.get({publicKey:{challenge:decode(key.challenge),rpId:key.rpId,
+      allowCredentials:[{type:'public-key',id:decode(key.credentialId)}],userVerification:'required',timeout:60000}});
+    if(!credential)throw new Error('未完成 passkey 確認。');
+    showReceipt(await call('approve',{requestId:exact.requestId,digest:exact.digest,assertion:{credentialId:encode(credential.rawId),
+      clientDataJSON:encode(credential.response.clientDataJSON),authenticatorData:encode(credential.response.authenticatorData),signature:encode(credential.response.signature)}}));});
+  $('query').onclick=()=>perform(async()=>showReceipt(await call('receipt',{requestId:$('receipt-id').value.trim()})));
+  $('new-request').onclick=()=>perform(async()=>{if(!receipt?.requestId)return;
+    const verified=await call('receipt',{requestId:receipt.requestId});showReceipt(verified);
+    if(!canStartNew(verified))throw new Error('此筆結果尚未確定；保留原收據，禁止重送。');
+    retry=null;receipt=null;preview=null;save();$('receipt-id').value='';$('details').replaceChildren();$('request').disabled=true;
+    $('new-request').disabled=true;$('confirmation').hidden=true;notice('可以開始新的一筆；請重新檢查 PID 與 Build ID。');});
+  $('copy').onclick=()=>perform(async()=>{await navigator.clipboard.writeText($('receipt-id').value);notice('已複製收據 ID。');});
+  $('enroll').onclick=()=>perform(async()=>{await ready;assertWebAuthn('create');
+    const credential=await navigator.credentials.create({publicKey:{rp:{id:location.hostname,name:'Codex Bridge self reload'},
+      user:{id:crypto.getRandomValues(new Uint8Array(32)),name:'self-reload-operator',displayName:'Self reload operator'},
+      challenge:crypto.getRandomValues(new Uint8Array(32)),pubKeyCredParams:[{type:'public-key',alg:-7}],
+      authenticatorSelection:{userVerification:'required'},attestation:'none',timeout:60000}});
+    if(!credential || credential.response.getPublicKeyAlgorithm()!==-7)throw new Error('需要 ES256 passkey。');
+    const key=await crypto.subtle.importKey('spki',credential.response.getPublicKey(),{name:'ECDSA',namedCurve:'P-256'},true,['verify']);
+    const jwk=await crypto.subtle.exportKey('jwk',key);
+    $('enrollment').textContent=JSON.stringify({contract:'remote-self-reload-r1',bridgeSid:'OPERATOR_MUST_SET_BRIDGE_SID',rpId:location.hostname,
+      origin:location.origin,topOrigin:hostOrigin,credentialId:encode(credential.rawId),x:jwk.x,y:jwk.y},null,2);
+    notice('公開登錄資料已產生；尚未部署，也未核准重載。operator 必須核對可信裝置及 host origin。');});
+  inspectHost();
+  ready.then(()=>{inspectHost();return call('status',{});}).then(status=>notice(status.deployment==='DEPLOYED'?'HOST_NOT_VERIFIED · 獨立 owner 已連線；僅可查詢。':'NOT_DEPLOYED · '+status.error?.code)).catch(error=>notice(error.message));
+})();
+</script></body></html>

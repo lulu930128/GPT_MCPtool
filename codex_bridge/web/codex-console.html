@@ -1901,7 +1901,15 @@
     <dialog class="operator-drawer" id="operator-drawer" aria-labelledby="operator-title">
       <div class="operator-head"><div><strong id="operator-title">Codex 狀態</strong><small id="operator-context"></small></div><div><button id="refresh-operator" type="button">重新讀取</button><button id="close-operator" type="button" aria-label="關閉 Codex 狀態">關閉</button></div></div>
       <p class="operator-note">僅顯示本次讀取的摘要；各資料來源可能個別無法使用。</p>
-      <div id="operator-content" class="operator-content" aria-live="polite"></div>
+      <div class="operator-content">
+        <section class="status-card" aria-label="PowerShell Request 收據查詢">
+          <label for="powershell-request-id">PowerShell Request ID（DIRECT 不需選取工作）</label>
+          <input id="powershell-request-id" type="text" maxlength="36" autocomplete="off" spellcheck="false" placeholder="Request UUID" style="width:100%;box-sizing:border-box">
+          <button id="read-powershell-receipt" type="button">唯讀查詢收據</button>
+          <div id="powershell-receipt-result" aria-live="polite">審閱意見與 OS 執行收據分開顯示；未知結果不會重送。</div>
+        </section>
+        <div id="operator-content" aria-live="polite"></div>
+      </div>
     </dialog>
     <section class="artifact" id="artifact" hidden>
       <div class="artifact-dialog" role="dialog" aria-modal="true" aria-labelledby="artifact-title">
@@ -2418,6 +2426,7 @@
           if (opener) { opener.setAttribute("aria-expanded", "false"); focusWithoutScroll(opener); }
         });
         $("#refresh-operator").addEventListener("click", () => loadOperatorStatus(true));
+        $("#read-powershell-receipt").addEventListener("click", () => loadPowerShellReceipt());
         $("#classification").addEventListener("change", () => {
           state.draftArtifacts.forEach((artifact) => {
             artifact.bundleId = "";
@@ -2851,18 +2860,25 @@
         function loadOperatorStatus(force) {
           if (!$("#operator-drawer").open) return Promise.resolve();
           const projectId = state.selectedProjectId;
+          const job = state.selectedJob;
+          const jobId = job && job.id || null;
           const previous = state.operatorRead;
-          if (previous && previous.projectId === projectId) {
+          if (previous && previous.projectId === projectId && previous.jobId === jobId) {
             if (previous.promise) { renderOperatorStatus(); return previous.promise; }
             if (Date.now() - previous.startedAt < (force ? 5000 : 30000)) { renderOperatorStatus(); return Promise.resolve(); }
           }
-          const read = { projectId, projectName: currentProject() && currentProject().name || "尚未選擇專案", startedAt: Date.now(), results: {}, promise: null };
+          const read = { projectId, jobId, projectName: currentProject() && currentProject().name || "尚未選擇專案", startedAt: Date.now(), results: {}, promise: null };
           state.operatorRead = read;
           const configured = isOperableProjectId(projectId);
-          const tasks = [["usage", "codex_usage_status", {}], ["runtime", "codex_runtime_status", { projectId }], ["inventory", "codex_inventory", { projectId, kind: "all" }]];
+          const tasks = [["usage", "codex_usage_status", {}], ["runtime", "codex_runtime_status", { projectId }], ["inventory", "codex_inventory", { projectId, kind: "all" }], ["powershell", "codex_powershell_status", {}]];
+          const previewEligible = configured && job && job.projectId === projectId && job.source !== "local" && !job.readOnly &&
+            job.directActionHistoryEligible === true && ["personal", "public"].includes(job.dataClassification) &&
+            typeof jobId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(jobId);
+          if (previewEligible) tasks.push(["powershellJob", "codex_powershell_job_preview", { jobId }]);
+          else read.results.powershellJob = { unavailable: "PREVIEW_NOT_ELIGIBLE" };
           read.promise = Promise.allSettled(tasks.map(async ([key, tool, args]) => {
-            if (key !== "usage" && !configured) { read.results[key] = { unavailable: "PROJECT_NOT_CONFIGURED" }; return; }
-            try { read.results[key] = await callTool(tool, args, { update: false }); }
+            if (["runtime", "inventory"].includes(key) && !configured) { read.results[key] = { unavailable: "PROJECT_NOT_CONFIGURED" }; return; }
+            try { read.results[key] = await callTool(tool, args, { update: false }) || { unavailable: "INVALID_RESPONSE" }; }
             catch { read.results[key] = { unavailable: "BACKEND_UNAVAILABLE" }; }
           })).then(() => {
             read.promise = null;
@@ -2870,6 +2886,59 @@
           });
           renderOperatorStatus();
           return read.promise;
+        }
+
+        function loadPowerShellReceipt() {
+          const requestId = $("#powershell-request-id").value.trim();
+          const output = $("#powershell-receipt-result");
+          if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId)) {
+            output.textContent = "請輸入完整 Request UUID；尚未查詢。";
+            return Promise.resolve();
+          }
+          if (state.powerShellReceiptRead && state.powerShellReceiptRead.promise) return state.powerShellReceiptRead.promise;
+          const read = { requestId, promise: null };
+          state.powerShellReceiptRead = read;
+          $("#read-powershell-receipt").disabled = true;
+          output.textContent = "讀取中 · UNVERIFIED";
+          read.promise = callTool("codex_powershell_receipt", { requestId }, { update: false }).then((receipt) => {
+            if (state.powerShellReceiptRead === read) {
+              if ($("#powershell-request-id").value.trim() === requestId) output.innerHTML = renderPowerShellReceipt(receipt, requestId);
+              else output.textContent = "Request ID 已變更；請重新查詢。";
+            }
+          }).catch(() => {
+            if (state.powerShellReceiptRead === read) output.textContent = "收據無法確認 · UNVERIFIED；不會自動重送或執行。";
+          }).finally(() => {
+            if (state.powerShellReceiptRead === read) { read.promise = null; $("#read-powershell-receipt").disabled = false; }
+          });
+          return read.promise;
+        }
+
+        function renderPowerShellReceipt(receipt, requestId) {
+          const invalid = '<p class="status-unavailable">收據無法確認 · UNVERIFIED；不會自動重送或執行。</p>';
+          if (!receipt || receipt.availability !== "AVAILABLE" || receipt.requestId !== requestId ||
+            !["DIRECT", "CODEX_DERIVED"].includes(receipt.origin) || receipt.evidence !== "SAVED_JOURNAL_ONLY" ||
+            receipt.hostAcceptance !== "UNVERIFIED" || receipt.productionEnabled !== false ||
+            receipt.automaticResume !== false || receipt.retryAllowed !== false ||
+            !receipt.correlation || receipt.correlation.request !== "MATCHED_CANONICAL_REQUEST") return invalid;
+          const opinion = receipt.reviewOpinion, execution = receipt.osExecutionReceipt;
+          const review = receipt.kind === "REVIEW_ONLY_NONEXECUTABLE" && opinion && execution === null &&
+            opinion.evidence === "REVIEW_ONLY_NONEXECUTABLE" && ["PENDING", "ACCEPTED", "DECLINED", "EXPIRED"].includes(opinion.effectiveState);
+          const production = receipt.kind === "PRODUCTION" && opinion === null &&
+            ["PROPOSED", "APPROVED", "CONSUMED", "DENIED", "EXPIRED", "SUCCEEDED", "FAILED", "UNKNOWN"].includes(receipt.state);
+          if (!review && !production) return invalid;
+          if (execution !== null && (!production || execution.requestId !== requestId || execution.receiptId !== receipt.receiptId ||
+            execution.verification !== "UNVERIFIED" || !["SUCCEEDED", "FAILED", "UNKNOWN"].includes(execution.outcome) ||
+            execution.outcome !== receipt.state || !(execution.exitCode === null || Number.isSafeInteger(execution.exitCode)) ||
+            execution.outcome === "SUCCEEDED" && execution.exitCode !== 0 ||
+            execution.outcome === "FAILED" && (execution.exitCode === null || execution.exitCode === 0))) return invalid;
+          return statusRows([
+            ["Request", requestId], ["來源", receipt.origin],
+            ["審閱意見（不可執行）", review ? opinion.effectiveState + " · NONEXECUTABLE" : "無審閱意見"],
+            ["Production 保存狀態", production ? receipt.state + " · SAVED_JOURNAL_ONLY" : "無 Production Grant"],
+            ["OS 執行收據", execution ? execution.outcome + " · Exit " + String(execution.exitCode) + " · UNVERIFIED" : "未有 OS 執行收據 · UNVERIFIED"],
+            ["失敗來源關聯", receipt.correlation.completion === "MATCHED_SAVED_COMPLETION" ? "已對應保存的失敗 item" : "UNVERIFIED"],
+            ["權限失敗／Host／OS 效果", "UNVERIFIED；非零 Exit 或審閱接受不證明 OS 授權或成功"],
+          ]);
         }
 
         function operatorPart(group, key) {
@@ -2921,7 +2990,52 @@
           const { usage, runtime, inventory } = read.results;
           const card = statusCard;
           const part = operatorPart;
-          const html = '<h2>帳戶</h2>' + card("額度", part(usage, "rateLimits"), usageRateLimits) +
+          // Fixed, non-secret projection: never render raw errors, scripts or arbitrary gate strings.
+          const ps = read.results.powershell;
+          const preview = read.results.powershellJob;
+          const unavailable = (value) => !value ? "讀取中 · UNVERIFIED" : value.unavailable === "PREVIEW_NOT_ELIGIBLE"
+            ? "未讀取：需選取 allowlist 內、personal/public 且符合歷史資格的 Bridge 工作 · UNVERIFIED"
+            : "工具不可用或回傳不符契約 · UNVERIFIED";
+          const disabled = ps && !ps.unavailable && ps.enabled === false && (ps.deployment === "NOT_DEPLOYED" || ps.deployment === "EXECUTION_DISABLED") &&
+            ps.protectedHost === "UNVERIFIED" && ps.NORMAL === "BLOCKED_HOST_ACCEPTANCE" && ps.ADMIN === "BLOCKED_AWAITING_LOCAL_UAC" &&
+            (ps.executionPolicy === undefined || ps.executionPolicy && ps.executionPolicy.NORMAL === "OFF" && ps.executionPolicy.ADMIN === "OFF");
+          const gates = disabled && ps.readiness && ps.readiness.evidence === "SOURCE_DECLARATION" ? ps.readiness : {};
+          const localNormal = ps && !ps.unavailable && ps.enabled === true && ps.deployment === "LOCAL_CONFIRMATION_REQUIRED" &&
+            ps.protectedHost === "UNVERIFIED" && ps.NORMAL === "LOCAL_HOST_CONFIRMATION_REQUIRED" && ps.ADMIN === "BLOCKED_AWAITING_LOCAL_UAC" &&
+            ps.executionPolicy && ps.executionPolicy.NORMAL === "PER_REQUEST_LOCAL_CONFIRMATION" && ps.executionPolicy.ADMIN === "OFF" &&
+            ps.normalExecution && ps.normalExecution.configured === true && ps.normalExecution.currentHostVerified === false &&
+            ps.normalExecution.consent === "WINDOWS_LOCAL_HOST_EACH_REQUEST";
+          const psRows = statusRows([
+            ["狀態來源 · codex_powershell_status", localNormal ? "已載入本機確認入口；目前 Host 身分仍須每次 Native IPC 驗證" : disabled ? "Source 固定宣告；非 Live OS／Host attestation" : unavailable(ps)],
+            ["App-only 審核準備", gates.appOnlyReview === "NATIVE_CODEX_ONLY" ? "僅既有 Codex 核准介面有 App-only 隔離；PowerShell 審核未提供" : "UNVERIFIED"],
+            ["密碼秘密通道", "UNVERIFIED；App-only 可見性不證明密碼端到端安全"],
+            ["Windows Host", gates.windowsHost === "NOT_DEPLOYED" ? "NOT_DEPLOYED（Source 宣告）；OS／Host 驗證 UNVERIFIED" : "UNVERIFIED"],
+          ]);
+          const diagnostics = preview && preview.commandFailureDiagnostics;
+          const saved = preview && !preview.unavailable && preview.availability === "AVAILABLE" && preview.jobId === read.jobId &&
+            preview.executes === false && preview.createsRequest === false && preview.createsGrant === false && preview.requiresPassword === false &&
+            preview.executionPolicy && preview.executionPolicy.NORMAL === "OFF" && preview.executionPolicy.ADMIN === "OFF" &&
+            diagnostics && diagnostics.cause === "UNKNOWN" && diagnostics.permissionAttribution === "UNVERIFIED";
+          const observed = saved && diagnostics.evidenceStatus === "OBSERVED_NONZERO" && diagnostics.scope === "bounded_saved_conversation" &&
+            Array.isArray(diagnostics.failures) && diagnostics.failures.length > 0 && diagnostics.failures.length <= 50 &&
+            diagnostics.failures.every((failure) => failure && failure.jobId === read.jobId && failure.observedStatus === "completed" &&
+              failure.evidenceStatus === "OBSERVED_NONZERO" && Number.isSafeInteger(failure.exitCode) && failure.exitCode !== 0);
+          const previewRows = statusRows([
+            ["工作來源 · codex_powershell_job_preview", saved ? "已保存、有限範圍的工作證據；非即時 OS 診斷" : unavailable(preview)],
+            ...(saved ? [["本次讀取的工作", read.jobId]] : []),
+            ["失敗證據", observed ? "OBSERVED_NONZERO · " + diagnostics.failures.length + " 筆；Exit " + diagnostics.failures.map((failure) => failure.exitCode).join(", ") : "UNVERIFIED"],
+            ["原因／權限歸因", "UNKNOWN／UNVERIFIED；非零 Exit 不等於已證實權限拒絕"],
+            ...(observed && diagnostics.truncated ? [["證據範圍", "已縮限，非完整清單"]] : []),
+          ]);
+          const executionDisabled = disabled && ps.deployment === "EXECUTION_DISABLED";
+          const psHeading = localNormal ? "NORMAL 每筆本機確認 · ADMIN OFF" : executionDisabled ? "EXECUTION_DISABLED · NORMAL/ADMIN OFF" : "NOT_DEPLOYED · NORMAL/ADMIN OFF";
+          const psDescription = localNormal ? "請由對話送交既有 Request；Windows Host 會顯示完整指令，只有本人逐筆確認後才執行。此面板只讀，不代表當前 Host 可用或已有授權。" : executionDisabled
+            ? "本區僅為停用執行功能的唯讀準備度預覽，不可執行；不收集密碼、不建立請求或授權。"
+            : "本區僅為未部署功能的唯讀準備度預覽，不可執行；不收集密碼、不建立請求或授權。";
+          const html = '<h2>PowerShell 審核／Windows Host 準備度</h2>' +
+            '<section class="status-card"><h3>' + psHeading + '</h3><p class="status-unavailable">' + psDescription + '</p>' + psRows + '</section>' +
+            '<section class="status-card"><h3>工作失敗唯讀預覽</h3>' + previewRows + '</section>' +
+            '<h2>帳戶</h2>' + card("額度", part(usage, "rateLimits"), usageRateLimits) +
             card("使用摘要", part(usage, "accountUsage"), (data) => statusRows([["累計 tokens", metric(data.summary.lifetimeTokens)], ["單日最高 tokens", metric(data.summary.peakDailyTokens)], ["連續使用天數", metric(data.summary.currentStreakDays)]])) +
             '<h2>Runtime</h2>' + card("App Server", part(runtime, "server"), (data) => statusRows([["常駐記憶體", data.process.residentMemoryBytes == null ? "未知" : formatBytes(data.process.residentMemoryBytes)], ["診斷計量", metric(data.gauges.length)]]) + statusDetails("診斷摘要", data.gauges.map((gauge) => [gauge.name, String(gauge.value)]))) +
             card("Windows sandbox", part(runtime, "windowsSandbox"), (data) => statusRows([["Readiness", data.status]])) +

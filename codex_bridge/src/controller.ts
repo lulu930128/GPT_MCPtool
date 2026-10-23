@@ -651,6 +651,11 @@ export class CodexBridgeController {
           approvalPolicy: "on-request", approvalsReviewer: approvalReviewer, permissions, excludeTurns: true,
         });
         if (nestedId(resumed, "thread") !== input.expectedThreadId) throw new DirectOperationError("DIRECT_THREAD_CHANGED");
+        if (kind === "review") {
+          // A live thread/resume rejoins the existing session without applying its
+          // permissions override. review/start has no per-turn permissions field.
+          await this.applyThreadPermissions(input.expectedThreadId, permissions, approvalReviewer);
+        }
         await this.store.prepareTurn(job.id, {
           executionMode, approvalReviewer, dataClassification: job.currentDataClassification ?? job.workPackage.dataClassification,
           model: job.model, effort: job.effort, controlAction: { kind, priorTurnId: input.expectedTurnId },
@@ -926,6 +931,7 @@ export class CodexBridgeController {
         runtimeWorkspaceRoots: [job.project.path],
         approvalPolicy: "on-request",
         approvalsReviewer: job.workPackage.approvalReviewer ?? "user",
+        permissions: permissionProfile,
         ...(job.workPackage.model ? { model: job.workPackage.model } : {}),
         ...(job.workPackage.effort ? { effort: job.workPackage.effort } : {}),
         input: [
@@ -974,6 +980,7 @@ export class CodexBridgeController {
       if (!threadId) {
         throw new Error("Codex App Server did not return a resumed thread id.");
       }
+      await this.applyThreadPermissions(threadId, permissionProfile, input.approvalReviewer);
       this.threadSyncStates.delete(threadId);
       this.jobsByThread.set(threadId, jobId);
       const turnResponse = await this.appServer.request<Record<string, unknown>>("turn/start", {
@@ -983,6 +990,8 @@ export class CodexBridgeController {
         runtimeWorkspaceRoots: [job.project.path],
         approvalPolicy: "on-request",
         approvalsReviewer: input.approvalReviewer,
+        // thread/resume may only rejoin a loaded session; bind the actual turn.
+        permissions: permissionProfile,
         ...(input.model ? { model: input.model } : {}),
         ...(input.effort ? { effort: input.effort } : {}),
         input: [{ type: "text", text: buildCodexUserInput({
@@ -1053,8 +1062,52 @@ export class CodexBridgeController {
     }
   }
 
+  private async applyThreadPermissions(threadId: string, permissions: string, approvalReviewer: "user" | "auto_review"): Promise<void> {
+    // Apply before the next turn loads environment instructions, then confirm the
+    // active policy. settings/update acknowledges enqueueing, not application.
+    const sandboxType = permissions === ":danger-full-access" ? "dangerFullAccess" : "readOnly";
+    const update = async (params: Record<string, unknown>, expectedProfile: string | null) => {
+      let appliedHandler!: (message: JsonRpcNotification) => void;
+      let timeout!: ReturnType<typeof setTimeout>;
+      const applied = new Promise<void>((resolve, reject) => {
+        appliedHandler = (message) => {
+          if (message.method !== "thread/settings/updated" || message.params?.threadId !== threadId) return;
+          const settings = message.params.threadSettings;
+          if (isObject(settings) && (expectedProfile === null ? settings.activePermissionProfile === null
+            : isObject(settings.activePermissionProfile) && settings.activePermissionProfile.id === expectedProfile)
+            && isObject(settings.sandboxPolicy) && settings.sandboxPolicy.type === sandboxType
+            && settings.approvalPolicy === "on-request" && settings.approvalsReviewer === approvalReviewer) resolve();
+        };
+        this.appServer.on("notification", appliedHandler);
+        timeout = setTimeout(() => reject(new DirectOperationError("PERMISSION_PROFILE_UNVERIFIED")), 5_000);
+      });
+      try {
+        await Promise.all([applied, this.appServer.request("thread/settings/update", {
+          threadId, ...params, approvalPolicy: "on-request", approvalsReviewer: approvalReviewer,
+        })]);
+      } finally {
+        clearTimeout(timeout);
+        this.appServer.off("notification", appliedHandler);
+      }
+    };
+    if (permissions === ":danger-full-access") {
+      // Native 0.154 can retain the managed filesystem policy when switching from
+      // read-only to the built-in Full Access profile. Apply the native Full Access
+      // policy first, then bind its named profile; never send both in one request.
+      await update({ sandboxPolicy: { type: "dangerFullAccess" } }, null);
+    }
+    await update({ permissions }, permissions);
+    const verified = await this.appServer.request<Record<string, unknown>>("thread/resume", { threadId, excludeTurns: true });
+    if (nestedId(verified, "thread") !== threadId
+      || !isObject(verified.activePermissionProfile) || verified.activePermissionProfile.id !== permissions
+      || !isObject(verified.sandbox) || verified.sandbox.type !== sandboxType
+      || verified.approvalPolicy !== "on-request" || verified.approvalsReviewer !== approvalReviewer) {
+      throw new DirectOperationError("PERMISSION_PROFILE_UNVERIFIED");
+    }
+  }
+
   private async selectPermissionProfile(job: JobRecord, executionMode = job.currentExecutionMode ?? job.workPackage.executionMode): Promise<string> {
-    const requiredId = executionMode === "plan" ? "codex-bridge-read-only" : "codex-bridge-workspace";
+    const requiredId = executionMode === "plan" ? "codex-bridge-read-only" : ":danger-full-access";
     const response = await this.appServer.request<Record<string, unknown>>("permissionProfile/list", {
       cwd: job.project.path,
       limit: 100,
@@ -1160,6 +1213,19 @@ export class CodexBridgeController {
 
     this.notificationEpochs.set(jobId, (this.notificationEpochs.get(jobId) ?? 0) + 1);
     await this.withJobLock(jobId, async () => {
+      // Routing maps only identify a candidate. Revalidate against the current store
+      // under the lock before creating approval state or projecting into a turn.
+      const job = this.store.get(jobId);
+      const turnId = stringValue(params.turnId) ?? nestedId(params, "turn");
+      const threadIds = [params.threadId, params.thread === undefined ? undefined : nestedId(params, "thread") ?? null];
+      const turnIds = [params.turnId, params.turn === undefined ? undefined : nestedId(params, "turn") ?? null];
+      if (!job || !["running", "awaiting_approval"].includes(job.status)
+        || !turnId?.trim() || turnId !== job.turnId
+        || threadIds.some((id) => id !== undefined && id !== job.threadId)
+        || turnIds.some((id) => id !== undefined && id !== job.turnId)) {
+        this.appServer.respond(message.id, safeDeclineResponse(message.method));
+        return;
+      }
       const approval: PendingApproval = {
         id: randomUUID(),
         kind,
@@ -1175,8 +1241,8 @@ export class CodexBridgeController {
         await this.store.applyConversationNotification(jobId, {
           method: "bridge/approval",
           params: {
-            threadId: stringValue(params.threadId),
-            turnId: stringValue(params.turnId),
+            threadId: job.threadId,
+            turnId: job.turnId,
             itemId: stringValue(params.itemId),
             approvalId: approval.id,
             state: approval.state,

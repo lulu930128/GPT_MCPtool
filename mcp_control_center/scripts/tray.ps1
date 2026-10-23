@@ -18,9 +18,13 @@ Import-Module $modulePath -Force
 if ([string]::IsNullOrWhiteSpace($ManifestPath)) { $ManifestPath = Get-McpCcDefaultManifestPath }
 if ([string]::IsNullOrWhiteSpace($RuntimeRoot)) { $RuntimeRoot = Get-McpCcDefaultRuntimeRoot }
 $manifest = Read-McpCcManifest -Path $ManifestPath
-if (Test-McpCcPathWithinRoot -Path $RuntimeRoot -Root $manifest.workspaceRoot) {
-    throw "RuntimeRoot must be outside the source workspace."
+if ($manifest.schemaVersion -eq 4) {
+    Import-Module (Join-Path $projectRoot 'src\McpControlCenter.InstalledRelease.psm1')
+    if ($manifest.installedRelease.schemaVersion -lt 3) { throw 'INSTALLED_LIFECYCLE_BINDINGS_REQUIRED' }
+    if ($ReplaceExisting -or $RuntimeRoot -ine (Get-McpCcInstalledStateRoot $manifest.installedRelease)) { throw 'INSTALLED_CALLER_OVERRIDE_REJECTED' }
+    Assert-McpCcInstalledActivation $manifest -TrayBootstrap
 }
+Assert-McpCcRuntimeRoot -Manifest $manifest -RuntimeRoot $RuntimeRoot
 $trayPidPath = Join-Path $RuntimeRoot "tray.pid"
 $trayDisplayName = "MCP Control Center"
 
@@ -105,7 +109,60 @@ $script:PendingLabel = $null
 $script:PendingOperationId = $null
 $script:SecondsSinceRefresh = 0
 $script:Closing = $false
+$script:ExitRequested = $false
+$script:ExitClock = $null
+$script:PendingAction = $null
+$script:StatusProcess = $null
+$script:StatusClock = $null
+$script:StatusStopAttempted = $false
+$script:StatusStopClock = $null
+$script:ControllerWarningShown = $false
 $script:ComponentUi = @{}
+$script:WorkspaceLocalOwner = $null
+$script:WorkspaceLocalWorker = $null
+# The existing tray mutex is already acquired. No second manager or poller.
+# This source-workspace path does not participate in the installed R1 operator.
+if ($manifest.schemaVersion -eq 3) {
+    try {
+        Import-Module (Join-Path $projectRoot 'src\McpControlCenter.WorkspaceLocal.psm1')
+        $script:WorkspaceLocalOwner = New-McpCcWorkspaceLocalOwner -RuntimeRoot $RuntimeRoot
+    } catch { Write-Warning 'Workspace local channel unavailable; existing tray continues.' }
+}
+$script:SelfReloadWorker = $null
+$script:SelfReloadShutdown = $null
+$script:NormalOperatorWorker = $null
+# The installed owner continuously accepts independently authenticated requests.
+function Start-NormalOperatorHost {
+    if ($script:Closing -or $script:ExitRequested -or $null -ne $script:NormalOperatorWorker) { return }
+    $normalWorker = [PowerShell]::Create()
+    $normalRunspace = [RunspaceFactory]::CreateRunspace()
+    $normalRunspace.ApartmentState = 'STA'
+    $normalRunspace.ThreadOptions = 'ReuseThread'
+    $normalRunspace.Open()
+    $normalWorker.Runspace = $normalRunspace
+    $cancellation=New-Object Threading.CancellationTokenSource
+    [void]$normalWorker.AddScript('param($module,$root,$ownerPid,$cancel) Import-Module $module; Invoke-McpCcNormalOperatorOwner -ManagerRoot $root -TrayProcessId $ownerPid -Cancellation $cancel.Token')
+    [void]$normalWorker.AddArgument((Join-Path $projectRoot 'src\McpControlCenter.NormalOperator.psm1')).AddArgument($projectRoot).AddArgument($PID).AddArgument($cancellation)
+    try { $script:NormalOperatorWorker = @{ shell=$normalWorker; runspace=$normalRunspace; pending=$normalWorker.BeginInvoke(); cancellation=$cancellation } }
+    catch { $normalWorker.Dispose();$normalRunspace.Dispose();$cancellation.Dispose();throw }
+}
+# Only the existing installed singleton owns this bounded startup channel. No
+# read-only tool starts a child, and this startup is not a human approval ceremony.
+if (Test-Path -LiteralPath (Join-Path $projectRoot 'config\installed-release.json') -PathType Leaf) {
+    # Discovery alone does not open a pipe. Worker verifies the existing canonical
+    # InstalledRelease v3 binding/selection/closure before listener construction.
+    Start-NormalOperatorHost
+}
+# Optional, fail-closed worker belongs to this already independent tray process.
+# No install, elevation, task registration, registry mutation or detached launcher.
+$selfReloadPolicy = Join-Path $RuntimeRoot 'remote-self-reload-r1\policy.json'
+if (Test-Path -LiteralPath $selfReloadPolicy -PathType Leaf) {
+    $script:SelfReloadShutdown = New-Object Threading.CancellationTokenSource
+    $worker = [PowerShell]::Create()
+    [void]$worker.AddScript('param($module,$manifest,$runtime,$shutdown) Import-Module $module; Invoke-R1OwnerLoop -ManifestPath $manifest -RuntimeRoot $runtime -ShutdownSignal $shutdown')
+    [void]$worker.AddArgument((Join-Path $projectRoot 'src\McpControlCenter.SelfReload.Owner.psm1')).AddArgument($ManifestPath).AddArgument($RuntimeRoot).AddArgument($script:SelfReloadShutdown)
+    $script:SelfReloadWorker = @{ shell=$worker; pending=$worker.BeginInvoke() }
+}
 
 function Set-NotifyText([string]$Text) {
     if ($Text.Length -gt 63) { $Text = $Text.Substring(0, 63) }
@@ -141,12 +198,126 @@ function Show-Warning([string]$Message) {
     ) | Out-Null
 }
 
+function Get-TrayControllerState {
+    if ($null -eq $script:ControllerProcess) { return 'Idle' }
+    try {
+        if ($script:ControllerProcess.HasExited) { return 'Exited' }
+        return 'Running'
+    }
+    catch { return 'Unknown' }
+}
+
+function Test-TrayMaintenanceBusy {
+    if ($null -ne $script:WorkspaceLocalWorker) { return $true }
+    if ($null -ne $script:WorkspaceLocalOwner -and $script:WorkspaceLocalOwner.HasActiveRequest) { return $true }
+    # Native Host remains authorization-closed. Its passive listener is cancellable
+    # admission, not manual maintenance; do not prevent Exit from cancelling it.
+    return $false
+}
+
+function Show-TrayControllerWarning {
+    if ($script:ControllerWarningShown) { return }
+    $script:ControllerWarningShown = $true
+    # Non-modal: a failed cancellation must not block the WinForms timer.
+    $notifyIcon.ShowBalloonTip(1800, $trayDisplayName, 'Status could not be confirmed stopped. Refresh is paused; any requested Exit remains pending. Component operations are unchanged.', [Windows.Forms.ToolTipIcon]::Warning)
+}
+
+function Stop-TrayApplication {
+    [Windows.Forms.Application]::Exit()
+}
+
+function Complete-TrayExit {
+    if (-not $script:ExitRequested -or $script:Closing) { return }
+    if ((Get-TrayControllerState) -ne 'Idle' -or (Test-TrayMaintenanceBusy)) { return }
+    # R1 is a long-lived owner, not a busy flag. Exit signals cooperative drain;
+    # wait for the existing operation/postcheck and owner finally blocks to finish.
+    if ($null -ne $script:SelfReloadWorker -and -not $script:SelfReloadWorker.pending.IsCompleted) { return }
+    if ($null -ne $script:NormalOperatorWorker -and -not $script:NormalOperatorWorker.pending.IsCompleted) {
+        if ($script:ExitClock.Elapsed.TotalSeconds -ge 5) { Show-TrayControllerWarning }
+        return # cancellation already sent; never dispose a still-running runspace
+    }
+    # The owner closes admission under the same lock used to accept requests.
+    if ($null -ne $script:WorkspaceLocalOwner -and -not $script:WorkspaceLocalOwner.TryBeginShutdown()) { return }
+    $script:Closing = $true
+    $timer.Stop()
+    $notifyIcon.Visible = $false
+    Stop-TrayApplication
+}
+
+function Request-TrayExit {
+    if ($script:Closing -or $script:ExitRequested) { return }
+    if (Test-TrayMaintenanceBusy) {
+        Show-Warning 'Wait for manual maintenance to finish before closing.'
+        return
+    }
+    $state = Get-TrayControllerState
+    if ($state -eq 'Unknown' -or ($state -eq 'Running' -and $script:PendingAction -ne 'Status')) {
+        Show-Warning "Wait for $($script:PendingLabel) to finish before closing the control center."
+        return
+    }
+    $script:ExitRequested = $true
+    $script:ExitClock = [Diagnostics.Stopwatch]::StartNew()
+    if ($null -ne $script:NormalOperatorWorker) { $script:NormalOperatorWorker.cancellation.Cancel() }
+    if ($null -ne $script:SelfReloadShutdown) { $script:SelfReloadShutdown.Cancel() }
+    # A request accepted just before this gate still drains on the existing timer.
+    if ($null -ne $script:WorkspaceLocalOwner) { $null = $script:WorkspaceLocalOwner.TryBeginShutdown() }
+    Update-TrayControllerLifecycle
+}
+
+function Update-TrayControllerLifecycle {
+    if ($script:Closing) { return }
+    $state = Get-TrayControllerState
+    if ($state -eq 'Unknown') { Show-TrayControllerWarning; return }
+    if ($state -eq 'Running' -and $script:PendingAction -eq 'Status') {
+        # Monotonic overall deadline, with a shorter grace period after explicit Exit.
+        $expired = ($null -ne $script:StatusClock -and $script:StatusClock.Elapsed.TotalSeconds -ge 120) -or
+            ($script:ExitRequested -and $script:ExitClock.Elapsed.TotalSeconds -ge 5)
+        if ($expired -and -not $script:StatusStopAttempted) {
+            $script:StatusStopAttempted = $true
+            $script:StatusStopClock = [Diagnostics.Stopwatch]::StartNew()
+            try {
+                if ($null -eq $script:StatusProcess -or -not [object]::ReferenceEquals($script:StatusProcess, $script:ControllerProcess)) { throw 'STATUS_HANDLE_UNAVAILABLE' }
+                # Kill this retained process handle only, never its tree or a PID lookup.
+                if (-not $script:StatusProcess.HasExited) { $script:StatusProcess.Kill() }
+            }
+            catch { Show-TrayControllerWarning }
+        }
+        if ($script:StatusStopAttempted -and $script:StatusStopClock.Elapsed.TotalSeconds -ge 5) { Show-TrayControllerWarning }
+        $state = Get-TrayControllerState
+    }
+    if ($state -eq 'Exited') {
+        try { $exitCode = $script:ControllerProcess.ExitCode }
+        catch { $exitCode = -1 }
+        $completedLabel = $script:PendingLabel
+        try { $script:ControllerProcess.Dispose() } catch { }
+        $script:ControllerProcess = $null
+        $script:StatusProcess = $null
+        $script:StatusClock = $null
+        $script:PendingAction = $null
+        $script:PendingLabel = $null
+        $script:PendingOperationId = $null
+        $script:SecondsSinceRefresh = 0
+        if (-not $script:ExitRequested) {
+            Update-UiFromState
+            if ($exitCode -ne 0) {
+                $notifyIcon.ShowBalloonTip(1800, $trayDisplayName, "$completedLabel completed with an attention state.", [Windows.Forms.ToolTipIcon]::Warning)
+            }
+        }
+    }
+    Complete-TrayExit
+}
+
 function Start-ControllerAction {
     param(
         [ValidateSet("Status", "Reconcile", "Start", "Restart", "RestartMcp", "RepairConnectivity", "RestartCore", "ShutdownRuntime", "ShowDiagnosticTray", "Doctor")][string]$Action,
         [string]$Component
     )
-    if ($null -ne $script:ControllerProcess -and -not $script:ControllerProcess.HasExited) {
+    if ($script:Closing -or $script:ExitRequested) { return }
+    if ($null -ne $script:WorkspaceLocalOwner -and $script:WorkspaceLocalOwner.HasActiveRequest) {
+        Show-Warning 'Workspace manual maintenance is pending; inspect its request receipt.'
+        return
+    }
+    if ((Get-TrayControllerState) -notin @('Idle', 'Exited')) {
         Show-Warning "The control center is already running $($script:PendingLabel)."
         return
     }
@@ -159,18 +330,33 @@ function Start-ControllerAction {
         "-RuntimeRoot", $RuntimeRoot
     )
     $script:PendingOperationId = $null
+    if ($manifest.schemaVersion -eq 4 -and $Action -eq 'Status') { $arguments+='-PublishObservation' }
     if ($Action -eq "Reconcile") {
         $script:PendingOperationId = [Guid]::NewGuid().ToString("D")
         $arguments += @("-OperationId", $script:PendingOperationId)
     }
     if (-not [string]::IsNullOrWhiteSpace($Component)) { $arguments += @("-Component", $Component) }
     $startInfo = New-Object Diagnostics.ProcessStartInfo
-    $startInfo.FileName = (Get-Command powershell.exe -ErrorAction Stop).Source
+    $startInfo.FileName = if ($manifest.schemaVersion -eq 4) { 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' } else { (Get-Command powershell.exe -ErrorAction Stop).Source }
     $startInfo.Arguments = ($arguments | ForEach-Object { Quote-ProcessArgument ([string]$_) }) -join " "
     $startInfo.WorkingDirectory = $projectRoot
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
     $script:ControllerProcess = [Diagnostics.Process]::Start($startInfo)
+    $script:PendingAction = $Action
+    $script:StatusProcess = $null
+    $script:StatusClock = $null
+    $script:StatusStopAttempted = $false
+    $script:ControllerWarningShown = $false
+    if ($Action -eq 'Status') {
+        $script:StatusClock = [Diagnostics.Stopwatch]::StartNew()
+        try {
+            # Force acquisition now, while this is the exact child we just started.
+            $null = $script:ControllerProcess.Handle
+            $script:StatusProcess = $script:ControllerProcess
+        }
+        catch { Show-TrayControllerWarning }
+    }
     $script:PendingLabel = if ([string]::IsNullOrWhiteSpace($Component)) { $Action } else { "$Action / $Component" }
     $overallItem.Text = "MCP Control Center | Running: $($script:PendingLabel)"
     Set-NotifyText "$trayDisplayName | $($script:PendingLabel)"
@@ -189,7 +375,7 @@ function Start-HealthDetail {
         "-RuntimeRoot", $RuntimeRoot
     )
     $startInfo = New-Object Diagnostics.ProcessStartInfo
-    $startInfo.FileName = (Get-Command powershell.exe -ErrorAction Stop).Source
+    $startInfo.FileName = if ($manifest.schemaVersion -eq 4) { 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' } else { (Get-Command powershell.exe -ErrorAction Stop).Source }
     $startInfo.Arguments = ($arguments | ForEach-Object { Quote-ProcessArgument ([string]$_) }) -join " "
     $startInfo.WorkingDirectory = $projectRoot
     $startInfo.UseShellExecute = $false
@@ -206,6 +392,9 @@ function Start-HealthDetail {
 
 function Update-UiFromState {
     $state = Read-McpCcState -RuntimeRoot $RuntimeRoot
+    if ($null -ne $script:WorkspaceLocalOwner) {
+        Publish-McpCcWorkspaceLocalState -Owner $script:WorkspaceLocalOwner -State $state
+    }
     if ($null -eq $state) {
         $overallItem.Text = "MCP Control Center | First check pending"
         $lastRefreshItem.Text = "Last update: none"
@@ -279,6 +468,9 @@ $lastRefreshItem = New-Object Windows.Forms.MenuItem "Last update: none"
 $lastRefreshItem.Enabled = $false
 $contextMenu.MenuItems.Add($overallItem) | Out-Null
 $contextMenu.MenuItems.Add($lastRefreshItem) | Out-Null
+$normalOperatorItem = New-Object Windows.Forms.MenuItem('NORMAL: accepting MCP requests')
+$normalOperatorItem.Enabled=$false
+$contextMenu.MenuItems.Add($normalOperatorItem) | Out-Null
 $contextMenu.MenuItems.Add("-") | Out-Null
 
 foreach ($component in @($manifest.components | Sort-Object startupOrder)) {
@@ -350,17 +542,7 @@ $copyAdoptionItem.add_Click({
     [Windows.Forms.Clipboard]::SetText($command)
     $notifyIcon.ShowBalloonTip(1200, $trayDisplayName, "Copied. Run Plan before applying Startup adoption.", [Windows.Forms.ToolTipIcon]::Info)
 })
-$exitItem.add_Click({
-    if ($null -ne $script:ControllerProcess -and -not $script:ControllerProcess.HasExited) {
-        Show-Warning "Wait for $($script:PendingLabel) to finish before closing the control center."
-        return
-    }
-    $script:Closing = $true
-    $timer.Stop()
-    $notifyIcon.Visible = $false
-    $notifyIcon.Dispose()
-    [Windows.Forms.Application]::Exit()
-})
+$exitItem.add_Click({ Request-TrayExit })
 
 foreach ($item in @($refreshItem, $reconcileItem, $doctorItem, "-", $openRuntimeItem, $copyAdoptionItem, "-", $exitItem)) {
     $contextMenu.MenuItems.Add($item) | Out-Null
@@ -375,23 +557,56 @@ $notifyIcon.Visible = $true
 $timer = New-Object Windows.Forms.Timer
 $timer.Interval = 1000
 $timer.add_Tick({
-    if ($null -ne $script:ControllerProcess -and $script:ControllerProcess.HasExited) {
-        $exitCode = $script:ControllerProcess.ExitCode
-        $completedLabel = $script:PendingLabel
-        $script:ControllerProcess.Dispose()
-        $script:ControllerProcess = $null
-        $script:PendingLabel = $null
-        $script:PendingOperationId = $null
-        $script:SecondsSinceRefresh = 0
-        Update-UiFromState
-        if ($exitCode -ne 0) {
-            $notifyIcon.ShowBalloonTip(1800, $trayDisplayName, "$completedLabel completed with an attention state.", [Windows.Forms.ToolTipIcon]::Warning)
+    if ($script:Closing) { return }
+    if ($null -ne $script:WorkspaceLocalWorker -and $script:WorkspaceLocalWorker.pending.IsCompleted) {
+        try { $null=$script:WorkspaceLocalWorker.shell.EndInvoke($script:WorkspaceLocalWorker.pending) }
+        catch { Write-Warning 'Workspace maintenance result unknown; inspect its request receipt.' }
+        finally {
+            if ($script:WorkspaceLocalOwner.HasActiveRequest) {
+                try { $script:WorkspaceLocalOwner.Complete($script:WorkspaceLocalWorker.requestId,'UNKNOWN') }
+                catch { Write-Warning 'Workspace receipt update unavailable; durable UNKNOWN remains.' }
+            }
+            $script:WorkspaceLocalWorker.shell.Dispose(); $script:WorkspaceLocalWorker=$null
+        }
+        # Existing periodic Status refresh will publish new observations.
+        $script:SecondsSinceRefresh=[int]$manifest.settings.refreshIntervalSeconds
+    }
+    if ($null -ne $script:WorkspaceLocalOwner -and $null -eq $script:WorkspaceLocalWorker -and $null -eq $script:ControllerProcess) {
+        $request=$script:WorkspaceLocalOwner.TakePending()
+        if ($null -ne $request) {
+            $script:WorkspaceLocalOwner.Publish($null)
+            $maintenance=[PowerShell]::Create()
+            [void]$maintenance.AddScript('param($core,$module,$owner,$request,$manifest,$runtime) Import-Module $core; Import-Module $module; Invoke-McpCcWorkspaceLocalRestart -Owner $owner -Request $request -Manifest $manifest -RuntimeRoot $runtime')
+            [void]$maintenance.AddArgument($modulePath).AddArgument((Join-Path $projectRoot 'src\McpControlCenter.WorkspaceLocal.psm1')).AddArgument($script:WorkspaceLocalOwner).AddArgument($request).AddArgument($manifest).AddArgument($RuntimeRoot)
+            try { $script:WorkspaceLocalWorker=@{shell=$maintenance;pending=$maintenance.BeginInvoke();requestId=$request.requestId} }
+            catch { $maintenance.Dispose();$script:WorkspaceLocalOwner.Complete($request.requestId,'UNKNOWN') }
         }
     }
-    elseif ($null -ne $script:ControllerProcess -and $script:PendingLabel -eq "Reconcile") {
+    if ($null -ne $script:NormalOperatorWorker -and $script:NormalOperatorWorker.pending.IsCompleted) {
+        try {
+            $gateResults=@($script:NormalOperatorWorker.shell.EndInvoke($script:NormalOperatorWorker.pending))
+            $gateCode='HOST_PREFLIGHT_FAILED'
+            if ($gateResults.Count -eq 1 -and $gateResults[0].status -ceq 'BLOCKED' -and
+                $gateResults[0].failure.code -cmatch '^[A-Z][A-Z0-9_]{2,95}$') { $gateCode=$gateResults[0].failure.code }
+            $normalOperatorItem.Text='NORMAL Operator: BLOCKED / '+$gateCode
+            if($gateResults.Count -eq 1 -and $gateResults[0].status -ceq 'STOPPED') {
+                $normalOperatorItem.Text='NORMAL Operator: stopped'
+            }
+        } catch { $normalOperatorItem.Text='NORMAL Operator: BLOCKED / HOST_PREFLIGHT_FAILED' }
+        finally {
+            $script:NormalOperatorWorker.shell.Dispose()
+            $script:NormalOperatorWorker.runspace.Dispose()
+            $script:NormalOperatorWorker.cancellation.Dispose()
+            $script:NormalOperatorWorker=$null
+        }
+    }
+    $hadController = $null -ne $script:ControllerProcess
+    Update-TrayControllerLifecycle
+    if ($script:Closing -or $script:ExitRequested) { return }
+    if ($null -ne $script:ControllerProcess -and $script:PendingLabel -eq "Reconcile") {
         Update-UiFromReconcileProgress | Out-Null
     }
-    elseif ($null -eq $script:ControllerProcess) {
+    elseif (-not $hadController -and $null -eq $script:ControllerProcess -and $null -eq $script:WorkspaceLocalWorker) {
         $script:SecondsSinceRefresh += 1
         if ($script:SecondsSinceRefresh -ge [int]$manifest.settings.refreshIntervalSeconds) {
             $script:SecondsSinceRefresh = 0
@@ -408,11 +623,23 @@ try {
     [Windows.Forms.Application]::Run()
 }
 finally {
+    if ($null -ne $script:WorkspaceLocalOwner) { $script:WorkspaceLocalOwner.Dispose() }
+    if ($null -ne $script:WorkspaceLocalWorker) { $script:WorkspaceLocalWorker.shell.Dispose() }
+    if ($null -ne $script:NormalOperatorWorker) {
+        $script:NormalOperatorWorker.cancellation.Cancel()
+        $script:NormalOperatorWorker.shell.Stop()
+        $script:NormalOperatorWorker.shell.Dispose()
+        $script:NormalOperatorWorker.runspace.Dispose()
+        $script:NormalOperatorWorker.cancellation.Dispose()
+    }
+    if ($null -ne $script:SelfReloadWorker) {
+        $script:SelfReloadWorker.shell.Stop()
+        $script:SelfReloadWorker.shell.Dispose()
+    }
+    if ($null -ne $script:SelfReloadShutdown) { $script:SelfReloadShutdown.Dispose() }
     $timer.Stop()
     $timer.Dispose()
-    if ($null -ne $script:ControllerProcess -and -not $script:ControllerProcess.HasExited) {
-        $script:ControllerProcess.Dispose()
-    }
+    if ($null -ne $script:ControllerProcess) { try { $script:ControllerProcess.Dispose() } catch { } }
     $notifyIcon.Visible = $false
     $notifyIcon.Dispose()
     if ((Read-TrayPid) -eq $PID) { Remove-Item -LiteralPath $trayPidPath -Force -ErrorAction SilentlyContinue }

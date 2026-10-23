@@ -4,18 +4,23 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { BridgeRuntime } from "./runtime.js";
 import { createCodexBridgeMcpServer } from "./server.js";
+import { closeResources, waitForClose } from "./close-resources.js";
 
 export interface BridgeHttpServerOptions {
   host: string;
   port: number;
   bearerToken?: string;
   log?: (message: string) => void;
+  /** HTTP composition root defers admission until the local control receiver is ready. */
+  deferAdmission?: boolean;
 }
 
 export interface BridgeHttpServerHandle {
   host: string;
   port: number;
   url: string;
+  isIdle: () => boolean;
+  activate: () => void;
   close: () => Promise<void>;
 }
 
@@ -24,7 +29,13 @@ export async function startBridgeHttpServer(
   options: BridgeHttpServerOptions,
 ): Promise<BridgeHttpServerHandle> {
   const transports = new Map<string, StreamableHTTPServerTransport>();
+  let closing: Promise<void> | undefined;
+  let accepting = !options.deferAdmission;
+  let activeRequests = 0;
   const httpServer = createServer(async (req, res) => {
+    activeRequests++;
+    try {
+    if (!accepting) { sendJson(res, 503, { ok: false, error: "Runtime not ready." }); return; }
     if (!req.url) {
       sendJsonRpcError(res, 400, -32600, "Missing request URL.");
       return;
@@ -64,6 +75,7 @@ export async function startBridgeHttpServer(
       options.log?.(`MCP HTTP error: ${error instanceof Error ? error.message : String(error)}`);
       if (!res.headersSent) sendJsonRpcError(res, 500, -32603, "Internal server error.");
     }
+    } finally { activeRequests--; }
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -76,36 +88,56 @@ export async function startBridgeHttpServer(
   const address = httpServer.address();
   const actualPort = typeof address === "object" && address ? address.port : options.port;
   const url = `http://${options.host}:${actualPort}/mcp`;
-  options.log?.(`Codex Handoff Bridge listening at ${url}`);
-  if (!options.bearerToken) {
-    options.log?.("WARNING: no HTTP bearer token is configured; keep the listener on localhost behind the secure tunnel.");
-  }
-  return {
+  const handle: BridgeHttpServerHandle = {
     host: options.host,
     port: actualPort,
     url,
-    close: async () => {
-      await Promise.all(Array.from(transports.values()).map((transport) => transport.close().catch(() => undefined)));
-      transports.clear();
-      await new Promise<void>((resolve, reject) => httpServer.close((error) => (error ? reject(error) : resolve())));
-      await runtime.close();
+    isIdle: () => accepting && activeRequests === 0,
+    activate: () => {
+      if (closing) throw new Error("HTTP_CLOSING");
+      accepting = true;
     },
+    close: () => closing ??= (async () => {
+      accepting = false;
+      const stopped = new Promise<void>((resolve, reject) => httpServer.close((error) => (error ? reject(error) : resolve())));
+      void stopped.catch(() => undefined);
+      await closeResources([
+        async () => { await closeResources(Array.from(transports.values(), transport =>
+          () => waitForClose(transport.close(), 3000, "HTTP_TRANSPORT_CLOSE_UNKNOWN"))); },
+        async () => { transports.clear(); httpServer.closeAllConnections(); await waitForClose(stopped, 3000, "HTTP_CLOSE_UNKNOWN"); },
+        () => waitForClose(runtime.close(), 10000, "RUNTIME_CLOSE_UNKNOWN"),
+      ]);
+    })(),
   };
+  try {
+    options.log?.(`Codex Handoff Bridge listening at ${url}`);
+    if (!options.bearerToken) {
+      options.log?.("WARNING: no HTTP bearer token is configured; keep the listener on localhost behind the secure tunnel.");
+    }
+    return handle;
+  } catch (error) {
+    await closeResources([() => { throw error; }, () => handle.close()]);
+    throw error;
+  }
 }
 
-function healthPayload(runtime: BridgeRuntime) {
-  const jobs = runtime.store.list(runtime.config.maxRecentJobs);
+export function healthPayload(runtime: BridgeRuntime) {
+  const jobs = runtime.store.listAll();
   return {
     ok: true,
     service: "codex-handoff-bridge",
     version: "1.1.0",
     buildId: runtime.config.buildId,
+    pid: process.pid,
+    selfReload: { contract: "remote-self-reload-r1", drain: runtime.store.selfReloadDrain },
     controller: runtime.controller.status,
     projectIds: Array.from(runtime.config.projects.keys()),
     jobs: {
-      totalVisible: jobs.length,
+      totalVisible: Math.min(jobs.length, runtime.config.maxRecentJobs),
+      total: jobs.length,
+      scope: "all",
       active: jobs.filter((job) => ["queued", "preparing", "running", "awaiting_approval"].includes(job.status)).length,
-      awaitingApproval: jobs.filter((job) => job.status === "awaiting_approval").length,
+      awaitingApproval: jobs.filter((job) => job.status === "awaiting_approval" || job.pendingApprovalCount > 0).length,
     },
   };
 }

@@ -288,7 +288,7 @@ test("drawer reads lazily, coalesces requests, uses bounded refresh and isolates
   nodes["#operator-drawer"].open = true;
   const first = api.loadOperatorStatus(false);
   assert.equal(api.loadOperatorStatus(false), first);
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 4);
   assert.ok(calls.every((call) => call.options.update === false));
   resolveUsage({ rateLimits: { status: "unavailable", code: "AUTH_UNAVAILABLE" }, accountUsage: { status: "available", data: { summary: { lifetimeTokens: null, peakDailyTokens: 0, currentStreakDays: null } }, truncated: false } });
   await first;
@@ -301,10 +301,10 @@ test("drawer reads lazily, coalesces requests, uses bounded refresh and isolates
   assert.doesNotMatch(rendered, /secret-path/);
   api.renderOperatorStatus();
   await api.loadOperatorStatus(true);
-  assert.equal(calls.length, 3, "Render/poll and repeated clicks do not refetch heavy RPCs.");
+  assert.equal(calls.length, 4, "Render/poll and repeated clicks do not refetch heavy RPCs.");
   state.operatorRead.startedAt -= 31000;
   await api.loadOperatorStatus(false);
-  assert.equal(calls.length, 6);
+  assert.equal(calls.length, 8);
 });
 
 test("drawer selects safe fields, keeps null credits unknown and avoids schema/commands", () => {

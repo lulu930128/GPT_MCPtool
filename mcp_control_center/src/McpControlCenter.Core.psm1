@@ -1,5 +1,9 @@
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = "Stop"
+if (Test-Path -LiteralPath (Join-Path $PSScriptRoot '..\config\installed-release.json')) {
+    $env:PSModulePath='C:\Windows\System32\WindowsPowerShell\v1.0\Modules'
+}
+$script:InstalledManager=Test-Path -LiteralPath (Join-Path $PSScriptRoot '..\config\installed-release.json')
 
 $script:ExpectedTrayContract = "unified-always-on-v2"
 $script:ExpectedLifecycleContract = "unified-lifecycle-v3"
@@ -34,7 +38,11 @@ $script:SafeSummaryFields = @(
     "ready",
     "databaseReady",
     "frontendReady",
-    "errorCode"
+    "errorCode",
+    "jobs.active",
+    "jobs.awaitingApproval",
+    "jobs.scope",
+    "controller"
 )
 $script:MaximumRegistryComponents = 64
 $script:MaximumConfigBytes = 131072
@@ -50,6 +58,18 @@ function Get-McpCcDefaultManifestPath {
 }
 
 function Get-McpCcDefaultRuntimeRoot {
+    $manager=Split-Path -Parent $PSScriptRoot
+    if(Test-Path -LiteralPath (Join-Path $manager 'config\installed-release.json')){
+        Import-Module (Join-Path $PSScriptRoot 'McpControlCenter.InstalledRelease.psm1')
+        $release=Read-McpCcInstalledRelease $manager
+        if($release.schemaVersion -ge 5){
+            # Migrated roots never inherit a caller-selected environment override.
+            # Older inert releases retain their existing static inspection path.
+            $binding=Get-McpCcInstalledOwnerBinding $manager
+            if($env:MCP_CONTROL_CENTER_DATA_DIR -and [IO.Path]::GetFullPath($env:MCP_CONTROL_CENTER_DATA_DIR) -ine $binding.ownerRoot){throw 'INSTALLED_CALLER_OVERRIDE_REJECTED'}
+            return $binding.ownerRoot
+        }
+    }
     if (-not [string]::IsNullOrWhiteSpace($env:MCP_CONTROL_CENTER_DATA_DIR)) {
         return [IO.Path]::GetFullPath($env:MCP_CONTROL_CENTER_DATA_DIR)
     }
@@ -68,6 +88,20 @@ function Get-McpCcBootId {
     catch {
         return "session-$PID-$([DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ'))"
     }
+}
+
+function Assert-McpCcRuntimeRoot {
+    param([Parameter(Mandatory=$true)]$Manifest,[Parameter(Mandatory=$true)][string]$RuntimeRoot)
+    if (-not (Test-McpCcPathWithinRoot -Path $RuntimeRoot -Root $Manifest.workspaceRoot)) { return }
+    # Only a physically installed v6 binding may use the component-owned private
+    # subtree. Source callers and arbitrary workspace overrides remain rejected.
+    if (-not $script:InstalledManager -or $Manifest.schemaVersion -ne 4 -or
+        $Manifest.installedRelease.schemaVersion -ne 6) { throw 'RuntimeRoot must be outside the source workspace.' }
+    Import-Module (Join-Path $PSScriptRoot 'McpControlCenter.InstalledRelease.psm1')
+    $binding=Get-McpCcInstalledOwnerBinding (Split-Path -Parent $PSScriptRoot)
+    if ($RuntimeRoot -cne $binding.ownerRoot) { throw 'INSTALLED_CALLER_OVERRIDE_REJECTED' }
+    $module=Get-Module McpControlCenter.InstalledRelease
+    & $module {param($p,$s) Assert-McpCcInstalledPrivatePath $p $s} $RuntimeRoot $binding.operatorSid
 }
 
 function Test-McpCcPathWithinRoot {
@@ -971,9 +1005,9 @@ function Read-McpCcRegistryManifest {
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)]$Registry
     )
-    Assert-McpCcObjectShape -Object $Registry -Allowed @("schemaVersion", "settings", "components") -Required @("schemaVersion", "settings", "components") -Label "Registry v3"
+    Assert-McpCcObjectShape -Object $Registry -Allowed @("schemaVersion", "settings", "components") -Required @("schemaVersion", "settings", "components") -Label "Registry"
     if ($Registry.schemaVersion -isnot [int] -and $Registry.schemaVersion -isnot [long]) { throw "Registry schemaVersion must be an integer." }
-    if ([int]$Registry.schemaVersion -ne 3) { throw "Unsupported registry schemaVersion '$($Registry.schemaVersion)'." }
+    if ([int]$Registry.schemaVersion -notin @(3,4)) { throw "Unsupported registry schemaVersion '$($Registry.schemaVersion)'." }
     Assert-McpCcObjectShape `
         -Object $Registry.settings `
         -Allowed @("initialDelaySeconds", "betweenComponentsSeconds", "probeTimeoutSeconds", "postStartTimeoutSeconds", "controllerActionTimeoutSeconds", "refreshIntervalSeconds", "eventRetentionDays") `
@@ -1002,6 +1036,15 @@ function Read-McpCcRegistryManifest {
     $manifestDirectory = Split-Path -Parent $manifestPath
     $managerRoot = Split-Path -Parent $manifestDirectory
     $workspaceRoot = Split-Path -Parent $managerRoot
+    $installedRelease=$null
+    if ($Registry.schemaVersion -eq 4) {
+        Import-Module (Join-Path $PSScriptRoot 'McpControlCenter.InstalledRelease.psm1') -ErrorAction Stop
+        # An installed registry belongs only to its one installed manager, never a dev manager.
+        if ($managerRoot -ine (Split-Path -Parent $PSScriptRoot)) { throw 'INSTALLED_MANAGER_MISMATCH' }
+        $installedRelease=Read-McpCcInstalledRelease -ManagerRoot $managerRoot
+        if ($entries.Count -ne 8) { throw 'INSTALLED_EIGHT_COMPONENTS_REQUIRED' }
+        $workspaceRoot=$installedRelease.legacyWorkspaceRoot
+    }
     $ids = @{}
     $roots = @{}
     $orders = @{}
@@ -1015,10 +1058,14 @@ function Read-McpCcRegistryManifest {
         if ([string]::IsNullOrWhiteSpace($id) -or $id -notmatch '^[a-z][a-z0-9_]{0,63}$') { throw "Every registry component requires a stable lowercase id." }
         if ($ids.ContainsKey($id)) { throw "Duplicate component id '$id'." }
         $ids[$id] = $true
-        if ([IO.Path]::IsPathRooted([string]$entry.root) -or [string]::IsNullOrWhiteSpace([string]$entry.root)) { throw "Component '$id' root must be relative." }
-        $resolvedRoot = [IO.Path]::GetFullPath((Join-Path $manifestDirectory ([string]$entry.root)))
-        $resolvedParent = Split-Path -Parent $resolvedRoot
-        if (-not $resolvedParent.Equals($workspaceRoot, [StringComparison]::OrdinalIgnoreCase)) { throw "Component '$id' root must be a direct child of the workspace root." }
+        if ($null -ne $installedRelease) {
+            $resolvedRoot=Resolve-McpCcInstalledComponentRoot -Release $installedRelease -Id $id -RootToken ([string]$entry.root)
+        } else {
+            if ([IO.Path]::IsPathRooted([string]$entry.root) -or [string]::IsNullOrWhiteSpace([string]$entry.root)) { throw "Component '$id' root must be relative." }
+            $resolvedRoot = [IO.Path]::GetFullPath((Join-Path $manifestDirectory ([string]$entry.root)))
+            $resolvedParent = Split-Path -Parent $resolvedRoot
+            if (-not $resolvedParent.Equals($workspaceRoot, [StringComparison]::OrdinalIgnoreCase)) { throw "Component '$id' root must be a direct child of the workspace root." }
+        }
         if ($roots.ContainsKey($resolvedRoot)) { throw "Duplicate component root '$resolvedRoot'." }
         $roots[$resolvedRoot] = $true
         if (-not (Test-Path -LiteralPath $resolvedRoot -PathType Container)) { throw "Component '$id' root does not exist." }
@@ -1032,6 +1079,31 @@ function Read-McpCcRegistryManifest {
         $descriptorPath = Resolve-McpCcChildPath -Root $resolvedRoot -RelativePath ([string]$entry.descriptor) -Label "Component '$id' descriptor"
         $descriptorRead = Read-McpCcJsonFile -Path $descriptorPath -Label "component descriptor '$id'"
         $component = ConvertFrom-McpCcComponentDescriptor -Descriptor $descriptorRead.document -RegistryEntry $entry -ResolvedRoot $resolvedRoot -DescriptorPath $descriptorRead.path
+        if ($null -ne $installedRelease) { $component | Add-Member -NotePropertyName installedReleasePending -NotePropertyValue $true }
+        if ($null -ne $installedRelease -and $installedRelease.schemaVersion -ge 3 -and $id -ceq 'codex_bridge') {
+            $privateRuntime=Join-Path (Get-McpCcInstalledStateRoot $installedRelease) ('installed-bridge\'+$installedRelease.releaseId)
+            foreach ($probe in $component.probes) {
+                if ($probe.id -ceq 'mcp') { $probe.resolvedOwnerManagedPidFile=Join-Path $privateRuntime 'codex-bridge-http-server.pid' }
+                elseif ($probe.id -ceq 'tunnel') {
+                    $probe.resolvedOwnerManagedPidFile=Join-Path $privateRuntime 'tunnel-client.pid'
+                    # Installed dependencies and private state no longer live
+                    # below a codex_bridge directory. Match the protected
+                    # release executable and its exact bound PID argument.
+                    $probe.ownerManagedCommandContains=@(
+                        ('"'+$installedRelease.dependencies.tunnelClient.path+'"'),
+                        '--profile "codex-bridge"',
+                        ('--pid.file "'+$probe.resolvedOwnerManagedPidFile+'"')
+                    )
+                }
+                else { throw 'INSTALLED_BRIDGE_PROBE_INVALID' }
+            }
+            $component.connectivityEvidence.resolvedRemoteEvidencePath=Join-Path $privateRuntime 'remote-registration-evidence.json'
+        }
+        if ($null -ne $installedRelease -and $id -ceq 'codex_bridge' -and
+            ($component.runtimeMode -cne 'component-controller' -or
+             $descriptorRead.document.contractScript -cne 'scripts\runtime-control.ps1' -or
+             $descriptorRead.document.lifecycle.controller.path -cne 'scripts\runtime-control.ps1' -or
+             -not $entry.enabled -or -not $entry.autoStart)) { throw 'INSTALLED_BRIDGE_REGISTRATION_INVALID' }
         foreach ($probe in @($component.probes | Where-Object { $_.role -in @("core", "connectivity") })) {
             $portKey = [string][int]$probe.port
             if ($ownedPorts.ContainsKey($portKey)) {
@@ -1057,8 +1129,8 @@ function Read-McpCcRegistryManifest {
         if ([bool]$entry.enabled) { $activeComponents += $component }
     }
     if ($activeComponents.Count -eq 0) { throw "Registry requires at least one enabled component." }
-    return [pscustomobject]@{
-        schemaVersion = 3
+    $result=[pscustomobject]@{
+        schemaVersion = [int]$Registry.schemaVersion
         settings = $Registry.settings
         components = $activeComponents
         registryEntries = $registeredEntries
@@ -1069,6 +1141,8 @@ function Read-McpCcRegistryManifest {
         managerRoot = $managerRoot
         workspaceRoot = $workspaceRoot
     }
+    if ($null -ne $installedRelease) { $result | Add-Member -NotePropertyName installedRelease -NotePropertyValue $installedRelease }
+    return $result
 }
 
 function Read-McpCcManifest {
@@ -1078,7 +1152,7 @@ function Read-McpCcManifest {
     if ($read.document.schemaVersion -isnot [int] -and $read.document.schemaVersion -isnot [long]) { throw "Manifest schemaVersion must be an integer." }
     $schemaVersion = [int]$read.document.schemaVersion
     if ($schemaVersion -in @(1, 2)) { return Read-McpCcLegacyManifest -Path $read.path }
-    if ($schemaVersion -eq 3) { return Read-McpCcRegistryManifest -Path $read.path -Registry $read.document }
+    if ($schemaVersion -in @(3,4)) { return Read-McpCcRegistryManifest -Path $read.path -Registry $read.document }
     throw "Unsupported manifest schemaVersion '$schemaVersion'."
 }
 
@@ -1287,11 +1361,148 @@ function Test-McpCcCommandLineContains {
     return $true
 }
 
+function New-McpCcOwnershipScan {
+    # Observation only: never store this context globally or pass it to actions.
+    return @{
+        clock = [Diagnostics.Stopwatch]::StartNew(); closed = $false
+        listeners = $null; processes = @{}; invalid = $false
+        metrics = [ordered]@{ listenerQueries = 0; listenerMs = 0L; netstatFallbacks = 0; processQueries = 0; processMs = 0L; processCacheHits = 0; identityChecks = 0; identityMs = 0L; uncertain = 0 }
+    }
+}
+
+function Get-McpCcNetstatListeners {
+    $netstatPath = Join-Path $env:WINDIR 'System32\netstat.exe'
+    $lines = @(& $netstatPath -ano -p TCP 2>$null)
+    if ($LASTEXITCODE -ne 0) { throw 'LISTENER_SNAPSHOT_UNAVAILABLE' }
+    return $lines
+}
+
+function Get-McpCcListenerSnapshot {
+    param($ScanContext)
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    $ScanContext.metrics.listenerQueries++
+    try {
+        $rows = @(Get-NetTCPConnection -State Listen -ErrorAction Stop)
+    }
+    catch {
+        try {
+            $ScanContext.metrics.netstatFallbacks++
+            $lines = @(Get-McpCcNetstatListeners)
+            $rows = @(foreach ($line in $lines) {
+                if ([string]$line -match '^\s*TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$') {
+                    [pscustomobject]@{ LocalPort = [int]$matches[1]; OwningProcess = [int]$matches[2] }
+                }
+            })
+        }
+        catch { return $null }
+    }
+    finally { $ScanContext.metrics.listenerMs += $watch.ElapsedMilliseconds }
+    # Bound retained OS data; multiple distinct owners on one port are ambiguous.
+    if ($rows.Count -gt 16384) { return $null }
+    $snapshot = @{}
+    foreach ($row in $rows) {
+        $key = [int]$row.LocalPort
+        $ownerId = [int]$row.OwningProcess
+        if ($snapshot.ContainsKey($key) -and $snapshot[$key] -ne $ownerId) { $snapshot[$key] = 0 }
+        else { $snapshot[$key] = $ownerId }
+    }
+    return $snapshot
+}
+
+function Get-McpCcProcessGeneration {
+    param([int]$ProcessId)
+    $process = Get-Process -Id $ProcessId -ErrorAction Stop
+    # CIM datetime has microsecond precision; native creation time has 100ns ticks.
+    try { $ticks = $process.StartTime.ToUniversalTime().Ticks; return ($ticks - ($ticks % 10)) }
+    finally { $process.Dispose() }
+}
+
+function Get-McpCcObservedProcess {
+    param([int]$ProcessId, $ScanContext)
+    if ($null -eq $ScanContext) {
+        return Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction Stop
+    }
+    if ($ScanContext.closed -or $ScanContext.clock.Elapsed.TotalSeconds -gt 120) { throw 'OWNERSHIP_SCAN_EXPIRED' }
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        $ScanContext.metrics.identityChecks++
+        $generation = Get-McpCcProcessGeneration -ProcessId $ProcessId
+    }
+    finally { $ScanContext.metrics.identityMs += $watch.ElapsedMilliseconds }
+    if ($ScanContext.processes.ContainsKey($ProcessId)) {
+        $ScanContext.metrics.processCacheHits++
+        $cached = $ScanContext.processes[$ProcessId]
+        if ($null -eq $cached -or $generation -ne $cached.generation) { throw 'PROCESS_GENERATION_CHANGED' }
+        return $cached.process
+    }
+    if ($ScanContext.processes.Count -ge 512) { throw 'OWNERSHIP_SCAN_LIMIT' }
+    # Cache failures too; never promote a missing/denied process later in this scan.
+    $ScanContext.processes[$ProcessId] = $null
+    $watch.Restart()
+    try {
+        $ScanContext.metrics.processQueries++
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction Stop
+        if ($null -eq $process -or $null -eq $process.CreationDate -or
+            ([datetime]$process.CreationDate).ToUniversalTime().Ticks -ne $generation) { throw 'PROCESS_GENERATION_UNVERIFIED' }
+        $ScanContext.processes[$ProcessId] = @{ process = $process; generation = $generation }
+        return $process
+    }
+    finally { $ScanContext.metrics.processMs += $watch.ElapsedMilliseconds }
+}
+
+function Complete-McpCcOwnershipScan {
+    param($ScanContext, [object[]]$Components)
+    try {
+        $finalListeners = if ($null -ne $ScanContext.listeners) { Get-McpCcListenerSnapshot -ScanContext $ScanContext } else { $null }
+        $valid = -not $ScanContext.invalid -and $null -ne $finalListeners -and $ScanContext.clock.Elapsed.TotalSeconds -le 120
+        foreach ($processId in @($ScanContext.processes.Keys)) {
+            try { $null = Get-McpCcObservedProcess -ProcessId $processId -ScanContext $ScanContext }
+            catch { $valid = $false }
+        }
+        $valid = $valid -and $ScanContext.clock.Elapsed.TotalSeconds -le 120
+        foreach ($component in $Components) {
+            $invalidated = $false
+            foreach ($probe in @($component.probes)) {
+                $port = [int]$probe.port
+                if ($probe.tcpOpen -and $probe.ownershipRequired -and $null -eq $probe.owner.matchesExpected) {
+                    $invalidated = $true
+                }
+                if (-not $valid -or -not $finalListeners.ContainsKey($port) -or
+                    $finalListeners[$port] -le 0 -or $finalListeners[$port] -ne $ScanContext.listeners[$port]) {
+                    # Preserve an already observed mismatch; withdraw positive proofs.
+                    if ($probe.owner.matchesExpected -eq $true) {
+                        $probe.owner.matchesExpected = $null
+                        $probe.owner.relation = 'Unknown'
+                        $ScanContext.metrics.uncertain++
+                        $invalidated = $true
+                    }
+                }
+            }
+            if ($invalidated) {
+                # Final observation supersedes the classification made during probes.
+                if ($component.localStatus -notin @('OwnershipMismatch', 'Misconfigured', 'NotInstalled')) {
+                    $component.localStatus = 'OwnershipUnknown'
+                    $component.status = 'OwnershipUnknown'
+                }
+                $component.readinessScope = 'none'
+                $component.connectivity.localTunnel.status = 'Unknown'
+                $component.connectivity.localTunnel.errorCode = 'OWNERSHIP_OBSERVATION_CHANGED'
+                $component.issues += [pscustomobject]@{ probe = $null; code = 'OWNERSHIP_OBSERVATION_CHANGED'; message = 'Ownership changed or could not be revalidated during this scan.' }
+            }
+        }
+    }
+    finally {
+        $ScanContext.closed = $true; $ScanContext.clock.Stop()
+        $ScanContext.processes.Clear(); $ScanContext.listeners = $null
+    }
+}
+
 function Get-McpCcProcessLineage {
     param(
         [Parameter(Mandatory = $true)][int]$ProcessId,
         [Parameter(Mandatory = $true)][int]$ExpectedAncestorProcessId,
-        [scriptblock]$ProcessLookup
+        [scriptblock]$ProcessLookup,
+        $ScanContext
     )
     if ($ProcessId -le 0 -or $ExpectedAncestorProcessId -le 0) {
         return [pscustomobject]@{ known = $true; matches = $false; depth = $null }
@@ -1302,7 +1513,7 @@ function Get-McpCcProcessLineage {
     if ($null -eq $ProcessLookup) {
         $ProcessLookup = {
             param([int]$LookupProcessId)
-            Get-CimInstance Win32_Process -Filter "ProcessId=$LookupProcessId" -ErrorAction Stop
+            Get-McpCcObservedProcess -ProcessId $LookupProcessId -ScanContext $ScanContext
         }
     }
 
@@ -1323,6 +1534,13 @@ function Get-McpCcProcessLineage {
             return [pscustomobject]@{ known = $false; matches = $null; depth = $null }
         }
         $parentProcessId = [int]$process.ParentProcessId
+        if ($null -ne $ScanContext -and $parentProcessId -gt 0) {
+            try {
+                $parent = Get-McpCcObservedProcess -ProcessId $parentProcessId -ScanContext $ScanContext
+                if ($null -eq $parent -or $parent.CreationDate -gt $process.CreationDate) { throw 'PARENT_GENERATION_CHANGED' }
+            }
+            catch { return [pscustomobject]@{ known = $false; matches = $null; depth = $null } }
+        }
         if ($parentProcessId -eq $ExpectedAncestorProcessId) {
             return [pscustomobject]@{ known = $true; matches = $true; depth = ($depth + 1) }
         }
@@ -1339,22 +1557,35 @@ function Get-McpCcPortOwner {
         [Parameter(Mandatory = $true)][int]$Port,
         [string[]]$ExpectedCommandFragments = @(),
         [string]$ManagedPidPath,
-        [string[]]$ManagedExpectedCommandFragments = @()
+        [string[]]$ManagedExpectedCommandFragments = @(),
+        $ScanContext
     )
     try {
         $ownerProcessId = $null
-        try {
-            $connection = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction Stop | Select-Object -First 1
-            if ($null -ne $connection) { $ownerProcessId = [int]$connection.OwningProcess }
+        if ($null -ne $ScanContext) {
+            if ($ScanContext.closed -or $ScanContext.clock.Elapsed.TotalSeconds -gt 120) { throw 'OWNERSHIP_SCAN_EXPIRED' }
+            if ($null -eq $ScanContext.listeners) {
+                $ScanContext.listeners = Get-McpCcListenerSnapshot -ScanContext $ScanContext
+                if ($null -eq $ScanContext.listeners) { $ScanContext.listeners = @{}; $ScanContext.invalid = $true }
+            }
+            if ($ScanContext.listeners.ContainsKey($Port) -and $ScanContext.listeners[$Port] -gt 0) {
+                $ownerProcessId = $ScanContext.listeners[$Port]
+            }
         }
-        catch { }
-        if ($null -eq $ownerProcessId) {
-            $netstatPath = Join-Path $env:WINDIR "System32\netstat.exe"
-            if (Test-Path -LiteralPath $netstatPath -PathType Leaf) {
-                foreach ($line in @(& $netstatPath -ano -p TCP 2>$null)) {
-                    if ([string]$line -match ("^\s*TCP\s+\S+:" + $Port + "\s+\S+\s+LISTENING\s+(\d+)\s*$")) {
-                        $ownerProcessId = [int]$matches[1]
-                        break
+        else {
+            try {
+                $connection = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction Stop | Select-Object -First 1
+                if ($null -ne $connection) { $ownerProcessId = [int]$connection.OwningProcess }
+            }
+            catch { }
+            if ($null -eq $ownerProcessId) {
+                $netstatPath = Join-Path $env:WINDIR "System32\netstat.exe"
+                if (Test-Path -LiteralPath $netstatPath -PathType Leaf) {
+                    foreach ($line in @(& $netstatPath -ano -p TCP 2>$null)) {
+                        if ([string]$line -match ("^\s*TCP\s+\S+:" + $Port + "\s+\S+\s+LISTENING\s+(\d+)\s*$")) {
+                            $ownerProcessId = [int]$matches[1]
+                            break
+                        }
                     }
                 }
             }
@@ -1366,7 +1597,8 @@ function Get-McpCcPortOwner {
             }
         }
         try {
-            $process = Get-CimInstance Win32_Process -Filter "ProcessId=$ownerProcessId" -ErrorAction Stop
+            $process = Get-McpCcObservedProcess -ProcessId $ownerProcessId -ScanContext $ScanContext
+            if ($null -eq $process) { throw 'OWNER_PROCESS_MISSING' }
         }
         catch {
             return [pscustomobject]@{
@@ -1398,7 +1630,7 @@ function Get-McpCcPortOwner {
                 else {
                     $managedPid = $parsedManagedPid
                     try {
-                        $managedProcess = Get-CimInstance Win32_Process -Filter "ProcessId=$managedPid" -ErrorAction Stop
+                        $managedProcess = Get-McpCcObservedProcess -ProcessId $managedPid -ScanContext $ScanContext
                     }
                     catch {
                         return [pscustomobject]@{
@@ -1421,7 +1653,7 @@ function Get-McpCcPortOwner {
                             -ExpectedFragments $ManagedExpectedCommandFragments
                         $lineage = Get-McpCcProcessLineage `
                             -ProcessId ([int]$ownerProcessId) `
-                            -ExpectedAncestorProcessId $managedPid
+                            -ExpectedAncestorProcessId $managedPid -ScanContext $ScanContext
                         if (-not $lineage.known) {
                             return [pscustomobject]@{
                                 known = $true
@@ -1465,14 +1697,28 @@ function Get-McpCcPortOwner {
     }
 }
 
+function Test-McpCcOperationalSummaryValue {
+    param([string]$Field,$Value)
+    # These opt-in health fields are scalar operational metadata, never job payloads.
+    switch -CaseSensitive ($Field) {
+        'jobs.active' { return (($Value -is [int] -or $Value -is [long]) -and $Value -ge 0 -and $Value -le [int]::MaxValue) }
+        'jobs.awaitingApproval' { return (($Value -is [int] -or $Value -is [long]) -and $Value -ge 0 -and $Value -le [int]::MaxValue) }
+        'jobs.scope' { return ($Value -is [string] -and $Value -ceq 'all') }
+        'controller' { return ($Value -is [string] -and $Value -cin @('ready','idle','starting','unavailable')) }
+        default { return $true } # Preserve all existing summary field behavior.
+    }
+}
+
 function Get-McpCcProbeResult {
     param(
         [Parameter(Mandatory = $true)]$Probe,
         [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
         $PortPolicy,
-        [scriptblock]$TcpPortTester
+        [scriptblock]$TcpPortTester,
+        $ScanContext
     )
     $started = [Diagnostics.Stopwatch]::StartNew()
+    $httpMs = 0L
     $success = $false
     $errorCode = $null
     $errorMessage = $null
@@ -1487,7 +1733,9 @@ function Get-McpCcProbeResult {
             }
             throw "Configured loopback port is inside the Windows dynamic TCP client range."
         }
-        $response = Invoke-WebRequest -UseBasicParsing -Uri ([string]$Probe.url) -TimeoutSec $TimeoutSeconds
+        $httpWatch = [Diagnostics.Stopwatch]::StartNew()
+        try { $response = Invoke-WebRequest -UseBasicParsing -Uri ([string]$Probe.url) -TimeoutSec $TimeoutSeconds }
+        finally { $httpMs = $httpWatch.ElapsedMilliseconds }
         if ([int]$response.StatusCode -lt 200 -or [int]$response.StatusCode -ge 300) {
             throw "Unexpected HTTP status $($response.StatusCode)."
         }
@@ -1509,7 +1757,7 @@ function Get-McpCcProbeResult {
             }
             foreach ($field in @($Probe.summaryFields)) {
                 $value = Get-McpCcNestedProperty -Object $payload -Path ([string]$field)
-                if ($value.found) { $summary[[string]$field] = $value.value }
+                if ($value.found -and (Test-McpCcOperationalSummaryValue -Field ([string]$field) -Value $value.value)) { $summary[[string]$field] = $value.value }
             }
             if ($mismatches.Count -gt 0) {
                 $errorCode = "EXPECTED_MISMATCH"
@@ -1542,6 +1790,7 @@ function Get-McpCcProbeResult {
     }
     finally { $started.Stop() }
 
+    $tcpWatch = [Diagnostics.Stopwatch]::StartNew()
     $tcpOpen = if ($success) {
         $true
     }
@@ -1551,6 +1800,8 @@ function Get-McpCcProbeResult {
     else {
         Test-McpCcTcpPort -Port ([int]$Probe.port)
     }
+    $tcpWatch.Stop()
+    $ownerWatch = [Diagnostics.Stopwatch]::StartNew()
     $ownerFragmentsResult = Get-McpCcObjectProperty -Object $Probe -Name "ownerCommandContains"
     $managedPidPathResult = Get-McpCcObjectProperty -Object $Probe -Name "resolvedOwnerManagedPidFile"
     $managedFragmentsResult = Get-McpCcObjectProperty -Object $Probe -Name "ownerManagedCommandContains"
@@ -1565,7 +1816,7 @@ function Get-McpCcProbeResult {
             -Port ([int]$Probe.port) `
             -ExpectedCommandFragments $ownerFragments `
             -ManagedPidPath $managedPidPath `
-            -ManagedExpectedCommandFragments $managedFragments
+            -ManagedExpectedCommandFragments $managedFragments -ScanContext $ScanContext
     }
     else {
         [pscustomobject]@{
@@ -1573,6 +1824,7 @@ function Get-McpCcProbeResult {
             managedPid = $null; managedProcessName = $null; relation = $null
         }
     }
+    $ownerWatch.Stop()
     return [pscustomobject]@{
         id = [string]$Probe.id
         label = [string]$Probe.label
@@ -1582,11 +1834,14 @@ function Get-McpCcProbeResult {
         port = [int]$Probe.port
         success = $success
         elapsedMs = [int]$started.ElapsedMilliseconds
+        # elapsedMs retains the legacy HTTP/parse/preflight scope.
+        timing = [pscustomobject]@{ httpMs = $httpMs; tcpMs = $tcpWatch.ElapsedMilliseconds; ownerMs = $ownerWatch.ElapsedMilliseconds }
         tcpOpen = [bool]$tcpOpen
         errorCode = $errorCode
         error = $errorMessage
         summary = [pscustomobject]$summary
         owner = $owner
+        ownershipRequired = ($ownerFragments.Count -gt 0 -or -not [string]::IsNullOrWhiteSpace($managedPidPath))
         portPolicy = $portPolicyResult
     }
 }
@@ -2273,7 +2528,8 @@ function Get-McpCcComponentStatus {
         [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
         $RemoteEvidence,
         $PortPolicy,
-        [DateTimeOffset]$NowUtc = [DateTimeOffset]::UtcNow
+        [DateTimeOffset]$NowUtc = [DateTimeOffset]::UtcNow,
+        $ScanContext
     )
     $started = [Diagnostics.Stopwatch]::StartNew()
     $rootExists = Test-Path -LiteralPath $Component.resolvedRoot -PathType Container
@@ -2286,7 +2542,7 @@ function Get-McpCcComponentStatus {
     $probeResults = @()
     if ($rootExists) {
         foreach ($probe in @($Component.probes)) {
-            $probeResults += Get-McpCcProbeResult -Probe $probe -TimeoutSeconds $TimeoutSeconds -PortPolicy $PortPolicy
+            $probeResults += Get-McpCcProbeResult -Probe $probe -TimeoutSeconds $TimeoutSeconds -PortPolicy $PortPolicy -ScanContext $ScanContext
         }
     }
     $localStatus = Resolve-McpCcComponentState -Component $Component -RootExists $rootExists -StartActionExists $startExists -ProbeResults $probeResults
@@ -2367,6 +2623,8 @@ function Get-McpCcSystemState {
         [scriptblock]$StatusProvider,
         $PortPolicy
     )
+    $scanWatch = [Diagnostics.Stopwatch]::StartNew()
+    $policyWatch = [Diagnostics.Stopwatch]::StartNew()
     $effectivePortPolicy = if ($PSBoundParameters.ContainsKey("PortPolicy")) {
         $PortPolicy
     }
@@ -2376,11 +2634,13 @@ function Get-McpCcSystemState {
     else {
         $null
     }
+    $policyWatch.Stop()
+    $scanContext = if ($null -eq $StatusProvider) { New-McpCcOwnershipScan } else { $null }
     $components = @()
     foreach ($component in @($Manifest.components | Sort-Object startupOrder)) {
         try {
             if ($null -eq $StatusProvider) {
-                $components += Get-McpCcComponentStatus -Component $component -TimeoutSeconds ([int]$Manifest.settings.probeTimeoutSeconds) -PortPolicy $effectivePortPolicy
+                $components += Get-McpCcComponentStatus -Component $component -TimeoutSeconds ([int]$Manifest.settings.probeTimeoutSeconds) -PortPolicy $effectivePortPolicy -ScanContext $scanContext
             }
             else {
                 $components += & $StatusProvider $component ([int]$Manifest.settings.probeTimeoutSeconds)
@@ -2390,6 +2650,9 @@ function Get-McpCcSystemState {
             $components += New-McpCcMonitorExceptionStatus -Component $component
         }
     }
+    $validationWatch = [Diagnostics.Stopwatch]::StartNew()
+    if ($null -ne $scanContext) { Complete-McpCcOwnershipScan -ScanContext $scanContext -Components $components }
+    $validationWatch.Stop()
     $severe = @("NotInstalled", "Misconfigured", "OwnershipMismatch", "OwnershipUnknown", "Unhealthy")
     $overall = if (@($components | Where-Object { $_.status -in $severe }).Count -gt 0) {
         "Failed"
@@ -2409,6 +2672,13 @@ function Get-McpCcSystemState {
         overall = $overall
         counts = [pscustomobject]$counts
         portPolicy = ConvertTo-McpCcPortPolicySummary -Policy $effectivePortPolicy
+        # OS counters/times overlap probe ownerMs and final validationMs; do not sum them.
+        timing = [pscustomobject]@{
+            elapsedMs = $scanWatch.ElapsedMilliseconds
+            portPolicyMs = $policyWatch.ElapsedMilliseconds
+            ownershipValidationMs = $validationWatch.ElapsedMilliseconds
+            ownership = if ($null -ne $scanContext) { [pscustomobject]$scanContext.metrics } else { $null }
+        }
         components = $components
     }
 }
@@ -2746,6 +3016,7 @@ function Publish-McpCcState {
 
 function Test-McpCcComponentMenuContract {
     param([Parameter(Mandatory = $true)]$Component)
+    if ((Get-McpCcObjectProperty -Object $Component -Name 'installedReleasePending').found) { Assert-McpCcInstalledActivation ([pscustomobject]@{schemaVersion=4}) }
     $uiResult = Get-McpCcObjectProperty -Object $Component -Name "ui"
     if (-not $uiResult.found -or $null -eq $uiResult.value) {
         return [pscustomobject]@{ configured = $false; ok = $true; menuContract = $null; actions = @(); error = $null }
@@ -2757,7 +3028,8 @@ function Test-McpCcComponentMenuContract {
     try {
         $entrypoint = Resolve-McpCcChildPath -Root $Component.resolvedRoot -RelativePath ([string]$Component.ui.actionEntrypoint.path) -Label "Component '$($Component.id)' UI action entrypoint"
         if (-not (Test-Path -LiteralPath $entrypoint -PathType Leaf)) { throw "component UI action entrypoint is missing" }
-        $output = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $entrypoint -SelfTest 2>&1)
+        $powershell=if($script:InstalledManager){'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'}else{'powershell.exe'}
+        $output = @(& $powershell -NoProfile -ExecutionPolicy Bypass -File $entrypoint -SelfTest 2>&1)
         $exitCode = $LASTEXITCODE
         $outputText = ($output -join [Environment]::NewLine)
         if ([Text.Encoding]::UTF8.GetByteCount($outputText) -gt 65536) { throw "component UI SelfTest exceeded the output limit" }
@@ -2795,6 +3067,7 @@ function Test-McpCcComponentMenuContract {
 
 function Test-McpCcComponentContract {
     param([Parameter(Mandatory = $true)]$Component)
+    if ((Get-McpCcObjectProperty -Object $Component -Name 'installedReleasePending').found) { Assert-McpCcInstalledActivation ([pscustomobject]@{schemaVersion=4}) }
     if (-not (Test-Path -LiteralPath $Component.resolvedContractScript -PathType Leaf)) {
         return [pscustomobject]@{ id = $Component.id; ok = $false; error = "contract script is missing" }
     }
@@ -2806,7 +3079,8 @@ function Test-McpCcComponentContract {
         else {
             @("-SelfTest")
         }
-        $output = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Component.resolvedContractScript $contractArguments 2>&1)
+        $powershell=if($script:InstalledManager){'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'}else{'powershell.exe'}
+        $output = @(& $powershell -NoProfile -ExecutionPolicy Bypass -File $Component.resolvedContractScript $contractArguments 2>&1)
         $exitCode = $LASTEXITCODE
         if ($exitCode -ne 0) { throw "component SelfTest exited with code $exitCode" }
         $document = ($output -join [Environment]::NewLine) | ConvertFrom-Json
@@ -2875,6 +3149,7 @@ function Test-McpCcComponentContract {
 
 function Test-McpCcManifest {
     param([Parameter(Mandatory = $true)]$Manifest)
+    if ($Manifest.schemaVersion -eq 4) { Assert-McpCcInstalledActivation $Manifest }
     $components = @()
     foreach ($component in @($Manifest.components | Sort-Object startupOrder)) {
         $actions = @()
@@ -2970,7 +3245,7 @@ function Invoke-McpCcBoundedPowerShell {
         )
         $argumentLine = (@($processArguments | ForEach-Object { ConvertTo-McpCcWindowsArgument -Value ([string]$_) }) -join " ")
         $startInfo = New-Object Diagnostics.ProcessStartInfo
-        $startInfo.FileName = Join-Path $PSHOME "powershell.exe"
+        $startInfo.FileName = if($script:InstalledManager){'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'}else{Join-Path $PSHOME "powershell.exe"}
         $startInfo.Arguments = $argumentLine
         $startInfo.WorkingDirectory = $WorkingDirectory
         $startInfo.UseShellExecute = $false
@@ -3058,7 +3333,13 @@ function Assert-McpCcControllerActionResult {
         if ([string]::IsNullOrWhiteSpace($errorCode) -or $errorCode -notmatch '^[A-Z][A-Z0-9_]{0,63}$') {
             $errorCode = "CONTROLLER_REPORTED_FAILURE"
         }
-        throw "Component controller reported failure '$errorCode'; inspect the component-owned runtime log."
+        $failure = [InvalidOperationException]::new("Component controller reported failure '$errorCode'; inspect the component-owned runtime log.")
+        # Private structured evidence only after the explicit controller contract
+        # passed validation. Never infer refusal from stderr or exception text.
+        if ($ExpectedAction -ceq 'ReloadRuntime' -and $errorCode -cin @('ACTIVE_WORK_PRESENT','OWNERSHIP_MISMATCH','OWNERSHIP_UNKNOWN','ACTIVE_STATE_UNKNOWN')) {
+            $failure.Data['McpCc.ControllerRefusalCode'] = $errorCode
+        }
+        throw $failure
     }
 }
 
@@ -3096,6 +3377,11 @@ function Invoke-McpCcComponentUiAction {
         [int]$ActionTimeoutSeconds = 0,
         [ValidateRange(1024, 1048576)][int]$MaxCapturedOutputBytes = 65536
     )
+    if ($Manifest.schemaVersion -eq 4) {
+        Assert-McpCcInstalledActivation $Manifest
+        $Manifest=Read-McpCcManifest -Path (Join-Path $PSScriptRoot '..\config\registry.json')
+        if ($RuntimeRoot -ine (Get-McpCcInstalledStateRoot $Manifest.installedRelease)) { throw 'INSTALLED_CALLER_OVERRIDE_REJECTED' }
+    }
     $component = Get-McpCcComponent -Manifest $Manifest -Id $ComponentId
     if ((Get-McpCcRuntimeMode -Component $component) -ne "component-controller") {
         throw "Component '$ComponentId' UI actions require component-controller mode."
@@ -3181,8 +3467,16 @@ function Invoke-McpCcComponentAction {
         [int]$ActionTimeoutSeconds = 0,
         [ValidateRange(1024, 1048576)][int]$MaxCapturedOutputBytes = 65536
     )
+    if ($Manifest.schemaVersion -eq 4) {
+        Assert-McpCcInstalledActivation $Manifest
+        $Manifest=Read-McpCcManifest -Path (Join-Path $PSScriptRoot '..\config\registry.json')
+        if ($RuntimeRoot -ine (Get-McpCcInstalledStateRoot $Manifest.installedRelease)) { throw 'INSTALLED_CALLER_OVERRIDE_REJECTED' }
+    }
     $component = Get-McpCcComponent -Manifest $Manifest -Id $ComponentId
     $binding = Get-McpCcComponentActionBinding -Component $component -Action $Action
+    if ($Manifest.schemaVersion -eq 4 -and $ComponentId -ceq 'codex_bridge' -and $binding.semanticAction -ceq 'show_diagnostic_tray') {
+        throw 'INSTALLED_USE_SINGLE_CONTROL_CENTER'
+    }
     $actionSpec = $binding.actionSpec
     $actionPath = Resolve-McpCcChildPath -Root $component.resolvedRoot -RelativePath ([string]$actionSpec.path) -Label "$($binding.semanticAction) action"
     if (-not (Test-Path -LiteralPath $actionPath -PathType Leaf)) {
@@ -3208,13 +3502,13 @@ function Invoke-McpCcComponentAction {
             throw "Another manager action is already active for component '$ComponentId'."
         }
         $started = [Diagnostics.Stopwatch]::StartNew()
-        $pid = $null
+        $controllerProcessId = $null
         $exitCode = $null
         $actionResult = $null
         if ([string]$actionSpec.kind -eq "vbs") {
-            $wscript = Join-Path $env:WINDIR "System32\wscript.exe"
+            $wscript = if($script:InstalledManager){'C:\Windows\System32\wscript.exe'}else{Join-Path $env:WINDIR "System32\wscript.exe"}
             $process = Start-Process -FilePath $wscript -ArgumentList "`"$actionPath`"" -WorkingDirectory $component.resolvedRoot -WindowStyle Hidden -PassThru
-            $pid = $process.Id
+            $controllerProcessId = $process.Id
         }
         elseif ([string]$actionSpec.kind -eq "powershell") {
             $arguments = @()
@@ -3227,7 +3521,7 @@ function Invoke-McpCcComponentAction {
             }
             $timeoutSeconds = if ($ActionTimeoutSeconds -gt 0) { $ActionTimeoutSeconds } else { Get-McpCcComponentTimingSeconds -Manifest $Manifest -Component $component -Name "controllerActionTimeoutSeconds" }
             $execution = Invoke-McpCcBoundedPowerShell -ScriptPath $actionPath -Arguments $arguments -WorkingDirectory $component.resolvedRoot -RuntimeRoot $RuntimeRoot -TimeoutSeconds $timeoutSeconds -MaxCapturedOutputBytes $MaxCapturedOutputBytes
-            $pid = $execution.processId
+            $controllerProcessId = $execution.processId
             $exitCode = $execution.exitCode
             $outputText = ([string]$execution.stdout).Trim()
             if ($binding.runtimeMode -eq "component-controller") {
@@ -3265,7 +3559,7 @@ function Invoke-McpCcComponentAction {
             runtimeMode = $binding.runtimeMode
             planned = $false
             delegated = $true
-            processId = $pid
+            processId = $controllerProcessId
             exitCode = $exitCode
             result = $actionResult
             elapsedMs = [int]$started.ElapsedMilliseconds
@@ -3283,6 +3577,7 @@ function Get-McpCcControllerAudit {
         [string]$RuntimeRoot = (Get-McpCcDefaultRuntimeRoot),
         [scriptblock]$StatusInvoker
     )
+    if ($Manifest.schemaVersion -eq 4) { Assert-McpCcInstalledActivation $Manifest }
     $runtimeRootPath = Assert-McpCcSafeRuntimeRoot -RuntimeRoot $RuntimeRoot
     $entries = @()
     foreach ($component in @($Manifest.components | Sort-Object startupOrder)) {
@@ -3490,6 +3785,13 @@ function Get-McpCcReconcilePlan {
         [Parameter(Mandatory = $true)]$State,
         $ControllerAudit
     )
+    if ($Manifest.schemaVersion -eq 4 -and $Manifest.installedRelease.schemaVersion -lt 3) {
+        return @($Manifest.components | ForEach-Object {
+            [pscustomobject]@{component=$_.id;displayName=$_.displayName;currentStatus='NotInstalled';decision='ManualAttention';
+                classification=$null;reasonCode='INSTALLED_LIFECYCLE_BINDINGS_REQUIRED';managerAttemptLimit=0;retryOwner=$null;controllerTimeoutSeconds=0}
+        })
+    }
+    if ($Manifest.schemaVersion -eq 4) { Assert-McpCcInstalledActivation $Manifest }
     $items = @()
     foreach ($component in @($Manifest.components | Sort-Object startupOrder)) {
         $status = @($State.components | Where-Object { $_.id -eq $component.id } | Select-Object -First 1)[0]
@@ -3637,6 +3939,7 @@ function Get-McpCcStartupAudit {
 Export-ModuleMember -Function @(
     "Get-McpCcDefaultManifestPath",
     "Get-McpCcDefaultRuntimeRoot",
+    "Assert-McpCcRuntimeRoot",
     "Get-McpCcBootId",
     "Test-McpCcPathWithinRoot",
     "Resolve-McpCcChildPath",

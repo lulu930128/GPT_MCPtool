@@ -9,6 +9,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { loadBridgeConfig } from "../dist/src/config.js";
 import { startBridgeHttpServer } from "../dist/src/http-server.js";
 import { createBridgeRuntime } from "../dist/src/runtime.js";
+import { SelfReloadClient, ReloadError } from "../dist/src/self-reload/client.js";
 
 const root = await mkdtemp(join(tmpdir(), "codex-bridge-http-"));
 const projectPath = join(root, "approved-project");
@@ -25,9 +26,8 @@ const config = await loadBridgeConfig({
   CODEX_BRIDGE_HTTP_PORT: "0",
   CODEX_BRIDGE_HTTP_TOKEN: "smoke-token",
 });
-const runtime = await createBridgeRuntime(config);
 assert.match(config.handoffDir, /[\\/]\.tmp[\\/]codex-inbox$/);
-assert.ok(config.codexArgs.includes('default_permissions="codex-bridge-read-only"'));
+assert.ok(config.codexArgs.includes('default_permissions=":danger-full-access"'));
 assert.ok(config.codexArgs.some((value) => value.includes("permissions.codex-bridge-read-only=")));
 assert.ok(config.codexArgs.some((value) => value.includes("permissions.codex-bridge-workspace=")));
 const handoffFilesystemRule = `${JSON.stringify(config.handoffDir)} = "read"`;
@@ -35,6 +35,16 @@ assert.equal(config.codexArgs.filter((value) => value.includes(handoffFilesystem
 for (const path of [join(config.projectRoot, ".local"), projectsFile, dataDir]) {
   assert.equal(config.codexArgs.filter((value) => value.includes(`${JSON.stringify(path)} = "deny"`)).length, 2);
 }
+if (process.platform === "win32") {
+  const ccState = join(process.env.LOCALAPPDATA, "McpControlCenter");
+  assert.equal(config.codexArgs.filter((value) => value.includes(`${JSON.stringify(ccState)} = "deny"`)).length, 2);
+}
+// Keep the real launch-policy checks above, but all smoke writes stay isolated.
+config.handoffDir = join(root, "handoff");
+const runtime = await createBridgeRuntime(config);
+// Self-reload status otherwise spawns the real native pipe helper. Keep this
+// isolated HTTP test independent of the machine's production owner and policy.
+runtime.selfReload = new SelfReloadClient(runtime.store, async () => { throw new ReloadError("OWNER_UNAVAILABLE"); });
 const handle = await startBridgeHttpServer(runtime, { host: "127.0.0.1", port: 0, bearerToken: "smoke-token" });
 const client = new Client({ name: "codex-bridge-http-smoke", version: "1.1.0" });
 const transport = new StreamableHTTPClientTransport(new URL(handle.url), {
@@ -85,7 +95,25 @@ try {
     "codex_local_thread_list",
     "codex_local_thread_read",
     "codex_model_list",
+    "codex_powershell_host_preflight",
+    "codex_powershell_job_preview",
+    "codex_powershell_normal_execute",
+    "codex_powershell_preview",
+    "codex_powershell_receipt",
+    "codex_powershell_review_decide",
+    "codex_powershell_review_get",
+    "codex_powershell_review_receipt",
+    "codex_powershell_review_request",
+    "codex_powershell_status",
+    "codex_privileged_preview",
+    "codex_privileged_status",
     "codex_runtime_status",
+    "codex_self_reload_approve",
+    "codex_self_reload_challenge",
+    "codex_self_reload_preview",
+    "codex_self_reload_receipt",
+    "codex_self_reload_request",
+    "codex_self_reload_status",
     "codex_text_bundle_append",
     "codex_text_bundle_begin",
     "codex_text_bundle_finalize",
@@ -95,6 +123,8 @@ try {
     "render_codex_console",
   ]);
   for (const action of [
+    "codex_self_reload_approve",
+    "codex_self_reload_challenge",
     "codex_approval_decide",
     "codex_artifact_read_chunk",
     "codex_conversation_send",
@@ -111,6 +141,43 @@ try {
   ]) {
     assert.deepEqual(tools.find((tool) => tool.name === action)?._meta?.ui?.visibility, ["app"], `${action} must be app-only`);
   }
+  // Real HTTP/MCP validation; this temporary runtime has no installed Host.
+  const normalTool = tools.find((tool) => tool.name === "codex_powershell_normal_execute");
+  assert.equal(normalTool.annotations.readOnlyHint, false);
+  assert.notDeepEqual(normalTool._meta?.ui?.visibility, ["app"]);
+  assert.deepEqual(Object.keys(normalTool.inputSchema.properties).sort(), ["digest", "requestId", "userIntent"]);
+  assert.equal(normalTool.inputSchema.additionalProperties, false);
+  const proposal = await client.callTool({ name: "codex_powershell_review_request", arguments: {
+    origin: "DIRECT", projectId: "smoke", dataClassification: "personal", idempotencyKey: randomUUID(),
+    userIntent: "EXPLICIT_USER_REQUEST", contentPolicy: "PERSONAL_PUBLIC_NO_SECRETS_OR_REGULATED_ORDERS",
+    target: "isolated HTTP smoke", executionMode: "NORMAL", cwd: projectPath,
+    scriptSnapshot: "[Console]::Out.WriteLine('NORMAL_E2E_OK')", args: [], risk: "stdout only", sideEffects: "none",
+  } });
+  assert.notEqual(proposal.isError, true);
+  assert.match(proposal.structuredContent.requestId, /^[0-9a-f-]{36}$/);
+  assert.match(proposal.structuredContent.digest, /^[0-9a-f]{64}$/);
+  const binding = { requestId: proposal.structuredContent.requestId, digest: proposal.structuredContent.digest,
+    userIntent: "EXPLICIT_USER_EXECUTION_REQUEST" };
+  const forged = await client.callTool({ name: normalTool.name, arguments: { ...binding, approved: true } });
+  assert.equal(forged.isError, true);
+  const execution = await client.callTool({ name: normalTool.name, arguments: binding });
+  assert.equal(execution.isError, true);
+  assert.equal(execution.structuredContent.code, "NOT_DEPLOYED", JSON.stringify(execution));
+  assert.equal(execution.structuredContent.retryAllowed, false);
+  assert.equal(await runtime.approvalStore.readReviewExecution(binding.requestId), undefined);
+  assert.equal(runtime.controller.status, "idle", "NORMAL rejection must not start App Server.");
+  const privilegedStatus = await client.callTool({ name: "codex_privileged_status", arguments: {} });
+  assert.equal(privilegedStatus.structuredContent.deployment, "NOT DEPLOYED");
+  assert.equal(privilegedStatus.structuredContent.writeProtection, "NOT ENFORCED");
+  const privilegedPreview = await client.callTool({ name: "codex_privileged_preview", arguments: { operationId: "diagnostics.os_summary" } });
+  assert.equal(privilegedPreview.structuredContent.mode, "dry_run");
+  assert.equal(privilegedPreview.structuredContent.execution, "not_executed");
+  assert.equal(runtime.store.list().length, 0, "Broker preview must not create a Codex job.");
+  assert.equal(runtime.controller.status, "idle", "Broker tools must not start App Server.");
+  const reloadStatus = await client.callTool({ name: "codex_self_reload_status", arguments: {} });
+  assert.equal(reloadStatus.structuredContent.deployment, "NOT_DEPLOYED");
+  assert.equal(runtime.store.selfReloadDrain, null, "Read-only reload status cannot acquire admission.");
+  assert.equal(tools.find((tool) => tool.name === "codex_self_reload_request").annotations.readOnlyHint, false);
   assert.equal(tools.find((tool) => tool.name === "render_codex_console")?._meta?.ui?.resourceUri, "ui://codex-bridge/chat-workspace-v15.html");
   for (const name of names.filter((name) => name.startsWith("codex_direct_") || name === "codex_model_list")) {
     assert.notDeepEqual(tools.find((tool) => tool.name === name)?._meta?.ui?.visibility, ["app"]);
@@ -262,7 +329,8 @@ try {
     ok: true,
     health: { version: health.version, buildId: health.buildId, controller: health.controller },
     toolCount: tools.length,
-    appOnlyActions: 13,
+    normalExecution: "HTTP_SCHEMA_AND_NOT_DEPLOYED_VERIFIED_NO_OS_EXECUTION",
+    appOnlyActions: 15,
     finalizedTextBundle: bundleId,
     widgetMimeType: widget.contents[0]?.mimeType,
     previewCreatedJobs: runtime.store.list().length,

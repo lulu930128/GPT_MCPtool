@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, parse, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import type { BridgeProject } from "./types.js";
+import { installedCodexEnvironment, loadInstalledBinding, type InstalledBridgeBinding } from "./installed-runtime.js";
 
 export interface BridgeConfig {
   projectRoot: string;
@@ -22,6 +23,8 @@ export interface BridgeConfig {
   maxRecentJobs: number;
   buildId: string;
   codexHome: string;
+  installedBinding?: InstalledBridgeBinding;
+  codexEnvironment?: NodeJS.ProcessEnv;
 }
 
 interface ProjectsFileShape {
@@ -32,20 +35,30 @@ interface ProjectsFileShape {
 const COMPONENT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 export async function loadBridgeConfig(env: NodeJS.ProcessEnv = process.env): Promise<BridgeConfig> {
-  const projectRoot = resolve(env.CODEX_BRIDGE_PROJECT_ROOT?.trim() || COMPONENT_ROOT);
+  const installedBinding = await loadInstalledBinding(env);
+  const projectRoot = installedBinding?.codeRoot ?? resolve(env.CODEX_BRIDGE_PROJECT_ROOT?.trim() || COMPONENT_ROOT);
+  const configRoot = installedBinding?.configRoot ?? projectRoot;
   const projectsFile = resolve(
-    env.CODEX_BRIDGE_PROJECTS_FILE?.trim() || join(projectRoot, ".local", "projects.json"),
+    installedBinding?.projectsFile || env.CODEX_BRIDGE_PROJECTS_FILE?.trim() || join(configRoot, ".local", "projects.json"),
   );
   const dataDir = resolve(
-    env.CODEX_BRIDGE_DATA_DIR?.trim() ||
-      (process.platform === "win32" ? "C:\\CodexBridge" : join(homedir(), ".codex-bridge")),
+    installedBinding?.dataDir || env.CODEX_BRIDGE_DATA_DIR?.trim() ||
+      (process.platform === "win32" ? join(configRoot, ".local", "runtime") : join(homedir(), ".codex-bridge")),
   );
+  if (process.platform === "win32" && !installedBinding && !env.CODEX_BRIDGE_DATA_DIR?.trim()) {
+    const exists = async (path: string) => stat(path).then(() => true, (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return false;
+      throw error;
+    });
+    if (await exists("C:\\CodexBridge") && !await exists(dataDir)) throw new Error("RUNTIME_MIGRATION_REQUIRED");
+  }
   // Keep handoffs outside the denied settings subtree: Windows deny ACLs cannot
   // safely reopen a readable child below a denied parent.
-  const handoffDir = join(projectRoot, ".tmp", "codex-inbox");
-  const codexHome = resolve(env.CODEX_HOME?.trim() || join(homedir(), ".codex"));
+  const handoffDir = installedBinding?.handoffDir ?? join(configRoot, ".tmp", "codex-inbox");
+  const codexHome = installedBinding?.codexHome ?? resolve(env.CODEX_HOME?.trim() || join(homedir(), ".codex"));
   const { projects, sharedWorkspaceRoots } = await loadProjectPolicy(projectsFile);
-  const codexLaunch = await resolveCodexLaunch(projectRoot, handoffDir, projectsFile, dataDir, sharedWorkspaceRoots, env);
+  const codexLaunch = installedBinding ? resolveInstalledCodexLaunch(installedBinding, sharedWorkspaceRoots) :
+    await resolveCodexLaunch(projectRoot, handoffDir, projectsFile, dataDir, sharedWorkspaceRoots, env);
 
   return {
     projectRoot,
@@ -64,6 +77,7 @@ export async function loadBridgeConfig(env: NodeJS.ProcessEnv = process.env): Pr
     maxRecentJobs: parseBoundedInt(env.CODEX_BRIDGE_MAX_RECENT_JOBS, 20, 1, 100),
     buildId: await computeRuntimeBuildId(projectRoot),
     codexHome,
+    ...(installedBinding ? { installedBinding, codexEnvironment: installedCodexEnvironment(installedBinding) } : {}),
   };
 }
 
@@ -227,18 +241,30 @@ async function resolveCodexLaunch(
   return { command: "codex", args };
 }
 
+export function resolveInstalledCodexLaunch(binding: InstalledBridgeBinding, sharedWorkspaceRoots: string[]): { command: string; args: string[] } {
+  return { command: binding.nodePath, args: [binding.codexLauncher, ...withHandoffPermissionProfiles(["app-server"], {
+    projectRoot: binding.configRoot, handoffDir: binding.handoffDir, projectsFile: binding.projectsFile,
+    dataDir: binding.dataDir, sharedWorkspaceRoots, authorityPaths: [binding.releaseRoot, binding.ownerRoot, binding.runtimeRoot],
+  })] };
+}
+
 function withHandoffPermissionProfiles(args: string[], policy: {
   projectRoot: string;
   handoffDir: string;
   projectsFile: string;
   dataDir: string;
   sharedWorkspaceRoots: string[];
+  authorityPaths?: string[];
 }): string[] {
   if (!args.includes("app-server")) {
     throw new Error("CODEX_BRIDGE_CODEX_ARGS must launch the Codex app-server subcommand.");
   }
   const { projectRoot, handoffDir, projectsFile, dataDir, sharedWorkspaceRoots } = policy;
+  if (process.platform === "win32" && !process.env.LOCALAPPDATA) throw new Error("MCP_CC_STATE_PATH_UNAVAILABLE");
   const deniedPaths = [
+    ...(policy.authorityPaths ?? []),
+    // Retained sandbox profiles protect these paths; Full Access bypasses these rules.
+    ...(process.platform === "win32" && process.env.LOCALAPPDATA ? [join(process.env.LOCALAPPDATA, "McpControlCenter")] : []),
     join(projectRoot, ".local"),
     join(projectRoot, ".env"),
     join(projectRoot, ".env.*"),
@@ -271,13 +297,13 @@ function withHandoffPermissionProfiles(args: string[], policy: {
   return [
     ...args,
     "-c",
-    'default_permissions="codex-bridge-read-only"',
+    'default_permissions=":danger-full-access"',
     "-c",
     `permissions.codex-bridge-read-only={ ${readOnlyProfile} }`,
     "-c",
     `permissions.codex-bridge-workspace={ ${workspaceProfile} }`,
-    // Native Windows deny-read carveouts require this backend. This is scoped
-    // to the Bridge child process; it does not change the user's global config.
+    // Required by plan and the retained rollback profile. This backend setting
+    // does not sandbox Full Access and does not change the user's global config.
     ...(process.platform === "win32" ? ["-c", 'windows.sandbox="elevated"'] : []),
   ];
 }
