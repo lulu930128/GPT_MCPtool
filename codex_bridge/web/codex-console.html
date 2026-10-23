@@ -1536,69 +1536,69 @@
       body[data-theme="night-shift"] .workspace,
       body[data-theme="night-shift"] .chat { background: var(--ledger-canvas); }
       body[data-theme="night-shift"] .sidebar { background: var(--ledger-rail); }
-      body[data-theme="night-shift"] .brand strong { color: #f1f5f8; }
+      body[data-theme="night-shift"] .brand strong { color: var(--ledger-ink); }
       body[data-theme="night-shift"] .brand small,
-      body[data-theme="night-shift"] .rail-label { color: #71808d; }
+      body[data-theme="night-shift"] .rail-label { color: var(--quiet); }
       body[data-theme="night-shift"] .new-chat,
-      body[data-theme="night-shift"] .close-rail { border-color: #2b3945; color: #a9b6c1; }
+      body[data-theme="night-shift"] .close-rail { border-color: var(--ledger-line); color: var(--ledger-muted); }
       body[data-theme="night-shift"] .project-toggle:hover,
       body[data-theme="night-shift"] .project-add:hover,
-      body[data-theme="night-shift"] .conversation-item:hover { background: #131d26; }
+      body[data-theme="night-shift"] .conversation-item:hover { background: var(--ledger-hover); }
       body[data-theme="night-shift"] .conversation-item[aria-current="true"] {
-        background: rgba(107, 140, 255, .13);
-        box-shadow: inset 0 0 0 1px rgba(107, 140, 255, .12);
+        background: var(--ledger-hover);
+        box-shadow: none;
       }
-      body[data-theme="night-shift"] .sidebar-foot { border-color: #202c35; }
+      body[data-theme="night-shift"] .sidebar-foot { border-color: var(--ledger-line); }
 
       body[data-theme="night-shift"] .chat-head {
-        border-color: rgba(141, 154, 166, .14);
-        background: rgba(17, 24, 32, .91);
+        border-color: var(--ledger-line);
+        background: var(--ledger-canvas);
       }
       body[data-theme="night-shift"] .head-button,
       body[data-theme="night-shift"] .more > summary {
         border-color: var(--ledger-line);
-        background: #151e27;
-        color: #aab6c0;
+        background: var(--ledger-surface);
+        color: var(--ledger-muted);
       }
       body[data-theme="night-shift"] .head-button:hover,
-      body[data-theme="night-shift"] .more > summary:hover { border-color: #4a5a68; color: #eef3f7; background: #1b2630; }
+      body[data-theme="night-shift"] .more > summary:hover { border-color: var(--ledger-line-strong); color: var(--ledger-ink); background: var(--ledger-hover); }
       body[data-theme="night-shift"] .head-button.danger { color: #e88a8a; border-color: #5e363b; }
       body[data-theme="night-shift"] .more-menu {
         border-color: var(--ledger-line-strong);
-        background: #18212a;
+        background: var(--ledger-surface);
         color: var(--ledger-ink);
-        box-shadow: 0 16px 42px rgba(0, 0, 0, .42);
+        box-shadow: none;
       }
       body[data-theme="night-shift"] .more-menu button { color: var(--ledger-ink); }
-      body[data-theme="night-shift"] .more-menu button:hover { background: #202b35; }
+      body[data-theme="night-shift"] .more-menu button:hover { background: var(--ledger-hover); }
 
       body[data-theme="night-shift"] .transcript {
         background: var(--ledger-canvas);
       }
       body[data-theme="night-shift"] .message::before,
       body[data-theme="night-shift"] .approval-card::before,
-      body[data-theme="night-shift"] .activity-card::before { border-color: var(--ledger-canvas); background: #63717d; }
+      body[data-theme="night-shift"] .activity-card::before { border-color: var(--ledger-canvas); background: var(--quiet); }
       body[data-theme="night-shift"] .message.user {
-        background: #1b2732;
-        box-shadow: inset 2px 0 0 #34485c;
+        background: var(--user-bubble);
+        box-shadow: none;
       }
       body[data-theme="night-shift"] .message.user::before {
         background: var(--ledger-blue);
-        box-shadow: 0 0 14px rgba(107, 140, 255, .68);
+        box-shadow: none;
       }
       body[data-theme="night-shift"] .message-context,
       body[data-theme="night-shift"] .activity-card { border-color: var(--ledger-line); background: var(--ledger-surface); }
       body[data-theme="night-shift"] .message-artifact {
-        border-color: #33414d;
-        background: #111921;
-        color: #c9d4dc;
+        border-color: var(--ledger-line);
+        background: var(--ledger-canvas);
+        color: var(--ledger-ink);
       }
       body[data-theme="night-shift"] pre {
-        border-color: #2c3944;
-        background: #0d141b;
-        color: #cbd6de;
+        border-color: var(--ledger-line);
+        background: var(--code-surface);
+        color: var(--ledger-ink);
       }
-      body[data-theme="night-shift"] .turn-marker { border-color: #34414d; background: var(--ledger-canvas); }
+      body[data-theme="night-shift"] .turn-marker { border-color: var(--ledger-line); background: var(--ledger-canvas); }
       body[data-theme="night-shift"] .approval-card {
         border-color: #6b4d31;
         border-left-color: var(--ledger-amber);
@@ -1608,109 +1608,109 @@
       body[data-theme="night-shift"] .approval-title { color: #e7b27d; }
       body[data-theme="night-shift"] .approval-actions button {
         border-color: #594531;
-        background: #171a1d;
+        background: var(--ledger-surface);
         color: #d8b895;
       }
       body[data-theme="night-shift"] .approval-actions .accept {
         border-color: var(--ledger-blue);
         background: var(--ledger-blue);
-        color: #08111b;
+        color: var(--ledger-canvas);
       }
 
       body[data-theme="night-shift"] .composer-wrap {
-        background: linear-gradient(to bottom, rgba(17, 24, 32, 0), var(--ledger-canvas) 18px);
+        background: var(--ledger-canvas);
       }
       body[data-theme="night-shift"] .composer {
         border-color: var(--ledger-line-strong);
-        background: #151e27;
-        box-shadow: 0 14px 38px rgba(0, 0, 0, .22);
+        background: var(--ledger-surface);
+        box-shadow: none;
       }
       body[data-theme="night-shift"] .composer:focus-within {
-        border-color: #647fdd;
-        box-shadow: 0 0 0 3px rgba(107, 140, 255, .11), 0 14px 38px rgba(0, 0, 0, .22);
+        border-color: var(--ledger-line-strong);
+        box-shadow: none;
       }
       body[data-theme="night-shift"] .composer > textarea { color: var(--ledger-ink); }
-      body[data-theme="night-shift"] .composer > textarea::placeholder { color: #6f7e8a; }
+      body[data-theme="night-shift"] .composer > textarea::placeholder { color: var(--quiet); }
       body[data-theme="night-shift"] .context-panel { border-color: var(--ledger-line); }
-      body[data-theme="night-shift"] .context-fields { border-color: var(--ledger-line); background: #10171e; }
+      body[data-theme="night-shift"] .context-fields { border-color: var(--ledger-line); background: var(--ledger-surface); }
       body[data-theme="night-shift"] .context-fields textarea,
       body[data-theme="night-shift"] .context-fields select,
       body[data-theme="night-shift"] .text-entry-fields input,
       body[data-theme="night-shift"] .text-entry-fields textarea {
         border-color: var(--ledger-line);
-        background: #151e27;
+        background: var(--ledger-surface);
         color: var(--ledger-ink);
       }
       body[data-theme="night-shift"] .settings-popover {
         border-color: var(--ledger-line-strong);
-        background: #18212a;
-        box-shadow: 0 20px 52px rgba(0, 0, 0, .48);
+        background: var(--ledger-surface);
+        box-shadow: none;
       }
       body[data-theme="night-shift"] .settings-popover select {
         border-color: var(--ledger-line);
-        background: #111920;
+        background: var(--ledger-canvas);
         color: var(--ledger-ink);
       }
-      body[data-theme="night-shift"] .send { color: #07101a; }
-      body[data-theme="night-shift"] .send:disabled { border-color: #3a4650; background: #3a4650; color: #83909a; }
+      body[data-theme="night-shift"] .send { color: var(--ledger-canvas); }
+      body[data-theme="night-shift"] .send:disabled { border-color: var(--ledger-hover); background: var(--ledger-hover); color: var(--quiet); }
 
       body[data-theme="night-shift"] .inspector {
-        border-color: rgba(141, 154, 166, .12);
+        border-color: var(--ledger-line);
         background: var(--ledger-inspector);
       }
       body[data-theme="night-shift"] .inspector-head,
-      body[data-theme="night-shift"] .inspector-summary { border-color: rgba(141, 154, 166, .12); }
-      body[data-theme="night-shift"] .close-inspector { border-color: #35434e; color: #96a4af; }
+      body[data-theme="night-shift"] .inspector-summary { border-color: var(--ledger-line); }
+      body[data-theme="night-shift"] .close-inspector { border-color: var(--ledger-line); color: var(--ledger-muted); }
       body[data-theme="night-shift"] .workstream .activity-card,
       body[data-theme="night-shift"] .workstream .artifact-results {
-        border-color: rgba(141, 154, 166, .14);
-        background: #151e26;
+        border-color: var(--ledger-line);
+        background: var(--ledger-surface);
       }
-      body[data-theme="night-shift"] .workstream .activity-body { border-color: #2b3843; background: #0f171e; }
-      body[data-theme="night-shift"] .activity-status.running { color: #9bb0ff; }
+      body[data-theme="night-shift"] .workstream .activity-body { border-color: var(--ledger-line); background: var(--code-surface); }
+      body[data-theme="night-shift"] .activity-status.running { color: var(--ledger-blue); }
       body[data-theme="night-shift"] .activity-status.completed { color: #66bd96; }
       body[data-theme="night-shift"] .artifact-result {
-        border-color: #2f3c47;
-        background: #10181f;
+        border-color: var(--ledger-line);
+        background: var(--ledger-surface);
         color: var(--ledger-ink);
       }
-      body[data-theme="night-shift"] .artifact-result:hover { border-color: #506374; background: #16212a; }
+      body[data-theme="night-shift"] .artifact-result:hover { border-color: var(--ledger-line-strong); background: var(--ledger-hover); }
       body[data-theme="night-shift"] .artifact { background: rgba(3, 7, 11, .76); }
       body[data-theme="night-shift"] .artifact-dialog {
         border-color: var(--ledger-line-strong);
-        background: #151e27;
-        box-shadow: 0 26px 80px rgba(0, 0, 0, .56);
+        background: var(--ledger-surface);
+        box-shadow: none;
       }
-      body[data-theme="night-shift"] .artifact-head { border-color: var(--ledger-line); background: #101820; }
+      body[data-theme="night-shift"] .artifact-head { border-color: var(--ledger-line); background: var(--ledger-surface); }
       body[data-theme="night-shift"] .artifact-actions button,
       body[data-theme="night-shift"] .add-text-artifact {
         border-color: var(--ledger-line);
-        background: #18212a;
+        background: var(--ledger-surface);
         color: var(--ledger-ink);
       }
 
       body[data-theme="night-shift"][data-display-mode="inline"] .workspace {
-        border-color: #303d48;
-        background: #111820;
-        box-shadow: 0 14px 38px rgba(0, 0, 0, .32);
+        border-color: var(--ledger-line);
+        background: var(--ledger-canvas);
+        box-shadow: none;
       }
       body[data-theme="night-shift"][data-display-mode="inline"] .chat,
-      body[data-theme="night-shift"][data-display-mode="inline"] .chat-head { background: #111820; }
-      body[data-theme="night-shift"][data-display-mode="inline"] .transcript { background: #0e151c; }
+      body[data-theme="night-shift"][data-display-mode="inline"] .chat-head { background: var(--ledger-canvas); }
+      body[data-theme="night-shift"][data-display-mode="inline"] .transcript { background: var(--ledger-canvas); }
       body[data-theme="night-shift"][data-display-mode="inline"] .composer-wrap {
-        border-color: #2a3640;
-        background: #111820;
+        border-color: var(--ledger-line);
+        background: var(--ledger-canvas);
       }
       body[data-theme="night-shift"][data-display-mode="inline"] .composer {
-        border-color: #34424d;
-        background: #151e27;
+        border-color: var(--ledger-line);
+        background: var(--ledger-surface);
       }
       body[data-theme="night-shift"][data-display-mode="inline"] .dock-work {
-        border-color: #2e3a45;
+        border-color: var(--ledger-line);
         border-left-color: var(--ledger-blue);
-        background: #151e27;
+        background: var(--ledger-surface);
       }
-      body[data-theme="night-shift"] * { scrollbar-color: #40505d transparent; }
+      body[data-theme="night-shift"] * { scrollbar-color: #56575c transparent; }
       /* Workspace UX v2: quiet controls; each column owns one vertical scroller. */
       body[data-ledger="project-ledger"][data-theme="night-shift"] {
         --ledger-blue: #91aaa9;
@@ -1795,11 +1795,150 @@
         *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
         .status-windows, .artifact-result-list { scroll-snap-type: none !important; }
       }
+      /* Reading-first engineering workspace; keep the existing theme and owners. */
+      body[data-ledger="project-ledger"][data-theme="night-shift"] {
+        --ledger-canvas: #1c1d1f;
+        --ledger-rail: #202124;
+        --ledger-inspector: #202124;
+        --ledger-rail-soft: #292a2d;
+        --ledger-surface: #242528;
+        --ledger-hover: #343539;
+        --composer-surface: #2a2b2e;
+        --user-bubble: #303135;
+        --code-surface: #222326;
+        --ledger-ink: #ececf1;
+        --ledger-muted: #b4b8c0;
+        --ledger-line: rgba(255, 255, 255, .07);
+        --ledger-line-strong: #62646b;
+        --ledger-blue: #a4b1c4;
+        --ledger-blue-soft: #30343b;
+        --bg: var(--ledger-canvas);
+        --panel: var(--ledger-surface);
+        --panel-soft: var(--ledger-hover);
+        --panel-raised: var(--composer-surface);
+        --line: var(--ledger-line);
+        --line-strong: var(--ledger-line-strong);
+        --text: var(--ledger-ink);
+        --muted: var(--ledger-muted);
+        --quiet: #979ca5;
+        background: var(--ledger-canvas);
+      }
+      #console .message-body { display: block; overflow: visible; font-size: 16px; line-height: 1.8; -webkit-line-clamp: unset; }
+      #console .message-body.markdown { white-space: normal; overflow-wrap: anywhere; }
+      .markdown > :first-child { margin-top: 0; }
+      .markdown > :last-child { margin-bottom: 0; }
+      .markdown p, .markdown ul, .markdown ol { margin: 0 0 1em; }
+      .markdown ul, .markdown ol { padding-left: 1.6em; }
+      .markdown li + li { margin-top: .3em; }
+      .markdown h2, .markdown h3, .markdown h4, .markdown h5, .markdown h6 { margin: 1.3em 0 .5em; line-height: 1.4; font-weight: 650; }
+      .markdown h2 { font-size: 1.4em; }
+      .markdown h3 { font-size: 1.2em; }
+      .markdown h4, .markdown h5, .markdown h6 { font-size: 1.05em; }
+      .markdown a { color: #bcc9dd; text-decoration: underline; text-underline-offset: 3px; }
+      .markdown a:hover { color: var(--ledger-ink); }
+      .markdown code { padding: .12em .35em; border-radius: 4px; background: var(--ledger-surface); font: .88em/1.6 var(--ledger-mono); }
+      .code-block { margin: 1em 0; min-width: 0; border: 1px solid var(--ledger-line); border-radius: 7px; overflow: hidden; }
+      .code-language { padding: 5px 12px; background: var(--ledger-surface); color: var(--ledger-muted); font: 12px/1.5 var(--ledger-mono); overflow-wrap: anywhere; }
+      #console .markdown pre { margin: 0; padding: 12px 14px; max-height: 420px; overflow: auto; white-space: pre; border: 0; border-radius: 0; font-size: 14px; line-height: 1.65; }
+      .markdown pre code { padding: 0; background: none; font: inherit; }
+      .markdown-table { max-width: 100%; overflow: auto; margin: 1em 0; border: 1px solid var(--ledger-line); border-radius: 6px; }
+      .markdown table { width: 100%; border-collapse: collapse; font-size: 14px; line-height: 1.6; }
+      .markdown th, .markdown td { min-width: 110px; padding: 9px 12px; border-bottom: 1px solid var(--ledger-line); text-align: left; vertical-align: top; }
+      .markdown th { background: var(--ledger-surface); font-weight: 650; }
+      .markdown tr:last-child td { border-bottom: 0; }
+      #console .message-meta { font-size: 12px; line-height: 1.5; margin-bottom: 10px; }
+      #console .message { margin-bottom: 28px; }
+      #console .turn-marker { font-size: 11px; }
+      #console .conversation-list { margin-left: 3px; }
+      #console .conversation-item { padding: 10px 10px 10px 14px; align-items: start; }
+      #console .conversation-dot { margin-top: 8px; }
+      #console .conversation-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; white-space: normal; overflow-wrap: anywhere; font-size: 14px; line-height: 1.5; }
+      #console .conversation-item[aria-current="true"] .conversation-title { display: block; }
+      #console .conversation-copy small { font-size: 12px; line-height: 1.5; }
+      #console .project-toggle, #conversation-search { font-size: 14px; }
+      #console .show-all-conversations, #console .load-conversations { font-size: 12px; color: var(--ledger-muted); }
+      #console .chat-head { height: auto; min-height: 76px; padding: 12px 18px; flex-wrap: wrap; align-items: center; background: var(--ledger-canvas); }
+      #console .chat { grid-template-rows: auto minmax(0, 1fr) auto; }
+      #console .chat-heading { flex: 1 1 220px; }
+      #console .chat-title { font-size: 18px; line-height: 1.4; }
+      #console .chat-subtitle { font-size: 12px; opacity: 1; line-height: 1.5; }
+      #console .head-button, #console .more > summary { min-height: 34px; font-size: 12px; }
+      .thread-details { margin-top: 6px; }
+      .thread-details > summary { width: fit-content; color: var(--ledger-muted); font-size: 12px; cursor: pointer; }
+      #console .thread-controls { font-size: 13px; opacity: 1; }
+      body[data-display-mode="inline"] #thread-details { display: none; }
+      #console .composer > textarea { font-size: 16px; line-height: 1.5; }
+      #console .run-settings > summary, #console .compact-settings-summary { font-size: 12px; line-height: 1.4; }
+      #console .compact-warning strong { font-size: 13px; }
+      #console .compact-warning small { font-size: 12px; }
+      #console .close-rail, #console .close-inspector { display: grid; width: 34px; height: 34px; }
+      #console .sidebar, #console .inspector { display: none; }
+      body[data-display-mode="fullscreen"] #console { grid-template-columns: var(--rail-width, 284px) minmax(0, 1fr) var(--inspector-width, 0px); }
+      body[data-display-mode="fullscreen"] #console .chat { grid-column: 2; }
+      #console.rail-visible .sidebar { display: grid; grid-column: 1; grid-template-rows: auto auto minmax(0, 1fr) auto; }
+      #console.inspector-visible .inspector { display: grid; grid-column: 3; grid-template-rows: auto auto minmax(0, 1fr); }
+      #console.overlay-rail .sidebar, #console.overlay-inspector .inspector { position: absolute; z-index: 50; top: 0; bottom: 0; width: min(340px, 90%); height: auto; max-height: none; box-shadow: 0 0 30px #0006; }
+      #console.overlay-rail .sidebar { left: 0; right: auto; }
+      #console.overlay-inspector .inspector { right: 0; left: auto; }
+      .panel-scrim { position: absolute; z-index: 40; inset: 0; border: 0; border-radius: 0; background: #0008; }
+      .panel-scrim[hidden] { display: none; }
+      #console .transcript, #console .project-tree, #console .workstream { overscroll-behavior: contain; }
+      /* Conversation surfaces: one quiet palette, no decorative timeline. */
+      #console .message::before, #console .activity-card::before, #console .approval-card::before { display: none; }
+      #console .message.user { width: fit-content; max-width: min(88%, 680px); margin-left: auto; padding: 14px 16px; border-radius: 18px; background: var(--user-bubble); box-shadow: none; }
+      #console .message.user .message-body { max-width: 100%; padding: 0; border-radius: 0; background: transparent; }
+      #console .message.assistant { background: transparent; border: 0; box-shadow: none; }
+      #console .message-meta { color: var(--quiet); font-family: "Segoe UI", sans-serif; letter-spacing: 0; }
+      #console .message.user .message-meta { text-align: right; }
+      #console .conversation-item[aria-current="true"] { background: var(--ledger-hover); box-shadow: none; }
+      #console .conversation-item::before { display: none; }
+      #console .conversation-item:hover, #console .project-toggle:hover, #console .project-add:hover { background: var(--ledger-hover); }
+      #console .project-name, #console .brand strong { color: var(--ledger-ink); }
+      #console .rail-label, #console .brand small, #console .sidebar-foot, #console .inspector-summary { color: var(--quiet); }
+      #console .conversation-dot.active, #console .presence.online { box-shadow: none; }
+      #console .head-button, #console .more > summary { border-radius: 8px; }
+      #console .thread, #console .composer { max-width: 780px; }
+      #console .composer-wrap { background: var(--ledger-canvas); padding-top: 8px; border: 0; }
+      #console .composer { position: relative; border: 1px solid var(--ledger-line); border-radius: 21px; background: var(--composer-surface); box-shadow: 0 2px 8px #0000000a; }
+      #console .composer:focus-within { border-color: #686a72; box-shadow: 0 0 0 1px #b4b8c00d; }
+      #console .composer > textarea { display: block; width: 100%; min-height: 52px; max-height: min(192px, 30vh); padding: 16px 17px 8px; font: 16px/24px "Segoe UI", sans-serif; resize: none; overflow-y: auto; border: 0; border-radius: 20px 20px 0 0; background: transparent; }
+      #console .composer > textarea:focus-visible { outline: 1px solid #979ca580; outline-offset: -4px; }
+      #console .composer-bar { padding: 6px 10px 10px; gap: 8px; flex-wrap: wrap; }
+      #console .attach-context { display: inline-flex; align-items: center; gap: 5px; min-height: 34px; padding: 5px 8px; border: 0; border-radius: 9px; background: transparent; color: var(--ledger-muted); font-size: 13px; }
+      #console .attach-context:hover, #console .attach-context[aria-expanded="true"], #console .run-settings > summary:hover { background: var(--ledger-hover); color: var(--ledger-ink); }
+      #console .context-panel { display: none; margin: 0 12px; border: 0; }
+      #console .context-panel[open] { display: block; max-height: min(230px, 30vh); overflow-y: auto; }
+      #console .context-panel > summary { display: none; }
+      #console .context-fields { border: 1px solid var(--ledger-line); border-radius: 10px; padding: 12px; }
+      #console .run-settings { display: block; flex: 1 1 175px; min-width: 0; margin: 0; }
+      #console .run-settings > summary { max-width: none; white-space: normal; font: 12px/1.5 "Segoe UI", sans-serif; border-radius: 9px; }
+      #console .compact-settings-summary { display: none; }
+      #console .settings-popover { left: 0; bottom: calc(100% + 10px); width: min(360px, calc(100vw - 48px)); grid-template-columns: repeat(2, minmax(0, 1fr)); border-radius: 12px; }
+      #console .send { flex: 0 0 36px; width: 36px; min-width: 36px; height: 36px; padding: 0; margin-left: auto; border: 0; border-radius: 50%; background: #ececf1; color: #242528; }
+      #console .send:hover:not(:disabled) { background: #fff; }
+      #console .send:disabled { background: #47484e; color: #adb0b8; opacity: 1; }
+      #console .send .send-arrow { font: 24px/1 "Segoe UI", sans-serif; }
+      #console .send .send-pending { font: 20px/1 "Segoe UI", sans-serif; letter-spacing: 1px; }
+      body[data-theme="night-shift"] .settings-popover, body[data-theme="night-shift"] .artifact-dialog, body[data-theme="night-shift"] .operator-drawer, body[data-theme="night-shift"] .more-menu { border-radius: 12px; box-shadow: 0 8px 24px #00000026; }
+      body[data-theme="night-shift"] .artifact { background: #1c1d1fbd; }
+      body[data-theme="night-shift"] .operator-drawer::backdrop { background: #1c1d1f99; }
+      body[data-theme="night-shift"] :focus-visible { outline-color: #b4bdcb; }
+      @media (max-width: 760px) {
+        #console .chat-head { padding: 10px 12px; gap: 8px; }
+        #console .chat-heading { flex-basis: 100%; }
+        #console .chat-actions { width: 100%; }
+        #console .head-button { padding-inline: 8px; }
+        #console .transcript { padding-inline: 16px; }
+        #console .message.user { max-width: 94%; }
+        #console .run-settings { flex-basis: 155px; }
+        #console .settings-popover { position: fixed; left: 20px; bottom: 80px; max-height: min(330px, 60vh); overflow-y: auto; }
+      }
     </style>
   </head>
   <body data-display-mode="inline" data-ledger="project-ledger" data-theme="night-shift">
     <div class="workspace" id="console" data-shell="conversation-dock">
-      <aside class="sidebar" aria-label="專案與對話">
+      <button class="panel-scrim" id="panel-scrim" type="button" aria-label="關閉側欄" tabindex="-1" hidden></button>
+      <aside class="sidebar" id="conversation-panel" aria-label="專案與對話">
         <div class="sidebar-head">
           <div class="brand-row">
             <div class="brand"><span class="brand-mark">CB</span><span><strong>Codex Bridge</strong><small>Project ledger</small></span></div>
@@ -1824,7 +1963,7 @@
           <div class="chat-heading">
             <h1 class="chat-title" id="chat-title">新對話</h1>
             <div class="chat-subtitle" id="chat-subtitle">選擇專案後開始</div>
-            <div class="thread-controls" id="thread-controls" aria-label="對話執行設定與用量"></div>
+            <details class="thread-details" id="thread-details"><summary>執行設定與用量</summary><div class="thread-controls" id="thread-controls" aria-label="對話執行設定與用量"></div></details>
           </div>
           <div class="chat-actions" id="chat-actions"></div>
         </header>
@@ -1836,7 +1975,7 @@
 
         <div class="composer-wrap">
           <form class="composer" id="composer">
-            <textarea id="message" maxlength="4000" required placeholder="傳訊息給 Codex" aria-label="對話訊息"></textarea>
+            <textarea id="message" rows="1" maxlength="4000" required placeholder="傳訊息給 Codex" aria-label="對話訊息"></textarea>
             <details class="context-panel" id="context-panel">
               <summary>背景與文字文件</summary>
               <div class="context-fields">
@@ -1862,6 +2001,7 @@
               </div>
             </details>
             <div class="composer-bar">
+              <button class="attach-context" id="toggle-context" type="button" aria-controls="context-panel" aria-expanded="false" title="背景、文字文件與資料分類"><span aria-hidden="true">＋</span>附加內容</button>
               <span class="compact-settings-summary" id="compact-settings-summary">可修改 · 自動審核</span>
               <details class="run-settings" id="run-settings">
                 <summary><span id="run-settings-summary">可修改 · 自動審核 · Codex 預設</span><span aria-hidden="true">⌄</span></summary>
@@ -1882,13 +2022,13 @@
                   </select></label>
                 </div>
               </details>
-              <button class="send" id="send" type="submit" aria-label="送出"><span>送出</span><b aria-hidden="true">↵</b></button>
+              <button class="send" id="send" type="submit" aria-label="送出" title="送出"><span class="send-arrow" aria-hidden="true">↑</span></button>
             </div>
           </form>
         </div>
       </main>
 
-      <aside class="inspector" aria-label="工作紀錄">
+      <aside class="inspector" id="workstream-panel" aria-label="工作紀錄">
         <div class="inspector-head">
           <div><span class="inspector-kicker">WORKSTREAM</span><strong>工作紀錄</strong></div>
           <button class="close-inspector" id="close-inspector" type="button" aria-label="關閉工作紀錄">×</button>
@@ -1967,6 +2107,11 @@
           timelineSignatures: new Map(),
           newContentAvailable: false,
           headerSignature: "",
+          railCollapsed: false,
+          railOverlayOpen: false,
+          inspectorOpen: false,
+          focusMode: false,
+          focusPanels: null,
           modelSignature: "",
           draftArtifacts: [],
           hostCapabilities: {},
@@ -2031,7 +2176,7 @@
           if (state.displayMode === "inline" && $("#operator-drawer").open) $("#operator-drawer").close();
           document.body.dataset.displayMode = state.displayMode;
           $("#console").dataset.shell = state.displayMode === "fullscreen" ? "project-ledger" : "conversation-dock";
-          $("#console").classList.remove("rail-open", "inspector-open");
+          syncWorkspacePanels();
           const insets = state.hostContext.safeAreaInsets || {};
           const safeTop = finitePixels(insets.top);
           const safeRight = finitePixels(insets.right);
@@ -2386,14 +2531,17 @@
           $("#classification").value = "personal";
           renderModelOptions(state.draft.model || "", state.draft.effort || "");
           state.draft = {};
-          $("#console").classList.remove("rail-open", "inspector-open");
+          state.railOverlayOpen = false;
+          syncWorkspacePanels();
           render();
           focusWithoutScroll($("#message"));
         }
 
         $("#new-chat").addEventListener("click", () => startNewConversation());
-        $("#close-rail").addEventListener("click", () => $("#console").classList.remove("rail-open"));
-        $("#close-inspector").addEventListener("click", () => $("#console").classList.remove("inspector-open"));
+        $("#close-rail").addEventListener("click", () => toggleWorkspacePanel("rail", false));
+        $("#close-inspector").addEventListener("click", () => toggleWorkspacePanel("inspector", false));
+        $("#panel-scrim").addEventListener("click", closeOverlayPanel);
+        document.addEventListener("keydown", handlePanelKeydown);
         $("#new-content").addEventListener("click", () => {
           state.newContentAvailable = false;
           $("#transcript").scrollTo({ top: $("#transcript").scrollHeight, behavior: reducedMotion() ? "auto" : "smooth" });
@@ -2441,6 +2589,14 @@
         $("#model").addEventListener("change", () => { renderEffortOptions("", true); renderSettingsSummary(); });
         $("#effort").addEventListener("change", renderSettingsSummary);
         $("#add-text-artifact").addEventListener("click", openTextEntry);
+        $("#toggle-context").addEventListener("click", () => {
+          const panel = $("#context-panel");
+          panel.open = !panel.open;
+          focusWithoutScroll(panel.open ? $("#context") : $("#toggle-context"));
+        });
+        $("#context-panel").addEventListener("toggle", () => {
+          $("#toggle-context").setAttribute("aria-expanded", String($("#context-panel").open));
+        });
         $("#close-text-entry").addEventListener("click", closeTextEntry);
         $("#text-entry").addEventListener("click", (event) => { if (event.target === $("#text-entry")) closeTextEntry(); });
         $("#text-entry-form").addEventListener("submit", (event) => {
@@ -2462,6 +2618,20 @@
             $("#composer").requestSubmit();
           }
         });
+        $("#message").addEventListener("input", resizeComposerInput);
+
+        function resizeComposerInput() {
+          const input = $("#message");
+          const style = getComputedStyle(input);
+          const max = Number.parseFloat(style.maxHeight) || 192;
+          const measurement = [input.value, input.clientWidth, max].join("\u0000");
+          if (state.composerMeasurement === measurement) return;
+          state.composerMeasurement = measurement;
+          const scrollTop = input.scrollTop;
+          input.style.height = "auto";
+          input.style.height = Math.min(max, Math.max(52, input.scrollHeight)) + "px";
+          input.scrollTop = scrollTop;
+        }
 
         async function sendMessage() {
           const message = $("#message").value.trim();
@@ -2647,6 +2817,7 @@
           if (state.selectedConversation) void pollSelectedJob();
         }, { passive: true });
         window.addEventListener("resize", () => {
+          requestAnimationFrame(resizeComposerInput);
           if (state.displayMode !== "fullscreen") return;
           applyHostContext({
             containerDimensions: Object.assign({}, state.hostContext.containerDimensions || {}, { height: window.innerHeight }),
@@ -2699,7 +2870,7 @@
             const conversations = visibleConversations.length
               ? visibleConversations.map((item) => {
                   const selected = state.selectedConversation && state.selectedConversation.conversationId === item.conversationId;
-                  return '<button class="conversation-item" type="button" data-conversation-id="' + escapeAttr(item.conversationId) + '" aria-current="' + String(Boolean(selected)) + '">' +
+                  return '<button class="conversation-item" type="button" title="' + escapeAttr(item.title) + '" data-conversation-id="' + escapeAttr(item.conversationId) + '" aria-current="' + String(Boolean(selected)) + '">' +
                     '<span class="conversation-dot ' + conversationDotClass(item.automationState || item.bridgeJob && item.bridgeJob.status || item.threadStatus) + '"></span>' +
                     '<span class="conversation-copy"><span class="conversation-title">' + escapeHtml(item.title) + '</span><small>' +
                     escapeHtml(conversationRowMeta(item)) + '</small></span></button>';
@@ -2740,7 +2911,9 @@
           }));
           document.querySelectorAll("[data-conversation-id]").forEach((button) => button.addEventListener("click", () => withBusy(async () => {
             await callTool("codex_unified_conversation_get", { conversationId: button.dataset.conversationId });
-            $("#console").classList.remove("rail-open");
+            state.railOverlayOpen = false;
+            syncWorkspacePanels();
+            focusWithoutScroll($("#message"));
           })));
           const loadMoreLocal = document.querySelector("[data-load-local-history]");
           if (loadMoreLocal) loadMoreLocal.addEventListener("click", () => withBusy(loadMoreConversations));
@@ -3154,6 +3327,92 @@
           return true;
         }
 
+        function workspacePanelState() {
+          const railOverlay = state.displayMode !== "fullscreen" || window.innerWidth <= 760;
+          const inspectorOverlay = state.displayMode !== "fullscreen" || window.innerWidth <= 1080;
+          const rail = !state.focusMode && (railOverlay ? Boolean(state.railOverlayOpen) : !state.railCollapsed);
+          const inspector = !state.focusMode && state.displayMode === "fullscreen" && state.inspectorOpen;
+          return { rail, inspector, railOverlay, inspectorOverlay, overlay: rail && railOverlay ? "rail" : inspector && inspectorOverlay ? "inspector" : "" };
+        }
+
+        function syncWorkspacePanels() {
+          const panels = workspacePanelState(), shell = $("#console");
+          shell.classList.toggle("rail-visible", panels.rail);
+          shell.classList.toggle("inspector-visible", panels.inspector);
+          shell.classList.toggle("overlay-rail", panels.overlay === "rail");
+          shell.classList.toggle("overlay-inspector", panels.overlay === "inspector");
+          shell.style.setProperty("--rail-width", panels.rail && !panels.railOverlay ? "284px" : "0px");
+          shell.style.setProperty("--inspector-width", panels.inspector && !panels.inspectorOverlay ? "320px" : "0px");
+          for (const [name, id, buttonId] of [["rail", "conversation-panel", "open-conversations"], ["inspector", "workstream-panel", "toggle-inspector"]]) {
+            const panel = $("#" + id), button = $("#" + buttonId);
+            panel.inert = !panels[name] || Boolean(panels.overlay && panels.overlay !== name);
+            panel.setAttribute("aria-hidden", String(!panels[name]));
+            if (panels.overlay === name) { panel.setAttribute("role", "dialog"); panel.setAttribute("aria-modal", "true"); }
+            else { panel.removeAttribute("role"); panel.removeAttribute("aria-modal"); }
+            if (button) {
+              button.setAttribute("aria-expanded", String(panels[name]));
+              button.setAttribute("aria-label", (panels[name] ? "收合" : "展開") + (name === "rail" ? "對話清單" : "工作紀錄"));
+            }
+          }
+          $(".chat").inert = Boolean(panels.overlay);
+          $("#panel-scrim").hidden = !panels.overlay;
+          const focus = $("#toggle-focus");
+          if (focus) { focus.setAttribute("aria-pressed", String(state.focusMode)); focus.textContent = state.focusMode ? "離開專注" : "專注"; }
+          const active = document.activeElement;
+          if (active && active.closest("[inert]")) focusWithoutScroll(panels.overlay ? $(panels.overlay === "rail" ? "#close-rail" : "#close-inspector") : $("#open-conversations"));
+        }
+
+        function toggleWorkspacePanel(name, open) {
+          if (state.focusMode) { state.focusMode = false; state.railCollapsed = true; state.inspectorOpen = false; state.focusPanels = null; }
+          const panels = workspacePanelState();
+          const visible = open === undefined ? !panels[name] : open;
+          if (name === "rail") {
+            if (panels.railOverlay) state.railOverlayOpen = visible;
+            else state.railCollapsed = !visible;
+            if (visible && panels.railOverlay) state.inspectorOpen = false;
+          } else {
+            state.inspectorOpen = visible;
+            if (visible) state.railOverlayOpen = false;
+          }
+          syncWorkspacePanels();
+          focusWithoutScroll(visible && workspacePanelState().overlay ? $(name === "rail" ? "#close-rail" : "#close-inspector") : $(name === "rail" ? "#open-conversations" : "#toggle-inspector"));
+        }
+
+        function toggleFocusMode() {
+          if (!state.focusMode) {
+            state.focusPanels = { railCollapsed: state.railCollapsed, inspectorOpen: state.inspectorOpen };
+            state.railOverlayOpen = false;
+            state.focusMode = true;
+          } else {
+            state.focusMode = false;
+            if (state.focusPanels) Object.assign(state, state.focusPanels);
+            state.focusPanels = null;
+          }
+          syncWorkspacePanels();
+          focusWithoutScroll($("#toggle-focus"));
+        }
+
+        function closeOverlayPanel() {
+          const overlay = workspacePanelState().overlay;
+          if (overlay) toggleWorkspacePanel(overlay, false);
+        }
+
+        function handlePanelKeydown(event) {
+          // Leave foreground dialogs and editor input/IME shortcuts to their owners.
+          if ($("#operator-drawer").open || !$("#artifact").hidden || !$("#text-entry").hidden || event.isComposing) return;
+          const overlay = workspacePanelState().overlay;
+          if (event.key === "Escape") {
+            if (overlay) { event.preventDefault(); closeOverlayPanel(); }
+            else if (state.focusMode) { event.preventDefault(); toggleFocusMode(); }
+          } else if (event.key === "Tab" && overlay) {
+            const panel = $(overlay === "rail" ? "#conversation-panel" : "#workstream-panel");
+            const targets = Array.from(panel.querySelectorAll('button:not(:disabled), input:not(:disabled), a[href], summary, [tabindex="0"]')).filter((el) => el.getClientRects().length && !el.closest("[inert]"));
+            const first = targets[0], last = targets[targets.length - 1];
+            if (event.shiftKey && document.activeElement === first) { event.preventDefault(); focusWithoutScroll(last); }
+            else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); focusWithoutScroll(first); }
+          }
+        }
+
         function updateScrollState(transcript) {
           document.body.classList.toggle("header-compact", state.displayMode === "fullscreen" && transcript.scrollTop > 36);
         }
@@ -3165,7 +3424,7 @@
             ? [job.id, job.title, job.status, job.hasDiff, job.hasResult, (job.artifacts || []).map((item) => [item.id, item.sha256]), state.cancelArmedUntil > Date.now(), state.displayMode,
               job.executionMode, job.approvalReviewer, job.model, job.effort, job.conversation && [job.conversation.tokenUsage, job.conversation.modelRouting], directActionEligible(job), state.status && state.status.controller]
             : ["new", state.selectedProjectId, state.displayMode]);
-          if (signature === state.headerSignature) return;
+          if (signature === state.headerSignature) { syncWorkspacePanels(); return; }
           state.headerSignature = signature;
           $("#chat-title").textContent = job ? job.title : "新對話";
           $("#chat-subtitle").textContent = job
@@ -3176,10 +3435,11 @@
           const active = job && !terminal.has(job.status);
           $("#thread-controls").innerHTML = renderThreadControls(job);
           const actions = [];
-          actions.push('<button class="head-button only-narrow" id="open-conversations" type="button" aria-label="開啟對話清單" title="對話清單">對話</button>');
+          actions.push('<button class="head-button" id="open-conversations" type="button" aria-controls="conversation-panel" aria-expanded="false" title="收合或展開對話清單">對話</button>');
           if (state.displayMode === "fullscreen") {
             actions.push('<button class="head-button" id="open-operator" type="button" aria-haspopup="dialog" aria-controls="operator-drawer" aria-expanded="false">Codex · 狀態</button>');
-            actions.push('<button class="head-button only-narrow" id="toggle-inspector" type="button" aria-label="開啟工作紀錄" title="工作紀錄">工作紀錄</button>');
+            actions.push('<button class="head-button" id="toggle-inspector" type="button" aria-controls="workstream-panel" aria-expanded="false" title="命令、錯誤與成品">工作紀錄</button>');
+            actions.push('<button class="head-button" id="toggle-focus" type="button" aria-pressed="false" title="收合兩側欄；Esc 離開專注">專注</button>');
           }
           actions.push('<button class="head-button" id="toggle-display" type="button" aria-label="' +
             (state.displayMode === "fullscreen" ? "縮回對話" : "放大工作區") + '" title="' +
@@ -3202,9 +3462,11 @@
           const displayToggle = $("#toggle-display");
           if (displayToggle) displayToggle.addEventListener("click", toggleDisplayMode);
           const openConversations = $("#open-conversations");
-          if (openConversations) openConversations.addEventListener("click", () => $("#console").classList.add("rail-open"));
+          if (openConversations) openConversations.addEventListener("click", () => toggleWorkspacePanel("rail"));
           const toggleInspector = $("#toggle-inspector");
-          if (toggleInspector) toggleInspector.addEventListener("click", () => $("#console").classList.toggle("inspector-open"));
+          if (toggleInspector) toggleInspector.addEventListener("click", () => toggleWorkspacePanel("inspector"));
+          const focusToggle = $("#toggle-focus");
+          if (focusToggle) focusToggle.addEventListener("click", toggleFocusMode);
           const cancel = $("#cancel-chat");
           if (cancel) cancel.addEventListener("click", cancelConversation);
           const operator = $("#open-operator");
@@ -3214,6 +3476,7 @@
           }
           document.querySelectorAll("[data-thread-action]").forEach((button) => button.addEventListener("click", () => runThreadAction(button.dataset.threadAction)));
           document.querySelectorAll("[data-artifact]").forEach((button) => button.addEventListener("click", () => loadArtifact(button.dataset.artifact)));
+          syncWorkspacePanels();
         }
 
         function renderMessages() {
@@ -3501,7 +3764,103 @@
           const body = item.text || (item.isStreaming ? "" : projectionStatusLabel(item.status));
           return '<article class="message ' + role + (failed ? " failed" : "") + (item.isStreaming ? " streaming" : "") +
             '" data-timeline-key="' + escapeAttr(key) + '"><div class="message-meta">' + escapeHtml(meta + (time ? " · " + time : "")) +
-            (item.isStreaming ? " · 正在輸出" : "") + '</div><div class="message-body">' + escapeHtml(body) + '</div>' + inputArtifacts + context + '</article>';
+            (item.isStreaming ? " · 正在輸出" : "") + '</div><div class="message-body markdown">' + renderSafeMarkdown(body) + '</div>' + inputArtifacts + context + '</article>';
+        }
+
+        // Deliberately bounded Markdown subset: never interpret source HTML, images,
+        // attributes or entities. Only these functions emit trusted markup.
+        function safeMarkdownUrl(value) {
+          if (!/^(https?:\/\/|mailto:)/i.test(value) || /[\s\u0000-\u001f\u007f<>"'\\]/.test(value)) return "";
+          try {
+            const url = new URL(value);
+            if (url.protocol === "mailto:") return url.pathname ? url.href : "";
+            return url.hostname && !url.username && !url.password ? url.href : "";
+          } catch { return ""; }
+        }
+
+        function markdownInline(text) {
+          const token = /`([^`\n]+)`|\[([^\[\]\n]+)\]\(([^\s()]+)\)|\*\*([^*\n]+)\*\*|__([^_\n]+)__|\*([^*\n]+)\*/g;
+          let result = "", offset = 0;
+          for (const match of text.matchAll(token)) {
+            result += escapeHtml(text.slice(offset, match.index));
+            if (match[1] !== undefined) result += '<code>' + escapeHtml(match[1]) + '</code>';
+            else if (match[2] !== undefined) {
+              const href = safeMarkdownUrl(match[3]);
+              result += href ? '<a href="' + escapeAttr(href) + '" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">' + escapeHtml(match[2]) + '</a>' : escapeHtml(match[0]);
+            } else if (match[4] !== undefined || match[5] !== undefined) result += '<strong>' + escapeHtml(match[4] || match[5]) + '</strong>';
+            else result += '<em>' + escapeHtml(match[6]) + '</em>';
+            offset = match.index + match[0].length;
+          }
+          return result + escapeHtml(text.slice(offset));
+        }
+
+        function markdownCells(line) {
+          // Keep escaped pipes and pipes inside inline code in their original cell.
+          const cells = []; let cell = "", code = false;
+          for (let i = 0; i < line.length; i++) {
+            const char = line[i];
+            if (char === "\\" && line[i + 1] === "|") { cell += "|"; i++; }
+            else if (char === "`") { code = !code; cell += char; }
+            else if (char === "|" && !code) { cells.push(cell.trim()); cell = ""; }
+            else cell += char;
+          }
+          cells.push(cell.trim());
+          if (line.trim().startsWith("|")) cells.shift();
+          if (line.trim().endsWith("|") && cells[cells.length - 1] === "") cells.pop();
+          return cells;
+        }
+
+        function markdownTableStart(lines, index) {
+          if (!lines[index].includes("|") || index + 1 >= lines.length) return false;
+          const cells = markdownCells(lines[index + 1]);
+          return cells.length > 0 && cells.length === markdownCells(lines[index]).length && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+        }
+
+        function renderSafeMarkdown(value) {
+          const lines = String(value == null ? "" : value).replace(/\r\n?/g, "\n").split("\n");
+          const blocks = [];
+          const startsBlock = (i) => /^(?:\s*$| {0,3}(?:`{3,}|~{3,}|#{1,6}\s)|\s*(?:[-+*]|\d+[.)])\s+)/.test(lines[i]) || markdownTableStart(lines, i);
+          for (let i = 0; i < lines.length;) {
+            const line = lines[i];
+            if (!line.trim()) { i++; continue; }
+            const fence = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+            if (fence) {
+              const code = []; i++;
+              const end = new RegExp("^ {0,3}" + fence[1][0] + "{" + fence[1].length + ",}\\s*$");
+              while (i < lines.length && !end.test(lines[i])) code.push(lines[i++]);
+              if (i < lines.length) i++;
+              const language = fence[2].trim();
+              blocks.push('<div class="code-block">' + (language ? '<div class="code-language">' + escapeHtml(language) + '</div>' : "") + '<pre tabindex="0" aria-label="程式碼，可水平捲動"><code>' + escapeHtml(code.join("\n")) + '</code></pre></div>');
+              continue;
+            }
+            const heading = line.match(/^ {0,3}(#{1,6})\s+(.+)$/);
+            if (heading) { const level = Math.min(heading[1].length + 1, 6); blocks.push('<h' + level + '>' + markdownInline(heading[2]) + '</h' + level + '>'); i++; continue; }
+            if (markdownTableStart(lines, i)) {
+              const head = markdownCells(line); i += 2;
+              const rows = [];
+              while (i < lines.length && lines[i].trim() && lines[i].includes("|") && markdownCells(lines[i]).length === head.length) {
+                rows.push('<tr>' + markdownCells(lines[i++]).map((cell) => '<td>' + markdownInline(cell) + '</td>').join("") + '</tr>');
+              }
+              blocks.push('<div class="markdown-table" role="region" aria-label="表格，可水平捲動" tabindex="0"><table><thead><tr>' + head.map((cell) => '<th scope="col">' + markdownInline(cell) + '</th>').join("") + '</tr></thead><tbody>' + rows.join("") + '</tbody></table></div>');
+              continue;
+            }
+            const list = line.match(/^\s*([-+*]|\d+[.)])\s+(.+)$/);
+            if (list) {
+              const ordered = /^\d/.test(list[1]), items = [];
+              while (i < lines.length) {
+                const entry = lines[i].match(/^\s*([-+*]|\d+[.)])\s+(.+)$/);
+                if (!entry || /^\d/.test(entry[1]) !== ordered) break;
+                items.push('<li>' + markdownInline(entry[2]) + '</li>'); i++;
+              }
+              const tag = ordered ? "ol" : "ul";
+              blocks.push('<' + tag + (ordered ? ' start="' + Math.min(Number.parseInt(list[1], 10), 1000000) + '"' : "") + '>' + items.join("") + '</' + tag + '>');
+              continue;
+            }
+            const paragraph = [markdownInline(line)]; i++;
+            while (i < lines.length && !startsBlock(i)) paragraph.push(markdownInline(lines[i++]));
+            blocks.push('<p>' + paragraph.join('<br>') + '</p>');
+          }
+          return blocks.join("");
         }
 
         function activityBody(item, approval) {
@@ -3648,12 +4007,13 @@
         }
 
         function renderSettingsSummary() {
-          const mode = $("#mode").value === "workspace_write" ? "可修改" : "唯讀";
+          const mode = $("#mode").value === "workspace_write" ? "Agent 可修改" : "Plan 唯讀";
           const reviewer = $("#reviewer").value === "auto_review" ? "自動審核" : "每次詢問";
           const model = $("#model").selectedOptions[0] && $("#model").selectedOptions[0].textContent || "Codex 預設";
           const effort = $("#effort").selectedOptions[0] && $("#effort").selectedOptions[0].textContent || "預設推理";
           $("#compact-settings-summary").textContent = mode + " · " + reviewer;
-          $("#run-settings-summary").textContent = mode + " · " + reviewer + " · " + model + " · " + effort;
+          $("#run-settings-summary").textContent = mode + " · " + reviewer;
+          $("#run-settings-summary").title = model + " · " + effort;
         }
 
         function renderCompanyConfirmation() {
@@ -3675,6 +4035,7 @@
 
         function closeTextEntry() {
           $("#text-entry").hidden = true;
+          requestAnimationFrame(() => focusWithoutScroll($("#add-text-artifact")));
         }
 
         async function addDraftArtifact() {
@@ -3804,7 +4165,10 @@
           const hasProject = isOperableProjectId(state.selectedProjectId);
           $("#send").disabled = state.busy || !hasProject || readOnly;
           $("#send").classList.toggle("busy", state.busy);
-          $("#send").innerHTML = state.busy ? '<span>處理中</span>' : '<span>送出</span><b aria-hidden="true">↵</b>';
+          $("#send").innerHTML = state.busy ? '<span class="send-pending" aria-hidden="true">···</span>' : '<span class="send-arrow" aria-hidden="true">↑</span>';
+          $("#send").setAttribute("aria-label", state.busy ? "處理中" : "送出");
+          $("#send").setAttribute("aria-busy", String(state.busy));
+          $("#send").title = state.busy ? "處理中" : readOnly ? "唯讀歷史無法送出" : !hasProject ? "請先選擇專案" : "送出";
           $("#mode").disabled = state.busy || Boolean(active) || readOnly;
           $("#reviewer").disabled = state.busy || Boolean(active) || readOnly;
           $("#model").disabled = state.busy || Boolean(active) || readOnly;
@@ -3813,11 +4177,14 @@
           $("#message").disabled = state.busy || !hasProject || readOnly;
           $("#context").disabled = state.busy || !hasProject || readOnly;
           $("#add-text-artifact").disabled = state.busy || !hasProject || readOnly || state.draftArtifacts.length >= 8;
+          $("#toggle-context").disabled = state.busy || !hasProject || readOnly;
+          $("#toggle-context").setAttribute("aria-expanded", String($("#context-panel").open));
           $("#message").placeholder = readOnly
             ? "這個專案位置受到保護，本機歷史僅供查看"
             : job && job.source === "local"
               ? "接續這段本機 Codex 對話"
               : active ? "補充方向給正在執行的 Codex" : "傳訊息給 Codex";
+          requestAnimationFrame(resizeComposerInput);
         }
 
         function decideApproval(approvalId, decision) {

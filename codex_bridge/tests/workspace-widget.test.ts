@@ -15,13 +15,102 @@ function fixture(names: string[], context: Record<string, any> = {}) {
     assert.ok(next >= 0, name);
     return script.slice(start, start + 1 + next);
   }).join("\n");
-  const scope: Record<string, any> = { terminal, ...context };
+  const scope: Record<string, any> = { terminal, URL, ...context };
   new Script(functions + "\nglobalThis.api = { " + names.join(",") + " };").runInNewContext(scope);
   return { api: scope.api, scope };
 }
 const failureHelpers = ["isTechnicalItem", "needsApprovalAttention", "isFailedActivity", "isSuccessfulActivity", "reliableOperationValue", "sameTechnicalOperation", "turnFailurePresentation", "turnWorkCounts", "publicFailureText", "renderCompactFailure"];
-const renderHelpers = [...failureHelpers, "escapeHtml", "escapeAttr", "formatTime", "formatBytes", "formatDuration", "projectionStatusLabel", "activityTitle", "activitySubtitle", "activityStatusClass", "activityIcon", "activityBody", "isNarrative", "renderProjectedMessage", "renderConversationItem", "renderApproval", "renderDockWork", "metric"];
+const markdownHelpers = ["renderSafeMarkdown", "markdownInline", "markdownCells", "markdownTableStart", "safeMarkdownUrl"];
+const renderHelpers = [...markdownHelpers, ...failureHelpers, "escapeHtml", "escapeAttr", "formatTime", "formatBytes", "formatDuration", "projectionStatusLabel", "activityTitle", "activitySubtitle", "activityStatusClass", "activityIcon", "activityBody", "isNarrative", "renderProjectedMessage", "renderConversationItem", "renderApproval", "renderDockWork", "metric"];
 const narrative = (id: string, type: string, text = id) => ({ id, type, text, status: "completed" });
+
+test("composer grows to its cap, preserves editor scroll and skips unchanged measurements", () => {
+  const input: any = { value: "draft", clientWidth: 400, scrollHeight: 52, scrollTop: 0, style: {} };
+  const state: any = {};
+  const { api } = fixture(["resizeComposerInput"], { state, $: () => input, getComputedStyle: () => ({ maxHeight: "192px" }) });
+  api.resizeComposerInput();
+  assert.equal(input.style.height, "52px");
+  input.value = "long\n".repeat(20); input.scrollHeight = 504; input.scrollTop = 100;
+  api.resizeComposerInput();
+  assert.equal(input.style.height, "192px");
+  assert.equal(input.scrollTop, 100);
+  input.style.height = "unchanged";
+  api.resizeComposerInput();
+  assert.equal(input.style.height, "unchanged", "Polling does not disturb an unchanged editor");
+  input.value = ""; input.scrollHeight = 48;
+  api.resizeComposerInput();
+  assert.equal(input.style.height, "52px");
+});
+
+test("composer settings keep Agent/Plan and reviewer visible without duplicating controls", () => {
+  const nodes: any = { "#mode": { value: "workspace_write" }, "#reviewer": { value: "user" }, "#model": { selectedOptions: [{ textContent: "model" }] }, "#effort": { selectedOptions: [{ textContent: "high" }] }, "#compact-settings-summary": {}, "#run-settings-summary": {} };
+  const { api } = fixture(["renderSettingsSummary"], { $: (id: string) => nodes[id] });
+  api.renderSettingsSummary();
+  assert.equal(nodes["#run-settings-summary"].textContent, "Agent 可修改 · 每次詢問");
+  assert.equal(nodes["#run-settings-summary"].title, "model · high");
+  nodes["#mode"].value = "plan"; nodes["#reviewer"].value = "auto_review";
+  api.renderSettingsSummary();
+  assert.equal(nodes["#run-settings-summary"].textContent, "Plan 唯讀 · 自動審核");
+  assert.equal((html.match(/id="context-panel"/g) || []).length, 1);
+  assert.equal((html.match(/id="add-text-artifact"/g) || []).length, 1);
+});
+
+test("Markdown renders headings, lists, tables, code and safe links without interpreting HTML", () => {
+  const { api } = fixture(renderHelpers);
+  const output = api.renderSafeMarkdown('# Title\n\n## Section\n- **bold** and `code`\n- *emphasis*\n\n3. third\n4. fourth\n\n| Name | Value |\n| --- | ---: |\n| A | `a|b` |\n| B | escaped\\|pipe |\n\n```js\nconst x = "<tag>";\n```\n\n[Docs](https://example.com/a?q=1&b=2)\n[Mail](mailto:dev@example.com)');
+  for (const pattern of [/<h2>Title<\/h2>/, /<h3>Section<\/h3>/, /<ul>/, /<ol start="3">/, /<strong>bold<\/strong>/, /<em>emphasis<\/em>/, /<th scope="col">Name/, /<td><code>a\|b<\/code><\/td>/, /escaped\|pipe/, /&lt;tag&gt;/, /href="https:\/\/example.com\/a\?q=1&amp;b=2"/, /rel="noopener noreferrer"/, /href="mailto:/]) assert.match(output, pattern);
+  assert.doesNotMatch(output, /<tag>/);
+  assert.equal(api.renderSafeMarkdown(null), "");
+  assert.equal(api.renderSafeMarkdown(""), "");
+});
+
+test("Markdown rejects script schemes, encoded schemes, raw HTML, SVG and attribute injection", () => {
+  const { api } = fixture(renderHelpers);
+  for (const href of ["javascript:alert%281%29", "JaVaScRiPt:foo", "data:text/html;base64,xxx", "vbscript:foo", "file:///C:/secret", "//evil.test", "javascript&#58;alert", "&#106;avascript:foo", "https://example.com/\"onclick=evil", "https://example.com/\\evil", "https://u:p@example.com", "https://example.com/\u0000", "https:\n//evil.test"]) {
+    assert.equal(api.safeMarkdownUrl(href), "", href);
+    assert.doesNotMatch(api.renderSafeMarkdown('[attack](' + href + ')'), /<a\s/, href);
+  }
+  for (const payload of ['<script>alert(1)</script>', '<img src=x onerror="alert(1)">', '<svg onload=alert(1)>', '<a href="javascript:evil" onclick="evil">x</a>', '<iframe srcdoc="evil">']) {
+    for (const wrapper of [(s: string) => s, (s: string) => '`' + s + '`', (s: string) => '```html\n' + s + '\n```', (s: string) => '| x |\n| --- |\n| ' + s + ' |']) {
+      const output = api.renderSafeMarkdown(wrapper(payload));
+      assert.doesNotMatch(output, /<(?:script|img|svg|iframe|a)\b/);
+      assert.match(output, /&lt;/);
+    }
+  }
+  assert.match(api.renderSafeMarkdown('&lt;img src=x onerror=evil&gt;'), /&amp;lt;img/);
+});
+
+test("streaming partial Markdown and malformed tables preserve text; fences never parse markup", () => {
+  const { api } = fixture(renderHelpers);
+  assert.match(api.renderSafeMarkdown('```js\n<script>\n**raw**'), /&lt;script&gt;\n\*\*raw\*\*/);
+  assert.match(api.renderSafeMarkdown('**unfinished [link](https://'), /\*\*unfinished/);
+  assert.match(api.renderSafeMarkdown('| A | B |\n| --- | --- |\n| do | not | lose |'), /do.*not.*lose/);
+  const partial = api.renderProjectedMessage({ type: "agentMessage", text: '```\nunsafe <b>', isStreaming: true }, 'x');
+  assert.match(partial, /正在輸出/);
+  assert.match(partial, /unsafe &lt;b&gt;/);
+  assert.match(api.renderSafeMarkdown('~~~txt\r\nline\r\n~~~'), /<code>line<\/code>/);
+});
+
+test("panel visibility defaults, focus mode and responsive boundaries are UI only", () => {
+  const state: any = { displayMode: "fullscreen", railCollapsed: false, inspectorOpen: false, focusMode: false };
+  const window = { innerWidth: 1440 };
+  const { api } = fixture(["workspacePanelState"], { state, window });
+  assert.equal(api.workspacePanelState().rail, true);
+  assert.equal(api.workspacePanelState().inspector, false);
+  state.inspectorOpen = true;
+  assert.equal(api.workspacePanelState().overlay, "");
+  window.innerWidth = 900;
+  assert.equal(api.workspacePanelState().overlay, "inspector");
+  state.focusMode = true;
+  assert.equal(api.workspacePanelState().rail, false);
+  assert.equal(api.workspacePanelState().inspector, false);
+  state.focusMode = false; state.inspectorOpen = false; window.innerWidth = 390;
+  assert.equal(api.workspacePanelState().rail, false);
+  state.railOverlayOpen = true;
+  assert.equal(api.workspacePanelState().overlay, "rail");
+  state.displayMode = "inline"; window.innerWidth = 1440;
+  assert.equal(api.workspacePanelState().overlay, "rail");
+});
 
 test("message rendering uses createdAt, hides invalid/unknown time and identifies other dates", () => {
   const { api } = fixture(renderHelpers);
