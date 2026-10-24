@@ -297,7 +297,8 @@ def test_v1_compatibility_uses_same_guard(tmp_path: Path) -> None:
     assert result.fallback_markets == ("TW",) and result.status == "stale"
 
 
-def test_fallback_preserves_total_assets_and_database(session: Session, tmp_path: Path) -> None:    from decimal import Decimal
+def test_fallback_preserves_total_assets_and_database(session: Session, tmp_path: Path) -> None:
+    from decimal import Decimal
 
     from personal_asset_os.services.fx_rates import FxRateFact, FxReadResult
 

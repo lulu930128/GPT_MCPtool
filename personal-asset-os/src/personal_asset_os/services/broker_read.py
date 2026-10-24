@@ -297,7 +297,8 @@ class BrokerMarketScopeV2(_BrokerContract):
 
 class BrokerSnapshotV2(_BrokerContract):
     schema_version: Literal["broker.position.v2"]
-    broker: Literal["KGI"]    captured_at: datetime
+    broker: Literal["KGI"]
+    captured_at: datetime
     status: Literal["complete", "partial", "explicit_empty"]
     scopes: tuple[BrokerMarketScopeV2, ...]
     warnings: tuple[str, ...]

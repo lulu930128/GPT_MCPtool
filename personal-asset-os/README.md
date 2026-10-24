@@ -297,7 +297,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\validate.ps1 -Runtim
 
 postings 採 debit-positive：
 
-- 資產與費用增加為正數。- 負債、權益與收入增加為負數。
+- 資產與費用增加為正數。
+- 負債、權益與收入增加為負數。
 - 每筆交易的基準幣別總額必須為零。
 
 例如信用卡消費 500 元：費用 `+500`、信用卡負債 `-500`。繳款時銀行 `-500`、信用卡負債 `+500`，不會再新增支出。

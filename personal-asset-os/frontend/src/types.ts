@@ -297,7 +297,8 @@ export interface Dashboard {
     markets: Array<{
       market: "TW" | "US";
       status: "complete" | "explicit_empty" | "unavailable";
-      read_mode: "live" | "memory_cache" | "persistent_fallback" | "unavailable";      stale: boolean;
+      read_mode: "live" | "memory_cache" | "persistent_fallback" | "unavailable";
+      stale: boolean;
       source: "kgi.inventory_sum" | "kgi.stock_position_report";
       source_as_of: string | null;
       position_count: number;

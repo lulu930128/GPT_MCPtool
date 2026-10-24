@@ -297,7 +297,8 @@ def record_price(
 def buy(
     session: Session,
     *,
-    instrument_id: str,    investment_account_id: str,
+    instrument_id: str,
+    investment_account_id: str,
     cash_account_id: str,
     quantity: Decimal,
     execution_price: Decimal,
@@ -596,7 +597,8 @@ def portfolio_read_model(
                 "accounts": [],
                 "markets": [],
                 "captured_at": None,
-                "source_as_of": None,                "market_value": ZERO,
+                "source_as_of": None,
+                "market_value": ZERO,
                 "native_market_values": {},
                 "fx": None,
                 "position_count": 0,
@@ -895,7 +897,8 @@ def portfolio_read_model(
             "status": scope.status,
         }
         for scope in scopes
-        if scope.account is not None    ]
+        if scope.account is not None
+    ]
     markets = [
         {
             "market": scope.market,
