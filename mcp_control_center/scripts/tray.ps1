@@ -112,6 +112,8 @@ $script:Closing = $false
 $script:ExitRequested = $false
 $script:ExitClock = $null
 $script:PendingAction = $null
+$script:PendingComponent = $null
+$script:PendingRestartMcp = $null
 $script:StatusProcess = $null
 $script:StatusClock = $null
 $script:StatusStopAttempted = $false
@@ -198,10 +200,79 @@ function Show-Warning([string]$Message) {
     ) | Out-Null
 }
 
+function Set-TrayRestartFeedback([string]$Message, [switch]$Warning) {
+    # Transient UI only; controller last-actions and controller_error remain the
+    # sole durable action receipts. Status refresh must not erase this result.
+    $restartResultItem.Text = "Restart MCP | $Message"
+    $kind = if ($Warning) { [Windows.Forms.ToolTipIcon]::Warning } else { [Windows.Forms.ToolTipIcon]::Info }
+    $notifyIcon.ShowBalloonTip(3000, $trayDisplayName, $Message, $kind)
+}
+
+function Test-TrayRestartAllowed([string]$Component) {
+    if (-not $script:ComponentUi.ContainsKey($Component) -or -not $script:ComponentUi[$Component].supportsRestartMcp) { return $false }
+    try {
+        $state = Read-McpCcState -RuntimeRoot $RuntimeRoot
+        if ($null -eq $state) { return $false }
+        $matches = @($state.components | Where-Object { [string]$_.id -ceq $Component })
+        return ($matches.Count -eq 1 -and [bool](Get-McpCcRestartMcpDecision -ComponentStatus $matches[0]).allowed)
+    }
+    catch { return $false }
+}
+
+function Invoke-TrayRestartMcpClick {
+    param($Sender)
+    if ($script:Closing -or $script:ExitRequested) { return }
+    $matches = @($script:ComponentUi.GetEnumerator() | Where-Object { [object]::ReferenceEquals($_.Value.restartMcp, $Sender) })
+    if ($matches.Count -ne 1) {
+        Set-TrayRestartFeedback 'Not dispatched: the menu item does not identify one component.' -Warning
+        return
+    }
+    $componentId = [string]$matches[0].Key
+    $componentName = [string]$matches[0].Value.displayName
+    $choice = [Windows.Forms.MessageBox]::Show(
+        "Restart the complete MCP runtime for ${componentName}? A stopped component will be started without replacing a healthy instance.",
+        $trayDisplayName,
+        [Windows.Forms.MessageBoxButtons]::YesNo,
+        [Windows.Forms.MessageBoxIcon]::Warning
+    )
+    if ($choice -eq [Windows.Forms.DialogResult]::Yes) {
+        # The modal confirmation pumps events: recheck all gates after Yes.
+        Start-ControllerAction -Action RestartMcp -Component $componentId
+    }
+}
+
+function Update-TrayPendingRestart {
+    param([switch]$StatusCompleted)
+    if ($null -eq $script:PendingRestartMcp) { return }
+    $pending = $script:PendingRestartMcp
+    $state = Get-TrayControllerState
+    $reason = $null
+    if ($script:Closing -or $script:ExitRequested) { $reason = 'control center is exiting' }
+    elseif (Test-TrayMaintenanceBusy) { $reason = 'Workspace manual maintenance is pending' }
+    elseif ($pending.clock.Elapsed.TotalSeconds -ge 120) { $reason = 'the 120-second wait expired' }
+    elseif ($state -eq 'Unknown') { $reason = 'Status process ownership could not be observed' }
+    elseif ($state -eq 'Idle' -and -not $StatusCompleted) { $reason = 'the original Status completion was not confirmed' }
+    elseif ($state -ne 'Idle' -and ($script:PendingAction -ne 'Status' -or $script:StatusStopAttempted -or
+        -not [object]::ReferenceEquals($pending.process, $script:ControllerProcess))) { $reason = 'the original Status is no longer eligible' }
+    if ($null -ne $reason) {
+        $script:PendingRestartMcp = $null
+        Set-TrayRestartFeedback "Cancelled / $($pending.component): $reason; not dispatched." -Warning
+        return
+    }
+    if ($state -ne 'Idle') { return }
+    # Consume before dispatch; reentrant timer callbacks cannot replay it. The
+    # controller still performs its original fresh ownership/security checks.
+    $script:PendingRestartMcp = $null
+    Start-ControllerAction -Action RestartMcp -Component $pending.component
+}
+
 function Get-TrayControllerState {
     if ($null -eq $script:ControllerProcess) { return 'Idle' }
     try {
-        if ($script:ControllerProcess.HasExited) { return 'Exited' }
+        # PowerShell property getter failures can yield null instead of throwing.
+        $hasExited = $script:ControllerProcess.HasExited
+        if ($hasExited -isnot [bool]) { return 'Unknown' }
+        if ($hasExited) { return 'Exited' }
         return 'Running'
     }
     catch { return 'Unknown' }
@@ -246,6 +317,10 @@ function Complete-TrayExit {
 
 function Request-TrayExit {
     if ($script:Closing -or $script:ExitRequested) { return }
+    if ($null -ne $script:PendingRestartMcp) {
+        $script:PendingRestartMcp = $null
+        Set-TrayRestartFeedback 'Cancelled: Exit requested; not dispatched.' -Warning
+    }
     if (Test-TrayMaintenanceBusy) {
         Show-Warning 'Wait for manual maintenance to finish before closing.'
         return
@@ -266,6 +341,9 @@ function Request-TrayExit {
 
 function Update-TrayControllerLifecycle {
     if ($script:Closing) { return }
+    # Check expiry, maintenance and unknown handles before reaping Status. Only
+    # a normal completion of that same Status may release the one-shot request.
+    Update-TrayPendingRestart
     $state = Get-TrayControllerState
     if ($state -eq 'Unknown') { Show-TrayControllerWarning; return }
     if ($state -eq 'Running' -and $script:PendingAction -eq 'Status') {
@@ -289,20 +367,33 @@ function Update-TrayControllerLifecycle {
         try { $exitCode = $script:ControllerProcess.ExitCode }
         catch { $exitCode = -1 }
         $completedLabel = $script:PendingLabel
+        $completedAction = $script:PendingAction
+        $completedComponent = $script:PendingComponent
+        if (($script:StatusStopAttempted -or $exitCode -ne 0) -and $null -ne $script:PendingRestartMcp) {
+            $script:PendingRestartMcp = $null
+            Set-TrayRestartFeedback 'Cancelled: Status did not finish normally; not dispatched.' -Warning
+        }
         try { $script:ControllerProcess.Dispose() } catch { }
         $script:ControllerProcess = $null
         $script:StatusProcess = $null
         $script:StatusClock = $null
         $script:PendingAction = $null
+        $script:PendingComponent = $null
         $script:PendingLabel = $null
         $script:PendingOperationId = $null
         $script:SecondsSinceRefresh = 0
         if (-not $script:ExitRequested) {
-            Update-UiFromState
+            try { Update-UiFromState }
+            catch { $lastRefreshItem.Text = 'Last update: unavailable; inspect control-center logs.' }
             if ($exitCode -ne 0) {
                 $notifyIcon.ShowBalloonTip(1800, $trayDisplayName, "$completedLabel completed with an attention state.", [Windows.Forms.ToolTipIcon]::Warning)
             }
+            if ($completedAction -eq 'RestartMcp') {
+                $result = if ($exitCode -eq 0) { 'Completed' } else { 'Failed or unconfirmed' }
+                Set-TrayRestartFeedback "$result / $completedComponent. Logs: last-actions/$completedComponent.json; events (controller_error)." -Warning:($exitCode -ne 0)
+            }
         }
+        Update-TrayPendingRestart -StatusCompleted:($completedAction -eq 'Status' -and $exitCode -eq 0)
     }
     Complete-TrayExit
 }
@@ -313,11 +404,29 @@ function Start-ControllerAction {
         [string]$Component
     )
     if ($script:Closing -or $script:ExitRequested) { return }
-    if ($null -ne $script:WorkspaceLocalOwner -and $script:WorkspaceLocalOwner.HasActiveRequest) {
+    if (Test-TrayMaintenanceBusy) {
+        if ($Action -eq 'RestartMcp') { Set-TrayRestartFeedback "Not dispatched / ${Component}: Workspace manual maintenance is pending." -Warning }
         Show-Warning 'Workspace manual maintenance is pending; inspect its request receipt.'
         return
     }
-    if ((Get-TrayControllerState) -notin @('Idle', 'Exited')) {
+    if ($null -ne $script:PendingRestartMcp) {
+        Show-Warning "Restart MCP is already pending for $($script:PendingRestartMcp.component); this request was not accepted."
+        return
+    }
+    $controllerState = Get-TrayControllerState
+    if ($Action -eq 'RestartMcp' -and -not (Test-TrayRestartAllowed -Component $Component)) {
+        Set-TrayRestartFeedback "Not dispatched / ${Component}: restart eligibility or ownership is unknown; refresh and inspect MCP health." -Warning
+        return
+    }
+    if ($controllerState -notin @('Idle', 'Exited')) {
+        if ($Action -eq 'RestartMcp' -and $controllerState -eq 'Running' -and $script:PendingAction -eq 'Status' -and
+            -not $script:StatusStopAttempted -and $null -ne $script:StatusClock -and $script:StatusClock.Elapsed.TotalSeconds -lt 120 -and
+            [object]::ReferenceEquals($script:StatusProcess, $script:ControllerProcess)) {
+            $script:PendingRestartMcp = [pscustomobject]@{ component = $Component; process = $script:ControllerProcess; clock = [Diagnostics.Stopwatch]::StartNew() }
+            Set-TrayRestartFeedback "Pending / ${Component}: waiting for the current Status (at most 120 seconds)."
+            return
+        }
+        if ($Action -eq 'RestartMcp') { Set-TrayRestartFeedback "Not dispatched / ${Component}: controller is busy or its state is unknown." -Warning }
         Show-Warning "The control center is already running $($script:PendingLabel)."
         return
     }
@@ -336,14 +445,23 @@ function Start-ControllerAction {
         $arguments += @("-OperationId", $script:PendingOperationId)
     }
     if (-not [string]::IsNullOrWhiteSpace($Component)) { $arguments += @("-Component", $Component) }
-    $startInfo = New-Object Diagnostics.ProcessStartInfo
-    $startInfo.FileName = if ($manifest.schemaVersion -eq 4) { 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' } else { (Get-Command powershell.exe -ErrorAction Stop).Source }
-    $startInfo.Arguments = ($arguments | ForEach-Object { Quote-ProcessArgument ([string]$_) }) -join " "
-    $startInfo.WorkingDirectory = $projectRoot
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
-    $script:ControllerProcess = [Diagnostics.Process]::Start($startInfo)
+    try {
+        $startInfo = New-Object Diagnostics.ProcessStartInfo
+        $startInfo.FileName = if ($manifest.schemaVersion -eq 4) { 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' } else { (Get-Command powershell.exe -ErrorAction Stop).Source }
+        $startInfo.Arguments = ($arguments | ForEach-Object { Quote-ProcessArgument ([string]$_) }) -join " "
+        $startInfo.WorkingDirectory = $projectRoot
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $script:ControllerProcess = [Diagnostics.Process]::Start($startInfo)
+        if ($null -eq $script:ControllerProcess) { throw 'CONTROLLER_NOT_STARTED' }
+    }
+    catch {
+        if ($Action -ne 'RestartMcp') { throw }
+        Set-TrayRestartFeedback "Launch failed / ${Component}: no controller was started; no new action receipt is available." -Warning
+        return
+    }
     $script:PendingAction = $Action
+    $script:PendingComponent = $Component
     $script:StatusProcess = $null
     $script:StatusClock = $null
     $script:StatusStopAttempted = $false
@@ -360,6 +478,7 @@ function Start-ControllerAction {
     $script:PendingLabel = if ([string]::IsNullOrWhiteSpace($Component)) { $Action } else { "$Action / $Component" }
     $overallItem.Text = "MCP Control Center | Running: $($script:PendingLabel)"
     Set-NotifyText "$trayDisplayName | $($script:PendingLabel)"
+    if ($Action -eq 'RestartMcp') { Set-TrayRestartFeedback "Started / ${Component}: waiting for the controller result." }
     if ($Action -eq "Reconcile") { Show-ReconcilePendingUi }
 }
 
@@ -468,11 +587,15 @@ $lastRefreshItem = New-Object Windows.Forms.MenuItem "Last update: none"
 $lastRefreshItem.Enabled = $false
 $contextMenu.MenuItems.Add($overallItem) | Out-Null
 $contextMenu.MenuItems.Add($lastRefreshItem) | Out-Null
+$restartResultItem = New-Object Windows.Forms.MenuItem 'Restart MCP | No request in this session'
+$restartResultItem.Enabled = $false
+$contextMenu.MenuItems.Add($restartResultItem) | Out-Null
 $normalOperatorItem = New-Object Windows.Forms.MenuItem('NORMAL: accepting MCP requests')
 $normalOperatorItem.Enabled=$false
 $contextMenu.MenuItems.Add($normalOperatorItem) | Out-Null
 $contextMenu.MenuItems.Add("-") | Out-Null
 
+$restartMcpClickHandler = { param($sender, $eventArgs) Invoke-TrayRestartMcpClick -Sender $sender }
 foreach ($component in @($manifest.components | Sort-Object startupOrder)) {
     $componentId = [string]$component.id
     $componentName = [string]$component.displayName
@@ -484,17 +607,7 @@ foreach ($component in @($manifest.components | Sort-Object startupOrder)) {
     $restartMcpItem = New-Object Windows.Forms.MenuItem "Restart MCP"
     $healthItem = New-Object Windows.Forms.MenuItem "Open MCP health"
     $definition = $component
-    $restartMcpItem.add_Click(({
-        $choice = [Windows.Forms.MessageBox]::Show(
-            "Restart the complete MCP runtime for $componentName? A stopped component will be started without replacing a healthy instance.",
-            $trayDisplayName,
-            [Windows.Forms.MessageBoxButtons]::YesNo,
-            [Windows.Forms.MessageBoxIcon]::Warning
-        )
-        if ($choice -eq [Windows.Forms.DialogResult]::Yes) {
-            Start-ControllerAction -Action RestartMcp -Component $componentId
-        }
-    }).GetNewClosure())
+    $restartMcpItem.add_Click($restartMcpClickHandler)
     $healthItem.add_Click(({ Start-HealthDetail -Component $componentId }).GetNewClosure())
     $parent.MenuItems.Add($statusItem) | Out-Null
     $parent.MenuItems.Add("-") | Out-Null
@@ -517,6 +630,7 @@ foreach ($component in @($manifest.components | Sort-Object startupOrder)) {
     }
     $contextMenu.MenuItems.Add($parent) | Out-Null
     $script:ComponentUi[$componentId] = [pscustomobject]@{
+        displayName = $componentName
         parent = $parent
         status = $statusItem
         restartMcp = $restartMcpItem

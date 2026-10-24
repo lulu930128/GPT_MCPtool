@@ -422,6 +422,15 @@ function Get-McpCcInstalledBridgeBinding([string]$CodeRoot) {
         Assert-McpCcInstalledPrivatePath $profileFile $operator.sid
         if ((Get-Item -LiteralPath $profileFile).Length -gt 65536 -or
             (Get-FileHash -LiteralPath $profileFile).Hash.ToLowerInvariant() -cne $release.cutover.tunnelProfileSha256) { throw 'INSTALLED_PROFILE_CHANGED' }
+        if($release.schemaVersion -eq 6 -and $release.cutover.httpTokenSha256 -cne ''){
+            # Runs during Tray Activation, before any listener or reconciliation.
+            # Closure and operator were verified above. Credential IO/decryption
+            # remains in the protected Bridge helper; this verifier only hashes env.
+            $bearerHelper=Join-Path $release.root 'codex_bridge\scripts\bridge-bearer.ps1'
+            Assert-McpCcProtectedCodePath $bearerHelper
+            . $bearerHelper
+            Set-CbInstalledBearerEnvironment $release $ExecutionContext.SessionState.Module
+        }
         $token=[Environment]::GetEnvironmentVariable('CODEX_BRIDGE_HTTP_TOKEN','Process')
         $digest=Get-McpCcInstalledTokenHash $token
         if ($digest -cne $release.cutover.httpTokenSha256) { throw 'INSTALLED_HTTP_AUTH_MISMATCH' }
@@ -486,7 +495,9 @@ function Assert-McpCcInstalledSelection($Binding,[switch]$TrayBootstrap) {
     $shell=New-Object -ComObject WScript.Shell
     try {
         $link=$shell.CreateShortcut($shortcut)
-        if ($link.TargetPath -ine $ps -or $link.Arguments -cne ('-NoProfile -File "'+$tray+'" -AutoReconcile') -or
+        if ($link.TargetPath -ine $ps -or $link.Arguments -cnotin @(
+                ('-NoProfile -File "'+$tray+'" -AutoReconcile'),
+                ('-NoProfile -WindowStyle Hidden -File "'+$tray+'" -AutoReconcile')) -or
             $link.WorkingDirectory -ine (Split-Path -Parent (Split-Path -Parent $tray))) { throw 'INSTALLED_STARTUP_NOT_SELECTED' }
     } finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) }
     $native=Join-Path $Binding.releaseRoot 'mcp_control_center\src\RemoteSelfReload.Native.dll'
@@ -506,7 +517,7 @@ function Assert-McpCcInstalledSelection($Binding,[switch]$TrayBootstrap) {
         $cim=Get-CimInstance Win32_Process -Filter "ProcessId=$ownerPid" -ErrorAction Stop
         $sid=Invoke-CimMethod -InputObject $cim -MethodName GetOwnerSid -ErrorAction Stop
         if ($sid.ReturnValue -ne 0 -or $sid.Sid -cne $Binding.operatorSid -or
-            $cim.CommandLine -notmatch ('(?i)^"?'+[regex]::Escape($ps)+'"?\s+-NoProfile\s+-File\s+"'+[regex]::Escape($tray)+'"(?:\s+-AutoReconcile)?\s*$')) { throw 'INSTALLED_OWNER_UNKNOWN' }
+            $cim.CommandLine -notmatch ('(?i)^"?'+[regex]::Escape($ps)+'"?\s+-NoProfile\s+(?:-WindowStyle\s+Hidden\s+)?-File\s+"'+[regex]::Escape($tray)+'"(?:\s+-AutoReconcile)?\s*$')) { throw 'INSTALLED_OWNER_UNKNOWN' }
         # Validate lineage while the independent launcher is alive. Later checks prove
         # the same protected tray entrypoint is running outside all jobs; an exited
         # launcher PID must not become an eternal dependency (or be trusted after reuse).

@@ -8,7 +8,7 @@ $script:checks = 0
 function Check([bool]$Value, [string]$Message) {
     if (-not $Value) { throw "CHECK_FAILED: $Message" }; $script:checks++
 }
-foreach ($name in @('Get-TrayControllerState', 'Test-TrayMaintenanceBusy', 'Show-TrayControllerWarning', 'Complete-TrayExit', 'Request-TrayExit', 'Update-TrayControllerLifecycle', 'Start-ControllerAction', 'Start-NormalOperatorPreflight')) {
+foreach ($name in @('Get-TrayControllerState', 'Test-TrayMaintenanceBusy', 'Show-TrayControllerWarning', 'Complete-TrayExit', 'Request-TrayExit', 'Update-TrayControllerLifecycle', 'Update-TrayPendingRestart', 'Start-ControllerAction', 'Start-NormalOperatorHost')) {
     $node = $ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name }, $true)
     . ([scriptblock]::Create($node.Extent.Text))
 }
@@ -21,10 +21,13 @@ $script:click = $exitNode.Arguments[0].ScriptBlock.GetScriptBlock()
 function Stop-TrayApplication { $script:exitCalls++ }
 function Show-Warning { param($Message) $script:warnings++ }
 function Update-UiFromState { $script:updates++ }
+function Set-TrayRestartFeedback { param($Message, [switch]$Warning) $script:balloons++ }
 function Update-UiFromReconcileProgress { $script:progress++; return $true }
 function Reset-Fixture {
     $script:Closing = $false; $script:ExitRequested = $false; $script:ExitClock = $null
     $script:ControllerProcess = $null; $script:PendingAction = $null; $script:PendingLabel = $null; $script:PendingOperationId = $null
+    $script:PendingRestartMcp = $null
+    $script:PendingComponent = $null
     $script:StatusProcess = $null; $script:StatusClock = $null; $script:StatusStopAttempted = $false; $script:StatusStopClock = $null
     $script:ControllerWarningShown = $false; $script:SecondsSinceRefresh = 30
     $script:WorkspaceLocalOwner = $null; $script:WorkspaceLocalWorker = $null
@@ -72,7 +75,7 @@ Check ($script:ExitRequested -and -not $script:Closing -and $script:exitCalls -e
 & $script:tick
 Start-ControllerAction -Action Status
 Start-ControllerAction -Action RestartMcp -Component 'fixture'
-Start-NormalOperatorPreflight
+Start-NormalOperatorHost
 Check ([object]::ReferenceEquals($script:ControllerProcess, $child) -and $script:SecondsSinceRefresh -eq 30) 'pending exit suppresses periodic and manual launches'
 $child.HasExited = $true
 & $script:tick; & $script:tick; & $script:click

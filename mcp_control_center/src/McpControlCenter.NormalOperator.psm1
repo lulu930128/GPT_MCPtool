@@ -23,8 +23,12 @@ function Open-McpCcNormalInstalledContext {
     Assert-McpCcProtectedCodePath $ManagerRoot
     $release=Read-McpCcInstalledRelease $ManagerRoot
     if ($release.schemaVersion -lt 3) { throw 'INSTALLED_LIFECYCLE_BINDINGS_REQUIRED' }
-    Assert-McpCcInstalledClosure $release
+    $manifestPin=(Get-FileHash -LiteralPath $release.sourcePath -Algorithm SHA256).Hash
+    # OwnerBinding already verifies the complete protected tree. Bind that
+    # verification to this exact manifest instead of walking it twice at setup.
     $ownerBinding=Get-McpCcInstalledOwnerBinding $ManagerRoot
+    if ($ownerBinding.releaseRoot -ine $release.root -or
+        (Get-FileHash -LiteralPath $release.sourcePath -Algorithm SHA256).Hash -cne $manifestPin) { throw 'INSTALLED_CLOSURE_CHANGED' }
     Assert-McpCcInstalledSelection $ownerBinding -TrayBootstrap:($TrayProcessId -eq $PID)
     $nativePath=Join-Path $PSScriptRoot 'NormalOperator.Host.dll'
     Assert-McpCcProtectedCodePath $nativePath
@@ -43,19 +47,34 @@ function Open-McpCcNormalInstalledContext {
         if ($proof.image -ine $expectedImage) { throw 'TRAY_IMAGE_REJECTED' }
         $cim=Get-CimInstance Win32_Process -Filter "ProcessId=$TrayProcessId" -ErrorAction Stop
         $tray=Join-Path $ManagerRoot 'scripts\tray.ps1'
-        $pattern='(?i)^"?'+[regex]::Escape($expectedImage)+'"?\s+-NoProfile\s+-File\s+"'+[regex]::Escape($tray)+'"(?:\s+-AutoReconcile)?\s*$'
+        $pattern='(?i)^"?'+[regex]::Escape($expectedImage)+'"?\s+-NoProfile\s+(?:-WindowStyle\s+Hidden\s+)?-File\s+"'+[regex]::Escape($tray)+'"(?:\s+-AutoReconcile)?\s*$'
         if ($null -eq $cim -or $cim.CommandLine -inotmatch $pattern) { throw 'EXACT_TRAY_OWNER_REQUIRED' }
         [McpCcNormalSecurity]::AssertUnchanged($process,$token)
-        $manifestPin=(Get-FileHash -LiteralPath $release.sourcePath -Algorithm SHA256).Hash
         $peer=[McpCcNormalPipe+Peer]::Retain($proof.pid,$proof.sid,$proof.image,$proof.session,$proof.startedUtcTicks,$true)
         return [pscustomobject]@{ release=$release; peer=$peer; channel=[McpCcNormalPipe]::OwnerChannel($proof);
-            pin=$manifestPin; proof=$proof }
+            pin=$manifestPin; proof=$proof; sessionCheckedAt=$null }
     } finally { $process.Dispose() }
 }
-function Assert-McpCcNormalClosure($Context) {
+function Assert-McpCcNormalBinding($Context) {
+    Assert-McpCcProtectedCodePath $Context.release.sourcePath
     if ((Get-FileHash -LiteralPath $Context.release.sourcePath -Algorithm SHA256).Hash -cne $Context.pin) { throw 'INSTALLED_CLOSURE_CHANGED' }
-    Assert-McpCcInstalledClosure $Context.release
     $Context.peer.Check()
+}
+function Assert-McpCcNormalClosure($Context) {
+    $Context.sessionCheckedAt=$null
+    Assert-McpCcNormalBinding $Context
+    Assert-McpCcInstalledClosure $Context.release
+    Assert-McpCcNormalBinding $Context
+}
+function Assert-McpCcNormalSession($Context) {
+    # A successful resolver owns exactly one bounded native session. Consume the
+    # reuse before checking; failure/timeout cannot leave a reusable proof.
+    $checkedAt=$Context.sessionCheckedAt
+    $Context.sessionCheckedAt=$null
+    if ($null -eq $checkedAt) { throw 'NORMAL_SESSION_UNVERIFIED' }
+    $elapsed=([Diagnostics.Stopwatch]::GetTimestamp()-$checkedAt)/[Diagnostics.Stopwatch]::Frequency
+    if ($elapsed -lt 0 -or $elapsed -ge 120) { throw 'NORMAL_SESSION_EXPIRED' }
+    Assert-McpCcNormalBinding $Context
 }
 function Open-McpCcNormalBridgePeer($Context,[int]$ClientId) {
     # ClientId is GetNamedPipeClientProcessId, not an IPC field. Its parent must be
@@ -84,6 +103,7 @@ function Open-McpCcNormalBridgePeer($Context,[int]$ClientId) {
         $parentPeer=[McpCcNormalPipe+Peer]::Retain($node.pid,$node.sid,$node.image,$node.session,$node.startedUtcTicks,$false)
         $peer=[McpCcNormalPipe+Peer]::Retain($identity.pid,$identity.sid,$identity.image,$identity.session,$identity.startedUtcTicks,$false)
         $null=$peer.BindParent($parentPeer);$parentPeer=$null
+        $Context.sessionCheckedAt=[Diagnostics.Stopwatch]::GetTimestamp()
         $result=$peer;$peer=$null;return $result
     } finally {
         if($peer){$peer.Dispose()};if($parentPeer){$parentPeer.Dispose()}
@@ -119,21 +139,23 @@ function Invoke-McpCcNormalOperatorOwner {
         $Cancellation.ThrowIfCancellationRequested()
         $resolver=[Func[int,McpCcNormalPipe+Peer]] { param($observedPid) Open-McpCcNormalBridgePeer $context $observedPid }
         $handler=[Action[McpCcNormalPipe+Channel]] { param($channel)
-            Assert-McpCcNormalClosure $context
+            # Listener calls this only after the resolver and native handshake.
+            # Channel retains/rechecks the exact client and parent on every IO.
+            Assert-McpCcNormalSession $context
             [McpCcNormalHost]::Serve($channel)
         }
         # Keep the existing owner available for distinct requests. Each session
         # still has a fresh authenticated peer, sequence and durable single claim.
         while (-not $Cancellation.IsCancellationRequested) {
-            # The handler verifies closure before each request. Reopen promptly
-            # so a completed request does not leave a verification-sized gap.
+            # A new connection gets a fresh full closure in its resolver. Only
+            # the duplicate walk in that same session's handler is reused.
             $listener=New-Object McpCcNormalPipe+Listener($context.channel,[string]$context.release.state.operatorSid)
             try { $listener.Serve($resolver,$handler,$Cancellation) }
             catch {
                 if ($Cancellation.IsCancellationRequested) { break }
                 # The failed exchange returns through the client's transport.
                 # Never replay it; wait for the next independent MCP request.
-            } finally { $listener.Dispose();$listener=$null }
+            } finally { $context.sessionCheckedAt=$null;$listener.Dispose();$listener=$null }
         }
         return [pscustomobject]@{contract='normal-operator-host-gate-v1';enabled=$false;status='STOPPED';automaticResume=$false}
     } catch {

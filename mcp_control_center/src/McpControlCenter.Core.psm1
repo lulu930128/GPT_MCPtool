@@ -1599,6 +1599,10 @@ function Get-McpCcPortOwner {
         try {
             $process = Get-McpCcObservedProcess -ProcessId $ownerProcessId -ScanContext $ScanContext
             if ($null -eq $process) { throw 'OWNER_PROCESS_MISSING' }
+            # CIM may expose a PID but omit command identity across integrity levels.
+            if (@($ExpectedCommandFragments).Count -gt 0 -and [string]::IsNullOrWhiteSpace([string]$process.CommandLine)) {
+                throw 'OWNER_COMMAND_LINE_UNAVAILABLE'
+            }
         }
         catch {
             return [pscustomobject]@{
@@ -1631,6 +1635,10 @@ function Get-McpCcPortOwner {
                     $managedPid = $parsedManagedPid
                     try {
                         $managedProcess = Get-McpCcObservedProcess -ProcessId $managedPid -ScanContext $ScanContext
+                        if ($null -ne $managedProcess -and @($ManagedExpectedCommandFragments).Count -gt 0 -and
+                            [string]::IsNullOrWhiteSpace([string]$managedProcess.CommandLine)) {
+                            throw 'MANAGED_COMMAND_LINE_UNAVAILABLE'
+                        }
                     }
                     catch {
                         return [pscustomobject]@{
@@ -1860,6 +1868,10 @@ function Resolve-McpCcComponentState {
     }
     if (@($ProbeResults | Where-Object { $_.owner.known -and $_.owner.matchesExpected -eq $false }).Count -gt 0) {
         return "OwnershipMismatch"
+    }
+    # Direct component observations need the same unknown state as completed scans.
+    if (@($ProbeResults | Where-Object { $_.tcpOpen -and (Get-McpCcObjectProperty -Object $_ -Name 'ownershipRequired').value -eq $true -and $null -eq $_.owner.matchesExpected }).Count -gt 0) {
+        return "OwnershipUnknown"
     }
     $coreFailures = @($ProbeResults | Where-Object { $_.role -eq "core" -and -not $_.success })
     if ($coreFailures.Count -gt 0) {

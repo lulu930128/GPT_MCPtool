@@ -80,7 +80,9 @@ public static class McpCcNormalExecution {
             throw new InvalidOperationException("SCRIPT_DIGEST_MISMATCH");
         foreach(var a in p.args) if(a==null || a.Length>512 || a.IndexOf('\0')>=0)
             throw new InvalidOperationException("NORMAL_ARGUMENT_REJECTED");
-        if(String.IsNullOrEmpty(p.cwd) || !System.Text.RegularExpressions.Regex.IsMatch(p.cwd,@"\A[A-Za-z]:\\[^/:*?""<>|\r\n\0]+\z")
+        // Canonical drive/UNC directories, including a drive root. CWD is an OS
+        // location, not a project identity. Device namespaces remain forbidden.
+        if(String.IsNullOrEmpty(p.cwd) || !System.Text.RegularExpressions.Regex.IsMatch(p.cwd,@"\A(?:[A-Za-z]:\\|\\\\(?![?.]\\)[^\\/:*?""<>|\r\n\0]+\\[^\\/:*?""<>|\r\n\0]+(?:\\|\z))[^/:*?""<>|\r\n\0]*\z")
             || !String.Equals(Path.GetFullPath(p.cwd),p.cwd,StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("NORMAL_CWD_REJECTED");
     }

@@ -34,25 +34,30 @@ function Get-NetTCPConnection {
     if ($script:denyListeners) { throw 'FIXTURE_LISTENERS_UNAVAILABLE' }
     if ($script:changeIdentity -and $script:tcpCalls -gt 1) { $script:generations[300] += 10000000 }
     if ($script:changeListeners -and $script:tcpCalls -gt 1) { return @() }
+    if ($null -ne $LocalPort) { return @($script:rows | Where-Object { $_.LocalPort -eq $LocalPort }) }
     return $script:rows
 }
 function Get-McpCcNetstatListeners {
     $script:netstatCalls++
     if ($script:denyNetstat) { throw 'FIXTURE_NETSTAT_UNAVAILABLE' }
-    return @('  TCP    127.0.0.1:18100    0.0.0.0:0    LISTENING    300', '  TCP    [::1]:18100    [::]:0    LISTENING    300')
+    return @(foreach ($row in $script:rows) {
+        "  TCP    127.0.0.1:$($row.LocalPort)    0.0.0.0:0    LISTENING    $($row.OwningProcess)"
+        "  TCP    [::1]:$($row.LocalPort)    [::]:0    LISTENING    $($row.OwningProcess)"
+    })
 }
 function Get-CimInstance {
     param($ClassName, $Filter, $ErrorAction)
     $script:cimCalls++
     if ($script:cimDelayMs) { [Threading.Thread]::Sleep($script:cimDelayMs) }
-    if ($script:denyCim) { throw 'FIXTURE_CIM_UNAVAILABLE' }
+    if ($script:denyCim) { throw [UnauthorizedAccessException]::new('FIXTURE_CIM_ACCESS_DENIED') }
     $id = [int]($Filter -replace 'ProcessId=', '')
     return $script:processes[$id]
 }
 function Get-Process {
     param($Id, $ErrorAction)
     $script:identityCalls++
-    if ($script:denyIdentity -or -not $script:generations.ContainsKey([int]$Id)) { throw 'FIXTURE_PROCESS_MISSING' }
+    if ($script:denyIdentity) { throw [UnauthorizedAccessException]::new('FIXTURE_START_TIME_ACCESS_DENIED') }
+    if (-not $script:generations.ContainsKey([int]$Id)) { throw 'FIXTURE_PROCESS_MISSING' }
     $result = [pscustomobject]@{ StartTime = [datetime]::new($script:generations[[int]$Id], [DateTimeKind]::Utc) }
     $result | Add-Member ScriptMethod Dispose { }
     return $result
@@ -82,6 +87,75 @@ $component = [pscustomobject]@{
     capabilities = @(); autoStart = $false; startupOrder = 1; probes = @($probe)
 }
 $manifest = [pscustomobject]@{ components = @($component); settings = @{ probeTimeoutSeconds = 2 } }
+# Exercise production probe/classification with fixed OS evidence, never live processes.
+# Project Reading has direct command ownership; the existing fixture also covers managed lineage.
+$projectProbe = [pscustomobject]@{
+    id = 'core'; label = 'core'; role = 'core'; required = $true
+    url = 'http://127.0.0.1:18100/readyz'; port = 18100; kind = 'text'; expectedText = @('ok'); summaryFields = @()
+    ownerCommandContains = @('project_reading', 'dist\src\http-main.js')
+    resolvedOwnerManagedPidFile = $null; ownerManagedCommandContains = @()
+}
+$tunnelProbe = [pscustomobject]@{
+    id = 'tunnel'; label = 'tunnel'; role = 'connectivity'; required = $true
+    url = 'http://127.0.0.1:18101/readyz'; port = 18101; kind = 'text'; expectedText = @('ok'); summaryFields = @()
+    ownerCommandContains = @('fixture-200'); resolvedOwnerManagedPidFile = $null; ownerManagedCommandContains = @()
+}
+foreach ($fallback in @($false, $true)) {
+    foreach ($case in @('null', 'empty', 'whitespace', 'foreign', 'matching', 'cimDenied', 'generationDenied', 'noCreation')) {
+        Reset-Fixture
+        $script:denyListeners = $fallback
+        $script:rows += [pscustomobject]@{ LocalPort = 18101; OwningProcess = 200 }
+        $script:processes[300].CommandLine = 'node.exe C:\fixture\project_reading\dist\src\http-main.js'
+        switch ($case) {
+            'null' { $script:processes[300].CommandLine = $null }
+            'empty' { $script:processes[300].CommandLine = '' }
+            'whitespace' { $script:processes[300].CommandLine = '  ' }
+            'foreign' { $script:processes[300].CommandLine = 'node.exe C:\fixture\foreign\dist\src\http-main.js' }
+            'cimDenied' { $script:denyCim = $true }
+            'generationDenied' { $script:denyIdentity = $true }
+            'noCreation' { $script:processes[300].CreationDate = $null }
+        }
+        $expected = if ($case -eq 'matching') { 'Ready' } elseif ($case -eq 'foreign') { 'OwnershipMismatch' } else { 'OwnershipUnknown' }
+        $component.probes = @($projectProbe, $tunnelProbe)
+        # Direct callers do not have the generation check; test their evidence separately.
+        if (-not $fallback -and $case -notin @('generationDenied', 'noCreation')) {
+            $directStatus = Get-McpCcComponentStatus -Component $component -TimeoutSeconds 2
+            Check ($directStatus.status -eq $expected -and $directStatus.localStatus -eq $expected) "$case direct component classification agrees with scan classification"
+            Check ((Get-McpCcRestartMcpDecision -ComponentStatus $directStatus).allowed -eq ($expected -eq 'Ready')) "$case direct component restart stays fail closed"
+            $direct = Get-McpCcProbeResult -Probe $projectProbe -TimeoutSeconds 2
+            Check ($direct.owner.known -and $direct.owner.pid -eq 300) "$case direct probe retains listener PID evidence"
+            if ($expected -eq 'OwnershipUnknown') {
+                Check ($null -eq $direct.owner.matchesExpected -and $direct.owner.relation -eq 'Unknown') "$case direct probe preserves unknown command identity"
+            } else {
+                Check ($direct.owner.matchesExpected -eq ($expected -eq 'Ready')) "$case direct probe distinguishes foreign from owned"
+            }
+        }
+        $state = Get-McpCcSystemState -Manifest $manifest -BootId 'fixture'
+        $observed = $state.components[0]
+        Check ($observed.status -eq $expected -and $observed.localStatus -eq $expected) "$case fallback=$fallback preserves three-state ownership classification"
+        Check ($observed.probes[0].owner.known -and $observed.probes[0].owner.pid -eq 300) "$case scan retains PID without claiming identity"
+        if ($expected -eq 'OwnershipUnknown') {
+            Check ($null -eq $observed.probes[0].owner.matchesExpected -and $state.overall -eq 'Failed' -and $observed.readinessScope -eq 'none') "$case cannot publish readiness"
+        }
+        $decision = Get-McpCcRestartMcpDecision -ComponentStatus $observed
+        Check ($decision.allowed -eq ($expected -eq 'Ready')) "$case restart decision stays fail closed"
+        if ($expected -ne 'Ready') { Check ($null -eq $decision.action) "$case exposes no restart action" }
+        if ($case -in @('null', 'empty', 'whitespace', 'foreign', 'matching')) {
+            Check ($observed.probes[1].owner.matchesExpected -eq $true) "$case leaves matching tunnel ownership intact"
+        }
+        if ($fallback) { Check ($state.timing.ownership.netstatFallbacks -eq 2) "$case uses bounded listener fallback" }
+    }
+}
+foreach ($missingCommand in @($null, '', '  ')) {
+    foreach ($useScan in @($false, $true)) {
+        Reset-Fixture
+        $script:processes[100].CommandLine = $missingCommand
+        $scan = if ($useScan) { New-McpCcOwnershipScan } else { $null }
+        $owner = Get-McpCcPortOwner -Port 18100 -ExpectedCommandFragments @('fixture-300') -ManagedPidPath 'fixture.pid' -ManagedExpectedCommandFragments @('fixture-100') -ScanContext $scan
+        Check ($owner.known -and $owner.pid -eq 300 -and $owner.managedPid -eq 100 -and $null -eq $owner.matchesExpected -and $owner.relation -eq 'Unknown') 'missing managed command cannot become a mismatch or positive lineage proof'
+    }
+}
+$component.probes = @($probe)
 Reset-Fixture
 $component.probes = @(1..22 | ForEach-Object { $probe })
 $state = Get-McpCcSystemState -Manifest $manifest -BootId 'fixture'

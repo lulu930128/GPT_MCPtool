@@ -1,5 +1,24 @@
 # MCP Control Center
 
+2026-10-23 DIRECT NORMAL source：沿用既有單例 Owner 與 Native Host，接受 Bridge 經驗證的
+一次明確遠端請求；不再加本機密碼或確認。完整 closure 在 context setup 沿用既有 OwnerBinding
+核對，每次 native 連線仍重新完整驗證；同次連線 handler 只重查受保護 manifest／retained peer，
+重用證據一次消耗、120 秒到期，失敗與連線結束即清除。Native peer／DACL／claim 不變。
+這輪僅 source 與離線驗證，未更動 installed release 或服務；下方 10/15 文字是歷史紀錄。
+實際認證與部署缺口見 [NORMAL 交接](docs/NormalOperatorHandoff.md)。
+
+InstalledRelease v6 的正式 owner state 固定在 `mcp_control_center\.local\runtime`，並由同一受保護
+manifest 將 Bridge 資料固定在 `codex_bridge\.local\runtime`。此例外只適用於已驗證的 installed v6；
+一般 source workspace override 仍被拒絕。Git ignore 不能取代完整祖先 ACL 驗證。遷移使用原
+Bridge installed-release operator，詳見 [Runtime 資料遷移](../codex_bridge/docs/RuntimeStateMigration.md)。
+
+2026-10-15 PowerShell Host source 接續：既有 NormalOperator preflight 改沿用 InstalledRelease 全 closure，native Token/Peer/DACL checks 與 NORMAL execution kernel 僅供後續受保護 owner 接線；`HostLease` 仍拒絕執行，沒有開 listener、增加 Tray 或另一份 Grant Journal。唯一 Journal 仍由 Bridge Runtime 擁有；本輪只編譯／隔離檢查，沒有安裝或啟用。[工程紀錄與尚未完成項目](../codex_bridge/docs/agent-runs/powershell-host-20261015/Progress.md)。
+
+> **2026-10-15 Codex PowerShell 正式工程範圍：** Control Center 的一般 `component-controller` 仍只接受固定 lifecycle actions，不接受任意命令；但這不禁止在既有單例 Tray Owner 下開發獨立、受保護且逐筆核准的 Codex PowerShell Operator（DIRECT／CODEX_DERIVED）。開發期真實 PowerShell 操作唯讀、排除 `.env`／敏感內容；正式寫入／高權限測試僅在使用者明確發起並逐筆核准後、依 OS／平台授權執行。Host 尚未部署，不能以刪除 hard guard 或切換工具繞過平台拒絕。現行規格見 [Bridge PowerShell 主計畫](../codex_bridge/docs/RemotePowerShellApprovalPlan.md)。
+
+R1 目前為 **G1 PARTIAL / G2 NOT_DEPLOYED**：v4 搭配 release contract v3 已接通受驗證的本機 lifecycle，並提供獨立 operator 的版本安裝、cutover 與 rollback 工具。
+正式預設 v3 不變；G0 遠端核准保持關閉。操作與證據見 [R1 G2 operator](docs/R1G2Operator.md)。
+
 `MCP Control Center` 是可擴充的本機 MCP runtime Windows 中樞。它不是 MCP server，
 不持有任何市場、記憶、學習、workspace、Codex job 或財務資料；即使 MCP server 或
 Secure MCP Tunnel 故障，中樞仍可獨立檢查、記錄與協調啟動。
@@ -29,10 +48,17 @@ controller 遷移與 live adoption；既有六個元件另保留 legacy tray clo
 `unified-lifecycle-v3`。v3 採用
 component-owned stateless lifecycle controller：controller 以 mutex、PID file、exact
 executable／command、listener ownership 與必要的 process lineage 管理 detached child
-runtime，完成 action 後退出。中樞不持有 child process handle，也不新增 IPC。Loader 仍保留
+runtime，完成 action 後退出。中樞不接管 component process ownership。Loader 仍保留
 `legacy-tray` 相容能力，供 rollback 或尚未升級的新註冊元件使用；目前八個 descriptor 皆為 v3。
 
 ## 能力
+
+Remote Self-Reload R1 新增可選的 tray-owned runspace 與固定 authenticated named pipe，
+僅受理 Codex Bridge 的 `reload_runtime`；不新增 MCP server、不另建 component lifecycle。
+worker 持久化 exact human approval 與 receipt，等待完整 idle、重新核對 owner／canonical Build ID，
+再委派既有 action mapping。跨元件依賴只含固定 IPC 及公開 native verifier source，不讀 domain data／secret。
+**NOT_DEPLOYED**；正式 activation、同帳號信任界線、受保護安裝、WebAuthn host gate 與測試證據見
+[RemoteSelfReloadR1.md](docs/RemoteSelfReloadR1.md)。缺 policy 時既有 tray 行為不變。
 
 - 依 registry 的 `startupOrder` 檢查所有 enabled 元件的 core、dependency 與 tunnel readiness。
 - 在可取得 Windows listener 資訊時，比對 PID、process name 與 expected command fragments；
@@ -174,6 +200,18 @@ Control Center 的元件子選單。中樞只渲染 descriptor 內固定的 acti
 `Status`／`Doctor` 程序彼此獨立；關閉 diagnostic UI 只關閉臨時圖示，不停止或接管 runtime。
 
 ## 採用單一 Startup 入口
+
+InstalledRelease 的 Startup 由安裝 operator 管理，固定指向該 release 的 Windows PowerShell
+與 `tray.ps1`。背景啟動修正使用 `-NoProfile -WindowStyle Hidden -File "<installed tray.ps1>" -AutoReconcile`；
+selection、owner command 與後續升版檢查同時接受此命令及既有非隱藏命令，其他參數仍拒絕。
+舊版不能只修改捷徑，否則會回報 `INSTALLED_STARTUP_NOT_SELECTED`。使用者可選擇同一版本的
+局部修補：備份並更新三個啟動相關程式檔、同步 code tree hash、最後更新捷徑；不需重跑整套升版。
+原 manifest 以受保護的 `config/startup-presentation-baseline.json` 保留，state-plan 驗證只在
+其 hash 與歷史 pin 一致，且除 code tree hash 外所有設定完全相同時接受此修補。
+歷史切換收據仍維持原狀；`UNKNOWN` 不因此變成驗收成功。Program Files 寫入仍需管理員權限。
+InstalledRelease 不包含 source 的
+`start-tray.vbs`，不得直接把已安裝捷徑改指向它。此修正尚未代表冷開機驗收通過。
+隔離驗證：`powershell -NoProfile -File tests\test-installed-hidden-startup.ps1`。
 
 先預覽目前已註冊的 legacy shortcut；任何 target conflict 都會阻止 adoption：
 
@@ -407,3 +445,61 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\component-health.ps1
 元件 controller 擁有 Trainer → MCP → tunnel 的啟動流程；固定埠為 `18811`、`18810`、`18812`。
 依賴、私有設定與操作方法見 [Listening Audio 整合文件](../listening_audio/docs/ControlCenterIntegration.md)。
 中樞只讀安全 health 與 ownership metadata，不讀取題目、音訊、作答或金鑰。
+
+## Workspace 本機管理通道（2026-10-14 source candidate）
+
+現有 source schema 3 tray 在原 singleton mutex 後接入 `WorkspaceLocal.Native.cs`／
+`McpControlCenter.WorkspaceLocal.psm1`，沒有第二個 manager。status／preview 只讀 tray
+既有快照；固定七元件 reload 需 explicit interruption confirmation 與 UUID，寫 durable
+UNKNOWN 後才委派原 component controller。UUID 綁定精確目標，跨目標 replay 回
+`REQUEST_CONFLICT` 且不派送。排除 Workspace 自身與 CC；Codex Bridge active-work refusal 保留。
+不需要另一套人員身分驗證、跨 SID 或 Program Files G2；不涉及 R1／NORMAL／ADMIN。
+本輪未 restart 或部署。精確範圍、收據、人工採用與回退見
+[Workspace 本機維護](../project_reading/docs/LocalComponentManagement.md)。
+
+IPC 在每次 exchange 結束後重用同一個 pipe instance，包含 EOF／broken client；
+timeout 會先取消並等待 overlapped IO 結束，再 Disconnect。無法安全清理時關閉 owner，
+不留下無人處理的 pipe handle，也不重綁名稱或新增 listener。
+
+唯讀 `diagnostics` operation（`diagnosticsVersion=1`）由同一 publisher 擷取 canonical
+state 的安全欄位，在同一 owner 記憶體快照中回應；不於 IPC request 執行 probe 或讀取
+私人 runtime。舊四操作回應保持原樣。Bridge descriptor 透過既有 health summary 流程
+opt-in jobs.active／jobs.awaitingApproval／jobs.scope／controller；新增四欄各有型別與
+值域驗證，不保存 jobs payload，也不新增 probe。來源、ownership 與 Idle 的保守判定見
+[Workspace runtime 診斷](../project_reading/docs/RuntimeDiagnostics.md)。
+新增隔離測試：Windows PowerShell 5.1 `tests\test-runtime-diagnostics.ps1`。
+
+controller 明確拒絕 `ReloadRuntime` 且結果通過既有驗證時，CC 只接受
+`ACTIVE_WORK_PRESENT`、`OWNERSHIP_MISMATCH`、`OWNERSHIP_UNKNOWN`、`ACTIVE_STATE_UNKNOWN`
+四個 reason，原子寫入 `%LOCALAPPDATA%\McpControlCenter\workspace-local-diagnostics\<UUID>.json`
+（或明確 runtime override）。私有 sidecar 只有 requestId、componentId、action、reason、observedAt；
+不保存 exception、stderr、command、token 或 domain data。只有當次已派送的 active UUID
+可寫入一次；不回填歷史 receipt。寫入失敗仍保留 UNKNOWN 與防重播 reservation。
+Workspace wire schema 不變：失敗 receipt 仍為 `UNKNOWN`，`completed=null`；
+此私有診斷不代表 ChatGPT 可見的 terminal rejection，timeout／不完整結果也不推論拒絕。
+
+定向隔離測試（Windows PowerShell 5.1，無正式 controller／production pipe）：
+`powershell -NoProfile -File tests\test-workspace-local.ps1`。
+Tray runtime 採用另行驗收；`Restart-Tray.cmd` 含 AutoReconcile，不適合只刷新 CC。
+只有確定 exact owner 與 maintenance 閒置才可走 source schema 3 replacement；
+schema 4 不接受 `-ReplaceExisting`。無法證明閒置時，使用現有 Tray 的
+`Exit control center only` 安全閘門，確認退出後以不帶 AutoReconcile／ReplaceExisting 的入口啟動。
+
+## NORMAL 本機確認候選（2026-10-16）
+
+InstalledRelease v5 候選將唯一 owner state 固定為受保護 manifest 的 `C:\McpControlCenter`，沿用原 Tray mutex、Core、Native Host 與 Bridge lifecycle。Core 預設路徑、PID 投影、Tray／控制入口與 binding v3 一致選用該位置，拒絕 caller 改成其他 runtime root。原 AppData state 先保留私有備份，再準備 active copy，原目錄留作回復；不改 AppData ancestors ACL、不搬 `C:\CodexBridge`、不啟動第二個 owner。
+
+私有 runtime／部署快照與共用 Codex home 分開驗證，要求 `STATE_BOUND` receipt；APPLYING／UNKNOWN 不得啟動 installed binding。Control Center 不讀取或解密 credential bytes，只檢查其 metadata／ACL；ciphertext digest 與原 key-store 呼叫由 Bridge 負責。原 operator 的 state binding 保留來源與目的的平台 Deny，不信任 sandbox group，不修改 workspace／共用 `.codex` ACL。這些變更尚須新 release 部署與正式 Host 驗收。
+
+沿用 InstalledRelease v3 的單一 Tray owner，NORMAL 選單一次啟用一個有期限的 native session；既有 worker 使用 STA 執行 Windows 本機確認。對話框顯示 Canonical ApprovalStore 回傳的完整 Script／Args／CWD／Digest／TTL，使用者勾選同意該指令與有界結果回傳後才可執行一次。預設取消；取消或逾時不執行。MCP JSON、review 意見及選單啟用均不等於 Grant。
+
+只有此私有 Host ceremony 可進入原 NORMAL runner；公開 `Execute` 仍在 launch 前拒絕。UI 不保存 domain payload，Store 與 Receipt 仍由 Bridge 擁有；完成後不自動重綁 session、不自動重跑。ADMIN 保留獨立 UAC。封裝新增 Windows Forms／Drawing 參照，依既有 Prepare → Install → Preflight → Cutover 操作，不能把編譯 PASS 當成已採用，見[本次進度](../codex_bridge/docs/agent-runs/powershell-normal-20261016/Progress.md)。
+
+2026-10-20 閒置 listener 修正：同一個 first-instance pipe 持續等候首筆連線，Control Center 退出時取消等待，不再把啟動後的 120 秒視為首筆請求的期限。連線後仍保留 hello／challenge IO deadline、120 秒 session、exact peer 驗證與逐筆本機確認；完成或失敗後不自動重綁。這是 Source 修正，不能當作現役安裝已採用的證據。針對此缺陷的隔離驗證為 `powershell.exe -NoProfile -File tests\test-normal-host-receiver.ps1 -IdleAdmission`：實際等待 125 秒再送固定 preflight，另查取消等待及已連線未送 hello 的逾時；不建立 Grant 或執行指令。
+
+
+## NORMAL 持續接收遠端請求（2026-10-22 現行需求）
+
+既有單例 Tray Owner 啟動後持續接收經驗證的 DIRECT MCP 請求，取消逐次 arm 選單與 Windows 本機確認對話框。每筆仍使用獨立 native session、原 Request／Digest 與一次性 durable claim；下一筆請求不依賴前一筆人工重開通道。單筆通道失敗不重播該命令，owner 結束時取消等待並釋放同一接收通道。
+
+授權來源改記 `REMOTE_MCP_REQUEST`，沿用原 Host／Runner／ApprovalStore；component-controller 仍只有既有 lifecycle actions。完整輸出沿用原通道分段傳回 Bridge；大型結果由原 receipt 工具分頁續讀。詳見 [Bridge 現行 DIRECT NORMAL 說明](../codex_bridge/README.md#direct-normal-遠端執行2026-10-22-現行需求)。

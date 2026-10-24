@@ -43,6 +43,16 @@ $packet.scriptSha256=[McpCcNormalExecution]::Sha256([Text.Encoding]::UTF8.GetByt
 $packet.cwd=$root; $packet.args=@('','literal value'); $packet.expectedSid=$sid
 $now=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(); $packet.expiresAt=$now+60000; $packet.receiptDeadline=$now+90000
 [McpCcNormalExecution]::Validate($packet); $checks++
+$savedCwd=$packet.cwd
+foreach($cwd in @('C:\','C:\outside-configured-project','\\fixture-host\fixture-share\folder')) {
+    $packet.cwd=$cwd;[McpCcNormalExecution]::Validate($packet)
+}
+foreach($cwd in @('C:relative','\root-relative','\\.\pipe\example','\\?\C:\folder','C:\folder\..\other')) {
+    $packet.cwd=$cwd
+    try { [McpCcNormalExecution]::Validate($packet);throw 'INVALID_CWD_ACCEPTED' }
+    catch { if($_.Exception.GetBaseException().Message -cne 'NORMAL_CWD_REJECTED'){throw} }
+}
+$packet.cwd=$savedCwd;$checks++
 $packet.script+='; changed'
 try { [McpCcNormalExecution]::Validate($packet); throw 'CHANGED_SCRIPT_ACCEPTED' }
 catch { if ($_.Exception.GetBaseException().Message -cne 'SCRIPT_DIGEST_MISMATCH') { throw } }; $checks++
@@ -73,7 +83,7 @@ $script:ownerAttempts=0;$script:listenerDisposals=0
 $script:ownerCancellation=New-Object Threading.CancellationTokenSource
 function Open-McpCcNormalInstalledContext {
     $peer=[pscustomobject]@{};$peer | Add-Member ScriptMethod Dispose { }
-    [pscustomobject]@{peer=$peer;channel=[guid]::NewGuid();release=[pscustomobject]@{state=[pscustomobject]@{operatorSid='inert-test'}}}
+    [pscustomobject]@{peer=$peer;sessionCheckedAt=$null;channel=[guid]::NewGuid();release=[pscustomobject]@{state=[pscustomobject]@{operatorSid='inert-test'}}}
 }
 function Assert-McpCcNormalClosure { }
 function Get-NormalOperatorFailure { throw 'UNEXPECTED_OWNER_LOOP_FAILURE' }
@@ -95,6 +105,39 @@ try {
     $state=Invoke-McpCcNormalOperatorOwner -ManagerRoot 'inert' -TrayProcessId $PID -Cancellation $script:ownerCancellation.Token
     if($state.status -cne 'STOPPED' -or $script:ownerAttempts -ne 3 -or $script:listenerDisposals -ne 3){throw 'OWNER_DID_NOT_ACCEPT_NEXT_REQUEST'}
 } finally { $script:ownerCancellation.Dispose() };$checks++
+# Execute the actual bounded reuse checks with inert dependencies. Never read a
+# protected release, change ACLs, open a native pipe or launch a command here.
+foreach($name in @('Assert-McpCcNormalBinding','Assert-McpCcNormalClosure','Assert-McpCcNormalSession')) {
+    $definition=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true)
+    Invoke-Expression $definition.Extent.Text
+}
+$script:deepChecks=0;$script:aclChecks=0;$script:fakeHash='pinned';$script:rejectAcl=$false
+function Assert-McpCcInstalledClosure { $script:deepChecks++ }
+function Assert-McpCcProtectedCodePath { $script:aclChecks++;if($script:rejectAcl){throw 'PROTECTED_WRITE_REJECTED'} }
+function Get-FileHash { [pscustomobject]@{Hash=$script:fakeHash} }
+$peer=[pscustomobject]@{checks=0;dead=$false}
+$peer | Add-Member ScriptMethod Check { if($this.dead){throw 'PEER_EXITED'};$this.checks++ }
+$context=[pscustomobject]@{release=[pscustomobject]@{sourcePath='inert'};pin='pinned';peer=$peer;sessionCheckedAt=$null}
+Assert-McpCcNormalClosure $context
+$context.sessionCheckedAt=[Diagnostics.Stopwatch]::GetTimestamp()
+Assert-McpCcNormalSession $context
+if($script:deepChecks -ne 1 -or $script:aclChecks -ne 3 -or $peer.checks -ne 3 -or $null -ne $context.sessionCheckedAt){throw 'SESSION_REUSE_INVALID'}
+try { Assert-McpCcNormalSession $context;throw 'REPLAY_ACCEPTED' } catch { if($_.Exception.Message -cne 'NORMAL_SESSION_UNVERIFIED'){throw} }
+foreach($failure in @('manifest','expired','acl','peer')) {
+    $context.sessionCheckedAt=[Diagnostics.Stopwatch]::GetTimestamp()
+    $expected=switch($failure) {
+        'manifest' { $script:fakeHash='changed';'INSTALLED_CLOSURE_CHANGED' }
+        'expired' { $context.sessionCheckedAt-=[Diagnostics.Stopwatch]::Frequency*121;'NORMAL_SESSION_EXPIRED' }
+        'acl' { $script:rejectAcl=$true;'PROTECTED_WRITE_REJECTED' }
+        'peer' { $peer.dead=$true;'PEER_EXITED' }
+    }
+    try { Assert-McpCcNormalSession $context;throw 'STALE_SESSION_ACCEPTED' }
+    catch { if($_.Exception.GetBaseException().Message -cne $expected){throw} }
+    if($null -ne $context.sessionCheckedAt){throw 'FAILED_SESSION_REUSABLE'}
+    $script:fakeHash='pinned';$script:rejectAcl=$false;$peer.dead=$false
+}
+Assert-McpCcNormalClosure $context
+if($script:deepChecks -ne 2){throw 'NEW_SESSION_SKIPPED_CLOSURE'};$checks++
 [pscustomobject]@{ checks=$checks; result='PASS'; nativeCompile='PASS'; currentTestToken='OS_OBSERVED';
     productionEntry='REFUSED_BEFORE_LAUNCH'; nativePipeExchange='NOT_RUN'; runnerExecution='NOT_RUN';
     hostApproval='REMOTE_REQUEST_SOURCE_ONLY'; liveMutation=$false } | ConvertTo-Json -Compress
