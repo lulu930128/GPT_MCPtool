@@ -33,11 +33,15 @@ const publicErrorCodes = new Set([
 export async function validatePowerShellScope(input: ReviewInput, context: ReviewContext): Promise<SavedFailureEvidence | undefined> {
   validateReviewOrigin(input);
   const project = context.projects.get(input.projectId);
-  if (!project || !isAbsolute(input.cwd)) throw new ApprovalError("REVIEW_SCOPE_REJECTED");
+  const directNormal = input.origin === "DIRECT" && input.executionMode === "NORMAL";
+  if (!project || !isAbsolute(input.cwd)
+    || (directNormal && process.platform === "win32" && !/^(?:[A-Za-z]:[\\/]|\\\\(?![?.]\\)[^\\]+\\[^\\]+(?:\\|$))/.test(input.cwd)))
+    throw new ApprovalError("REVIEW_SCOPE_REJECTED");
   try {
     const root = await realpath(project.path), cwd = await realpath(input.cwd);
     const rel = relative(root, cwd);
-    if (isAbsolute(rel) || rel === ".." || rel.startsWith("..\\") || rel.startsWith("../") || !(await stat(cwd)).isDirectory())
+    if ((!directNormal && (isAbsolute(rel) || rel === ".." || rel.startsWith("..\\") || rel.startsWith("../")))
+      || !(await stat(root)).isDirectory() || !(await stat(cwd)).isDirectory())
       throw new Error("outside project");
   } catch { throw new ApprovalError("REVIEW_SCOPE_REJECTED"); }
   if (input.origin === "CODEX_DERIVED") {

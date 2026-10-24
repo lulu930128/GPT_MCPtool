@@ -68,7 +68,9 @@ reported as `Stale`. Malformed, oversized or extended documents fail closed.
 ```powershell
 cd C:\GPT_MCPtool\codex_bridge
 npm test
-npm run component:test
+powershell -NoProfile -ExecutionPolicy Bypass -File tests\test-runtime-build-id.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tests\test-runtime-control.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tests\test-runtime-control.ps1 -CanonicalBuildId
 npm run tray:selftest
 powershell -NoProfile -ExecutionPolicy Bypass `
   -File scripts\tray.ps1 -SelfTest -DiagnosticOnly
@@ -84,3 +86,12 @@ a fake tunnel. It proves active-work refusal, PID preservation, exact foreign
 owner refusal, tunnel-identity fail-closed behavior, remote-result
 classification and audit redaction without consuming a Codex turn, making an
 external lookup or touching `C:\CodexBridge`.
+
+Build ID has one implementation, `src/config.ts::computeRuntimeBuildId`. The
+PowerShell controller calls `scripts/runtime-build-id.mjs` using its absolute
+Node executable and caches the result (including failures) for the lifetime of
+one lifecycle context. The canonical suite above supplies no `-ExpectedBuildId`;
+the default suite retains the existing explicit test override. See
+[Runtime Build ID](RuntimeBuildId.md) for failure codes, update semantics and the
+post-job reload procedure. Run the controller suites sequentially: they share
+the lifecycle mutex even though their processes, ports and files are isolated.

@@ -10,7 +10,7 @@ function Put([string]$Path,$Value){[void][IO.Directory]::CreateDirectory((Split-
 $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $workspace 'codex_bridge\scripts\installed-release-operator.ps1'),[ref]$tokens,[ref]$errors)
 Check ($errors.Count -eq 0) 'Operator syntax'
-foreach($name in @('Get-InstalledUpgradeState','Get-StateBindingPlan','Get-StatePlanHash','Read-BoundedJson','Get-CutoverBaselineRoot','Assert-OwnerMigrationSourceUnchanged')){
+foreach($name in @('Test-InstalledStateManifest','Get-InstalledUpgradeState','Get-StateBindingPlan','Get-StatePlanHash','Read-BoundedJson','Get-CutoverBaselineRoot','Assert-OwnerMigrationSourceUnchanged')){
     $nodes=@($ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true))
     Check ($nodes.Count -eq 1) ('Unique function '+$name)
     . ([scriptblock]::Create($nodes[0].Extent.Text))
@@ -19,6 +19,7 @@ foreach($name in @('Get-InstalledUpgradeState','Get-StateBindingPlan','Get-State
 # lifecycle entrypoints, live stores, migration and existing ACL writes are forbidden.
 $verifier=New-Module {
     function Assert-McpCcNoReparseChain {param($p)}
+    function Assert-McpCcProtectedCodePath {param($p)}
     function Assert-McpCcInstalledPrivateTree {param($p,$s)}
     function Assert-McpCcInstalledPrivatePath {param($p,$s,[switch]$IntegrityOnly)}
     function Assert-McpCcInstalledStateReceipt {param($p,$s)}
@@ -34,6 +35,11 @@ function Invoke-Controller {throw 'FIXTURE_MUST_NOT_DISPATCH'}
 function Get-McpCcInstalledStateRoot {param($r) Join-Path $fixture 'owner'}
 function Read-McpCcInstalledRelease {param($p) $script:previous}
 function Assert-McpCcInstalledClosure {param($r) $script:closureChecks++}
+function Read-CbPersistedBearer {param($r,$v,$pin)
+    if($pin -cne ('e'*64)){throw 'INSTALLED_HTTP_AUTH_MISMATCH'}
+    $script:bearerReads++;return 'synthetic-only-not-a-credential'
+}
+$bearerReads=0
 function Assert-InstalledUpgradeSelection {param($r) if(-not $script:selected){throw 'UPGRADE_STARTUP_NOT_SELECTED'}; 'a'*64}
 $closureChecks=0;$selected=$true
 $operator=[pscustomobject]@{sid='S-1-5-21-100-200-300-1001';userProfile='C:\fixture-user';localAppData='C:\fixture-user\AppData\Local'}
@@ -53,6 +59,33 @@ Put (Join-Path $oldRuntime 'state-acl-before.json') $oldPlan
 Put (Join-Path $oldRuntime 'state-binding.json') @{phase='STATE_BOUND';planSha256=(Get-StatePlanHash $oldPlan)}
 $accepted=[ordered]@{contract='mcpcc-installed-cutover-v1';phase='LOCAL_ACCEPTED';releaseId='old';operatorSid=$operator.sid;newPid=1}
 Put (Join-Path $oldRuntime 'operator-cutover.json') $accepted
+# A resealed code-only repair keeps the original state anchor. It must never
+# permit a changed operator, store, dependency, credential pin or release ID.
+$repairManifest=Join-Path $fixture 'repair\installed-release.json'
+$repairBaseline=Join-Path $fixture 'repair\startup-presentation-baseline.json'
+$repairDocument=[ordered]@{releaseId='repair';state=@{ownerRoot='C:\fixture-owner'};dependencies=@{native='original'};
+    deployment=@{credentialSha256='synthetic-pin'};treeHashes=@{mcp_control_center='old-cc';codex_bridge='old-bridge';dependencies='unchanged'}}
+Put $repairManifest $repairDocument
+$repairHash=(Get-FileHash -LiteralPath $repairManifest).Hash.ToLowerInvariant()
+Copy-Item -LiteralPath $repairManifest -Destination $repairBaseline
+$repairDocument.treeHashes.mcp_control_center='new-cc';$repairDocument.treeHashes.codex_bridge='new-bridge'
+Put $repairManifest $repairDocument
+$repairRelease=[pscustomobject]@{sourcePath=$repairManifest}
+Check (Test-InstalledStateManifest $repairRelease $repairHash) 'Resealed code retains original protected state anchor'
+Check (-not(Test-InstalledStateManifest $repairRelease ('0'*64))) 'Reject unrelated baseline hash'
+foreach($change in @('release','state','native','credential','dependencies')){
+    $changed=$repairDocument|ConvertTo-Json -Depth 8|ConvertFrom-Json
+    switch($change){
+        'release' {$changed.releaseId='other'}
+        'state' {$changed.state.ownerRoot='C:\other'}
+        'native' {$changed.dependencies.native='other'}
+        'credential' {$changed.deployment.credentialSha256='other'}
+        'dependencies' {$changed.treeHashes.dependencies='other'}
+    }
+    Put $repairManifest $changed
+    Check (-not(Test-InstalledStateManifest $repairRelease $repairHash)) ('Repair rejects changed '+$change)
+}
+Put $repairManifest $repairDocument
 $reuse=Get-InstalledUpgradeState $release $previous.root -RequireSelected
 Check ($reuse.contract -ceq 'installed-active-state-reuse-v1' -and $closureChecks -eq 1) 'Upgrade verifies protected prior release'
 Check ($reuse.releaseRoot -ceq $previous.root) 'Prior installed root is retained'
@@ -97,6 +130,42 @@ Put (Join-Path $newRuntime 'state-binding.json') @{planSha256=(Get-StatePlanHash
 Check ((Get-CutoverBaselineRoot $release $newRuntime) -ceq $previous.root) 'v6 next release uses installed baseline'
 Assert-OwnerMigrationSourceUnchanged $release $newRuntime
 Refused {Get-StateBindingPlan $release} 'MIGRATION_OR_V6_UPGRADE_REQUIRED'
+$release.cutover.httpTokenSha256='e'*64
+$null=Get-InstalledUpgradeState $release $previous.root -RequireSelected
+Check ($bearerReads -eq 1) 'First v6 pin requires exact persisted bearer'
+$initialized=Get-StateBindingPlan $release -UpgradeRoot $previous.root
+Check ($initialized.entries.Count -eq 0 -and $initialized.files.Count -eq 3 -and $null -eq $initialized.migration) 'Initialization retains state and original three snapshots'
+Put (Join-Path $newRuntime 'state-acl-before.json') $initialized
+Put (Join-Path $newRuntime 'state-binding.json') @{planSha256=(Get-StatePlanHash $initialized)}
+Check ((Get-CutoverBaselineRoot $release $newRuntime) -ceq $previous.root) 'Initialized release still rolls back to immutable tokenless predecessor'
+$release.cutover.httpTokenSha256='f'*64
+Refused {Get-InstalledUpgradeState $release $previous.root} 'INSTALLED_HTTP_AUTH_MISMATCH'
+$release.cutover.httpTokenSha256='malformed'
+Refused {Get-InstalledUpgradeState $release $previous.root} 'UPGRADE_CONFIGURATION_CHANGED'
+$release.cutover.httpTokenSha256='e'*64;$previous.cutover.httpTokenSha256='d'*64
+Refused {Get-InstalledUpgradeState $release $previous.root} 'UPGRADE_CONFIGURATION_CHANGED'
+$release.cutover.httpTokenSha256=''
+Refused {Get-InstalledUpgradeState $release $previous.root} 'UPGRADE_CONFIGURATION_CHANGED'
+$previous.cutover.httpTokenSha256='e'*64;$release.cutover.httpTokenSha256='e'*64
+$null=Get-InstalledUpgradeState $release $previous.root
+Check $true 'Ordinary upgrade retains the exact initialized pin without rotating'
+$previous.cutover.httpTokenSha256='';$release.cutover.httpTokenSha256='e'*64
+foreach($field in @('projectsSha256','credentialSha256')){
+    $saved=$release.deployment.$field;$release.deployment.$field='0'*64
+    Refused {Get-InstalledUpgradeState $release $previous.root} 'UPGRADE_CONFIGURATION_CHANGED'
+    $release.deployment.$field=$saved
+}
+$saved=$release.cutover.tunnelProfileSha256;$release.cutover.tunnelProfileSha256='0'*64
+Refused {Get-InstalledUpgradeState $release $previous.root} 'UPGRADE_CONFIGURATION_CHANGED'
+$release.cutover.tunnelProfileSha256=$saved
+foreach($field in @('ownerRoot','dataDir','projectsFile','codexHome','userProfile','localAppData','operatorSid')){
+    $saved=$release.state.$field;$release.state.$field='changed'
+    Refused {Get-InstalledUpgradeState $release $previous.root} 'UPGRADE_STATE_SCOPE_CHANGED'
+    $release.state.$field=$saved
+}
+$previous.schemaVersion=5;$release.schemaVersion=5
+Refused {Get-InstalledUpgradeState $release $previous.root} 'UPGRADE_CONFIGURATION_CHANGED'
+$previous.schemaVersion=6;$release.schemaVersion=6;$release.cutover.httpTokenSha256=''
 $previous.schemaVersion=5;Refused {Get-InstalledUpgradeState $release $previous.root} 'UPGRADE_RELEASE_REJECTED';$previous.schemaVersion=6
 $initial=[ordered]@{releaseId='new';manifestSha256=(Get-FileHash -LiteralPath $release.sourcePath).Hash.ToLowerInvariant();migrationReceipt='fixture-only'}
 Put (Join-Path $newRuntime 'state-acl-before.json') $initial

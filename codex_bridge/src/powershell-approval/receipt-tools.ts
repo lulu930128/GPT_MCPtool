@@ -10,12 +10,16 @@ export function registerPowerShellReceiptTools(server: McpServer, store?: Approv
   readJob?: (id: string) => Promise<FailureJob>): void {
   server.registerTool("codex_powershell_receipt", {
     title: "依 Request 查詢 PowerShell 收據（唯讀）",
-    description: "Read canonical Request/Receipt correlation from the existing ApprovalStore by original requestId. DIRECT needs no job. NONEXECUTABLE review opinion and saved OS execution receipt are separate fields. Saved PRODUCTION state is not verified Host/OS success. Missing job, changed turn, unknown delivery or UNVERIFIED evidence never authorizes execution, retry, resume or another grant. Output pages retain all captured text for 10 minutes. Follow output.nextOffset using outputOffset until null. No script input, dispatch or writes.",
-    inputSchema: z.object({ requestId: z.string().uuid(), outputOffset: z.number().safe().int().nonnegative().optional() }).strict(),
+    description: "Read canonical Request/Receipt correlation from the existing ApprovalStore by original requestId, or idempotencyKey if the first execute response was lost (exactly one lookup key). DIRECT needs no job. NONEXECUTABLE review opinion and saved OS execution receipt are separate fields. Saved PRODUCTION state is not verified Host/OS success. Unknown delivery never authorizes execution, retry, resume or another grant. If still pending, back off before reading again; never resubmit execution. Output pages retain all captured text for 10 minutes. Follow output.nextOffset using outputOffset until null. No script input, dispatch or writes.",
+    inputSchema: z.object({ requestId: z.string().uuid().optional(), idempotencyKey: z.string().uuid().optional(),
+      outputOffset: z.number().safe().int().nonnegative().optional() }).strict(),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  }, async ({ requestId, outputOffset }) => {
+  }, async ({ requestId, idempotencyKey, outputOffset }) => {
     try {
       if (!store) throw new ApprovalError("RECEIPT_SOURCE_UNAVAILABLE");
+      if ((requestId === undefined) === (idempotencyKey === undefined)) throw new ApprovalError("INVALID_INPUT");
+      if (idempotencyKey) requestId = (await store.readReviewByIdempotencyKey(idempotencyKey))?.request.requestId;
+      if (!requestId) throw new ApprovalError("REQUEST_UNKNOWN");
       const result = await projectRequestReceipt(store, requestId, readJob, outputOffset);
       return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result };
     } catch (error) {

@@ -60,7 +60,7 @@ try {
     $tokens=$null;$errors=$null
     $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $workspace 'codex_bridge\scripts\installed-release-operator.ps1'),[ref]$tokens,[ref]$errors)
     Check ($errors.Count -eq 0) 'Operator must parse'
-    foreach($name in @('Get-OwnerMigrationPlan','Copy-OwnerMigrationEntry','Assert-OwnerMigrationSourceUnchanged','Get-StatePlanHash','Read-BoundedJson','Write-Receipt','New-StateDirectory','Invoke-StateBinding','Get-InactiveBoundState','Get-VerifiedStateRecovery','Copy-StateSnapshot')){. (Import-Function $ast $name)}
+    foreach($name in @('Test-InstalledStateManifest','Get-OwnerMigrationPlan','Copy-OwnerMigrationEntry','Assert-OwnerMigrationSourceUnchanged','Get-StatePlanHash','Read-BoundedJson','Write-Receipt','New-StateDirectory','Invoke-StateBinding','Get-InactiveBoundState','Get-VerifiedStateRecovery','Copy-StateSnapshot')){. (Import-Function $ast $name)}
     $inventory=Get-OwnerMigrationPlan $release
     Check ($inventory.source -ceq $source -and $inventory.target -ceq 'C:\McpControlCenter' -and $inventory.entries.Count -eq 5) 'Inventory must have one source and one fixed destination'
     Check ($inventory.entries[0].relative -ceq '' -and $inventory.bytes -gt 0) 'Parents must precede descendants'

@@ -330,7 +330,9 @@ test("source boundary has no review execution capability and runtime owns exactl
 test("request-first MCP reads the same DIRECT request across sessions without touching JobStore or writing", async t => {
   const f = await fixture(t), r = await f.request();
   const tool = (await f.client.listTools()).tools.find(tool => tool.name === "codex_powershell_receipt")!;
-  assert.deepEqual(tool.inputSchema.required, ["requestId"]);
+  assert.equal(tool.inputSchema.required, undefined);
+  assert.ok(tool.inputSchema.properties?.requestId);
+  assert.ok(tool.inputSchema.properties?.idempotencyKey);
   assert.equal(tool.inputSchema.additionalProperties, false);
   assert.equal(tool.annotations?.readOnlyHint, true);
   assert.equal(tool.annotations?.destructiveHint, false);
@@ -348,6 +350,9 @@ test("request-first MCP reads the same DIRECT request across sessions without to
     assert.equal((result.reviewOpinion as any).effectiveState, decision ?? "PENDING");
     assert.equal((result.correlation as any).job, "NOT_APPLICABLE");
     assert.equal("jobId" in (result.correlation as object), false);
+    assert.equal(await readFile(path, "utf8"), before);
+    const recovered = await f.client.callTool({ name: tool.name, arguments: { idempotencyKey: r.input.idempotencyKey } }) as CallToolResult;
+    assert.equal(recovered.structuredContent?.requestId, r.binding.requestId);
     assert.equal(await readFile(path, "utf8"), before);
     assert.doesNotMatch(JSON.stringify(result), /scriptSnapshot|Write-Output|literal value|cwd|ceremonyId/);
   }
@@ -475,7 +480,7 @@ test("runtime isolates locked/corrupt journal failures and enables review with m
           const view = await client.callTool({ name: "codex_powershell_review_get", arguments: {
             requestId: request.structuredContent!.requestId, digest: request.structuredContent!.digest,
           } }) as CallToolResult;
-          assert.equal((view.structuredContent?.hostAdmission as any).humanApproval, "LOCAL_HOST_CONFIRMATION_REQUIRED");
+          assert.equal((view.structuredContent?.hostAdmission as any).humanApproval, "AUTHENTICATED_DIRECT_REQUEST");
           assert.equal((view.structuredContent?.hostAdmission as any).executionDispatched, false);
         } else {
           assertSafeError(request, runtime.powershellReviewUnavailable!);

@@ -60,6 +60,12 @@ export async function startBridgeHttpServer(
       sendJson(res, 401, { ok: false, error: "Unauthorized." });
       return;
     }
+    // SDK request metadata, never a tools/call argument or a session assertion.
+    // Optional-auth HTTP remains compatible for ordinary tools; NORMAL requires
+    // a real verified bearer on every invocation.
+    if (options.bearerToken) Object.assign(req, { auth: {
+      token: options.bearerToken, clientId: "bridge-bearer", scopes: [],
+    } });
 
     try {
       if (req.method === "POST") {

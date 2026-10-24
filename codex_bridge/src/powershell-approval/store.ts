@@ -216,6 +216,15 @@ export class ApprovalStore {
       return linked.length ? parse(productionReceiptSchema, structuredClone(linked[0])) : undefined;
     });
   }
+  /** Lost first response recovery. Read the same journal without expiring,
+   * creating or dispatching anything, even after the original TTL. */
+  async readReviewByIdempotencyKey(key: string): Promise<ReviewReceipt | undefined> {
+    parse(z.string().uuid(), key);
+    return this.serial(async () => {
+      const record = [...this.#records.values()].find(r => isReview(r) && r.request.idempotencyKey === key);
+      return record && isReview(record) ? structuredClone(record) : undefined;
+    });
+  }
   async append(value: Receipt): Promise<void> {
     const receipt = parse(receiptSchema, value); // Detach caller data before awaiting the queue.
     return this.serial(() => this.#persist(receipt));

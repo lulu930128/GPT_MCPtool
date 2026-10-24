@@ -56,11 +56,29 @@ test("unavailable, missing installed binding and closed transport never reach Ho
   const transport = createNativeHostTransport(forbiddenPort), f = await connect(t, { transport });
   const status = (await f.call("codex_powershell_status", {})).structuredContent as any;
   assert.equal(status.nativeTransport.code, "NOT_CHECKED");
+  assert.equal(status.nativeTransport.checkState, "NOT_CHECKED");
+  assert.deepEqual(status.externalBlockers, ["HOST_READINESS_NOT_CHECKED"]);
+  assert.equal(status.separateModes.CODEX_DERIVED, "FAILURE_ATTRIBUTION_UNVERIFIED");
+  assert.equal(status.separateModes.ADMIN, "BLOCKED_AWAITING_LOCAL_UAC");
   assert.equal(status.installedRuntime.binding, "ABSENT");
   assert.equal((await f.call()).structuredContent?.code, "NOT_DEPLOYED");
   await transport.close();
   assert.equal((await f.call()).structuredContent?.code, "HOST_TRANSPORT_CLOSED");
   assert.equal(transport.status().active, false);
+});
+
+test("cached preflight success never projects a verified current owner or empty blockers", async t => {
+  const f = await connect(t, { transport: {
+    preflight: async () => { assert.fail("passive status must not probe"); },
+    status: () => ({ code: "HOST_READY", active: false, closed: false, authorization: "AUTHENTICATED_DIRECT_REQUEST",
+      preflight: { code: "HOST_READY", observedAt: "2026-10-23T00:00:00.000Z" } }),
+  } });
+  const status = (await f.call("codex_powershell_status", {})).structuredContent as any;
+  assert.equal(status.nativeTransport.checkState, "SUCCEEDED");
+  assert.equal(status.nativeTransport.provesCurrentReadiness, false);
+  assert.equal(status.authenticatedOwner, "UNVERIFIED");
+  assert.equal(status.normalExecution.currentHostVerified, false);
+  assert.deepEqual(status.externalBlockers, ["CURRENT_HOST_UNVERIFIED"]);
 });
 
 test("status is passive and separates source, cached observation, binding, owner and durable Store", async t => {
@@ -82,6 +100,8 @@ test("status is passive and separates source, cached observation, binding, owner
     assert.equal(data.installedRuntime.currentInstallation, "NOT_PROBED");
     assert.equal(data.authenticatedOwner, "UNVERIFIED");
     assert.equal(data.nativeTransport.code, observation.code);
+    assert.equal(data.nativeTransport.checkState, "FAILED");
+    assert.deepEqual(data.externalBlockers, [observation.code]);
     assert.equal(data.nativeTransport.observedAt, observation.observedAt);
     assert.equal(data.nativeTransport.provesCurrentReadiness, false);
     assert.deepEqual(data.reviewStore, store);

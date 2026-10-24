@@ -18,7 +18,8 @@ param(
     [string]$NodeDistribution='C:\Program Files\nodejs',
     [string]$DataDir='C:\CodexBridge',
     [string]$ProjectsFile,
-    [string]$CodexHome
+    [string]$CodexHome,
+    [switch]$InitializeBridgeBearer
 )
 # Local, independent operator only. No task/service, elevation or arbitrary command.
 Set-StrictMode -Version 3.0
@@ -28,6 +29,7 @@ $ps='C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
 $manager=Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'mcp_control_center'
 $verifier=Import-Module (Join-Path $manager 'src\McpControlCenter.InstalledRelease.psm1') -PassThru
 $operator=& $verifier {Get-McpCcInstalledOperator}
+. (Join-Path $PSScriptRoot 'bridge-bearer.ps1')
 
 function Assert-IndependentOperator {
     if ((Get-Process -Id $PID).Path -ine $ps) { throw 'WINDOWS_POWERSHELL_REQUIRED' }
@@ -105,6 +107,15 @@ function Get-Health([switch]$Idle) {
     if ($Idle -and ($h.jobs.active -cne 0 -or $h.jobs.awaitingApproval -cne 0)) { throw 'ALL_JOBS_MUST_BE_TERMINAL' }
     return $h
 }
+function Get-ReleaseHttpToken($Release) {
+    if($null -eq $Release){return [Environment]::GetEnvironmentVariable('CODEX_BRIDGE_HTTP_TOKEN','Process')}
+    # The previous immutable release selects its own auth mode, including rollback.
+    if($Release.cutover.httpTokenSha256 -ceq ''){return $null}
+    if($Release.schemaVersion -eq 6){return Read-CbPersistedBearer $Release $verifier $Release.cutover.httpTokenSha256}
+    $value=[Environment]::GetEnvironmentVariable('CODEX_BRIDGE_HTTP_TOKEN','Process')
+    if((& $verifier {param($t) Get-McpCcInstalledTokenHash $t} $value) -cne $Release.cutover.httpTokenSha256){throw 'INSTALLED_HTTP_AUTH_MISMATCH'}
+    return $value
+}
 function Invoke-Controller([string]$Root,[ValidateSet('Status','EnsureRunning','ShutdownRuntime')][string]$Verb) {
     $info=New-Object Diagnostics.ProcessStartInfo
     $info.FileName=$ps;$info.Arguments='-NoProfile -NonInteractive -File "'+(Join-Path $Root 'scripts\runtime-control.ps1')+'" -Action '+$Verb
@@ -118,6 +129,14 @@ function Invoke-Controller([string]$Root,[ValidateSet('Status','EnsureRunning','
     $childEnvironment.Clear()
     foreach ($n in @('USERPROFILE','LOCALAPPDATA','APPDATA','TEMP','TMP','CODEX_BRIDGE_HTTP_TOKEN')) {
         $v=[Environment]::GetEnvironmentVariable($n,'Process');if($null -ne $v){$info.EnvironmentVariables[$n]=$v}
+    }
+    if(Test-Path -LiteralPath (Join-Path $Root '..\mcp_control_center\config\installed-release.json')){
+        $target=Read-McpCcInstalledRelease (Join-Path $Root '..\mcp_control_center')
+        Assert-McpCcInstalledClosure $target
+        $targetToken=Get-ReleaseHttpToken $target
+        $info.EnvironmentVariables.Remove('CODEX_BRIDGE_HTTP_TOKEN')
+        if($targetToken){$info.EnvironmentVariables['CODEX_BRIDGE_HTTP_TOKEN']=$targetToken}
+        $targetToken=$null
     }
     $info.EnvironmentVariables['SystemRoot']='C:\Windows';$info.EnvironmentVariables['WINDIR']='C:\Windows'
     $info.EnvironmentVariables['PATH']='C:\Windows\System32;C:\Program Files\nodejs'
@@ -175,9 +194,9 @@ function Assert-OwnedReady($Result,$Health) {
         if($sid.ReturnValue -ne 0 -or $sid.Sid -cne $operator.sid){throw 'CREDENTIAL_OWNER_UNVERIFIED'}
     }
 }
-function Assert-HttpAuthentication([switch]$MigrationStoreStatus) {
+function Assert-HttpAuthentication([switch]$MigrationStoreStatus,$Release=$null) {
     $headers=@{Accept='application/json, text/event-stream'}
-    $token=[Environment]::GetEnvironmentVariable('CODEX_BRIDGE_HTTP_TOKEN','Process')
+    $token=Get-ReleaseHttpToken $Release
     if($token){$headers.Authorization='Bearer '+$token}
     # Discovery only, no domain tool or model execution. Session is deleted below.
     $session=$null
@@ -253,8 +272,15 @@ function Assert-RemoteReceiptsTerminal([string]$OwnerRoot) {
     # Never construct New-R1Engine: its recovery path writes receipts. Policy is not read.
 }
 function Start-SelectedTray([string]$Root) {
-    $p=Start-Process -FilePath $ps -ArgumentList ('-NoProfile -File "'+(Join-Path $Root 'scripts\tray.ps1')+'"') -WorkingDirectory $Root -WindowStyle Hidden -PassThru
-    return $p.Id
+    $saved=[Environment]::GetEnvironmentVariable('CODEX_BRIDGE_HTTP_TOKEN','Process')
+    try {
+        if(Test-Path -LiteralPath (Join-Path $Root 'config\installed-release.json')){
+            $target=Read-McpCcInstalledRelease $Root;Assert-McpCcInstalledClosure $target
+            [Environment]::SetEnvironmentVariable('CODEX_BRIDGE_HTTP_TOKEN',(Get-ReleaseHttpToken $target),'Process')
+        }
+        $p=Start-Process -FilePath $ps -ArgumentList ('-NoProfile -File "'+(Join-Path $Root 'scripts\tray.ps1')+'"') -WorkingDirectory $Root -WindowStyle Hidden -PassThru
+        return $p.Id
+    } finally {[Environment]::SetEnvironmentVariable('CODEX_BRIDGE_HTTP_TOKEN',$saved,'Process')}
 }
 
 function Get-OwnerMigrationPlan($Release) {
@@ -526,7 +552,7 @@ function Get-InactiveBoundState($Release,[string]$PreviousRoot,[string]$Recovery
     $backup=Join-Path $runtime 'state-acl-before.json'
     $plan=Read-BoundedJson $backup 16777216
     if((Get-StatePlanHash $plan) -cne $receipt.planSha256 -or $plan.releaseId -cne $previous.releaseId -or
-        $plan.manifestSha256 -cne (Get-FileHash -LiteralPath $previous.sourcePath).Hash.ToLowerInvariant()) {throw 'STATE_REUSE_PLAN_CHANGED'}
+        -not(Test-InstalledStateManifest $previous $plan.manifestSha256)) {throw 'STATE_REUSE_PLAN_CHANGED'}
     $sourceAdvance=$null
     if($AllowSourceAdvance){
         if(-not $RecoveryPath){throw 'SOURCE_ADVANCE_RECOVERY_REQUIRED'}
@@ -584,10 +610,30 @@ function Assert-InstalledUpgradeSelection($Previous) {
     $shell=New-Object -ComObject WScript.Shell
     try {
         $link=$shell.CreateShortcut($startup)
-        if($link.TargetPath -ine $ps -or $link.Arguments -cne ('-NoProfile -File "'+(Join-Path $Previous.root 'mcp_control_center\scripts\tray.ps1')+'" -AutoReconcile') -or
+        if($link.TargetPath -ine $ps -or $link.Arguments -cnotin @(
+                ('-NoProfile -File "'+(Join-Path $Previous.root 'mcp_control_center\scripts\tray.ps1')+'" -AutoReconcile'),
+                ('-NoProfile -WindowStyle Hidden -File "'+(Join-Path $Previous.root 'mcp_control_center\scripts\tray.ps1')+'" -AutoReconcile')) -or
             $link.WorkingDirectory -ine (Join-Path $Previous.root 'mcp_control_center')){throw 'UPGRADE_STARTUP_NOT_SELECTED'}
     }finally{[void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell)}
     return (Get-FileHash -LiteralPath $startup).Hash.ToLowerInvariant()
+}
+function Test-InstalledStateManifest($Release,[string]$ExpectedHash) {
+    if($ExpectedHash -cnotmatch '^[0-9a-f]{64}$'){return $false}
+    if((Get-FileHash -LiteralPath $Release.sourcePath).Hash.ToLowerInvariant() -ceq $ExpectedHash){return $true}
+    # A local startup-presentation repair may reseal code in the same release.
+    # Keep the original protected manifest as the state-plan anchor; never rewrite
+    # historical plans/cutover receipts or treat UNKNOWN as an accepted deployment.
+    $baseline=Join-Path (Split-Path -Parent $Release.sourcePath) 'startup-presentation-baseline.json'
+    if(-not(Test-Path -LiteralPath $baseline -PathType Leaf)){return $false}
+    & $verifier {param($p) Assert-McpCcProtectedCodePath $p} $baseline
+    if((Get-FileHash -LiteralPath $baseline).Hash.ToLowerInvariant() -cne $ExpectedHash){return $false}
+    $before=Read-BoundedJson $baseline 16384;$after=Read-BoundedJson $Release.sourcePath 16384
+    if(-not $before.PSObject.Properties['treeHashes'] -or -not $after.PSObject.Properties['treeHashes']){return $false}
+    if($before.treeHashes.dependencies -cne $after.treeHashes.dependencies){return $false}
+    $before.PSObject.Properties.Remove('treeHashes');$after.PSObject.Properties.Remove('treeHashes')
+    # Everything outside the resealed code trees (identity, private state, pinned
+    # native dependencies, authentication and configuration) must remain identical.
+    return ($before|ConvertTo-Json -Depth 24 -Compress) -ceq ($after|ConvertTo-Json -Depth 24 -Compress)
 }
 function Get-InstalledUpgradeState($Release,[string]$PreviousRoot,[switch]$RequireSelected) {
     # Retain the active canonical state. Never migrate it back through source or
@@ -604,8 +650,16 @@ function Get-InstalledUpgradeState($Release,[string]$PreviousRoot,[switch]$Requi
         }
         if($previous.deployment.projectsSha256 -cne $Release.deployment.projectsSha256 -or
             $previous.deployment.credentialSha256 -cne $Release.deployment.credentialSha256 -or
-            $previous.cutover.tunnelProfileSha256 -cne $Release.cutover.tunnelProfileSha256 -or
-            $previous.cutover.httpTokenSha256 -cne $Release.cutover.httpTokenSha256){throw 'UPGRADE_CONFIGURATION_CHANGED'}
+            $previous.cutover.tunnelProfileSha256 -cne $Release.cutover.tunnelProfileSha256){throw 'UPGRADE_CONFIGURATION_CHANGED'}
+        if($previous.cutover.httpTokenSha256 -cne $Release.cutover.httpTokenSha256){
+            # Only first-time v6 initialization; no rotation, removal or v5 change.
+            if($previous.schemaVersion -ne 6 -or $previous.cutover.httpTokenSha256 -cne '' -or
+                $Release.cutover.httpTokenSha256 -cnotmatch '^[0-9a-f]{64}$'){throw 'UPGRADE_CONFIGURATION_CHANGED'}
+            # Bind the candidate to the exact privately persisted secret. An env
+            # override or an arbitrary well-formed hash cannot authorize this change.
+            $verified=Read-CbPersistedBearer $Release $verifier $Release.cutover.httpTokenSha256
+            $verified=$null
+        }
     }
     $owner=Get-McpCcInstalledStateRoot $previous
     foreach($path in @($owner,$previous.state.dataDir)){
@@ -617,7 +671,7 @@ function Get-InstalledUpgradeState($Release,[string]$PreviousRoot,[switch]$Requi
     $receipt=Read-BoundedJson $receiptPath 4096;$plan=Read-BoundedJson $backup 16777216
     $manifestHash=(Get-FileHash -LiteralPath $previous.sourcePath).Hash.ToLowerInvariant()
     if((Get-StatePlanHash $plan) -cne $receipt.planSha256 -or $plan.releaseId -cne $previous.releaseId -or
-        $plan.manifestSha256 -cne $manifestHash){throw 'UPGRADE_STATE_PLAN_CHANGED'}
+        -not(Test-InstalledStateManifest $previous $plan.manifestSha256)){throw 'UPGRADE_STATE_PLAN_CHANGED'}
     $cutover=Join-Path $runtime 'operator-cutover.json';$accepted=Read-BoundedJson $cutover 4096
     if($accepted.contract -cne 'mcpcc-installed-cutover-v1' -or $accepted.phase -cne 'LOCAL_ACCEPTED' -or
         $accepted.releaseId -cne $previous.releaseId -or $accepted.operatorSid -cne $operator.sid){throw 'UPGRADE_PREVIOUS_NOT_ACCEPTED'}
@@ -634,7 +688,7 @@ function Get-CutoverBaselineRoot($Release,[string]$RuntimeRoot) {
     $saved=Read-BoundedJson (Join-Path $RuntimeRoot 'state-acl-before.json') 16777216
     $receipt=Read-BoundedJson (Join-Path $RuntimeRoot 'state-binding.json') 4096
     if((Get-StatePlanHash $saved) -cne $receipt.planSha256 -or $saved.releaseId -cne $Release.releaseId -or
-        $saved.manifestSha256 -cne (Get-FileHash -LiteralPath $Release.sourcePath).Hash.ToLowerInvariant()){throw 'CUTOVER_STATE_PLAN_CHANGED'}
+        -not(Test-InstalledStateManifest $Release $saved.manifestSha256)){throw 'CUTOVER_STATE_PLAN_CHANGED'}
     if($saved.PSObject.Properties['ownerReuse'] -and $saved.ownerReuse -and $saved.ownerReuse.contract -ceq 'installed-active-state-reuse-v1'){
         $current=Get-InstalledUpgradeState $Release $saved.ownerReuse.releaseRoot
         if((Get-StatePlanHash $current) -cne (Get-StatePlanHash $saved.ownerReuse)){throw 'UPGRADE_BASELINE_CHANGED'}
@@ -818,6 +872,9 @@ function Invoke-StateBinding($Release,[string]$ExpectedHash,[string]$PreviousRoo
 }
 
 Assert-IndependentOperator
+if($InitializeBridgeBearer -and ($Action -ne 'Prepare' -or -not $UpgradeFromReleaseRoot -or $RuntimeMigration)){
+    throw 'BRIDGE_BEARER_INITIALIZATION_ACTION_REJECTED'
+}
 if($RecoverR15PreCopy -and $Action -notin @('MigrationPlan','MigrationApply')){throw 'MIGRATION_INCIDENT_ACTION_REJECTED'}
 if($RuntimeMigration -and ($Action -ne 'Prepare' -or -not $UpgradeFromReleaseRoot)){throw 'MIGRATION_PREPARE_REQUIRES_PREVIOUS_RELEASE'}
 if($Action -like 'Migration*'){
@@ -848,7 +905,11 @@ if($Action -eq 'Prepare') {
         $baselineRoot=$previous.root
     }
     $h=Get-Health;Assert-OwnedReady (Invoke-Controller (Join-Path $baselineRoot 'codex_bridge') Status) $h
-    Assert-HttpAuthentication
+    Assert-HttpAuthentication -Release $previous
+    if($InitializeBridgeBearer){Initialize-CbInstalledBearer $previous $verifier}
+    elseif($previous -and $previous.schemaVersion -eq 6 -and $previous.cutover.httpTokenSha256 -cne ''){
+        Set-CbInstalledBearerEnvironment $previous $verifier
+    }
     $startup=Join-Path ([Environment]::GetFolderPath('Startup')) 'MCP Control Center.lnk'
     if(-not $previous){
         $shell=New-Object -ComObject WScript.Shell
@@ -877,7 +938,7 @@ if($Action -eq 'Prepare') {
     # restart launchers must not reintroduce mutable selectors into installed code.
     $scriptLists=@{
         mcp_control_center=@('tray.ps1','control-center.ps1','component-health.ps1','invoke-component-controller.ps1');
-        codex_bridge=@('runtime-control.ps1','codex-bridge-runtime.psm1','component-runtime.psm1','runtime-build-id.mjs','OwnedProcess.Native.cs','self-reload-pipe-client.ps1','powershell-host-transport.ps1','process-identity.ps1','cooperative-shutdown-host.ps1','control-center-ui.ps1','installed-release-operator.ps1','installed-runtime-migration.ps1','check-migration-approvals.mjs')
+        codex_bridge=@('runtime-control.ps1','codex-bridge-runtime.psm1','bridge-bearer.ps1','component-runtime.psm1','runtime-build-id.mjs','OwnedProcess.Native.cs','self-reload-pipe-client.ps1','powershell-host-transport.ps1','process-identity.ps1','cooperative-shutdown-host.ps1','control-center-ui.ps1','installed-release-operator.ps1','installed-runtime-migration.ps1','check-migration-approvals.mjs')
     }
     foreach($componentName in $scriptLists.Keys){
         $destination=Join-Path $PackageRoot ($componentName+'\scripts');New-Item -ItemType Directory $destination|Out-Null
@@ -1058,6 +1119,7 @@ $startup=Join-Path ([Environment]::GetFolderPath('Startup')) 'MCP Control Center
 $receiptPath=Join-Path $runtime 'operator-cutover.json'
 $backup=Join-Path $runtime 'legacy-startup.lnk'
 $isInstalledUpgrade=$baselineRoot -ine $release.legacyWorkspaceRoot
+$baselineRelease=if($isInstalledUpgrade){Read-McpCcInstalledRelease $legacyCc}else{$null}
 $resumeUpgrade=($Action -eq 'Cutover' -and $isInstalledUpgrade -and (Test-Path -LiteralPath $receiptPath) -and
     (Read-BoundedJson $receiptPath 4096).phase -ceq 'UPGRADE_STOPPED')
 $h=if($Action -ne 'Rollback' -and -not $resumeUpgrade){Get-Health -Idle}else{$null}
@@ -1065,7 +1127,7 @@ if($Action -eq 'Preflight'){
     Assert-OwnerMigrationSourceUnchanged $release $runtime
     Assert-OwnedReady (Invoke-Controller $legacyBridge Status) $h
     if($h.buildId -cne $release.cutover.rollbackBuildId -or (Get-FileHash -LiteralPath $startup).Hash.ToLowerInvariant() -cne $release.cutover.legacyStartupSha256){throw 'LEGACY_BASELINE_CHANGED'}
-    Assert-HttpAuthentication
+    Assert-HttpAuthentication -Release $baselineRelease
     [pscustomobject]@{phase='PREFLIGHT_READY';releaseId=$release.releaseId;livePid=$h.pid;liveBuildId=$h.buildId;allJobsTerminal=$true;host='HOST_NOT_VERIFIED'}|ConvertTo-Json
     exit 0
 }
@@ -1095,7 +1157,7 @@ try {
             if(Test-Path -LiteralPath $receiptPath){throw 'CUTOVER_RECEIPT_EXISTS_INSPECT_DO_NOT_RETRY'}
             if($h.buildId -cne $release.cutover.rollbackBuildId -or (Get-FileHash -LiteralPath $startup).Hash.ToLowerInvariant() -cne $release.cutover.legacyStartupSha256){throw 'LEGACY_BASELINE_CHANGED'}
             $before=Invoke-Controller $legacyBridge Status
-            Assert-OwnedReady $before $h;Assert-HttpAuthentication
+            Assert-OwnedReady $before $h;Assert-HttpAuthentication -Release $baselineRelease
             Copy-Item -LiteralPath $startup -Destination $backup
             $receipt=[ordered]@{contract='mcpcc-installed-cutover-v1';releaseId=$release.releaseId;operatorSid=$operator.sid;phase='STOPPING_LEGACY';
                 oldPid=$h.pid;oldBuildId=$h.buildId;oldStartTimeUtc=(Get-Process -Id $h.pid).StartTime.ToUniversalTime().ToString('o');
@@ -1114,13 +1176,13 @@ try {
             }
         }
         $shell=New-Object -ComObject WScript.Shell
-        try {$link=$shell.CreateShortcut($startup);$link.TargetPath=$ps;$link.Arguments='-NoProfile -File "'+(Join-Path $ReleaseRoot 'mcp_control_center\scripts\tray.ps1')+'" -AutoReconcile';$link.WorkingDirectory=Join-Path $ReleaseRoot 'mcp_control_center';$link.Save()}finally{[void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell)}
+        try {$link=$shell.CreateShortcut($startup);$link.TargetPath=$ps;$link.Arguments='-NoProfile -WindowStyle Hidden -File "'+(Join-Path $ReleaseRoot 'mcp_control_center\scripts\tray.ps1')+'" -AutoReconcile';$link.WorkingDirectory=Join-Path $ReleaseRoot 'mcp_control_center';$link.Save()}finally{[void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell)}
         $receipt.phase='SELECTED';Write-Receipt $receiptPath $receipt
         $trayPid=Start-SelectedTray (Join-Path $ReleaseRoot 'mcp_control_center')
         $deadline=[DateTime]::UtcNow.AddSeconds(30)
         do {Start-Sleep -Milliseconds 300;try{Assert-McpCcInstalledSelection $binding;break}catch{if([DateTime]::UtcNow -gt $deadline){throw 'INSTALLED_OWNER_START_UNKNOWN'}}}while($true)
         $started=Invoke-Controller (Join-Path $ReleaseRoot 'codex_bridge') EnsureRunning
-        $after=Get-Health -Idle;Assert-OwnedReady $started $after;Assert-HttpAuthentication
+        $after=Get-Health -Idle;Assert-OwnedReady $started $after;Assert-HttpAuthentication -Release $release
         $ready=Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:18829/readyz' -TimeoutSec 3 -MaximumRedirection 0
         if($ready.StatusCode -ne 200 -or $ready.Content.Trim() -notin @('ready','ok')){throw 'TUNNEL_NOT_READY'}
         $receipt.phase='LOCAL_ACCEPTED';$receipt.newPid=$after.pid;$receipt.newBuildId=$after.buildId
@@ -1150,7 +1212,7 @@ try {
             Copy-Item -LiteralPath $backup -Destination $startup -Force
             $null=Start-SelectedTray $legacyCc
             $started=Invoke-Controller $legacyBridge EnsureRunning
-            $h=Get-Health -Idle;Assert-OwnedReady $started $h;Assert-HttpAuthentication
+            $h=Get-Health -Idle;Assert-OwnedReady $started $h;Assert-HttpAuthentication -Release $baselineRelease
             if($h.buildId -cne $receipt.oldBuildId){throw 'ROLLBACK_BUILD_MISMATCH'}
             $receipt.phase='ROLLED_BACK';Write-Receipt $receiptPath $receipt
             $receipt|ConvertTo-Json

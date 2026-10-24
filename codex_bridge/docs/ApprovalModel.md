@@ -1,11 +1,28 @@
 # Codex Handoff Bridge Approval Model
 
+## Independent privileged approvals: NOT DEPLOYED
+
+Remote Privileged Broker V1 has a separate policy/request/receipt owner and never shares Codex
+job approval state. `codex_approval_decide`, native auto_review, model-generated human/source
+flags and MCP authentication cannot approve Broker operations or financial transactions.
+Only Broker status and dry-run preview tools are registered while the trusted human UI and
+protected authority/executor are missing. No remote request/decide/execute endpoint exists.
+
+The offline reviewer fixture binds exact requestId, approvalId, digest, policy, target, boot and
+expiry. Approval is separate from execution; duplicate ids do not redeliver, restart expires
+unused grants and uncertain delivery stays unknown. This verifies a synthetic contract, not a
+human approval channel. Future request tools must be non-read-only and approval tools app-only
+PLUS independently authenticated by a protected human authority; visibility metadata alone
+cannot supply that authority. Windows/other-MCP write protection remains **NOT ENFORCED**.
+See [Remote Privileged Broker V1](RemotePrivilegedBrokerV1.md) for state meanings and deployment gates.
+
 ## Principle
 
 The model may request work and Codex App Server may request permission. Each Bridge conversation
 selects one App Server reviewer: `user` routes actual approval requests to the interactive MCP Apps
-UI, while `auto_review` asks Codex's native reviewer to evaluate requests at the same sandbox
-boundary. There is no session-wide accept or blanket allow.
+UI, while `auto_review` asks Codex's native reviewer to evaluate actual requests under the selected
+permission profile. There is no session-wide accept or blanket allow; Full Access does not guarantee
+that every operation generates an approval request.
 
 ## Tool separation
 
@@ -54,14 +71,23 @@ preview again. Do not dispatch a digest produced for earlier content.
 
 | Mode | Codex permission profile | Approval behavior |
 | --- | --- | --- |
-| `plan` | Read-only | File-change approval cannot be accepted |
-| `workspace_write` | Workspace-scoped | Exact command/file-change requests may be accepted individually |
+| `plan` / Native Review | `codex-bridge-read-only` | File-change approval cannot be accepted |
+| `workspace_write` | `:danger-full-access` | `on-request`; actual exact requests may be accepted individually |
 
 Both modes use one server-resolved exact project path: either a configured allowlist entry or an
 app-only App Server discovery that passed the protected-path gate. Operator-configured
-`sharedWorkspaceProjectIds` may add allowlisted roots through the selected profile. Protected Bridge
-settings stay denied in both modes, and plan stays read-only. Network access remains disabled
-by default. The Bridge never selects a full-access profile.
+`sharedWorkspaceProjectIds` adds roots only to the read-only and retained rollback profiles.
+Every project's write task explicitly selects Full Access on start and resume. The App Server default
+is also Full Access. There is no Codex filesystem or network isolation for these write tasks, including
+Bridge state, secrets, `.git`, other projects and user files. Project entry checks, exact job/turn
+association, redaction and explicit commit/push instructions remain application/workflow controls,
+not OS isolation. `on-request` is retained; it is not changed to `never`.
+
+Plan and Native Review retain their read-only profile and disabled network. `codex-bridge-workspace`
+is defined only for rollback, not selected for normal writes. A required profile missing or denied by
+native policy stops dispatch/resume. Windows ACLs, administrator identity and independent MCP policies
+are unchanged. Restore isolation after the PowerShell NORMAL/ADMIN execution, authorization and Receipt
+pipeline passes acceptance, not on a calendar deadline.
 
 ## Approval reviewers
 
@@ -76,8 +102,19 @@ change requires user instruction and is allowed only between turns. Historical j
 cannot silently change their approval behavior. Auto-review can deny a high-risk operation; it is
 not a promise that every turn will finish without intervention.
 
-The controller passes the reviewer to `thread/start`, `thread/resume` and `turn/start` with unchanged
-permission profiles, exact workspace roots and `approvalPolicy=on-request`. The Bridge does not
+The controller passes the reviewer to `thread/start`, `thread/resume` and `turn/start` with the selected
+permission profile, exact workspace roots and `approvalPolicy=on-request`. Each `turn/start` explicitly
+selects its profile: App Server 0.154 can rejoin a loaded thread without applying `thread/resume`
+permission overrides. Follow-up turns and inline Native Review first apply `thread/settings/update`
+and wait for the matching `thread/settings/updated` notification, then read back the exact profile,
+sandbox, approval policy and reviewer before starting work. The update acknowledgement alone only
+confirms enqueueing. A five-second application timeout or an
+unavailable or mismatched result blocks the operation. Native Review always requires read-only.
+For write resumes, native 0.154 requires applying `sandboxPolicy=dangerFullAccess` before selecting
+`:danger-full-access`; otherwise a prior managed read-only policy can survive as `workspaceWrite`
+despite the Full Access profile id. These are separate acknowledged updates, with no turn between
+them. The final readback must confirm both the named profile and `dangerFullAccess` policy.
+The Bridge does not
 classify commands or auto-accept requests. If App Server emits a command/file-change request to the
 Bridge, it remains an exact pending human approval even on an auto_review job. Unsupported requests
 still fail closed. Native review decisions must be verified from native execution evidence, not

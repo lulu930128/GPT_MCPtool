@@ -634,12 +634,23 @@ function Start-CbServer {
   if(-not(Wait-CbCondition -TimeoutSeconds $Context.serverReadyTimeoutSeconds -Condition{Test-CbServerHealth -Context $Context})){$current=Get-CbProcess -ProcessId $process.Id;if($null-ne$current){Stop-CbOwnedRole -Context $Context -Role server};throw 'SERVER_NOT_READY: Bridge did not reach the expected build.'};$ready=Resolve-CbRoleOwnership -Context $Context -Role server;if(-not$ready.canMutate-or$ready.pid-ne$process.Id){throw 'OWNERSHIP_MISMATCH: Started server does not own the listener.'}
 }
 
+function Get-CbTunnelArguments($Context) {
+  $arguments='run --profile-dir "'+$Context.tunnelProfileDir+'" --profile "'+$Context.tunnelProfile+'" --log.file "'+$Context.tunnelLogFile+'" --pid.file "'+$Context.tunnelPidFile+'"'
+  if(-not [string]::IsNullOrWhiteSpace($Context.token)){
+    $arguments+=' --mcp.extra-headers "Authorization: env:CODEX_BRIDGE_TUNNEL_AUTHORIZATION" --mcp.discovery-extra-headers "Authorization: env:CODEX_BRIDGE_TUNNEL_AUTHORIZATION"'
+  }
+  return $arguments
+}
+function Set-CbTunnelAuthorizationEnvironment([hashtable]$Environment,$Context) {
+  # Explicit null clears a stale ambient reference in the source launcher too.
+  $Environment.CODEX_BRIDGE_TUNNEL_AUTHORIZATION=if([string]::IsNullOrWhiteSpace($Context.token)){$null}else{'Bearer '+$Context.token}
+}
 function Start-CbTunnelOnce {
   param($Context)
   Assert-CbInstalledMutationBlocked $Context
   if ($null -ne $Context.PSObject.Properties['installedBinding']) { Start-CbInstalledTunnel $Context; return }
   Assert-CbTunnelIdentityReady -Context $Context;if(-not(Test-CbServerHealth -Context $Context)){throw 'SERVER_NOT_READY: Tunnel start requires Bridge core.'};$ownership=Resolve-CbRoleOwnership -Context $Context -Role tunnel;if(Test-CbTunnelReady -Context $Context){if($ownership.canMutate-and$ownership.state-eq'OwnedReady'){return};throw 'OWNERSHIP_MISMATCH: Ready tunnel is not controller-owned.'};if(-not$ownership.canMutate){throw "OWNERSHIP_MISMATCH: Cannot start tunnel while ownership is $($ownership.state)."};if($ownership.state-eq'OwnedNotListening'){Stop-CbOwnedRole -Context $Context -Role tunnel};if(-not(Test-Path -LiteralPath $Context.tunnelClientPath -PathType Leaf)){throw 'TUNNEL_CLIENT_MISSING: tunnel-client.exe is missing.'};if(-not(Test-Path -LiteralPath $Context.tunnelProfilePath -PathType Leaf)){throw 'TUNNEL_PROFILE_MISSING: Tunnel profile is missing.'};. $Context.keyStorePath;Set-ControlPlaneApiKeyEnvFromSecret -ProjectRoot $Context.projectRoot -SecretPath $Context.secretPath|Out-Null;if([string]::IsNullOrWhiteSpace($env:CONTROL_PLANE_API_KEY)){throw 'TUNNEL_KEY_MISSING: Control-plane key is unavailable.'};New-Item -ItemType Directory -Force -Path $Context.runtimeDir|Out-Null
-  $startInfo=New-Object Diagnostics.ProcessStartInfo;$startInfo.FileName=$Context.tunnelClientPath;$startInfo.Arguments="run --profile-dir `"$($Context.tunnelProfileDir)`" --profile `"$($Context.tunnelProfile)`" --log.file `"$($Context.tunnelLogFile)`" --pid.file `"$($Context.tunnelPidFile)`"";$startInfo.WorkingDirectory=$Context.projectRoot;$startInfo.UseShellExecute=$true;$startInfo.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden;$process=Start-CbChildProcess -StartInfo $startInfo -Environment @{CONTROL_PLANE_API_KEY=$env:CONTROL_PLANE_API_KEY};if($null-eq$process){throw 'TUNNEL_START_FAILED: Tunnel process did not start.'};Write-CbAtomicText -Path $Context.tunnelPidFile -Value([string]$process.Id);$started=Get-CbProcess -ProcessId $process.Id;if($null-eq$started){throw 'TUNNEL_START_FAILED: Started tunnel is unavailable.'};Write-CbOwnerMetadata -Context $Context -Role tunnel -Process $started
+  $startInfo=New-Object Diagnostics.ProcessStartInfo;$startInfo.FileName=$Context.tunnelClientPath;$startInfo.Arguments=Get-CbTunnelArguments $Context;$startInfo.WorkingDirectory=$Context.projectRoot;$startInfo.UseShellExecute=$true;$startInfo.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden;$tunnelEnvironment=@{CONTROL_PLANE_API_KEY=$env:CONTROL_PLANE_API_KEY};Set-CbTunnelAuthorizationEnvironment $tunnelEnvironment $Context;try{$process=Start-CbChildProcess -StartInfo $startInfo -Environment $tunnelEnvironment}finally{$tunnelEnvironment.Clear()};if($null-eq$process){throw 'TUNNEL_START_FAILED: Tunnel process did not start.'};Write-CbAtomicText -Path $Context.tunnelPidFile -Value([string]$process.Id);$started=Get-CbProcess -ProcessId $process.Id;if($null-eq$started){throw 'TUNNEL_START_FAILED: Started tunnel is unavailable.'};Write-CbOwnerMetadata -Context $Context -Role tunnel -Process $started
 }
 
 function Repair-CbConnectivity {param($Context);$server=Resolve-CbRoleOwnership -Context $Context -Role server;if(-not(Test-CbServerHealth -Context $Context)-or-not$server.canMutate-or$server.state-ne'OwnedReady'){throw 'SERVER_NOT_READY: Connectivity repair requires an owned Bridge core.'};$tunnel=Resolve-CbRoleOwnership -Context $Context -Role tunnel;if(Test-CbTunnelReady -Context $Context){if($tunnel.canMutate-and$tunnel.state-eq'OwnedReady'){return};throw 'OWNERSHIP_MISMATCH: Ready tunnel is not controller-owned.'};if(-not$tunnel.canMutate){throw "OWNERSHIP_MISMATCH: Cannot repair tunnel while ownership is $($tunnel.state)."};if($tunnel.state-eq'OwnedNotListening'){Stop-CbOwnedRole -Context $Context -Role tunnel};foreach($delay in @($Context.tunnelRecoveryDelaysSeconds)){Start-CbTunnelOnce -Context $Context;if(Wait-CbCondition -TimeoutSeconds([int]$delay)-Condition{Test-CbTunnelReady -Context $Context}){$ready=Resolve-CbRoleOwnership -Context $Context -Role tunnel;if($ready.canMutate-and$ready.state-eq'OwnedReady'){return};throw 'OWNERSHIP_MISMATCH: Tunnel listener is not owned by the started process.'};Stop-CbOwnedRole -Context $Context -Role tunnel};throw 'TUNNEL_NOT_READY: Tunnel failed bounded recovery.'}
@@ -781,14 +792,16 @@ function Set-CbInstalledStartEnvironment($StartInfo,[hashtable]$Environment,$Con
   Assert-CbInstalledMutationBlocked $Context
   if($StartInfo.FileName -ine $Context.nodePath -and $StartInfo.FileName -ine $Context.tunnelClientPath){throw 'INSTALLED_EXECUTABLE_MISMATCH'}
   $server=$StartInfo.FileName -ieq $Context.nodePath
-  $expectedArgs=if($server){'"'+$Context.httpEntry+'"'}else{'run --profile-dir "'+$Context.tunnelProfileDir+'" --profile "codex-bridge" --log.file "'+$Context.tunnelLogFile+'" --pid.file "'+$Context.tunnelPidFile+'"'}
+  $expectedArgs=if($server){'"'+$Context.httpEntry+'"'}else{Get-CbTunnelArguments $Context}
   if($StartInfo.Arguments -cne $expectedArgs){throw 'INSTALLED_ARGUMENT_OVERRIDE_REJECTED'}
   $base=Get-CbInstalledChildEnvironment $Context.installedBinding
+  if(-not $server){Set-CbTunnelAuthorizationEnvironment $base $Context}
   $secretName=if($server){'CODEX_BRIDGE_HTTP_TOKEN'}else{'CONTROL_PLANE_API_KEY'}
   foreach($key in $Environment.Keys){
     if($key -cne $secretName -and (-not $base.ContainsKey($key) -or $Environment[$key] -cne $base[$key])){throw 'INSTALLED_ENV_OVERRIDE_REJECTED'}
   }
   if($server -and $Environment[$secretName] -cne $Context.token){throw 'INSTALLED_HTTP_AUTH_MISMATCH'}
+  if(-not $server -and $Environment['CODEX_BRIDGE_TUNNEL_AUTHORIZATION'] -cne $base.CODEX_BRIDGE_TUNNEL_AUTHORIZATION){throw 'INSTALLED_HTTP_AUTH_MISMATCH'}
   $StartInfo.UseShellExecute=$false;$StartInfo.CreateNoWindow=$true
   # Windows DLL lookup must not include a writable runtime working directory.
   # Every writable path is already absolute in the bound context/environment.
@@ -808,6 +821,7 @@ function Start-CbInstalledTunnel($Context) {
   if($owner.state -eq 'OwnedReady' -and (Test-CbTunnelReady $Context)){return}
   if($owner.state -ne 'Stopped'){throw 'INSTALLED_TUNNEL_NOT_STOPPED'}
   $environment=Get-CbInstalledChildEnvironment $Context.installedBinding
+  Set-CbTunnelAuthorizationEnvironment $environment $Context
   $previous=[Environment]::GetEnvironmentVariable('CONTROL_PLANE_API_KEY','Process')
   $credentialGuard=$null
   try {
@@ -829,7 +843,7 @@ function Start-CbInstalledTunnel($Context) {
   } finally { if($credentialGuard){$credentialGuard.Dispose()};[Environment]::SetEnvironmentVariable('CONTROL_PLANE_API_KEY',$previous,'Process') }
   $info=New-Object Diagnostics.ProcessStartInfo
   $info.FileName=$Context.tunnelClientPath
-  $info.Arguments='run --profile-dir "'+$Context.tunnelProfileDir+'" --profile "codex-bridge" --log.file "'+$Context.tunnelLogFile+'" --pid.file "'+$Context.tunnelPidFile+'"'
+  $info.Arguments=Get-CbTunnelArguments $Context
   try {
     $process=Start-CbInstalledChildProcess $info $environment $Context
   } finally { $environment.Clear();$info.EnvironmentVariables.Clear() }

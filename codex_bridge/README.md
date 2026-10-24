@@ -9,6 +9,14 @@ Codex Handoff Bridge 是私人、allowlist-first 的 MCP Apps 對話工作區。
 它不是公司資料政策或封鎖措施的繞過工具。只有個人、公開，或已明確獲准離開公司環境的內容
 可以進入這條通道。
 
+2026-10-23 DIRECT NORMAL source：專用 `codex_powershell_normal_execute` 現可在一次經 Bridge
+bearer 驗證的 MCP 請求中保存 exact Request，再走原 ApprovalStore／CC Native Host／durable claim。
+不需另呼叫 review_get／review_decide 或本機確認；CWD 可在設定專案外，projectId 仍須存在。
+這是下述一般 Codex job 路徑限制的專用例外。舊 requestId／digest 與 Receipt 分頁仍相容；
+遺失回應可用 idempotencyKey 唯讀找回原單，UNKNOWN 不重送。只有 Tunnel、沒有可驗證 Bridge
+bearer 的入口會回 `AUTHENTICATED_MCP_REQUIRED`。本輪未部署、未驗證 live OS 執行；
+詳見 [目前實作與交接](docs/RemotePowerShellApprovalPlan.md)。
+
 ## 文件導覽
 
 - [Threat Model](docs/ThreatModel.md)：受保護資產、trust zones、資料分類、攻擊面與剩餘風險。
@@ -67,8 +75,9 @@ Codex Handoff Bridge 是私人、allowlist-first 的 MCP Apps 對話工作區。
   `request.md` 供稽核，但不再把稽核模板或行為提示送進模型輸入。
 - 模型與推理強度由 App Server `model/list` 動態提供，並與執行模式一起放在輸入框下方。
 - `plan` 唯讀與 `workspace_write` 兩種執行模式。
-- 權限 reviewer 可依對話選擇 `auto_review` 或 `user`；預設自動審核，但 `approvalPolicy`、sandbox、
-  network 與本機 allowlist 設定的 workspace 範圍不會因此放寬。
+- 權限 reviewer 可依對話選擇 `auto_review` 或 `user`；預設自動審核。所有 `workspace_write`
+  使用內建 `:danger-full-access`，解除 Codex 檔案系統與網路隔離，並保留 `approvalPolicy=on-request`。
+  Reviewer 選擇不改變該 execution mode 的 Profile；專案 allowlist 是入口限制，不是檔案系統隔離。
 - Widget 可透過 MCP Apps 標準 display-mode request 在 inline 與 fullscreen 間切換；inline 寬度跟隨
   host 對話容器，高度以寬度的 1.12 倍等比例計算並限制在 640 至 960 px，只有 host 確認 fullscreen 後才顯示
   Project Ledger 三區工作區。低於 1080 px 時工作紀錄改為抽屜，低於 760 px 時專案清單也改為覆蓋層。
@@ -77,9 +86,9 @@ Codex Handoff Bridge 是私人、allowlist-first 的 MCP Apps 對話工作區。
 - 輸入框可加入最多 8 份命名純文字文件；Widget 會分段傳送，Bridge 驗證每段與整體 SHA-256、
   UTF-8 大小、MIME、專案及資料分類後，才將內容交給 Codex。
 - Bridge 會把驗證後文字複製到 ignored 的 `.tmp/codex-inbox/<job_id>/`，用 server-generated path
-  唯讀交給 Codex，並在 turn 保留相同內容的 verified inline fallback。
-- Codex 不會取得 staging 或 job 目錄權限；runtime workspace roots 使用目前選定的 exact project，
-  profile 另可加入本機設定的 shared workspace roots。`codex-inbox` 永遠維持唯讀。
+  交給 Codex，並在 turn 保留相同內容的 verified inline fallback。
+- `plan` 以 Sandbox 保護 staging／job 目錄，並使 `codex-inbox` 唯讀。Full Access 寫入工作
+  沒有這些 Sandbox 保證；runtime workspace roots 仍傳入 exact project，但不限制其檔案存取範圍。
 - request、final response 與 aggregated diff 會顯示在 fullscreen 工作紀錄區。Widget 按需分段讀取，內容放在
   app-only tool result `_meta`，不會因預覽而自動灌入 ChatGPT transcript。
 - 成品可複製；host 支援 MCP Apps `ui/download-file` 時可下載，否則自動改為複製。也可明確送出
@@ -90,7 +99,7 @@ Codex Handoff Bridge 是私人、allowlist-first 的 MCP Apps 對話工作區。
   `events.jsonl`、`conversation.json`、`conversation-events.jsonl`、`inbox/`、`diff.patch` 與 `result.json`。
 - preview digest 與 idempotency key 防止表單變更後誤送或重複建立。
 - 人工模式下，Codex App Server 提出的 command 與 file change request 逐次核准；自動模式改由
-  Codex 原生 reviewer 在相同 sandbox 邊界判斷，不提供 session-wide accept 或 blanket allow。
+  Codex 原生 reviewer 處理請求；不提供 session-wide accept 或 blanket allow，亦不保證每項操作都會詢問。
 - 重啟後不自動重送未完成 turn，舊核准會標成 expired。
 - Windows tray、Startup shortcut 與 Secure MCP Tunnel lifecycle。
 
@@ -108,7 +117,7 @@ flowchart TD
     C --> D["Project capability gate 與 Job Store"]
     D --> E["Codex Controller"]
     E --> F["Codex App Server stdio"]
-    F --> G["Exact selected project sandbox"]
+    F --> G["plan: read-only / workspace_write: Full Access"]
     F --> H["Events、Diff、Approval、Result"]
     H --> D
     D --> B
@@ -155,12 +164,13 @@ Copy-Item config\projects.example.json .local\projects.json
 若同一個工作需要跨專案操作，可在這份本機設定加入 `sharedWorkspaceProjectIds`，例如
 `"sharedWorkspaceProjectIds": ["projects", "mcp_tools"]`。每個 id 必須已存在於 `projects`，
 並各自映射到操作者授權的根目錄。省略時不新增 shared roots；設定後所有 Bridge 工作的
-permission profile 都會加入這些 roots，`plan` 仍唯讀，`workspace_write` 才可寫。
+唯讀與保留供回退的 Workspace Profile 都會加入這些 roots。`plan` 仍唯讀；Full Access 不受 roots 限制。
 
-兩個 profile 都拒絕讀寫本元件的 `.local`、`.env`／`.env.*`、`.secrets`、`.tunnel-client`、
+唯讀與回退 Profile 都拒絕讀寫本元件的 `.local`、`.env`／`.env.*`、`.secrets`、`.tunnel-client`、
 實際 projects allowlist、`CODEX_BRIDGE_DATA_DIR` 與共用的 `project_reading/.secrets`。
-原始碼與 `package.json` 沿用 workspace 權限。Windows 僅對 Bridge child process 設定
-`windows.sandbox="elevated"`，以支援讀取拒絕規則；不修改使用者全域 Codex 設定。
+這些規則不適用於 Full Access；`.env`、`.git`、其他專案與使用者檔案不再享有 Codex Sandbox 隔離。
+Windows 對 Bridge child process 保留 `windows.sandbox="elevated"`，支援唯讀／回退 Profile；
+它不是 Full Access 授權來源，也不改變 Windows 管理員身分或 ACL。
 `.env.*` 採原生 glob 規則，匹配於 sandbox 啟動前展開；執行期間新增秘密檔後應重載再啟動工作。
 
 附件鏡像使用 `.tmp/codex-inbox`，避開 Windows 無法在拒絕存取的父目錄中重新開放子目錄的限制。
@@ -171,7 +181,7 @@ permission profile 都會加入這些 roots，`plan` 仍唯讀，`workspace_writ
 ```json
 {
   "projectsFile": "C:\\GPT_MCPtool\\codex_bridge\\.local\\projects.json",
-  "dataDir": "C:\\CodexBridge",
+  "dataDir": "C:\\GPT_MCPtool\\codex_bridge\\.local\\runtime",
   "tunnelId": "tunnel_replace_me"
 }
 ```
@@ -180,6 +190,10 @@ permission profile 都會加入這些 roots，`plan` 仍唯讀，`workspace_writ
 `codex.js app-server`，避免 Windows Store App executable 無法由背景 controller spawn 的限制。
 Codex 必須在同一個 Windows 使用者下已登入。Bridge 使用現有 Codex 登入，不需要 OpenAI
 Platform API key。若要改用其他 CLI，可在本機設定 `codexCommand` 與 JSON 字串形式的 `codexArgs`。
+
+既有 installed v5 不會因為此 source 預設或範例改變而自動搬移。若舊 `C:\CodexBridge` 尚在且新預設
+目錄不存在，未指定 DataDir 的 source 啟動會拒絕建立第二份資料。正式 v6 必須依
+[Runtime 資料遷移](docs/RuntimeStateMigration.md) 經獨立 operator 完成停機備份、binding 與切換。
 
 ## 本機啟動與托盤
 
@@ -204,8 +218,8 @@ Invoke-RestMethod http://127.0.0.1:18828/health
 
 托盤使用 `unified-always-on-v2` 契約。正式啟動會一起準備 MCP server 與 Secure MCP
 Tunnel；選單不提供 Start／Stop 或 tunnel restart。Jobs folder 保留在 `Exit` 上方的
-元件特有區。這只讓外部 MCP 連線能力保持可用，不會替 Codex job 自動開啟 network
-access。安裝目前使用者的 Startup shortcut：
+元件特有區。MCP 連線能力與 Codex job 的 Profile 分開管理；Full Access job 的網路不受
+Codex Sandbox 隔離。安裝目前使用者的 Startup shortcut：
 
 ```powershell
 npm run startup:install
@@ -225,6 +239,13 @@ Codex Bridge 是 `approval-sensitive` 元件。health 若顯示 active job 或 p
 controller 會拒絕 core restart、full reload 與 shutdown，並保持 PID 不變。controller 不讀 job
 payload，也沒有 dispatch、turn、steer、cancel 或 approval decision 能力。完整契約與隔離驗證見
 [`docs/ControlCenterIntegration.md`](docs/ControlCenterIntegration.md)。
+
+Controller 與 server 的 Build ID 統一由 `src/config.ts` 的 `computeRuntimeBuildId` 計算；
+PowerShell 透過固定路徑 `scripts/runtime-build-id.mjs` 載入編譯後的同一函式，單次 lifecycle
+call 只計算一次。正式啟動不需要 `-ExpectedBuildId`；此參數僅保留給隔離測試。
+缺少 helper／build 或 helper 輸出不合法時，controller 會在變更 runtime 前回報 `BUILD_ID_*`。
+Windows 回歸、cache 邊界與工作結束後的 reload 驗收步驟見
+[`docs/RuntimeBuildId.md`](docs/RuntimeBuildId.md)。
 
 ## Secure MCP Tunnel
 
@@ -328,11 +349,12 @@ Control Center Status 讀取限額 8192 bytes，驗證固定 contract／allowlis
 `plan` 模式即使收到 file change request 也不能核准。公司資料分類另外要求控制台中的明確授權勾選。
 Bridge 對所有 turn 保持 `approvalPolicy=on-request`。`auto_review` 只替換 App Server reviewer，
 不是提高權限，也可能拒絕高風險操作；`user` 則把實際提出的 request 送回 Widget 逐次決定。
-Bridge 啟動 App Server 時會在既有 profile 上加入兩個狹窄的 inline permission profiles：
-`plan` 使用繼承 `:read-only` 的 `codex-bridge-read-only`，`workspace_write` 使用繼承 `:workspace`
-的 `codex-bridge-workspace`。兩者允許唯讀存取 `.tmp/codex-inbox`、拒絕本機設定與秘密路徑，
-並加入明確設定的 shared workspace roots；Bridge 會先用
-`permissionProfile/list` 驗證 profile 存在，且永遠不選擇 `:danger-full-access`。
+Bridge App Server 預設為內建 `:danger-full-access`，所有專案的 `workspace_write` 在新建及續接時
+明確選用它；不使用自訂 Profile 繼承 Full Access。`plan` 與 Native Review 明確選用
+`codex-bridge-read-only`。`codex-bridge-workspace` 定義保留供回退，正常寫入不再選用。
+Controller 先用 `permissionProfile/list` 驗證所需 Profile 存在且 allowed，失敗時不降級或繼續執行。
+此模式持續生效，直到 PowerShell NORMAL／ADMIN 的正式執行、授權與 Receipt 管線驗收後再恢復。
+全域設定、回退方式與驗收狀態見 [遷移紀錄](docs/agent-runs/full-access-20261018/Progress.md)。
 
 ## 驗證
 
@@ -366,7 +388,7 @@ npm run doctor:app-server -- "C:\GPT_MCPtool"
 npm run smoke:codex -- --confirm-live-codex
 ```
 
-`smoke:http` 會驗證 32 個工具、13 個 app-only actions／reads、MCP Apps MIME、resource 內容、HTTP bearer
+`smoke:http` 會驗證 34 個工具、13 個 app-only actions／reads、MCP Apps MIME、resource 內容、HTTP bearer
 拒絕、文字 staging 完整週期與 preview 不建立 job。它不會啟動實際 Codex turn。
 
 ## Runtime 資料
@@ -432,3 +454,85 @@ checkpoint。啟動時若 journal 比 checkpoint 新，Bridge 只依連續 revis
   單份最多 500,000 字元／2,000,000 UTF-8 bytes，同一次最多 8 份且合計不超過 2,000,000 bytes。
 - 目前不提供跨主機檔案同步、二進位附件上傳、任意輸出檔案掃描，亦不會自動清除歷史 staging、
   job inbox 或 `codex-inbox`；清理前必須停止 Bridge 並確認沒有執行中的 job。
+
+## 本機 cooperative shutdown（Source，未部署）
+
+2026-10-15 的 component lifecycle Source 另有固定 `bridge-cooperative-close-v1` 通道：
+沿用既有 controller／HTTP／Runtime／ApprovalStore，由 Node 自有 receiver 驗證本機 controller 身分，
+只接 probe／shutdown。公開 native dependency 重用相鄰 `mcp_control_center/src/NormalOperator.Native.cs`
+與 `RemoteSelfReload.Native.cs`；沒有另建 lifecycle manager 或授權 Journal。
+這不是 R1 遠端核准或 PowerShell executor，亦未刷新 live dist／安裝 protected release。
+實作與尚未完成的 Windows E2E 見 [LifecycleReadinessCheckpoint.md](docs/LifecycleReadinessCheckpoint.md)。
+
+Control Center 的正式 client 是同一 source／release 內的
+`mcp_control_center/scripts/invoke-component-controller.ps1`；它在自身 runspace 執行 Bridge
+`runtime-control.ps1`。Host 核對完整 `-File`／`-ControllerPath` 形狀與固定 action 的精確
+`ArgumentsBase64`，只接受 `RestartCore`、`ReloadRuntime`、`ShutdownRuntime`，拒絕額外參數及
+跨 release 路徑；原直接 controller 入口與 native peer／nonce／ACL 檢查保留。
+`powershell -NoProfile -ExecutionPolicy Bypass -File tests/test-cooperative-source.ps1` 會直接測試
+manager 組裝、wrapper 解碼與 Host verifier 的 source 契約，不啟動 controller、不代表 Live E2E。
+部署須經獨立 review 並沿用既有 Prepare／Install 流程；不能只覆寫現役 Host。
+
+## Remote Self-Reload R1（source / offline）
+
+後續修復仍為 **G0 HOST_NOT_VERIFIED / G1 PARTIAL**；新增 UI source candidate 與 native-handle stop regression，
+不覆寫現役 web/dist。驗證請用 `tests/test-r1-isolated.ps1`；[正式安裝阻擋](../mcp_control_center/docs/R1InstalledRelease.md)
+尚未解除，不可將 schema v4 視為可部署 release。
+
+Remote Self-Reload R1 是獨立的固定重載流程：新增六個 MCP tools、app-only exact passkey 確認、
+Control Center tray-owned durable worker 與跨重啟收據。正式狀態 **NOT_DEPLOYED**；只允許
+`codex_bridge / reload_runtime`，需全部 jobs idle 與既有 owner/controller guard。
+跨元件只使用固定 authenticated named pipe 和 CC 公開 native IPC verifier，不共享 domain data 或 secret。
+詳見 [R1 契約與驗證](docs/RemoteSelfReloadR1.md) 及其連結的 operator bootstrap。
+
+## Remote Privileged Broker V1（source / offline）
+
+獨立 Broker 的 MCP 入口直接提供 `codex_privileged_status` 與 `codex_privileged_preview`，
+不經 Codex Controller/App Server。正式 executor **NOT DEPLOYED**；正式模組 ACL 與其他 MCP
+防更動 **NOT ENFORCED**。本輪允許修改開發 source，不表示部署後可修改正式 executable/policy。
+目前僅開放 status/dry-run preview；request、exact review、receipt/result 僅在獨立 synthetic fixture
+驗證。真人 UI／核准 authority 未完成，沒有遠端 request/approval/execute 或管理員服務啟用開關。
+詳見 [契約、限制與人工部署前置](docs/RemotePrivilegedBrokerV1.md)。
+
+## InstalledRelease 私有狀態接線（候選）
+
+InstalledRelease v5／binding v3 固定唯一 Control Center owner state 為 `C:\McpControlCenter`，保留 `C:\CodexBridge` 與唯一 ApprovalStore。原 operator 的 `PlanState` 只列出 metadata 計畫；`BindState -StatePlanSha256 <digest>` 核對同一計畫後，將原 `%LOCALAPPDATA%\McpControlCenter` 備份到新私有 runtime，再準備新的 active state。原目錄保留、不再作為 installed owner 的使用中狀態；只有既有 Cutover 會切換 Startup 與單一 Tray。
+
+遷移保留來源與目的全部 Deny，移除新私有範圍的非受信任 Allow，不複製來源 Allow 為新權限。檔案先建立為空並套用 ACL，才寫入已核對 hash 的內容；備份包含舊 PID，但 active root 排除 `tray.pid`。原狀態變動、未知 ACE、reparse、超限或目的已存在均停止；部分複製留下 UNKNOWN，不自動重試。此版本僅處理首次遷移，既有目標必須人工檢視。AppData、workspace、共用 Codex home 與其他元件 ACL 不變；歷史狀態不提供新的 NORMAL Grant。
+
+projects allowlist、tunnel profile 與既有 DPAPI ciphertext 由原登入使用者複製成受 manifest digest 綁定的私有部署快照；不解密、不輸出 credential，不新增 credential 服務。Bridge 在啟動 tunnel 前持有 ciphertext read handle，核對 digest 後才呼叫原 key-store。原設定仍由原元件擁有；設定或 key 更新須重新部署快照，不從 workspace 靜默跟隨。共用 Codex home 保留既有讀取權限，仍檢查 owner、reparse 與不可被外部 principal 寫入／替換；它不提供 NORMAL 授權。
+
+此版本的順序為 Prepare → Install → PlanState → BindState → Preflight → Cutover。r3／r4 已安裝但未啟用；v5 仍為 Source 候選。Preflight／Cutover 再核對原 state 未變；Rollback 沿用原 Startup 備份及原 state，不自動合併切換後的新營運紀錄。Source 測試、安裝、Runtime adoption、Native Host 與 ChatGPT E2E 分別記錄，不互相替代。
+
+2026-10-20：若 r8 已依原 stop／recovery 收據恢復 source，之後 source 又正常運行或重啟，舊 PID／Build 與舊 state snapshot 不能直接沿用。`PlanState`／`BindState` 可明確加上 `-AllowRecoveredSourceAdvance`，但仍必須提供 `-PreviousReleaseRoot`、原 `-StateRecoveryReceipt` 及其 `-StateRecoverySha256`。原 r8 drain／repair／Startup hash 鏈保留，另由當下 canonical controller 核對新的 idle source、PID／start time、Build 與新版 release 的 rollback baseline；Tray 必須先正常退出。預設不加旗標時仍要求原 snapshot 完全一致。
+
+這個承接只允許 CC 狀態快取／日誌變更，以及新增、格式完整的 Workspace Local 去重收據；資料夾型別、舊收據、其他設定的變更或檔案刪除都拒絕。Source ACL 僅接受原值或額外增加 Deny ACE：owner、group、control flags、所有舊 ACE bytes 必須保留，只容許連續 Deny 區段內的排序差異；不接受新增 Allow、移除 Deny，或跨 Allow 移動 Deny。BindState 先保存完整 source owner snapshot，只將新的去重收據寫入同一個 `C:\McpControlCenter`；同 ID 不同內容拒絕覆寫，`UNKNOWN` 原樣保留，舊 installed 營運紀錄不覆寫。完整計畫仍受 `StatePlanSha256`、來源重驗與 partial-failure 不重試規則約束。此路徑不安裝、不切換 Startup、不啟動 Host，也不重播任何操作。
+
+## 逐筆人工核准 NORMAL / ADMIN PowerShell（2026-10-15 現行交付需求）
+
+新需求是可實際執行的 PowerShell 專用管線：`DIRECT` 由使用者直接指定操作，`CODEX_DERIVED` 從真實 Codex Job／Turn 權限故障提案；兩者共用唯一 ApprovalStore、App-only 逐筆檢視與受保護 Windows Host／Control Center Operator，回傳真實 Request Receipt。Source 開發與必要實作已獲授權，不以舊 G0/G1 的固定 Marker、Source-only、不可執行 Review 限制新功能實作。
+
+- 開發／診斷期間若實際呼叫 PowerShell，僅限唯讀查詢；不讀 `.env`／`.env.*`、憑證或其他敏感資料，也不變更正式檔案與 OS 狀態。Source 修改與隔離編譯可繼續。
+- 正式可寫／高權限驗收由使用者明確發起，每一筆完整 Script／Args／Mode／影響與 Digest 需另行核准；NORMAL 使用一般權限，ADMIN 另需有效 Windows UAC／OS 授權。歷史平台拒絕不擴大成全 Source 開發禁令，但當下明確拒絕的同一操作不可改用其他工具繞過。
+- **本規格不代表正式 Host 已部署。** Source 的 `codex_powershell_status` 分列來源宣告、載入的 installed binding、快取 preflight、未驗證 owner 與既有 Store；NORMAL/ADMIN 仍關閉。`codex_powershell_host_preflight` 只在使用者明確要求時啟動固定 installed helper，不帶 candidate，也不授權。`codex_powershell_receipt` 依原 requestId 讀取同一 Store；審閱意見與保存的 OS receipt 分開，後者仍是 `UNVERIFIED`。本次未部署，刷新與驗證步驟見 [Host 診斷交接](docs/PowerShellHostDiagnostics.md)。
+
+Self-Reload R1 與舊 Remote Privileged Broker 為獨立歷史功能，不能混同 PowerShell 授權 Owner。以 [2026-10-15 現行主計畫](docs/RemotePowerShellApprovalPlan.md) 為權威；[G0/G1 證據](docs/RemotePowerShellApprovalG0G1.md) 僅供驗證繼承，不再限制施工。
+
+2026-10-16 NORMAL 候選已沿用 Runtime 唯一 ApprovalStore、InstalledRelease Host receiver 與既有 NORMAL runner，接通 `codex_powershell_normal_execute`。它只接受已保存的 DIRECT Request ID／Digest；模型宣告不授權，必須由經 native peer 驗證的 Windows Host 顯示完整指令並取得逐筆本機確認。額外平台真人證明不列入本次 MVP；平台已拒絕的工作不得換成 DIRECT 重送。CODEX_DERIVED 與 ADMIN 仍不可由此入口執行。
+
+Grant、Claim、Receipt 維持 durable journal；原 Request ID 可查一次性結果。stdout／stderr 合計最多 16 KiB，經本機確認後在同一 Store 記憶體最多保留 10 分鐘／32 筆，逾期、重啟或容量淘汰後只保留 receipt／output hash。Unknown／Timeout／Lost Response 不得自動重跑。此處描述 Source 能力；InstalledRelease 部署、Runtime adoption 與 ChatGPT 往返仍須分別驗收，見[本次進度](docs/agent-runs/powershell-normal-20261016/Progress.md)。先前 G0/G1 與 Host 文件中的平台阻擋是歷史階段記錄。
+
+
+## DIRECT NORMAL 遠端執行（2026-10-22 現行需求）
+
+本節取代上述 NORMAL 的逐筆本機確認與手動 arm 流程。經既有 MCP 身分驗證的明確 DIRECT 執行請求，使用原 `review_request` 的 Request ID／Digest，透過 `codex_powershell_normal_execute` 直接交給既有 Windows Host。Host 持續接收新請求，不顯示確認視窗，也不需要每次點 Tray。收據的授權來源如實記為 `REMOTE_MCP_REQUEST / AUTHENTICATED_DIRECT_REQUEST`，不假造本機點選紀錄。
+
+沿用唯一 ApprovalStore、既有一般權限 Runner 與 Request Receipt。相同 Request 只消耗一次；失去回應後讀原收據，不重跑。NORMAL 不會變成 ADMIN，也不替代平台或 workspace 的權限。
+
+stdout／stderr 不再受到 16 KiB 截斷或因此中止程序，完整捕獲後透過同一 Host 通道分段交付。小結果直接回傳；大結果以 `codex_powershell_receipt(requestId, outputOffset=output.nextOffset)` 續讀，直到 `nextOffset=null`，不用重新執行。原有輸出記憶體快取保留 10 分鐘；Journal 仍只保存 hash／計數／Exit Code。原有 30 秒執行期限保留，逾時如實回報 UNKNOWN，不宣稱成功。
+
+修改 source 不會更新受保護的 installed release；需更新 Bridge 與 Host 為同一版本，再重新整理 MCP 工具清單，才能使用此行為。
+
+既有 `installed-release-operator.ps1` 的 `Prepare`、`PlanState`、`BindState` 可使用 `-UpgradeFromReleaseRoot <目前 installed release>` 直接升版。它核對舊 release、Startup 與原 state-binding／cutover 收據，沿用現有私有設定快照；不搬移資料、不回到 source，也不重設現有 ACL。安裝仍由獨立 Windows PowerShell 執行，只有 `Install` 需要系統管理員。
+
+升版期間先保留舊 Tray，讓其原 controller 正常停止 Bridge。第一次 `Cutover` 產生 `UPGRADE_STOPPED` 後，選擇 Tray 的 `Exit control center only`，再執行同一個 `Cutover` 完成版本切換。這是一次性的更新步驟，與執行 PowerShell 請求無關；日常 NORMAL 執行不需要 Tray 點選。只有這個明確的停止階段可續接，UNKNOWN 仍需查明原因，不能重試。

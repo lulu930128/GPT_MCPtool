@@ -13,25 +13,31 @@ ChatGPT tool result 只是投影，不是 system of record。
    thread metadata 發現的 opaque project id，但 server 必須先以 realpath、存在性與敏感路徑 deny rules 驗證。
 3. Job UUID、目錄與 artifact 路徑全部由 server 建立。
 4. Codex App Server 只透過 child-process stdio 存取，不直接暴露網路 listener。
-5. Bridge 啟動 App Server 時建立兩個狹窄的 inline permission profiles。`codex-bridge-read-only`
-   繼承 `:read-only`，`codex-bridge-workspace` 繼承 `:workspace`；兩者允許唯讀存取固定的
-   `.tmp/codex-inbox`，並拒絕本機設定與秘密路徑。永遠不選擇 `:danger-full-access`；runtime roots
-   使用目前再次驗證的 exact project，profile 可加入本機 `sharedWorkspaceProjectIds` 指定的已驗證 roots。
+5. App Server 預設與所有專案 `workspace_write` 的 start／resume 均使用內建 `:danger-full-access`。
+   `plan` 與 Native Review 明確使用 `codex-bridge-read-only`，繼承 `:read-only`。
+   `codex-bridge-workspace` 繼承 `:workspace`，僅保留供回退；兩個 Sandbox Profile 保留 handoff
+   唯讀、秘密路徑拒絕與 shared roots。這些規則不套用 Full Access；exact project／runtime roots
+   與入口 allowlist 不是其檔案系統隔離。所需 Profile 缺失或不被允許時停止，不降級。
 6. `turn/start`／`turn/steer` 的文字只由使用者明確輸入與標記為資料的 context、criteria、constraints、
    text artifact 區段組成。Bridge 不把 audit 模板或自訂行為提示注入模型；durable `request.md` 只供
-   Bridge 稽核，job folder 不授權給 Codex。
-7. 不核准額外 network permission，approval policy 固定 `on-request`。
+   Bridge 稽核；Full Access 不保證 job folder 隔離。
+7. approval policy 固定 `on-request`；plan 禁用網路，Full Access 寫入工作解除 Codex 網路隔離。
 8. command 與 file change request 只允許 `accept`、`decline`、`cancel`，不提供 `acceptForSession`。
 9. 文字文件只能經 app-only begin／append／finalize contract 進入 server-owned staging。檔名只作 metadata，
    實際路徑永遠使用 Bridge UUID；每段與整體 SHA-256、character count、UTF-8 byte count 均需吻合。
 10. finalized bundle 綁定 project id 與 data classification；Job Store 把通過綁定的內容複製到 job
     `inbox/` 與 `.tmp/codex-inbox/<job_id>/`。Controller 重新驗證 hash 後，把 server-generated
-    唯讀路徑與 verified inline fallback 一起放入 turn。`C:\CodexBridge` 與 `codex-inbox` 都不加入
-    Codex runtime roots。
+    handoff 路徑與 verified inline fallback 一起放入 turn。`C:\CodexBridge` 與 `codex-inbox` 都不加入
+    Codex runtime roots；只有 plan 的 Sandbox 保證 handoff 唯讀，Full Access 不受 roots 限制。
 11. Widget 的大型成品讀取使用 app-only `codex_artifact_read_chunk`，內容只放 tool result `_meta`；
     `structuredContent` 只含檔名、大小、hash、cursor 等 metadata。
 12. 本機 thread 的 list／read 無副作用；安全 discovered thread 只有在使用者從 Widget 明確送出時才建立
-    durable Bridge job，沿用原 `threadId` 由 `thread/resume` 續作。Root、home、system 與 sensitive path 保持受保護。
+    durable Bridge job，沿用原 `threadId` 由 `thread/resume` 續作。Root、home、system 與 sensitive path
+    仍不能作為 discovered project 入口，但 Full Access 不保證對它們的 OS 隔離。
+
+這是持續的全域 Full Access 階段；待 PowerShell NORMAL／ADMIN 執行、授權及 Receipt 管線驗收後，
+原生 Codex 恢復 `:workspace`，Bridge 寫入恢復 `codex-bridge-workspace`。不更動 Windows 管理員
+身分、ACL 或其他 MCP 權限；Commit／Push 明確授權、日誌遮蔽與服務 Owner 契約維持。
 
 ## State model
 
