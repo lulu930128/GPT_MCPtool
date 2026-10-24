@@ -1,11 +1,13 @@
 # GPT MCP Tool Workspace
 
+InstalledRelease 沿用唯一 Bridge ApprovalStore 與 Control Center owner。v5 保留舊根目錄契約；明確的 v6 遷移將正式資料綁定至各元件 Git-ignored 的 `.local/runtime`。v6 仍要求受保護 release、完整祖先 ACL 與獨立 operator，不能只改環境變數或複製資料即視為部署完成。操作與回復邊界見 [Runtime 資料遷移](codex_bridge/docs/RuntimeStateMigration.md)。
+
 這個 repository 保存八個本機 MCP 專案、一個非 MCP 的 KGI Broker Bridge 與一個 Windows
 runtime 中樞的公開原始碼。它採用 source-only monorepo：各 MCP 元件維持各自的依賴、
 啟動方式、測試、PID authority 與安全邊界，不把程式碼攤平成單一套件，也不由中樞接管
 domain data 或 component lifecycle。
 
-目前 workspace release 為 `1.1.0`。各元件依自己的 application SemVer 獨立演進；實際版本以各元件 manifest 為準，新增的 Listening Audio 為 `0.1.0`。MCP protocol、schema、registry 與 domain contract 版本維持各自獨立演進，不隨 workspace release 重新編號。
+目前 workspace release 為 `1.1.0`。各元件依自己的 application SemVer 獨立演進；實際版本以各元件 manifest 為準，新增的 Listening Audio 為 `0.2.0`。MCP protocol、schema、registry 與 domain contract 版本維持各自獨立演進，不隨 workspace release 重新編號。
 
 > 這是 source-only repository。個人資料、SQLite、DPAPI 密文、tunnel profile、
 > token、log、PID、cache、虛擬環境、編譯輸出、下載的 executable，以及本機 Agent／Codex
@@ -19,8 +21,8 @@ domain data 或 component lifecycle。
 | [`Memory Core`](./Memory%20Core/) | local-first 個人記憶 API、MCP 與 candidate review system of record | Python / FastAPI / SQLite | 正式資料只存在本機且不進 Git |
 | [`japanese_study`](./japanese_study/) | Japanese Study Hub 的 bounded MCP adapter | TypeScript / Node.js | 需要 Japanese Study Hub HTTP API |
 | [`english_study`](./english_study/) | English Study Hub 的獨立 bounded MCP adapter | TypeScript / Node.js | 需要 `C:\project\english-study-hub` HTTP API；第一版不含音訊，tunnel 由元件自行管理 |
-| [`listening_audio`](./listening_audio/) | 日文聽力考試與音訊的 bounded MCP adapter | TypeScript / Node.js | 需要 Listening Trainer `listening-trainer-v1` API；沿用其 GPT-SoVITS，tunnel／Trainer／MCP 由元件 controller 管理 |
-| [`project_reading`](./project_reading/) | explicit allowlist、多 root、read-only workspace MCP | TypeScript / Node.js | 需要使用者自行設定允許讀取的本機 roots |
+| [`listening_audio`](./listening_audio/) | 日文／英文聽力考試與音訊的 bounded MCP adapter | TypeScript / Node.js | 需要 Listening Trainer `listening-trainer-v1` API；Trainer 呼叫獨立共用 Voice Runtime，tunnel／Trainer／MCP 由元件 controller 管理 |
+| [`project_reading`](./project_reading/) | explicit allowlist、多 root、預設唯讀，可明確啟用受限文字寫入的 workspace MCP | TypeScript / Node.js | 讀取 roots 與獨立 write policy；操作收據／audit 保存於 roots 外的 operator state |
 | [`codex_bridge`](./codex_bridge/) | ChatGPT MCP Apps 到本機 Codex App Server 的受控工作交接 | TypeScript / Node.js | 需要可執行且已登入的 Codex CLI、專案 allowlist 與專屬 tunnel id |
 | [`personal-asset-os`](./personal-asset-os/) | local-first 個人資產帳本、dashboard 與唯讀 MCP | Python / FastAPI / React / SQLite | 正式財務資料只存在 `%LOCALAPPDATA%\PersonalAssetOS`，不進 Git |
 | [`personal-asset-os/kgi_broker_bridge`](./personal-asset-os/kgi_broker_bridge/) | PAOS 專用的 KGI 帳務／持倉唯讀隔離 bridge；不是 MCP | Python / FastAPI | 已接 PAOS read-time valuation overlay；原始持倉不持久化 |
@@ -69,12 +71,15 @@ domain data 或 component lifecycle。
 - `OMI_search` 是 OMI backend 的薄 adapter，不持有市場資料或 freshness 邏輯。
 - `japanese_study` 是 Japanese Study Hub 的薄 adapter，不直接讀取教材、Anki 或 Hub database。
 - `listening_audio` 重用 `project_reading` 的 tunnel client 與 DPAPI key 儲存路徑；profile、PID 與 log 獨立，Trainer 持有考試與音訊資料。
+- Listening Trainer 的中央語音預設呼叫 loopback Voice Runtime（`18890`），由 Voice Package 自有入口管理模型、registry、Python 與推論；MCP／Control Center 不接管共用引擎。語音離線會明確回報，但不阻擋 Trainer／MCP 的 liveness 與啟動。詳見元件 README。
 - `english_study` 是 English Study Hub 的獨立薄 adapter，不共用 Japanese Study 的 API、database、PID 或 port。
 - `OMI_search` 與 `Memory Core` 的部分 Windows lifecycle script 會重用
   `project_reading` 的 tunnel client／key-store 安裝位置。這是本機 runtime 資源重用，
   不是 MCP protocol 或資料層耦合。
 - `codex_bridge` 也重用 `project_reading` 的 tunnel client／key-store 安裝位置，但使用自己的
-  tunnel profile、health port 與 `C:\CodexBridge` job store，不共享 MCP session 或 job data。
+  tunnel profile、health port 與獨立 job store，不共享 MCP session 或 job data。v6 的 JobStore 位於
+  `codex_bridge\.local\runtime`，Control Center 的營運 state 位於 `mcp_control_center\.local\runtime`；
+  兩者皆不屬於 Git source archive，來源與目的 Deny 及完整祖先保護仍必須保留。
 - `personal-asset-os` 自帶 tunnel client runtime；source 位於 monorepo，但 `.env`、profile、log、
   executable 與正式財務資料仍維持 Git-ignored／repo-external。
 - `personal-asset-os/kgi_broker_bridge` 是 PAOS-owned、non-MCP、read-only process boundary。
@@ -198,3 +203,20 @@ read-only validator，以及 SHA-guarded Plan／Apply／receipt／rollback 註�
 controller 必須回傳 `OwnershipUnknown` 或 `OWNERSHIP_CHANGED`，不得清除 evidence 或嘗試接管。
 
 日常 Control Center tray 已收斂為每個元件最多三項：狀態感知的 `Restart MCP`、統一 `Open MCP health` 詳情頁，以及 descriptor 明確宣告時才顯示的正式 frontend。維修層的 connectivity repair、core-only restart、shutdown、URL/Tunnel/Logs 等能力仍保留在 component controller、Health > Advanced 或 CLI，不由 tray 第一層直接暴露。
+
+### 英文 Assessment 與 Listening 整合
+
+English Study Hub schema 2 擁有練習歷史、IELTS assessment 與進度。Listening Trainer 的英文 completed result 經 caller 送入 English Study 既有 preview/record；兩個 MCP 維持 bounded adapter，沒有共用 DB 或 domain logic。契約見 [English Study Assessment](english_study/docs/AssessmentContract.md) 與 [English Listening v2](listening_audio/docs/EnglishListeningV2.md)。
+
+### Workspace 的固定元件維護
+
+Workspace 的 `mcp_component_restart` source contract `2026-10-14.1` 經既有 authenticated
+HTTP 與 CC tray local pipe，將七個固定元件的單次 `reload_runtime` 委派給
+`Invoke-McpCcComponentAction`／元件 controller；Workspace 與 CC 自身不在遠端 allowlist。
+UUID 收據保存精確 target，跨目標重播拒絕；既有 ownership、active-work 與權限 gate 保留。
+這是 source 能力，不能推論 CC owner IPC 已可用或 runtime 已採用。
+範圍與驗證見 [本機維護契約](project_reading/docs/LocalComponentManagement.md)。
+
+### PowerShell NORMAL 本機確認候選（2026-10-16）
+
+Codex Bridge 與 Control Center 沿用同一份 InstalledRelease、單一 native Host 與 Bridge ApprovalStore；沒有新增 Broker、Store、Runner 或 Tray。MCP execute 綁定保存的 DIRECT Request，Windows Host 逐筆確認後呼叫原 NORMAL runner，將 Exit Code、有限文字與 Receipt 回傳原 Request。Unknown 不重跑，ADMIN 獨立 UAC。這是 Source 候選，正式部署與 OS E2E 尚須驗收；[實作與驗證進度](codex_bridge/docs/agent-runs/powershell-normal-20261016/Progress.md)分列 Source／Runtime 證據。
