@@ -51,6 +51,9 @@ $context = $null
 try {
     foreach ($directory in @($testRoot,$trainerRoot,(Join-Path $testRoot '.tmp'),(Join-Path $testRoot 'src'),(Join-Path $testRoot 'dist\src'),(Join-Path $testRoot '.tunnel-client'),(Join-Path $testRoot '.secrets'),(Join-Path $testRoot 'scripts'))) { New-Item -ItemType Directory -Force -Path $directory | Out-Null }
     $trainerChildPath = Join-Path $testRoot 'fake-trainer-child.js'
+    New-Item -ItemType Directory -Force -Path (Join-Path $testRoot 'ui'),(Join-Path $testRoot 'dist\ui') | Out-Null
+    [IO.File]::WriteAllText((Join-Path $testRoot 'ui\question-download.html'), '<html>test</html>', $utf8)
+    [IO.File]::WriteAllText((Join-Path $testRoot 'dist\ui\question-download.html'), '<html>test</html>', $utf8)
     $trainerRunnerPath = Join-Path $testRoot 'fake-trainer-runner.js'
     $mcpEntryPath = Join-Path $testRoot 'dist\src\http-main.js'
     $tunnelPath = Join-Path $testRoot 'fake-tunnel.js'

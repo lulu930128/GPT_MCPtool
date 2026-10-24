@@ -1,0 +1,176 @@
+{
+  "schema_version": "2.0",
+  "set_id": "english-test",
+  "title": "English test",
+  "scope": "section",
+  "source_ref": "test-fixture",
+  "question_count": 5,
+  "questions": [
+    {
+      "id": "Q1",
+      "prompt": "Answer question 1",
+      "section": 1,
+      "answer_type": "single_choice",
+      "expected_answers": [
+        {
+          "type": "single_choice",
+          "value": "A"
+        }
+      ],
+      "explanation": "Review the recording.",
+      "audio_script": [
+        {
+          "seq": 1,
+          "speaker": "Guide",
+          "voice_slot": "narrator",
+          "text": "The train leaves at seven thirty."
+        }
+      ],
+      "options": [
+        {
+          "key": "A",
+          "text": "A"
+        },
+        {
+          "key": "B",
+          "text": "B"
+        },
+        {
+          "key": "C",
+          "text": "C"
+        }
+      ]
+    },
+    {
+      "id": "Q2",
+      "prompt": "Answer question 2",
+      "section": 1,
+      "answer_type": "multiple_choice",
+      "expected_answers": [
+        {
+          "type": "multiple_choice",
+          "value": [
+            "A",
+            "C"
+          ]
+        }
+      ],
+      "explanation": "Review the recording.",
+      "audio_script": [
+        {
+          "seq": 1,
+          "speaker": "Guide",
+          "voice_slot": "narrator",
+          "text": "The train leaves at seven thirty."
+        }
+      ],
+      "options": [
+        {
+          "key": "A",
+          "text": "A"
+        },
+        {
+          "key": "B",
+          "text": "B"
+        },
+        {
+          "key": "C",
+          "text": "C"
+        }
+      ],
+      "selection_count": 2
+    },
+    {
+      "id": "Q3",
+      "prompt": "Answer question 3",
+      "section": 1,
+      "answer_type": "text",
+      "expected_answers": [
+        {
+          "type": "text",
+          "value": "environment"
+        }
+      ],
+      "explanation": "Review the recording.",
+      "audio_script": [
+        {
+          "seq": 1,
+          "speaker": "Guide",
+          "voice_slot": "narrator",
+          "text": "The train leaves at seven thirty."
+        }
+      ],
+      "word_limit": {
+        "max_words": 1,
+        "max_numbers": 0
+      }
+    },
+    {
+      "id": "Q4",
+      "prompt": "Answer question 4",
+      "section": 1,
+      "answer_type": "number",
+      "expected_answers": [
+        {
+          "type": "number",
+          "value": "7:30"
+        },
+        {
+          "type": "number",
+          "value": "7.30"
+        }
+      ],
+      "explanation": "Review the recording.",
+      "audio_script": [
+        {
+          "seq": 1,
+          "speaker": "Guide",
+          "voice_slot": "narrator",
+          "text": "The train leaves at seven thirty."
+        }
+      ]
+    },
+    {
+      "id": "Q5",
+      "prompt": "Answer question 5",
+      "section": 1,
+      "answer_type": "matching",
+      "expected_answers": [
+        {
+          "type": "matching",
+          "value": {
+            "one": "A",
+            "two": "B"
+          }
+        }
+      ],
+      "explanation": "Review the recording.",
+      "audio_script": [
+        {
+          "seq": 1,
+          "speaker": "Guide",
+          "voice_slot": "narrator",
+          "text": "The train leaves at seven thirty."
+        }
+      ],
+      "options": [
+        {
+          "key": "A",
+          "text": "A"
+        },
+        {
+          "key": "B",
+          "text": "B"
+        },
+        {
+          "key": "C",
+          "text": "C"
+        }
+      ],
+      "matching_keys": [
+        "one",
+        "two"
+      ]
+    }
+  ]
+}

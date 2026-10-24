@@ -1,15 +1,15 @@
 # Listening Audio MCP
 
-本機日文聽力 MCP Adapter。沿用 Listening Trainer 的 schema、GPT-SoVITS profile
-與合成流程，不複製模型、不直接讀寫 Trainer 資料，也不保存長期學習紀錄。
+本機日文與英文聽力 MCP Adapter。沿用 Listening Trainer 的 schema、GPT-SoVITS profile
+與合成流程；Trainer 預設呼叫共用 Voice Runtime。不複製模型、不直接讀寫 Trainer 資料，也不保存長期學習紀錄。
 
-目前版本 `0.1.0`，MCP contract `listening-audio-v1`，Trainer contract
-`listening-trainer-v1`。第一版支援 `ja`；英文尚未開放。提供五個工具與唯讀 WAV resource。
+目前版本 `0.2.0`，MCP contract `listening-audio-v2`，Trainer contract
+`listening-trainer-v1`。支援日文 schema 1.2 與英文 schema 2.0。提供六個資料工具、一個下載測試 render tool 與唯讀 WAV resource。
 
 ## 啟動
 
 需要 Node.js 20+、已安裝 listening API 擴充的 JLPT Listening Trainer，以及原有
-GPT-SoVITS 環境。套件版本固定為 workspace 已使用的版本；請使用 lockfile 安裝。
+Voice Runtime。套件版本固定為 workspace 已使用的版本；請使用 lockfile 安裝。
 
 ```powershell
 cd C:\GPT_MCPtool\listening_audio
@@ -30,8 +30,9 @@ HTTP 只允許 `127.0.0.1`，拒絕 browser Origin。設定 bearer token 後，h
 
 ```powershell
 cd C:\project\jlpt-listening-trainer
-# 僅在已確認空閒且適合本機配置時設定；9983 可能被 VPN 使用。
-$env:JLPT_TTS_MALE_PORT = '9984'
+# 中央模式只設定共用服務，不管理模型或 TTS 子程序。
+$env:JLPT_TTS_MODE = 'central'
+$env:JLPT_VOICE_RUNTIME_URL = 'http://127.0.0.1:18890'
 .\scripts\run.ps1
 ```
 
@@ -67,8 +68,8 @@ npm run smoke:http
 $env:LISTENING_ALLOW_TEST_WRITE = '1'
 $env:LISTENING_TRAINER_ROOT = 'C:\project\jlpt-listening-trainer'
 $env:LISTENING_TRAINER_PYTHON = 'C:\project\jlpt-listening-trainer\.venv\Scripts\python.exe'
-# 確認此 port 無其他 owner 後，才選用測試覆寫：
-$env:LISTENING_TEST_MALE_PORT = '9984'
+# 隔離 Trainer 使用已啟動的中央服務：
+$env:JLPT_TTS_MODE = 'central'
 npm run smoke:live
 # 實際男聲、女聲、雙角色合成（需現有模型與 GPU）：
 $env:LISTENING_LIVE_TTS = '1'
@@ -84,9 +85,9 @@ npm run smoke:live
 - 同一對話的 AI 若負責出題，已知道答案；安全投影只能避免工具額外洩漏，不能清除模型上下文。
 - `text_options` 顯示日文選項；`audio_only` 隱藏選項文字，出題者必須將選項放入 audio_script。
 - 考試資料由 Trainer 的獨立 `listening-v1.sqlite3` 保存，不會自動出現在舊 Trainer UI 題庫。
-- 目前答後回傳正誤、正解、逐字稿與重點解析；詞彙／文法診斷及 Study 寫回是後續整合範圍。
+- 目前答後回傳正誤、正解、逐字稿與重點解析；英文 completed result 可由 caller 經 English Study 正式 preview/record 寫回；日文 Study 寫回尚未加入。
 - 一次準備一題。若客戶端 TIMEOUT，後端可能仍在合成；先查題目狀態，BUSY 時稍後重試。
-- 音質、口音與題目教學品質仍需人工聽感檢查；英文目前明確拒絕。
+- 音質、口音與題目教學品質仍需人工聽感檢查；英文透過 schema 2.0 明確指定。
 
 ## Tunnel 與 Control Center
 
@@ -99,3 +100,30 @@ Controller 不下載 binary，不複製模型／金鑰，Control Center 不讀�
 npm run runtime:status
 npm run test:runtime
 ```
+
+## 中央語音服務與 health
+
+最小下載 Widget 使用 `listening_render_question`，操作與驗證方式見 [DownloadWidgetTest.md](docs/DownloadWidgetTest.md)。
+目前是 host 相容性測試，尚未宣稱 ChatGPT 真實下載成功；不支援的 Client 會明確顯示狀態。
+
+Trainer 預設 `JLPT_TTS_MODE=central`、`JLPT_VOICE_RUNTIME_URL=http://127.0.0.1:18890`。
+female → yuki，male／narrator → kuro；一般專案只設定 URL 與 voice_id。
+模型、registry、Python、引擎及跨 consumer 推論鎖由 Voice Package 管理。
+
+```powershell
+powershell -NoProfile -File "C:\project\voice package\GPT-SoVITS\scripts\start-service.ps1" -Background
+```
+
+共用服務不屬於 Listening Audio controller 的程序；Restart MCP 不會重啟它。
+舊 TTS port override 只適用明確選用 legacy 的安裝，central 模式忽略它們。
+本次不安裝 Voice Runtime 開機自動啟動，重開機後需使用其自有入口啟動。
+
+MCP `/health` 是 adapter liveness；`listening_health` 回報 Trainer 與 TTS 狀態。
+中央服務離線時，Trainer 在短限時探測後仍回 `ok=true`，TTS 回報
+`mode=central`、`serviceStatus=unavailable`、`listenerRunning=false`；這不阻擋 MCP／tunnel 啟動。
+`available`／`busy` 也不表示已合成或人工聽感通過。prepare 離線回 `TTS_NOT_READY`，
+共用服務忙碌回 `BUSY`；不自動重試、不回退舊引擎。
+
+## 英文聽力與學習紀錄
+
+完整 schema、finalize、raw score、重試與單一路徑寫回見 [EnglishListeningV2.md](docs/EnglishListeningV2.md)。Hub 擁有 assessment 與長期進度，Trainer 保存題目／attempt／音訊；MCP 不直接開啟任何資料庫。

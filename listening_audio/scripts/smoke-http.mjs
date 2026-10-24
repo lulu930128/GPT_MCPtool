@@ -11,9 +11,9 @@ try {
   assert.equal((await fetch(server.url)).status, 401);
   assert.equal((await fetch(server.url, { headers: { authorization: `Bearer ${token}`, origin: "https://evil.test" } })).status, 403);
   const status = await fetch(server.url.replace("/mcp", "/health"), { headers: { authorization: `Bearer ${token}` } });
-  const info = await status.json(); assert.equal(info.toolCount, 5); assert.match(info.buildId, /^[0-9a-f]{16}$/);
+  const info = await status.json(); assert.equal(info.toolCount, 7); assert.match(info.buildId, /^[0-9a-f]{16}$/);
   await client.connect(new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
-  assert.equal((await client.listTools()).tools.length, 5);
+  assert.equal((await client.listTools()).tools.length, 7);
   const result = await client.callTool({ name: "listening_health", arguments: {} });
   assert.equal(result.isError, undefined);
   assert.equal(result.structuredContent.contractVersion, "listening-trainer-v1");

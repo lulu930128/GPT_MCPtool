@@ -493,6 +493,12 @@ function Assert-ListeningAudioSourceReady {
     }
     $newestSource = Get-ChildItem -LiteralPath (Join-Path $Context.projectRoot "src") -Filter "*.ts" -File -Recurse | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
     $artifact = Get-Item -LiteralPath $Context.mcpEntry
+    $uiArtifact = Join-Path $Context.projectRoot "dist\ui\question-download.html"
+    if (-not (Test-Path -LiteralPath $uiArtifact -PathType Leaf)) { throw "BUILD_STALE: Download UI missing; run npm run build." }
+    $newestUi = Get-ChildItem -LiteralPath (Join-Path $Context.projectRoot "ui") -File -Recurse | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+    if ($null -ne $newestUi -and $newestUi.LastWriteTimeUtc -gt (Get-Item -LiteralPath $uiArtifact).LastWriteTimeUtc) {
+        throw "BUILD_STALE: Download UI is newer than dist; run npm run build."
+    }
     if ($null -ne $newestSource -and $newestSource.LastWriteTimeUtc -gt $artifact.LastWriteTimeUtc) {
         throw "BUILD_STALE: Listening Audio TypeScript source is newer than dist; run npm run build."
     }

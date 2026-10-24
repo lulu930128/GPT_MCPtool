@@ -1,11 +1,12 @@
 import type { z } from "zod";
+import { isDeepStrictEqual } from "node:util";
 import type { Config } from "./config.js";
 import { ListeningError } from "./errors.js";
-import { answerResult, examResult, healthResult, safeQuestion, setId, id } from "./schemas.js";
+import { answerResult, completedResult, examResult, healthResult, safeQuestion, setId, id, answerInput } from "./schemas.js";
 export const PREFIX = "/api/listening/v1";
 const codes = new Set(["INVALID_SET", "INVALID_QUESTION", "INVALID_ANSWER", "INVALID_REQUEST", "SET_CONFLICT", "SUBMISSION_CONFLICT",
   "ANSWER_CONFLICT", "EXAM_NOT_FOUND", "AUDIO_NOT_FOUND", "AUDIO_STALE", "AUDIO_INVALID", "AUDIO_TOO_LARGE", "TTS_NOT_READY",
-  "TTS_GENERATION_FAILED", "BUSY", "STORAGE_ERROR", "METHOD_NOT_ALLOWED"]);
+  "TTS_GENERATION_FAILED", "BUSY", "STORAGE_ERROR", "METHOD_NOT_ALLOWED", "ATTEMPT_NOT_FOUND", "ATTEMPT_COMPLETED"]);
 export class TrainerClient {
   constructor(readonly config: Config) {}
   async request(path: string, method = "GET", body?: unknown, audio = false, timeout = 10000): Promise<unknown> {
@@ -60,16 +61,43 @@ export class TrainerClient {
   async prepare(s: string, q: string) {
     return this.parse(safeQuestion, await this.request(this.path(s, q) + "/audio", "POST", {}, false, this.config.timeoutMs));
   }
-  async answer(input: { setId: string; attemptId: string; submissionId: string; answers: Record<string, number> }) {
+  async answer(input: z.infer<typeof answerInput>) {
     const { setId: s, ...body } = input;
     const result = this.parse(answerResult, await this.request(this.path(s) + "/answers", "POST", body));
+    if ("contractVersion" in result) {
+      if (result.setId !== s || result.attemptId !== input.attemptId || result.submissionId !== input.submissionId) throw new ListeningError("TRAINER_INVALID_RESPONSE");
+      validateCumulativeResult(result);
+      if (input.finalize && result.status !== "completed") throw new ListeningError("TRAINER_INVALID_RESPONSE");
+      for (const [key, answer] of Object.entries(input.answers)) {
+        const detail = result.details.find(d => d.questionId === key);
+        if (!detail || !isDeepStrictEqual(detail.answer, answer)) throw new ListeningError("TRAINER_INVALID_RESPONSE");
+      }
+      return result;
+    }
     if (result.setId !== s || result.attemptId !== input.attemptId || result.submissionId !== input.submissionId ||
       result.details.length !== Object.keys(input.answers).length || new Set(result.details.map(d => d.questionId)).size !== result.details.length ||
       result.details.some(d => input.answers[d.questionId] !== d.chosen)) throw new ListeningError("TRAINER_INVALID_RESPONSE");
     return result;
   }
+  async result(s: string, attemptId: string) {
+    id.parse(attemptId);
+    const result = this.parse(completedResult, await this.request(this.path(s) + `/attempts/${encodeURIComponent(attemptId)}`));
+    if (result.setId !== s || result.attemptId !== attemptId) throw new ListeningError("TRAINER_INVALID_RESPONSE");
+    validateCumulativeResult(result);
+    return result;
+  }
   async audio(s: string, q: string): Promise<Buffer> {
     return await this.request(this.path(s, q) + "/audio", "GET", undefined, true, 10000) as Buffer;
+  }
+}
+function validateCumulativeResult(result: z.infer<typeof completedResult>): void {
+  if (result.details.length !== result.answeredCount || new Set(result.details.map(d => d.questionId)).size !== result.details.length ||
+      new Set(result.details.map(d => d.position)).size !== result.details.length ||
+      result.details.some(d => d.awardedPoints > d.maxPoints || d.position > result.questionCount) ||
+      result.details.reduce((sum, d) => sum+d.awardedPoints, 0) !== result.rawScore ||
+      result.rawScore > result.maxScore || result.answeredCount > result.questionCount ||
+      (result.status === "completed" && (result.completedAt === null || result.answeredCount !== result.questionCount || result.details.reduce((sum,d) => sum+d.maxPoints,0) !== result.maxScore))) {
+    throw new ListeningError("TRAINER_INVALID_RESPONSE");
   }
 }
 export function validateWav(data: Buffer): void {

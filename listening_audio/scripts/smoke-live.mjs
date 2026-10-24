@@ -48,8 +48,9 @@ try {
   const linesByQuestion = [
     [{ seq: 1, speaker: "Man", voice_slot: "male", text: "明日の会議は午後三時からです。" }],
     [{ seq: 1, speaker: "Woman", voice_slot: "female", text: "明日の会議は午後三時からです。" }],
-    [{ seq: 1, speaker: "Narrator", voice_slot: "narrator", text: "明日の会議は何時からですか。" },
-     { seq: 2, speaker: "Woman", voice_slot: "female", text: "午後三時からです。" }]
+    [{ seq: 1, speaker: "Woman", voice_slot: "female", text: "明日の会議は何時からですか。" },
+     { seq: 2, speaker: "Man", voice_slot: "male", text: "午後三時からです。" },
+     { seq: 3, speaker: "Woman", voice_slot: "female", text: "わかりました。ありがとうございます。" }]
   ];
   const set = { schema_version: "1.2", set_id: setId, level: "N3", question_count: 3, answer_sequence: [1, 2, 1],
     questions: linesByQuestion.map((script, index) => ({ id: `Q00${index + 1}`, level: "N3", type: "point_comprehension", topic: "company",

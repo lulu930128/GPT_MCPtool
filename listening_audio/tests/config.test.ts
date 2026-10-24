@@ -20,7 +20,7 @@ test("strict envelopes reject arbitrary parameters and unsafe IDs", () => {
 test("bounded schema delegates domain validation but enforces lengths, counts and language", () => {
   const schema = createInput(loadConfig({}));
   assert.equal(schema.safeParse({ set }).success, true);
-  assert.equal(schema.safeParse({ set, language: "en" }).success, false);
+  assert.equal(schema.safeParse({ set, language: "fr" }).success, false);
   assert.equal(schema.safeParse({ set, generateAudio: true }).success, false);
   assert.equal(schema.safeParse({ set: { ...set, question_count: 2 } }).success, false);
   assert.equal(schema.safeParse({ set: { ...set, question_count: 2, questions: [...set.questions, ...set.questions] } }).success, false);

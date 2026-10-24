@@ -7,12 +7,16 @@ Controller 依序啟動 Trainer、MCP、tunnel；關閉時依反向順序，只�
 ## 設定與邊界
 
 複製 `config/runtime.example.psd1` 至忽略的 `.local/runtime.psd1` 後填寫本機路徑。
-Trainer 使用其原有 `.venv`、`src`、資料目錄與 GPT-SoVITS；MCP 不讀取 domain 資料。
+Trainer 使用其原有 `.venv`、`src`、資料目錄並呼叫共用 Voice Runtime；MCP 不讀取 domain 資料。
 此主機沿用 `project_reading` 的 tunnel client 與 DPAPI current-user 金鑰位置，沒有複製金鑰；更新共享 binary 需另外協調。
 元件自有 `.tunnel-client/` profile、`.tmp/` PID/owner/log，不與其他元件共享。
 Control Center 只能讀取安全 health/probe 與 lifecycle metadata，不讀 secret 或 domain payload。
 
-固定埠：Trainer `18811`、MCP `18810`、tunnel admin `18812`。Trainer 的 male TTS 在子程序環境使用 `9984`，避開主機 VPN 使用的 `9983`；不修改 Trainer 原設定檔。TTS 按需求啟動。
+固定埠：Trainer `18811`、MCP `18810`、tunnel admin `18812`。中央語音使用獨立服務 `18890`，
+由 Voice Package 自有入口啟動，模型按需載入。Controller 的 male port `9984` override 僅供 legacy 相容，central 忽略它。
+Controller 不解析 manifest、不啟停共用 Voice Runtime，也不保存模型路徑。
+Trainer health 的中央探測 timeout 為 350 ms，低於 controller 的 2 秒期限；
+語音離線回報 unavailable，不阻擋 Trainer／MCP／tunnel liveness。此前 3 秒探測可能使啟動卡在 Trainer gate。
 MCP 僅監聽 `127.0.0.1`，拒絕 browser Origin。受控 tunnel 是遠端認證邊界，local upstream 使用 `sample_mcp_remote_no_auth`。
 Controller 明確清除子程序的 `LISTENING_MCP_HTTP_TOKEN`，避免未同步的 bearer 設定造成 tunnel/health 不一致；手動 HTTP 啟動仍支援 bearer。
 

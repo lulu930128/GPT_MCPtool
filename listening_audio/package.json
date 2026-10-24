@@ -1,11 +1,11 @@
 {
   "name": "listening-audio-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "license": "UNLICENSED",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node scripts/build-ui.mjs && tsc -p tsconfig.json",
     "test": "npm run build && node --test dist/tests/*.test.js",
     "smoke:http": "npm run build && node scripts/smoke-http.mjs",
     "smoke:live": "npm run build && node scripts/smoke-live.mjs",
@@ -18,11 +18,13 @@
     "tunnel:doctor": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tunnel.ps1 -Action Doctor"
   },
   "dependencies": {
+    "@modelcontextprotocol/ext-apps": "1.7.5",
     "@modelcontextprotocol/sdk": "1.29.0",
     "zod": "3.25.76"
   },
   "devDependencies": {
     "@types/node": "24.13.3",
+    "esbuild": "0.25.12",
     "typescript": "5.9.3"
   },
   "engines": {

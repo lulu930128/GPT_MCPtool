@@ -1,4 +1,6 @@
-# Listening Audio v1
+# Listening Audio contracts
+
+新版英文 schema 2.0 與第七個工具 listening_get_attempt_result 見 [EnglishListeningV2.md](EnglishListeningV2.md)。下列 v1 說明保留為日文相容契約。
 
 所有工具 envelope 都是 strict；未知參數拒絕。完整 Trainer set 可保留 schema 擴充欄位，
 由 Trainer 原有 validator 作完整驗證，Adapter 只限制識別碼、題數與文字／payload 大小。
@@ -8,6 +10,7 @@
 | listening_health | `{}` | 唯讀；契約、ja capability、TTS listener 狀態 |
 | listening_create_exam | `{set, language?:"ja", presentation?:"text_options"或"audio_only"}` | 保存 immutable exam，不生成 |
 | listening_get_question | `{setId, questionId}` | 唯讀安全題目與 missing/stale/ready |
+| listening_render_question | `{setId, questionId}` | 唯讀下載測試 Widget；只呈現題號與既有音檔，不產音 |
 | listening_prepare_audio | `{setId, questionId}` | 準備一題，可啟動既有配置的 TTS |
 | listening_submit_answer | `{setId, attemptId, submissionId, answers:{Q001:1}}` | 冪等提交、已答題解析 |
 
@@ -45,7 +48,10 @@ SUBMISSION_CONFLICT、ANSWER_CONFLICT、TRAINER_UNREACHABLE、TRAINER_INVALID_RE
 TRAINER_HTTP_ERROR、TIMEOUT、BUSY、TTS_NOT_READY、TTS_GENERATION_FAILED、AUDIO_NOT_FOUND、
 AUDIO_STALE、AUDIO_INVALID、AUDIO_TOO_LARGE、RESPONSE_TOO_LARGE。
 
-Health timeout 5 秒，一般操作 10 秒，prepare 預設 300 秒。Trainer 冷啟動最多等待 120 秒，
+Health 保留 `readiness=listener_only` 的 v1 相容欄位；新增可選 `tts.mode`（central／legacy）與
+`tts.serviceStatus`（available／busy／unavailable），皆由 Trainer 提供且不含 URL、模型路徑或 traceback。
+中央模式不啟動程序，語音不可達時 prepare 回 `TTS_NOT_READY`；共用服務忙碌回 `BUSY`。
+Health timeout 5 秒，一般操作 10 秒，prepare 預設 300 秒。Legacy Trainer 冷啟動最多等待 120 秒，
 其餘時間供整題合成使用。client timeout 不代表後端取消。
 遇到 TIMEOUT 先用 get_question 查狀態，仍未 ready 時稍後以同 ID 重試；不建立另一份題組。
 服務不自動重試寫入，也不接受 force、cache delete、reset 或變更模型設定。

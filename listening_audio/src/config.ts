@@ -21,6 +21,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
   return { host, port: number("LISTENING_MCP_PORT", 18810, 1, 65535), trainerBaseUrl: url.origin, token,
     timeoutMs: number("LISTENING_REQUEST_TIMEOUT_MS", 300000, 1000, 300000),
-    maxQuestions: number("LISTENING_MAX_QUESTIONS", 20, 1, 20),
+    maxQuestions: number("LISTENING_MAX_QUESTIONS", 40, 1, 40),
     maxTextLength: number("LISTENING_MAX_TEXT_LENGTH", 5000, 1, 5000) };
 }

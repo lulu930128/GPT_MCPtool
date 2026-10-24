@@ -3,6 +3,7 @@ import { writeFile } from "node:fs/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildId } from "../dist/src/http-server.js";
+import { DOWNLOAD_UI_URI, downloadHtml } from "../dist/src/download-app.js";
 
 // Read-only adoption probe: does not create exams, generate audio or submit answers.
 const client = new Client({ name: "listening-managed-smoke", version: "1" });
@@ -14,11 +15,14 @@ try {
   assert.equal(health.tunnelConfigured, true);
   await client.connect(new StreamableHTTPClientTransport(new URL("http://127.0.0.1:18810/mcp")));
   const tools = (await client.listTools()).tools;
-  assert.deepEqual(tools.map(tool => tool.name).sort(), ["listening_health", "listening_create_exam", "listening_get_question", "listening_prepare_audio", "listening_submit_answer"].sort());
+  assert.deepEqual(tools.map(tool => tool.name).sort(), ["listening_health", "listening_create_exam", "listening_get_question", "listening_prepare_audio", "listening_submit_answer", "listening_render_question", "listening_get_attempt_result"].sort());
+  const ui = await client.readResource({ uri: DOWNLOAD_UI_URI });
+  assert.equal(ui.contents[0].mimeType, "text/html;profile=mcp-app");
+  assert.equal(ui.contents[0].text, downloadHtml());
   const result = await client.callTool({ name: "listening_health", arguments: {} });
   assert.notEqual(result.isError, true);
   assert.equal(result.structuredContent.contractVersion, "listening-trainer-v1");
-  assert.deepEqual(result.structuredContent.languages, ["ja"]);
+  assert.deepEqual(result.structuredContent.languages, ["ja", "en"]);
   assert.equal((await client.listResourceTemplates()).resourceTemplates.length, 1);
   const ready = await fetch("http://127.0.0.1:18812/readyz", { signal: AbortSignal.timeout(5000) });
   assert.equal(ready.status, 200);

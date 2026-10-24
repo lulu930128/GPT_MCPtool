@@ -1,7 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { TrainerClient, validateWav } from "../src/trainer-client.js";
-import { backend, send, question, wav } from "./fixtures.js";
+import { backend, send, question, wav, health } from "./fixtures.js";
+test("central health keeps service availability separate and strips internal details", async () => {
+  for (const serviceStatus of ["available", "busy", "unavailable"]) {
+    const fixture = await backend((_req, res) => send(res, { ...health,
+      tts: { ...health.tts, mode: "central", serviceStatus, paths: "private", error: "traceback" } }));
+    try {
+      assert.deepEqual(await new TrainerClient(fixture.config).health(), { ...health,
+        tts: { ...health.tts, mode: "central", serviceStatus } });
+    } finally { await fixture.close(); }
+  }
+});
 test("projection strips raw answers, paths and metadata before returning a question", async () => {
   const fixture = await backend((_req, res) => send(res, { ...question, audio_script: "secret", correct_option: 3, saved_to: "private",
     options: question.options.map(o => ({ ...o, text_zh_tw: "secret", answer: true })) }));

@@ -4,9 +4,11 @@ import { readFileSync } from "node:fs";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Config } from "./config.js";
 import { CONTRACT, VERSION, TOOL_COUNT, createMcpServer } from "./server.js";
+import { downloadHtml } from "./download-app.js";
 export function buildId() {
   const hash = createHash("sha256");
-  for (const file of ["config", "errors", "schemas", "trainer-client", "server", "http-server"]) hash.update(readFileSync(new URL(`./${file}.js`, import.meta.url)));
+  for (const file of ["config", "errors", "schemas", "trainer-client", "server", "http-server", "download-app"]) hash.update(readFileSync(new URL(`./${file}.js`, import.meta.url)));
+  hash.update(downloadHtml());
   return hash.digest("hex").slice(0, 16);
 }
 function json(res: ServerResponse, status: number, data: unknown) {
