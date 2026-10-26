@@ -1,5 +1,8 @@
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = "Stop"
+if(Test-Path -LiteralPath (Join-Path $PSScriptRoot 'McpControlCenter.Deployment.psm1')){
+    Import-Module (Join-Path $PSScriptRoot 'McpControlCenter.Deployment.psm1')
+}
 if (Test-Path -LiteralPath (Join-Path $PSScriptRoot '..\config\installed-release.json')) {
     $env:PSModulePath='C:\Windows\System32\WindowsPowerShell\v1.0\Modules'
 }
@@ -57,8 +60,22 @@ function Get-McpCcDefaultManifestPath {
     return Join-Path $moduleRoot "config\components.json"
 }
 
+function Get-McpCcCodeDeployment([string]$ManagerRoot) {
+    # Older installed/source fixtures need no new deployment dependency.
+    if(Get-Command Get-McpCcDeploymentLayout -ErrorAction SilentlyContinue){return Get-McpCcDeploymentLayout $ManagerRoot}
+    if((Test-Path -LiteralPath (Join-Path $ManagerRoot 'cc-runtime.json')) -or
+        $ManagerRoot -imatch '\\mcp_control_center\\Runtime\\versions\\[^\\]+$'){throw 'CC_DEPLOYMENT_MODULE_MISSING'}
+    return $null
+}
+
 function Get-McpCcDefaultRuntimeRoot {
     $manager=Split-Path -Parent $PSScriptRoot
+    $deployment=Get-McpCcCodeDeployment $manager
+    if($null -ne $deployment){return $deployment.stateRoot}
+    if(Test-Path -LiteralPath (Join-Path $manager '..\daily-mode.json')){
+        . (Join-Path $manager '..\codex_bridge\scripts\daily-runtime-settings.ps1')
+        return (Read-CbDailySettings (Split-Path -Parent $manager)).ownerRoot
+    }
     if(Test-Path -LiteralPath (Join-Path $manager 'config\installed-release.json')){
         Import-Module (Join-Path $PSScriptRoot 'McpControlCenter.InstalledRelease.psm1')
         $release=Read-McpCcInstalledRelease $manager
@@ -92,9 +109,21 @@ function Get-McpCcBootId {
 
 function Assert-McpCcRuntimeRoot {
     param([Parameter(Mandatory=$true)]$Manifest,[Parameter(Mandatory=$true)][string]$RuntimeRoot)
+    $deployment=Get-McpCcCodeDeployment $Manifest.managerRoot
+    if($null -ne $deployment){
+        if($Manifest.schemaVersion -ne 3 -or $Manifest.managerRoot -ine (Split-Path -Parent $PSScriptRoot) -or
+            [IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\') -ine $deployment.stateRoot){throw 'CC_STATE_ROOT_MISMATCH'}
+        return
+    }
     if (-not (Test-McpCcPathWithinRoot -Path $RuntimeRoot -Root $Manifest.workspaceRoot)) { return }
     # Only a physically installed v6 binding may use the component-owned private
     # subtree. Source callers and arbitrary workspace overrides remain rejected.
+    if(Test-Path -LiteralPath (Join-Path $Manifest.managerRoot '..\daily-mode.json')){
+        . (Join-Path $Manifest.managerRoot '..\codex_bridge\scripts\daily-runtime-settings.ps1')
+        $daily=Read-CbDailySettings (Split-Path -Parent $Manifest.managerRoot)
+        if($RuntimeRoot -cne $daily.ownerRoot){throw 'DAILY_RUNTIME_ROOT_MISMATCH'}
+        return
+    }
     if (-not $script:InstalledManager -or $Manifest.schemaVersion -ne 4 -or
         $Manifest.installedRelease.schemaVersion -ne 6) { throw 'RuntimeRoot must be outside the source workspace.' }
     Import-Module (Join-Path $PSScriptRoot 'McpControlCenter.InstalledRelease.psm1')
@@ -1037,6 +1066,21 @@ function Read-McpCcRegistryManifest {
     $managerRoot = Split-Path -Parent $manifestDirectory
     $workspaceRoot = Split-Path -Parent $managerRoot
     $installedRelease=$null
+    $deployment=Get-McpCcCodeDeployment $managerRoot
+    $bridgeDeployment=$null
+    if($null -ne $deployment){
+        if($Registry.schemaVersion -ne 3 -or $entries.Count -ne 8 -or
+            $managerRoot -ine (Split-Path -Parent $PSScriptRoot)){throw 'CC_REGISTRY_LAYOUT_MISMATCH'}
+        $workspaceRoot=$deployment.workspaceRoot
+        $bridgeDeployment=Get-McpCcBridgeDeployment $workspaceRoot -IncludeState
+    }
+    $dailyLayout=Test-Path -LiteralPath (Join-Path $managerRoot '..\daily-mode.json')
+    if($dailyLayout){
+        if($Registry.schemaVersion -ne 3 -or $managerRoot -ine (Split-Path -Parent $PSScriptRoot)){throw 'DAILY_REGISTRY_REJECTED'}
+        . (Join-Path $managerRoot '..\codex_bridge\scripts\daily-runtime-settings.ps1')
+        $null=Read-CbDailySettings (Split-Path -Parent $managerRoot)
+        $workspaceRoot='C:\GPT_MCPtool'
+    }
     if ($Registry.schemaVersion -eq 4) {
         Import-Module (Join-Path $PSScriptRoot 'McpControlCenter.InstalledRelease.psm1') -ErrorAction Stop
         # An installed registry belongs only to its one installed manager, never a dev manager.
@@ -1060,6 +1104,13 @@ function Read-McpCcRegistryManifest {
         $ids[$id] = $true
         if ($null -ne $installedRelease) {
             $resolvedRoot=Resolve-McpCcInstalledComponentRoot -Release $installedRelease -Id $id -RootToken ([string]$entry.root)
+        } elseif($null -ne $deployment) {
+            $resolvedRoot=Resolve-McpCcDeploymentComponentRoot $deployment $id ([string]$entry.root) $bridgeDeployment
+        } elseif($dailyLayout) {
+            # Preserve the source registry and every other component's existing root.
+            $folder=Split-Path -Leaf ([string]$entry.root)
+            if([string]$entry.root -cne ('..\..\'+$folder)){throw 'DAILY_COMPONENT_ROOT_REJECTED'}
+            $resolvedRoot=if($id -ceq 'codex_bridge'){Join-Path (Split-Path -Parent $managerRoot) 'codex_bridge'}else{Join-Path $workspaceRoot $folder}
         } else {
             if ([IO.Path]::IsPathRooted([string]$entry.root) -or [string]::IsNullOrWhiteSpace([string]$entry.root)) { throw "Component '$id' root must be relative." }
             $resolvedRoot = [IO.Path]::GetFullPath((Join-Path $manifestDirectory ([string]$entry.root)))
@@ -1079,6 +1130,27 @@ function Read-McpCcRegistryManifest {
         $descriptorPath = Resolve-McpCcChildPath -Root $resolvedRoot -RelativePath ([string]$entry.descriptor) -Label "Component '$id' descriptor"
         $descriptorRead = Read-McpCcJsonFile -Path $descriptorPath -Label "component descriptor '$id'"
         $component = ConvertFrom-McpCcComponentDescriptor -Descriptor $descriptorRead.document -RegistryEntry $entry -ResolvedRoot $resolvedRoot -DescriptorPath $descriptorRead.path
+        if($null -ne $deployment -and $id -ceq 'codex_bridge') {
+            foreach($probe in $component.probes) {
+                if($probe.id -ceq 'mcp'){$probe.resolvedOwnerManagedPidFile=Join-Path $bridgeDeployment.bridgeRuntimeDir 'codex-bridge-http-server.pid'}
+                elseif($probe.id -ceq 'tunnel'){
+                    $probe.resolvedOwnerManagedPidFile=Join-Path $bridgeDeployment.bridgeRuntimeDir 'tunnel-client.pid'
+                    $probe.ownerManagedCommandContains=@($bridgeDeployment.tunnelClientPath,'--profile "codex-bridge"',('--pid.file "'+$probe.resolvedOwnerManagedPidFile+'"'))
+                }else{throw 'CC_BRIDGE_PROBE_INVALID'}
+            }
+            $component.connectivityEvidence.resolvedRemoteEvidencePath=Join-Path $bridgeDeployment.bridgeRuntimeDir 'remote-registration-evidence.json'
+        }
+        if($dailyLayout -and $id -ceq 'codex_bridge') {
+            $daily=Read-CbDailySettings (Split-Path -Parent $managerRoot)
+            foreach($probe in $component.probes) {
+                if($probe.id -ceq 'mcp'){$probe.resolvedOwnerManagedPidFile=Join-Path $daily.bridgeRuntimeDir 'codex-bridge-http-server.pid'}
+                elseif($probe.id -ceq 'tunnel'){
+                    $probe.resolvedOwnerManagedPidFile=Join-Path $daily.bridgeRuntimeDir 'tunnel-client.pid'
+                    $probe.ownerManagedCommandContains=@($daily.tunnelClientPath,'--profile "codex-bridge"',('--pid.file "'+$probe.resolvedOwnerManagedPidFile+'"'))
+                }else{throw 'DAILY_BRIDGE_PROBE_INVALID'}
+            }
+            $component.connectivityEvidence.resolvedRemoteEvidencePath=Join-Path $daily.bridgeRuntimeDir 'remote-registration-evidence.json'
+        }
         if ($null -ne $installedRelease) { $component | Add-Member -NotePropertyName installedReleasePending -NotePropertyValue $true }
         if ($null -ne $installedRelease -and $installedRelease.schemaVersion -ge 3 -and $id -ceq 'codex_bridge') {
             $privateRuntime=Join-Path (Get-McpCcInstalledStateRoot $installedRelease) ('installed-bridge\'+$installedRelease.releaseId)
@@ -1142,6 +1214,11 @@ function Read-McpCcRegistryManifest {
         workspaceRoot = $workspaceRoot
     }
     if ($null -ne $installedRelease) { $result | Add-Member -NotePropertyName installedRelease -NotePropertyValue $installedRelease }
+    if ($null -ne $deployment) {
+        $again=Get-McpCcBridgeDeployment $workspaceRoot -IncludeState
+        if(($again|ConvertTo-Json -Compress) -cne ($bridgeDeployment|ConvertTo-Json -Compress)){throw 'CC_BRIDGE_SELECTION_CHANGED'}
+        $result | Add-Member -NotePropertyName codeDeployment -NotePropertyValue $deployment
+    }
     return $result
 }
 
@@ -1161,6 +1238,11 @@ function Get-McpCcComponent {
         [Parameter(Mandatory = $true)]$Manifest,
         [Parameter(Mandatory = $true)][string]$Id
     )
+    if($Id -ceq 'codex_bridge' -and $null -ne $Manifest.PSObject.Properties['codeDeployment']){
+        # A long-lived Workspace IPC owner may hold a manifest from before a
+        # Bridge-only update. Resolve its action against the current selector.
+        $Manifest=Read-McpCcManifest -Path $Manifest.sourcePath
+    }
     $match = @($Manifest.components | Where-Object { $_.id -eq $Id })
     if ($match.Count -ne 1) {
         throw "Unknown component '$Id'."

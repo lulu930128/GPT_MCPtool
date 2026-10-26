@@ -4,6 +4,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { ServerConfig } from "./config.js";
 import { createWorkspaceMcpServer } from "./server.js";
+import { writeCapabilities } from "./write-policy.js";
 
 export interface WorkspaceHttpServerOptions {
   host: string;
@@ -23,6 +24,15 @@ export async function startWorkspaceHttpServer(
   config: ServerConfig,
   options: WorkspaceHttpServerOptions,
 ): Promise<WorkspaceHttpServerHandle> {
+  // Reuse the existing transport credential. No separate human identity proof,
+  // new password, OS identity or installation is introduced for maintenance.
+  const authenticatedMaintenance = !!options.bearerToken && options.bearerToken.length >= 32 && ["127.0.0.1", "::1", "localhost"].includes(options.host);
+  if (config.writePolicy.enabled && (!options.bearerToken || options.bearerToken.length < 32)) {
+    throw new Error("Operate mode requires an explicit WORKSPACE_MCP_HTTP_TOKEN of at least 32 characters.");
+  }
+  if (config.writePolicy.enabled && !["127.0.0.1", "::1", "localhost"].includes(options.host)) {
+    throw new Error("Operate mode HTTP must bind to loopback behind the authenticated transport boundary.");
+  }
   const transports = new Map<string, StreamableHTTPServerTransport>();
   const httpServer = createServer(async (req, res) => {
     if (!req.url) {
@@ -32,10 +42,14 @@ export async function startWorkspaceHttpServer(
 
     const url = new URL(req.url, `http://${req.headers.host || `${options.host}:${options.port}`}`);
     if (url.pathname === "/health") {
+      const capabilities = await writeCapabilities(config.writePolicy);
       sendJson(res, 200, {
         ok: true,
         service: "gpt-project-workspace-mcp",
-        mode: "read-only",
+        mode: capabilities.enabled ? "operate" : "read-only",
+        writeEnabled: capabilities.enabled,
+        manualMaintenanceEnabled: authenticatedMaintenance,
+        writePolicyReason: capabilities.reason,
         defaultRoot: config.defaultRootId,
         rootIds: Array.from(config.roots.keys()),
         assetScopeIds: Array.from(config.assetScopes.keys()),
@@ -53,10 +67,14 @@ export async function startWorkspaceHttpServer(
       sendJson(res, 401, { ok: false, error: "Unauthorized." });
       return;
     }
+    if ((config.writePolicy.enabled || authenticatedMaintenance) && req.headers.origin) {
+      sendJson(res, 403, { ok: false, error: "Browser-origin requests are not accepted in operate mode." });
+      return;
+    }
 
     try {
       if (req.method === "POST") {
-        await handlePost(config, transports, req, res);
+        await handlePost(config, transports, req, res, authenticatedMaintenance, () => httpServer.listening);
         return;
       }
       if (req.method === "GET" || req.method === "DELETE") {
@@ -127,6 +145,8 @@ async function handlePost(
   transports: Map<string, StreamableHTTPServerTransport>,
   req: IncomingMessage,
   res: ServerResponse,
+  authenticatedMaintenance: boolean,
+  httpListening: () => boolean,
 ): Promise<void> {
   const body = await readJsonBody(req);
   const sessionId = getSingleHeader(req, "mcp-session-id");
@@ -154,7 +174,8 @@ async function handlePost(
       }
     };
 
-    const mcpServer = createWorkspaceMcpServer(config);
+    const mcpServer = createWorkspaceMcpServer(config, { authenticatedMaintenance,
+      runtimeContext: () => ({ transport: "streamable-http", httpListening: httpListening() }) });
     await mcpServer.connect(transport);
   }
 

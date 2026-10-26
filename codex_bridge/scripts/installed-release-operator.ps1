@@ -1,5 +1,9 @@
 param(
-    [ValidateSet('Prepare','Install','PlanState','BindState','Preflight','Cutover','Rollback','MigrationPlan','MigrationApply','MigrationVerify','MigrationCleanup','MigrationRollback')][string]$Action='Preflight',
+    [ValidateSet('Prepare','Install','PlanState','BindState','Preflight','Cutover','Rollback','AttestSelectedV6','MigrationPlan','MigrationApply','MigrationVerify','MigrationCleanup','MigrationRollback')][string]$Action='Preflight',
+    [switch]$AutoResume,
+    [string]$InstalledRecoverySha256,
+    [string]$OriginalCutoverSha256,
+    [string]$RecoveryManifestSha256,
     [switch]$RuntimeMigration,
     [switch]$RecoverR15PreCopy,
     [string]$StatePlanSha256,
@@ -25,6 +29,7 @@ param(
 Set-StrictMode -Version 3.0
 $ErrorActionPreference='Stop'
 $utf8=New-Object Text.UTF8Encoding($false)
+$operatorCodePath=$PSCommandPath
 $ps='C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
 $manager=Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'mcp_control_center'
 $verifier=Import-Module (Join-Path $manager 'src\McpControlCenter.InstalledRelease.psm1') -PassThru
@@ -35,6 +40,12 @@ function Assert-IndependentOperator {
     if ((Get-Process -Id $PID).Path -ine $ps) { throw 'WINDOWS_POWERSHELL_REQUIRED' }
     $installed=Test-Path -LiteralPath (Join-Path $manager 'config\installed-release.json')
     $native=Join-Path $manager $(if($installed){'src\RemoteSelfReload.Native.dll'}else{'src\RemoteSelfReload.Native.cs'})
+    if($Action -eq 'AttestSelectedV6' -or $InstalledRecoverySha256){
+        $nativeRoot=if($UpgradeFromReleaseRoot){$UpgradeFromReleaseRoot}else{$ReleaseRoot}
+        if(-not $nativeRoot){throw 'RECOVERY_RELEASE_ROOT_REQUIRED'}
+        $native=Join-Path $nativeRoot 'mcp_control_center\src\RemoteSelfReload.Native.dll'
+        $installed=$true
+    }
     if($installed){ & $verifier {param($p) Assert-McpCcProtectedCodePath $p} $native }
     if (-not ('McpCcReloadNative' -as [type])) { Add-Type -Path $native }
     if($installed -and [McpCcReloadNative].Assembly.Location -ine $native){throw 'INSTALLED_LOADED_NATIVE_MISMATCH'}
@@ -194,7 +205,7 @@ function Assert-OwnedReady($Result,$Health) {
         if($sid.ReturnValue -ne 0 -or $sid.Sid -cne $operator.sid){throw 'CREDENTIAL_OWNER_UNVERIFIED'}
     }
 }
-function Assert-HttpAuthentication([switch]$MigrationStoreStatus,$Release=$null) {
+function Assert-HttpAuthentication([switch]$MigrationStoreStatus,$Release=$null,[switch]$SelectedV6) {
     $headers=@{Accept='application/json, text/event-stream'}
     $token=Get-ReleaseHttpToken $Release
     if($token){$headers.Authorization='Bearer '+$token}
@@ -231,11 +242,31 @@ function Assert-HttpAuthentication([switch]$MigrationStoreStatus,$Release=$null)
             if(($response.PSObject.Properties['isError'] -and $response.isError) -or $store.lifecycle -cne 'OPEN' -or
                 $store.owner -cne 'THIS_INSTANCE' -or $store.presence -cne 'PRESENT'){throw 'MIGRATION_STORE_NOT_OPEN'}
         }
+        if($SelectedV6){
+            # resources/read returns the actual in-memory UI, not merely disk bytes.
+            $r=Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:18828/mcp' -Method Post -Headers $headers -ContentType 'application/json' -TimeoutSec 5 -MaximumRedirection 0 -Body '{"jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri":"ui://codex-bridge/chat-workspace-v15.html"}}'
+            if($r.RawContentLength -gt 2097152){throw 'RECOVERY_UI_LIMIT'}
+            $body=[string]$r.Content
+            if($body.TrimStart() -match '^(event:|data:)'){
+                $data=@($body -split '\r?\n'|Where-Object{$_.StartsWith('data: ')})
+                if($data.Count -ne 1){throw 'RECOVERY_UI_UNVERIFIED'};$body=$data[0].Substring(6)
+            }
+            $response=$body|ConvertFrom-Json
+            $contents=@($response.result.contents)
+            if($response.id -cne 4 -or $contents.Count -ne 1 -or
+                $contents[0].uri -cne 'ui://codex-bridge/chat-workspace-v15.html' -or $contents[0].text -isnot [string]){throw 'RECOVERY_UI_UNVERIFIED'}
+            $ui=Join-Path $Release.root 'codex_bridge\web\codex-console.html'
+            $hash=[Security.Cryptography.SHA256]::Create()
+            try{$loadedHash=([BitConverter]::ToString($hash.ComputeHash($utf8.GetBytes($contents[0].text)))).Replace('-','').ToLowerInvariant()}finally{$hash.Dispose()}
+            if($loadedHash -cne (Get-FileHash -LiteralPath $ui).Hash.ToLowerInvariant()){throw 'RECOVERY_LOADED_UI_CHANGED'}
+        }
         if($token){
             $code=0
             try {$null=Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:18828/mcp' -TimeoutSec 3 -MaximumRedirection 0}catch{if($_.Exception.Response){$code=[int]$_.Exception.Response.StatusCode}}
             if($code -ne 401){throw 'HTTP_AUTH_DOWNGRADE'}
         }
+        if($SelectedV6){return [pscustomobject][ordered]@{uiSha256=$loadedHash;
+            powerShellReviewStore='UNVERIFIED';powerShellHost='UNVERIFIED'}}
     } finally {
         if($session){try{$null=Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:18828/mcp' -Method Delete -Headers $headers -TimeoutSec 3 -MaximumRedirection 0}catch{}}
         $headers.Clear();$token=$null
@@ -247,7 +278,95 @@ function Assert-NoTray {
     finally {if($m){$m.Dispose()}}
     throw 'CLOSE_CONTROL_CENTER_UI_ONLY_THEN_REPEAT'
 }
-function Assert-RemoteReceiptsTerminal([string]$OwnerRoot) {
+function Open-UpgradeTrayHandoff($Previous) {
+    $priorBinding=Get-McpCcInstalledBridgeBinding (Join-Path $Previous.root 'codex_bridge')
+    Assert-McpCcInstalledSelection $priorBinding
+    $pidPath=Join-Path $priorBinding.ownerRoot 'tray.pid'
+    & $verifier {param($p,$s) Assert-McpCcInstalledPrivatePath $p $s} $pidPath $operator.sid
+    $raw=[IO.File]::ReadAllText($pidPath)
+    if($raw -cnotmatch '^\d{1,10}$'){throw 'UPGRADE_TRAY_IDENTITY_UNKNOWN'}
+    $process=Get-Process -Id ([int]$raw) -ErrorAction Stop
+    $signal=$null
+    try {
+        # Retain the native process instance before any shutdown. PID is only a locator.
+        $null=$process.Handle
+        $started=$process.StartTime.ToUniversalTime().Ticks
+        if($process.HasExited -or $process.Path -ine $ps -or $process.SessionId -ne (Get-Process -Id $PID).SessionId -or
+            -not [McpCcReloadNative]::OutsideJobs($process)){throw 'UPGRADE_TRAY_IDENTITY_UNKNOWN'}
+        Assert-McpCcInstalledSelection $priorBinding
+        if([IO.File]::ReadAllText($pidPath) -cne $raw -or $process.HasExited){throw 'UPGRADE_TRAY_IDENTITY_CHANGED'}
+        $name='Local\McpCc.InstalledTrayExit.v1.'+$process.Id+'.'+$started
+        try {
+            $signal=[Threading.EventWaitHandle]::OpenExisting($name,
+                [Security.AccessControl.EventWaitHandleRights]::Modify -bor [Security.AccessControl.EventWaitHandleRights]::ReadPermissions)
+        } catch [Threading.WaitHandleCannotBeOpenedException] { throw 'UPGRADE_TRAY_EXIT_UNAVAILABLE' }
+        $acl=$signal.GetAccessControl()
+        $rules=@($acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
+        if(-not $acl.AreAccessRulesProtected -or $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -cne $operator.sid -or $rules.Count -ne 2){throw 'UPGRADE_TRAY_SIGNAL_ACL_REJECTED'}
+        foreach($rule in $rules){
+            $expected=if($rule.IdentityReference.Value -ceq $operator.sid){'Allow'}elseif($rule.IdentityReference.Value -ceq 'S-1-5-2'){'Deny'}else{throw 'UPGRADE_TRAY_SIGNAL_ACL_REJECTED'}
+            if($rule.IsInherited -or [string]$rule.AccessControlType -cne $expected -or
+                $rule.EventWaitHandleRights -ne [Security.AccessControl.EventWaitHandleRights]::FullControl){throw 'UPGRADE_TRAY_SIGNAL_ACL_REJECTED'}
+        }
+        return @{process=$process;signal=$signal;started=$started;sent=$false}
+    } catch {if($signal){$signal.Dispose()};$process.Dispose();throw}
+}
+function Wait-UpgradeTrayExit($Handoff) {
+    if($Handoff.sent){throw 'UPGRADE_TRAY_SIGNAL_ALREADY_SENT'}
+    if($Handoff.process.HasExited -or $Handoff.process.StartTime.ToUniversalTime().Ticks -ne $Handoff.started -or
+        -not [McpCcReloadNative]::OutsideJobs($Handoff.process)){throw 'UPGRADE_TRAY_IDENTITY_CHANGED'}
+    $Handoff.sent=$true # Never replay, including ambiguous Set/timeout outcomes.
+    if(-not $Handoff.signal.Set()){throw 'UPGRADE_TRAY_SIGNAL_UNKNOWN'}
+    if(-not $Handoff.process.WaitForExit(30000)){throw 'UPGRADE_TRAY_EXIT_TIMEOUT'}
+    Assert-NoTray
+}
+function Get-UpgradeListeners {
+    [Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()
+}
+function Assert-UpgradeRuntimeStopped($Receipt) {
+    foreach($identity in @(@($Receipt.oldPid,$Receipt.oldStartTimeUtc),@($Receipt.oldTunnelPid,$Receipt.oldTunnelStartTimeUtc))){
+        if($identity[0] -isnot [int] -or $identity[0] -le 0 -or [string]::IsNullOrWhiteSpace($identity[1])){throw 'UPGRADE_STOP_RECEIPT_CHANGED'}
+        $old=$null
+        try {$old=Get-Process -Id $identity[0] -ErrorAction Stop}
+        catch {
+            if($_.FullyQualifiedErrorId -notlike 'NoProcessFoundForGivenId,*'){throw 'UPGRADE_PROCESS_STATE_UNKNOWN'}
+        }
+        if($old){
+            try {
+                $null=$old.Handle
+                if(-not $old.HasExited){
+                    if($old.StartTime.ToUniversalTime().ToString('o') -cne $identity[1]){throw 'UPGRADE_FOREIGN_PID_PRESENT'}
+                    throw 'UPGRADE_PREVIOUS_STILL_RUNNING'
+                }
+            } finally {$old.Dispose()}
+        }
+    }
+    if(@(Get-UpgradeListeners|Where-Object{$_.Port -in @(18828,18829)}).Count){throw 'UPGRADE_LISTENER_PRESENT'}
+}
+function Wait-UpgradeRuntimeStopped($Receipt) {
+    $clock=[Diagnostics.Stopwatch]::StartNew()
+    do {
+        try {Assert-UpgradeRuntimeStopped $Receipt;return}
+        catch {
+            if($_.Exception.Message -notin @('UPGRADE_PREVIOUS_STILL_RUNNING','UPGRADE_LISTENER_PRESENT')){throw}
+            if($clock.ElapsedMilliseconds -ge 10000){throw 'UPGRADE_RUNTIME_EXIT_TIMEOUT'}
+        }
+        Start-Sleep -Milliseconds 100
+    } while($true)
+}
+function Get-UpgradeResumeReceipt {
+    Assert-NoTray
+    Assert-OwnerMigrationSourceUnchanged $release $runtime -StoppedUpgrade
+    $saved=Read-BoundedJson $receiptPath 4096
+    if($saved.contract -cne 'mcpcc-installed-cutover-v1' -or $saved.phase -cne 'UPGRADE_STOPPED' -or
+        $saved.releaseId -cne $release.releaseId -or $saved.operatorSid -cne $operator.sid -or
+        $saved.oldBuildId -cne $release.cutover.rollbackBuildId -or $null -ne $saved.newPid -or $null -ne $saved.newTunnelPid -or
+        (Get-FileHash -LiteralPath $backup).Hash.ToLowerInvariant() -cne $release.cutover.legacyStartupSha256 -or
+        (Get-FileHash -LiteralPath $startup).Hash.ToLowerInvariant() -cne $release.cutover.legacyStartupSha256){throw 'UPGRADE_STOP_RECEIPT_CHANGED'}
+    Assert-UpgradeRuntimeStopped $saved
+    return $saved
+}
+function Assert-RemoteReceiptsTerminal([string]$OwnerRoot,[string]$SelectedRoot='') {
     $root=Join-Path $OwnerRoot 'remote-self-reload-r1'
     if(-not(Test-Path -LiteralPath $root)){return}
     & $verifier {param($p,$s) Assert-McpCcInstalledPrivatePath $p $s} $root $operator.sid
@@ -256,7 +375,8 @@ function Assert-RemoteReceiptsTerminal([string]$OwnerRoot) {
     if(-not(Test-Path -LiteralPath $path)){return}
     & $verifier {param($p,$s) Assert-McpCcInstalledPrivatePath $p $s} $path $operator.sid
     $state=Read-BoundedJson $path 1048576
-    $engine=Import-Module (Join-Path $ReleaseRoot 'mcp_control_center\src\McpControlCenter.SelfReload.psm1') -PassThru
+    if(-not $SelectedRoot){$SelectedRoot=$ReleaseRoot}
+    $engine=Import-Module (Join-Path $SelectedRoot 'mcp_control_center\src\McpControlCenter.SelfReload.psm1') -PassThru
     & $engine {
         param($state)
         Assert-R1Fields $state @('contract','receipts')
@@ -350,11 +470,12 @@ function Copy-OwnerMigrationEntry($Row,[string]$SourceRoot,[string]$TargetRoot) 
         }
     }finally{if($outputStream){$outputStream.Dispose()};if($hash){$hash.Dispose()};if($inputStream){$inputStream.Dispose()}}
 }
-function Assert-OwnerMigrationSourceUnchanged($Release,[string]$RuntimeRoot) {
+function Assert-OwnerMigrationSourceUnchanged($Release,[string]$RuntimeRoot,[switch]$StoppedUpgrade) {
     if($Release.schemaVersion -notin @(5,6)){return}
     $saved=Read-BoundedJson (Join-Path $RuntimeRoot 'state-acl-before.json') 16777216
     if($saved.PSObject.Properties['ownerReuse'] -and $saved.ownerReuse -and $saved.ownerReuse.contract -ceq 'installed-active-state-reuse-v1'){
-        $current=Get-InstalledUpgradeState $Release $saved.ownerReuse.releaseRoot -RequireSelected
+        $pin=if($saved.ownerReuse.PSObject.Properties['attestationSha256']){$saved.ownerReuse.attestationSha256}else{''}
+        $current=Get-InstalledUpgradeState $Release $saved.ownerReuse.releaseRoot -RequireSelected -AttestationSha256 $pin -StoppedUpgrade:$StoppedUpgrade
         if((Get-StatePlanHash $current) -cne (Get-StatePlanHash $saved.ownerReuse)){throw 'UPGRADE_BASELINE_CHANGED'}
         return
     }
@@ -610,9 +731,11 @@ function Assert-InstalledUpgradeSelection($Previous) {
     $shell=New-Object -ComObject WScript.Shell
     try {
         $link=$shell.CreateShortcut($startup)
-        if($link.TargetPath -ine $ps -or $link.Arguments -cnotin @(
+        if((($link.TargetPath -ine $ps -or $link.Arguments -cnotin @(
                 ('-NoProfile -File "'+(Join-Path $Previous.root 'mcp_control_center\scripts\tray.ps1')+'" -AutoReconcile'),
-                ('-NoProfile -WindowStyle Hidden -File "'+(Join-Path $Previous.root 'mcp_control_center\scripts\tray.ps1')+'" -AutoReconcile')) -or
+                ('-NoProfile -WindowStyle Hidden -File "'+(Join-Path $Previous.root 'mcp_control_center\scripts\tray.ps1')+'" -AutoReconcile'))) -and
+            ($link.TargetPath -ine (Join-Path $env:WINDIR 'System32\wscript.exe') -or
+                $link.Arguments -cne ('"'+(Join-Path $Previous.root 'mcp_control_center\scripts\start-tray.vbs')+'"'))) -or
             $link.WorkingDirectory -ine (Join-Path $Previous.root 'mcp_control_center')){throw 'UPGRADE_STARTUP_NOT_SELECTED'}
     }finally{[void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell)}
     return (Get-FileHash -LiteralPath $startup).Hash.ToLowerInvariant()
@@ -635,7 +758,172 @@ function Test-InstalledStateManifest($Release,[string]$ExpectedHash) {
     # native dependencies, authentication and configuration) must remain identical.
     return ($before|ConvertTo-Json -Depth 24 -Compress) -ceq ($after|ConvertTo-Json -Depth 24 -Compress)
 }
-function Get-InstalledUpgradeState($Release,[string]$PreviousRoot,[switch]$RequireSelected) {
+function Get-SelectedV6History($Previous) {
+    Assert-McpCcInstalledClosure $Previous
+    if($Previous.schemaVersion -ne 6 -or $Previous.state.operatorSid -cne $operator.sid -or
+        $Previous.state.userProfile -ine $operator.userProfile -or $Previous.state.localAppData -ine $operator.localAppData){throw 'RECOVERY_OPERATOR_REJECTED'}
+    $owner=Get-McpCcInstalledStateRoot $Previous
+    foreach($path in @($owner,$Previous.state.dataDir)){
+        & $verifier {param($p,$s) Assert-McpCcInstalledPrivateTree $p $s} $path $operator.sid
+    }
+    $runtime=Join-Path $owner ('installed-bridge\'+$Previous.releaseId)
+    & $verifier {param($p,$s) Assert-McpCcInstalledStateReceipt $p $s} $runtime $operator.sid
+    $binding=Read-BoundedJson (Join-Path $runtime 'state-binding.json') 4096
+    $plan=Read-BoundedJson (Join-Path $runtime 'state-acl-before.json') 16777216
+    if($binding.phase -cne 'STATE_BOUND' -or (Get-StatePlanHash $plan) -cne $binding.planSha256 -or
+        $plan.releaseId -cne $Previous.releaseId -or -not(Test-InstalledStateManifest $Previous $plan.manifestSha256)){throw 'RECOVERY_STATE_PLAN_CHANGED'}
+    $cutover=Read-BoundedJson (Join-Path $runtime 'operator-cutover.json') 4096
+    if($cutover.contract -cne 'mcpcc-installed-cutover-v1' -or $cutover.phase -cne 'UNKNOWN' -or
+        $cutover.lastPhase -cne 'SELECTED' -or $cutover.releaseId -cne $Previous.releaseId -or
+        $cutover.operatorSid -cne $operator.sid -or $cutover.oldBuildId -cne $Previous.cutover.rollbackBuildId -or
+        $cutover.oldBuildId -cnotmatch '^[0-9a-f]{16}$'){throw 'RECOVERY_HISTORY_REJECTED'}
+    foreach($name in @('newPid','newBuildId','newTunnelPid','newStartTimeUtc','newTunnelStartTimeUtc')){
+        if($null -ne $cutover.$name){throw 'RECOVERY_HISTORY_REJECTED'}
+    }
+    foreach($name in @('oldPid','oldTunnelPid')){if($cutover.$name -isnot [int] -or $cutover.$name -le 0){throw 'RECOVERY_HISTORY_REJECTED'}}
+    if($cutover.oldPid -eq $cutover.oldTunnelPid){throw 'RECOVERY_HISTORY_REJECTED'}
+    $pins=[ordered]@{releaseId=$Previous.releaseId;releaseRoot=$Previous.root;operatorSid=$operator.sid;
+        manifestSha256=(Get-FileHash -LiteralPath $Previous.sourcePath).Hash.ToLowerInvariant();originalPhase='UNKNOWN';originalLastPhase='SELECTED'}
+    foreach($entry in @(@('bindingSha256','state-binding.json'),@('planSha256','state-acl-before.json'),
+        @('originalCutoverSha256','operator-cutover.json'),@('rollbackStartupSha256','legacy-startup.lnk'))){
+        $path=Join-Path $runtime $entry[1]
+        & $verifier {param($p,$s) Assert-McpCcInstalledPrivatePath $p $s} $path $operator.sid
+        $pins[$entry[0]]=(Get-FileHash -LiteralPath $path).Hash.ToLowerInvariant()
+    }
+    if($pins.rollbackStartupSha256 -cne $Previous.cutover.legacyStartupSha256){throw 'RECOVERY_ROLLBACK_CHANGED'}
+    return [pscustomobject]$pins
+}
+function Get-SelectedV6Observation($Previous) {
+    $clock=[Diagnostics.Stopwatch]::StartNew();$started=[DateTime]::UtcNow
+    $history=Get-SelectedV6History $Previous
+    $startup=Assert-InstalledUpgradeSelection $Previous
+    # Keep the physically loaded canonical verifier (including its native DLL).
+    # The selected Controller builds/verifies its full binding in its own process;
+    # importing the previous verifier here would collide with the successor DLL.
+    $owner=Get-McpCcInstalledStateRoot $Previous
+    $binding=[pscustomobject]@{activationReady=$true;releaseRoot=$Previous.root;operatorSid=$operator.sid;
+        windowsRoot=$operator.windows;ownerRoot=$owner;codeRoot=(Join-Path $Previous.root 'codex_bridge');
+        runtimeRoot=(Join-Path $owner ('installed-bridge\'+$Previous.releaseId))}
+    & $verifier {param($b) Assert-McpCcInstalledSelection $b} $binding
+    foreach($entry in @(@('McpCcNormalNative','NormalOperator.Host.dll'),@('McpCcReloadNative','RemoteSelfReload.Native.dll'))){
+        $path=Join-Path $Previous.root ('mcp_control_center\src\'+$entry[1])
+        if(-not($entry[0] -as [type])){Add-Type -Path $path}
+        $loaded=($entry[0] -as [type]).Assembly.Location
+        # A fresh operator may have loaded the successor's identical native DLL.
+        & $verifier {param($p) Assert-McpCcProtectedCodePath $p} $loaded
+        if((Get-FileHash -LiteralPath $loaded).Hash -cne (Get-FileHash -LiteralPath $path).Hash){throw 'RECOVERY_LOADED_NATIVE_CHANGED'}
+    }
+    $health=Get-Health -Idle
+    $status=Invoke-Controller (Join-Path $Previous.root 'codex_bridge') Status
+    Assert-OwnedReady $status $health
+    $processes=New-Object 'Collections.Generic.List[object]';$identities=@()
+    try{
+        foreach($row in @(@($health.pid,$Previous.dependencies.node.path,'codex-bridge-http-server.owner.json'),
+            @($status.after.tunnel.pid,$Previous.dependencies.tunnelClient.path,'tunnel-client.owner.json'))){
+            $process=Get-Process -Id $row[0] -ErrorAction Stop;$processes.Add($process)
+            $proof=[McpCcNormalNative]::Inspect($process)
+            $metadata=Read-BoundedJson (Join-Path $binding.runtimeRoot $row[2]) 4096
+            if($proof.sid -cne $operator.sid -or $proof.elevated -or $proof.inAnyJob -or $proof.image -ine $row[1] -or
+                $proof.session -ne (Get-Process -Id $PID).SessionId -or $metadata.pid -ne $proof.pid -or
+                $metadata.executablePath -ine $proof.image -or
+                ([DateTime]::Parse($metadata.startTimeUtc).ToUniversalTime().Ticks) -ne $proof.startedUtcTicks){throw 'RECOVERY_PROCESS_IDENTITY_CHANGED'}
+            $identities+=,[pscustomobject][ordered]@{pid=$proof.pid;startedUtcTicks=[string]$proof.startedUtcTicks;sid=$proof.sid;
+                image=$proof.image;session=$proof.session;elevated=$proof.elevated;inAnyJob=$proof.inAnyJob}
+        }
+        $mcp=Assert-HttpAuthentication -Release $Previous -SelectedV6
+        Assert-RemoteReceiptsTerminal (Get-McpCcInstalledStateRoot $Previous) -SelectedRoot $Previous.root
+        $ready=Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:18829/readyz' -TimeoutSec 3 -MaximumRedirection 0
+        if($ready.StatusCode -ne 200 -or $ready.Content.Trim() -cnotin @('ready','ok')){throw 'TUNNEL_NOT_READY'}
+        & $verifier {param($b) Assert-McpCcInstalledSelection $b} $binding
+        if($startup -cne (Assert-InstalledUpgradeSelection $Previous) -or
+            (Get-StatePlanHash $history) -cne (Get-StatePlanHash (Get-SelectedV6History $Previous)) -or
+            (Get-StatePlanHash $mcp) -cne (Get-StatePlanHash (Assert-HttpAuthentication -Release $Previous -SelectedV6))){throw 'RECOVERY_EVIDENCE_CHANGED'}
+        Assert-RemoteReceiptsTerminal (Get-McpCcInstalledStateRoot $Previous) -SelectedRoot $Previous.root
+        $after=Get-Health -Idle;$current=Invoke-Controller (Join-Path $Previous.root 'codex_bridge') Status
+        Assert-OwnedReady $current $after
+        if($after.buildId -cne $health.buildId -or $after.pid -ne $health.pid -or $current.after.tunnel.pid -ne $status.after.tunnel.pid){throw 'RECOVERY_RUNTIME_CHANGED'}
+        for($i=0;$i -lt $processes.Count;$i++){
+            $proof=[McpCcNormalNative]::Inspect($processes[$i])
+            foreach($name in @('pid','startedUtcTicks','sid','image','session','elevated','inAnyJob')){
+                if([string]$proof.$name -cne [string]$identities[$i].$name){throw 'RECOVERY_PROCESS_IDENTITY_CHANGED'}
+            }
+        }
+        if($clock.Elapsed.TotalSeconds -gt 120 -or [DateTime]::UtcNow -lt $started -or
+            [Math]::Abs(([DateTime]::UtcNow-$started).TotalSeconds-$clock.Elapsed.TotalSeconds) -gt 5){throw 'RECOVERY_OBSERVATION_EXPIRED'}
+        return [pscustomobject][ordered]@{history=$history;startupSha256=$startup;buildId=$health.buildId;
+            codeRoot=$binding.codeRoot;mcp=$mcp;processes=$identities;jobsScope='all';activeJobs=0;awaitingApproval=0;r1ReceiptsTerminal=$true}
+    }finally{foreach($process in $processes){$process.Dispose()}}
+}
+function Get-VerifiedSelectedV6Attestation($Previous,[string]$Sha256,[switch]$Observe) {
+    if($Sha256 -cnotmatch '^[0-9a-f]{64}$'){throw 'UPGRADE_PREVIOUS_NOT_ACCEPTED'}
+    $runtime=Join-Path (Get-McpCcInstalledStateRoot $Previous) ('installed-bridge\'+$Previous.releaseId)
+    $path=Join-Path $runtime ('selected-v6-attestation-'+$Sha256+'.json')
+    & $verifier {param($p,$s) Assert-McpCcInstalledPrivatePath $p $s} $path $operator.sid
+    if((Get-FileHash -LiteralPath $path).Hash.ToLowerInvariant() -cne $Sha256){throw 'RECOVERY_ATTESTATION_CHANGED'}
+    $audit=Read-BoundedJson $path 16384
+    & $verifier {param($a) Assert-McpCcInstalledFields $a @('contract','phase','createdUtc','expiresUtc','operatorCodeSha256','historyChanged','cutoverReplayed','evidence')} $audit
+    if($audit.contract -cne 'installed-selected-v6-attestation-v1' -or $audit.phase -cne 'ATTESTED_SELECTED_V6' -or
+        $audit.operatorCodeSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        $audit.historyChanged -cne $false -or $audit.cutoverReplayed -cne $false -or
+        (Get-StatePlanHash $audit.evidence.history) -cne (Get-StatePlanHash (Get-SelectedV6History $Previous))){throw 'RECOVERY_ATTESTATION_REJECTED'}
+    $created=[DateTimeOffset]::ParseExact($audit.createdUtc,'o',[Globalization.CultureInfo]::InvariantCulture)
+    $expires=[DateTimeOffset]::ParseExact($audit.expiresUtc,'o',[Globalization.CultureInfo]::InvariantCulture)
+    if($expires -ne $created.AddHours(4) -or $created.Offset -ne [TimeSpan]::Zero -or $expires.Offset -ne [TimeSpan]::Zero){throw 'RECOVERY_ATTESTATION_TIME_REJECTED'}
+    if($Observe){
+        if([DateTimeOffset]::UtcNow -lt $created -or [DateTimeOffset]::UtcNow -gt $expires){throw 'RECOVERY_ATTESTATION_EXPIRED'}
+        $current=Get-SelectedV6Observation $Previous
+        if((Get-StatePlanHash $current) -cne (Get-StatePlanHash $audit.evidence)){throw 'RECOVERY_ATTESTATION_STALE'}
+        if([DateTimeOffset]::UtcNow -gt $expires){throw 'RECOVERY_ATTESTATION_EXPIRED'}
+    }
+    if((Get-FileHash -LiteralPath $path).Hash.ToLowerInvariant() -cne $Sha256){throw 'RECOVERY_ATTESTATION_CHANGED'}
+    return $Sha256
+}
+function Assert-RecoveryBoundSuccessor($Release,$Previous,[string]$Pin,[switch]$StoppedUpgrade) {
+    # Historical verification is only for an already-bound successor. It cannot
+    # admit a new Prepare/Plan/Bind, renew an expired pin, or invent a stopped phase.
+    if(-not $Release){throw 'RECOVERY_BOUND_SUCCESSOR_REQUIRED'}
+    $runtime=Join-Path (Get-McpCcInstalledStateRoot $Release) ('installed-bridge\'+$Release.releaseId)
+    & $verifier {param($p,$s) Assert-McpCcInstalledStateReceipt $p $s} $runtime $operator.sid
+    $receipt=Read-BoundedJson (Join-Path $runtime 'state-binding.json') 4096
+    $plan=Read-BoundedJson (Join-Path $runtime 'state-acl-before.json') 16777216
+    if((Get-StatePlanHash $plan) -cne $receipt.planSha256 -or $plan.releaseId -cne $Release.releaseId -or
+        -not(Test-InstalledStateManifest $Release $plan.manifestSha256) -or
+        $plan.ownerReuse.contract -cne 'installed-active-state-reuse-v1' -or
+        $plan.ownerReuse.releaseRoot -ine $Previous.root -or $plan.ownerReuse.attestationSha256 -cne $Pin){throw 'RECOVERY_BOUND_SUCCESSOR_CHANGED'}
+    if($StoppedUpgrade){
+        $stopped=Read-BoundedJson (Join-Path $runtime 'operator-cutover.json') 4096
+        if($stopped.contract -cne 'mcpcc-installed-cutover-v1' -or $stopped.phase -cne 'UPGRADE_STOPPED' -or
+            $stopped.releaseId -cne $Release.releaseId -or $stopped.operatorSid -cne $operator.sid -or
+            $stopped.oldBuildId -cne $Release.cutover.rollbackBuildId -or $null -ne $stopped.newPid -or
+            $null -ne $stopped.newTunnelPid){throw 'RECOVERY_STOPPED_SUCCESSOR_REQUIRED'}
+    }
+}
+function New-SelectedV6Attestation($Previous,[string]$OriginalHash,[string]$ManifestHash) {
+    if($OriginalHash -cnotmatch '^[0-9a-f]{64}$' -or $ManifestHash -cnotmatch '^[0-9a-f]{64}$'){throw 'RECOVERY_REVIEW_PINS_REQUIRED'}
+    $history=Get-SelectedV6History $Previous
+    if($history.originalCutoverSha256 -cne $OriginalHash -or $history.manifestSha256 -cne $ManifestHash){throw 'RECOVERY_REVIEW_PINS_CHANGED'}
+    $evidence=Get-SelectedV6Observation $Previous
+    if((Get-StatePlanHash $history) -cne (Get-StatePlanHash $evidence.history)){throw 'RECOVERY_EVIDENCE_CHANGED'}
+    $created=[DateTimeOffset]::UtcNow
+    $document=[ordered]@{contract='installed-selected-v6-attestation-v1';phase='ATTESTED_SELECTED_V6';
+        createdUtc=$created.ToString('o');expiresUtc=$created.AddHours(4).ToString('o');
+        operatorCodeSha256=(Get-FileHash -LiteralPath $operatorCodePath).Hash.ToLowerInvariant();historyChanged=$false;cutoverReplayed=$false;evidence=$evidence}
+    $bytes=$utf8.GetBytes(($document|ConvertTo-Json -Depth 12))
+    if($bytes.Length -gt 16384){throw 'RECOVERY_ATTESTATION_LIMIT'}
+    $hash=[Security.Cryptography.SHA256]::Create()
+    try{$digest=([BitConverter]::ToString($hash.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()}finally{$hash.Dispose()}
+    $runtime=Join-Path (Get-McpCcInstalledStateRoot $Previous) ('installed-bridge\'+$Previous.releaseId)
+    & $verifier {param($p,$s) Assert-McpCcInstalledPrivatePath $p $s} $runtime $operator.sid
+    $path=Join-Path $runtime ('selected-v6-attestation-'+$digest+'.json')
+    # CreateNew + durable flush. Interrupted/partial bytes cannot match the filename
+    # pin; never replace/delete either the historical receipt or a prior attestation.
+    $stream=[IO.File]::Open($path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+    try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
+    $null=Get-VerifiedSelectedV6Attestation $Previous $digest -Observe
+    return [pscustomobject]@{phase='ATTESTED_SELECTED_V6';releaseId=$Previous.releaseId;attestationSha256=$digest;
+        expiresUtc=$document.expiresUtc;historyChanged=$false;runtimeChanged=$false}
+}
+function Get-InstalledUpgradeState($Release,[string]$PreviousRoot,[switch]$RequireSelected,[string]$AttestationSha256='',[switch]$StoppedUpgrade) {
     # Retain the active canonical state. Never migrate it back through source or
     # trust a stale PID from the previous cutover after an ordinary restart.
     $previous=Read-McpCcInstalledRelease (Join-Path $PreviousRoot 'mcp_control_center')
@@ -673,31 +961,40 @@ function Get-InstalledUpgradeState($Release,[string]$PreviousRoot,[switch]$Requi
     if((Get-StatePlanHash $plan) -cne $receipt.planSha256 -or $plan.releaseId -cne $previous.releaseId -or
         -not(Test-InstalledStateManifest $previous $plan.manifestSha256)){throw 'UPGRADE_STATE_PLAN_CHANGED'}
     $cutover=Join-Path $runtime 'operator-cutover.json';$accepted=Read-BoundedJson $cutover 4096
-    if($accepted.contract -cne 'mcpcc-installed-cutover-v1' -or $accepted.phase -cne 'LOCAL_ACCEPTED' -or
+    $recovery=$null
+    if($accepted.phase -cne 'LOCAL_ACCEPTED' -and $previous.schemaVersion -eq 6 -and $AttestationSha256){
+        if(-not $RequireSelected -or $StoppedUpgrade){Assert-RecoveryBoundSuccessor $Release $previous $AttestationSha256 -StoppedUpgrade:$StoppedUpgrade}
+        $recovery=Get-VerifiedSelectedV6Attestation $previous $AttestationSha256 -Observe:($RequireSelected -and -not $StoppedUpgrade)
+    }
+    if($accepted.contract -cne 'mcpcc-installed-cutover-v1' -or ($accepted.phase -cne 'LOCAL_ACCEPTED' -and -not $recovery) -or
         $accepted.releaseId -cne $previous.releaseId -or $accepted.operatorSid -cne $operator.sid){throw 'UPGRADE_PREVIOUS_NOT_ACCEPTED'}
     if($RequireSelected){
         $startupHash=Assert-InstalledUpgradeSelection $previous
         if($Release -and $startupHash -cne $Release.cutover.legacyStartupSha256){throw 'UPGRADE_STARTUP_CHANGED'}
     }
-    return [pscustomobject][ordered]@{contract='installed-active-state-reuse-v1';releaseRoot=$previous.root;releaseId=$previous.releaseId;
+    $result=[pscustomobject][ordered]@{contract='installed-active-state-reuse-v1';releaseRoot=$previous.root;releaseId=$previous.releaseId;
         manifestSha256=$manifestHash;receiptSha256=(Get-FileHash -LiteralPath $receiptPath).Hash.ToLowerInvariant();
         backupSha256=(Get-FileHash -LiteralPath $backup).Hash.ToLowerInvariant();cutoverSha256=(Get-FileHash -LiteralPath $cutover).Hash.ToLowerInvariant()}
+    if($recovery){$result|Add-Member NoteProperty attestationSha256 $recovery}
+    return $result
 }
-function Get-CutoverBaselineRoot($Release,[string]$RuntimeRoot) {
+function Get-CutoverBaselineRoot($Release,[string]$RuntimeRoot,[string]$ExpectedAttestationSha256='') {
     & $verifier {param($p,$s) Assert-McpCcInstalledStateReceipt $p $s} $RuntimeRoot $operator.sid
     $saved=Read-BoundedJson (Join-Path $RuntimeRoot 'state-acl-before.json') 16777216
     $receipt=Read-BoundedJson (Join-Path $RuntimeRoot 'state-binding.json') 4096
     if((Get-StatePlanHash $saved) -cne $receipt.planSha256 -or $saved.releaseId -cne $Release.releaseId -or
         -not(Test-InstalledStateManifest $Release $saved.manifestSha256)){throw 'CUTOVER_STATE_PLAN_CHANGED'}
     if($saved.PSObject.Properties['ownerReuse'] -and $saved.ownerReuse -and $saved.ownerReuse.contract -ceq 'installed-active-state-reuse-v1'){
-        $current=Get-InstalledUpgradeState $Release $saved.ownerReuse.releaseRoot
+        $pin=if($saved.ownerReuse.PSObject.Properties['attestationSha256']){$saved.ownerReuse.attestationSha256}else{''}
+        if($ExpectedAttestationSha256 -and $ExpectedAttestationSha256 -cne $pin){throw 'RECOVERY_BOUND_PIN_CHANGED'}
+        $current=Get-InstalledUpgradeState $Release $saved.ownerReuse.releaseRoot -AttestationSha256 $pin
         if((Get-StatePlanHash $current) -cne (Get-StatePlanHash $saved.ownerReuse)){throw 'UPGRADE_BASELINE_CHANGED'}
         return $current.releaseRoot
     }
     if($Release.schemaVersion -eq 6){throw 'MIGRATION_USE_MIGRATION_ACTIONS'}
     return $Release.legacyWorkspaceRoot
 }
-function Get-StateBindingPlan($Release,[string]$PreviousRoot='',[string]$RecoveryPath='',[string]$RecoveryHash='',[switch]$AllowSourceAdvance,[string]$UpgradeRoot='') {
+function Get-StateBindingPlan($Release,[string]$PreviousRoot='',[string]$RecoveryPath='',[string]$RecoveryHash='',[switch]$AllowSourceAdvance,[string]$UpgradeRoot='',[string]$AttestationSha256='') {
     if($Release.schemaVersion -notin @(4,5,6)){throw 'STATE_BINDING_V4_REQUIRED'}
     $owner=Get-McpCcInstalledStateRoot $Release
     if($Release.schemaVersion -eq 6 -and -not $UpgradeRoot){throw 'MIGRATION_OR_V6_UPGRADE_REQUIRED'}
@@ -711,7 +1008,7 @@ function Get-StateBindingPlan($Release,[string]$PreviousRoot='',[string]$Recover
     $migration=$null;$reuse=$null
     if($Release.schemaVersion -in @(5,6)){
         if(Test-Path -LiteralPath $owner){
-            if($UpgradeRoot){$reuse=Get-InstalledUpgradeState $Release $UpgradeRoot -RequireSelected}
+            if($UpgradeRoot){$reuse=Get-InstalledUpgradeState $Release $UpgradeRoot -RequireSelected -AttestationSha256 $AttestationSha256}
             elseif($PreviousRoot){$reuse=Get-InactiveBoundState $Release $PreviousRoot $RecoveryPath $RecoveryHash -AllowSourceAdvance:$AllowSourceAdvance}
             else{throw 'OWNER_DESTINATION_EXISTS_INSPECT_DO_NOT_RETRY'}
         }elseif($PreviousRoot){throw 'STATE_REUSE_OWNER_MISSING'}
@@ -795,11 +1092,11 @@ function Copy-StateSnapshot($File) {
     } finally{$hash.Dispose();$sourceStream.Dispose()}
     if((Get-FileHash -LiteralPath $File.target).Hash.ToLowerInvariant() -cne $File.sha256){throw 'DEPLOYMENT_COPY_MISMATCH'}
 }
-function Invoke-StateBinding($Release,[string]$ExpectedHash,[string]$PreviousRoot='',[string]$RecoveryPath='',[string]$RecoveryHash='',[switch]$AllowSourceAdvance,[string]$UpgradeRoot='') {
+function Invoke-StateBinding($Release,[string]$ExpectedHash,[string]$PreviousRoot='',[string]$RecoveryPath='',[string]$RecoveryHash='',[switch]$AllowSourceAdvance,[string]$UpgradeRoot='',[string]$AttestationSha256='') {
     $owner=Get-McpCcInstalledStateRoot $Release
     $runtime=Join-Path $owner ('installed-bridge\'+$Release.releaseId)
     if(Test-Path -LiteralPath $runtime){throw 'STATE_BINDING_EXISTS_INSPECT_DO_NOT_RETRY'}
-    $plan=Get-StateBindingPlan $Release $PreviousRoot $RecoveryPath $RecoveryHash -AllowSourceAdvance:$AllowSourceAdvance -UpgradeRoot $UpgradeRoot
+    $plan=Get-StateBindingPlan $Release $PreviousRoot $RecoveryPath $RecoveryHash -AllowSourceAdvance:$AllowSourceAdvance -UpgradeRoot $UpgradeRoot -AttestationSha256 $AttestationSha256
     if($ExpectedHash -cnotmatch '^[0-9a-f]{64}$' -or (Get-StatePlanHash $plan) -cne $ExpectedHash){throw 'STATE_PLAN_CHANGED_NO_MUTATION'}
     $reuse=if($plan.PSObject.Properties['ownerReuse']){$plan.ownerReuse}else{$null}
     if($plan.migration -and -not $reuse){
@@ -859,7 +1156,7 @@ function Invoke-StateBinding($Release,[string]$ExpectedHash,[string]$PreviousRoo
         foreach($root in $plan.roots){& $verifier {param($p,$s) Assert-McpCcInstalledPrivateTree $p $s} $root $operator.sid}
         Assert-OwnerMigrationSourceUnchanged $Release $runtime
         if($reuse){
-            $currentReuse=if($UpgradeRoot){Get-InstalledUpgradeState $Release $UpgradeRoot -RequireSelected}else{Get-InactiveBoundState $Release $PreviousRoot $RecoveryPath $RecoveryHash -AllowSourceAdvance:$AllowSourceAdvance}
+            $currentReuse=if($UpgradeRoot){Get-InstalledUpgradeState $Release $UpgradeRoot -RequireSelected -AttestationSha256 $AttestationSha256}else{Get-InactiveBoundState $Release $PreviousRoot $RecoveryPath $RecoveryHash -AllowSourceAdvance:$AllowSourceAdvance}
             if((Get-StatePlanHash $currentReuse) -cne (Get-StatePlanHash $reuse)){throw 'STATE_REUSE_EVIDENCE_CHANGED'}
         }
         Write-Receipt $receipt @{contract='installed-state-binding-v1';phase='STATE_BOUND';planSha256=$ExpectedHash;backup=$backup}
@@ -872,6 +1169,15 @@ function Invoke-StateBinding($Release,[string]$ExpectedHash,[string]$PreviousRoo
 }
 
 Assert-IndependentOperator
+if($AutoResume -and $Action -ne 'Cutover'){throw 'AUTO_RESUME_CUTOVER_ONLY'}
+if(($OriginalCutoverSha256 -or $RecoveryManifestSha256) -and $Action -ne 'AttestSelectedV6'){throw 'RECOVERY_ACTION_REJECTED'}
+if($InstalledRecoverySha256 -and ($InstalledRecoverySha256 -cnotmatch '^[0-9a-f]{64}$' -or
+    $Action -notin @('Prepare','PlanState','BindState','Preflight','Cutover','Rollback') -or $RuntimeMigration -or
+    $PreviousReleaseRoot -or $StateRecoveryReceipt -or $StateRecoverySha256 -or $AllowRecoveredSourceAdvance)){throw 'RECOVERY_ACTION_REJECTED'}
+if($InstalledRecoverySha256 -and $Action -in @('Prepare','PlanState','BindState') -and -not $UpgradeFromReleaseRoot){throw 'RECOVERY_ACTION_REJECTED'}
+if($Action -eq 'AttestSelectedV6' -and ($RuntimeMigration -or $UpgradeFromReleaseRoot -or $PreviousReleaseRoot -or
+    $StateRecoveryReceipt -or $StateRecoverySha256 -or $AllowRecoveredSourceAdvance -or $InitializeBridgeBearer -or
+    $RecoverR15PreCopy -or $StatePlanSha256 -or $CandidateRoot -or $PackageRoot -or $PackageFile)){throw 'RECOVERY_ACTION_REJECTED'}
 if($InitializeBridgeBearer -and ($Action -ne 'Prepare' -or -not $UpgradeFromReleaseRoot -or $RuntimeMigration)){
     throw 'BRIDGE_BEARER_INITIALIZATION_ACTION_REJECTED'
 }
@@ -898,7 +1204,7 @@ if($Action -eq 'Prepare') {
     if($CandidateRoot -ieq $LegacyWorkspaceRoot -or $CandidateRoot.StartsWith($LegacyWorkspaceRoot+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'ISOLATED_BUILT_CANDIDATE_REQUIRED'}
     $previous=$null;$baselineRoot=$LegacyWorkspaceRoot
     if($UpgradeFromReleaseRoot){
-        $upgrade=Get-InstalledUpgradeState $null $UpgradeFromReleaseRoot -RequireSelected
+        $upgrade=Get-InstalledUpgradeState $null $UpgradeFromReleaseRoot -RequireSelected -AttestationSha256 $InstalledRecoverySha256
         $previous=Read-McpCcInstalledRelease (Join-Path $upgrade.releaseRoot 'mcp_control_center')
         if($RuntimeMigration -and $previous.schemaVersion -ne 5){throw 'MIGRATION_V5_BASE_REQUIRED'}
         if($previous.legacyWorkspaceRoot -ine $LegacyWorkspaceRoot){throw 'UPGRADE_WORKSPACE_CHANGED'}
@@ -937,8 +1243,8 @@ if($Action -eq 'Prepare') {
     # Ship only the selected lifecycle surface. Legacy standalone tunnel/Startup/
     # restart launchers must not reintroduce mutable selectors into installed code.
     $scriptLists=@{
-        mcp_control_center=@('tray.ps1','control-center.ps1','component-health.ps1','invoke-component-controller.ps1');
-        codex_bridge=@('runtime-control.ps1','codex-bridge-runtime.psm1','bridge-bearer.ps1','component-runtime.psm1','runtime-build-id.mjs','OwnedProcess.Native.cs','self-reload-pipe-client.ps1','powershell-host-transport.ps1','process-identity.ps1','cooperative-shutdown-host.ps1','control-center-ui.ps1','installed-release-operator.ps1','installed-runtime-migration.ps1','check-migration-approvals.mjs')
+        mcp_control_center=@('tray.ps1','start-tray.vbs','control-center.ps1','component-health.ps1','invoke-component-controller.ps1');
+        codex_bridge=@('runtime-control.ps1','codex-bridge-runtime.psm1','cooperative-layout.ps1','bridge-bearer.ps1','component-runtime.psm1','runtime-build-id.mjs','OwnedProcess.Native.cs','self-reload-pipe-client.ps1','powershell-host-transport.ps1','process-identity.ps1','cooperative-shutdown-host.ps1','control-center-ui.ps1','installed-release-operator.ps1','installed-runtime-migration.ps1','check-migration-approvals.mjs')
     }
     foreach($componentName in $scriptLists.Keys){
         $destination=Join-Path $PackageRoot ($componentName+'\scripts');New-Item -ItemType Directory $destination|Out-Null
@@ -961,6 +1267,7 @@ if($Action -eq 'Prepare') {
     $nativeBuilds=@(
         @{output=(Join-Path $cc 'src\RemoteSelfReload.Native.dll');sources=@((Join-Path $cc 'src\RemoteSelfReload.Native.cs'));references=@()},
         @{output=(Join-Path $cc 'src\InstalledRelease.Native.dll');sources=@((Join-Path $cc 'src\InstalledRelease.Native.cs'));references=@()},
+        @{output=(Join-Path $cc 'src\WorkspaceLocal.Native.dll');sources=@((Join-Path $cc 'src\WorkspaceLocal.Native.cs'));references=@('System.Web.Extensions.dll')},
         @{output=(Join-Path $bridge 'scripts\OwnedProcess.Native.dll');sources=@((Join-Path $bridge 'scripts\OwnedProcess.Native.cs'));references=@()},
         @{output=(Join-Path $cc 'src\NormalOperator.Host.dll');sources=@(
             'NormalOperator.Native.cs','NormalOperator.Pipe.cs','NormalOperator.Security.cs','NormalOperator.Execution.cs','NormalOperator.Host.cs'
@@ -1002,7 +1309,7 @@ if($Action -eq 'Prepare') {
         $manifest.contract='mcpcc-installed-release-v6';$manifest.schemaVersion=6
         $manifest.state.ownerRoot=$previous.state.ownerRoot;$manifest.state.dataDir=$previous.state.dataDir
     }
-    if($previous){$null=Get-InstalledUpgradeState ([pscustomobject]$manifest) $previous.root -RequireSelected}
+    if($previous){$null=Get-InstalledUpgradeState ([pscustomobject]$manifest) $previous.root -RequireSelected -AttestationSha256 $InstalledRecoverySha256}
     if($RuntimeMigration){
         # v5 stays immutable. Only this explicit migration produces the fixed v6 layout.
         $manifest.contract='mcpcc-installed-release-v6';$manifest.schemaVersion=6
@@ -1080,11 +1387,22 @@ $release=Read-McpCcInstalledRelease (Join-Path $ReleaseRoot 'mcp_control_center'
 Assert-McpCcInstalledClosure $release
 if($release.schemaVersion -lt 3 -or $release.state.operatorSid -cne $operator.sid){throw 'ORIGINAL_OPERATOR_REQUIRED'}
 $owner=Get-McpCcInstalledStateRoot $release
+if($Action -eq 'AttestSelectedV6'){
+    # The sole operator mutex serializes attestations with binding/cutover. This
+    # branch has no lifecycle call and never enters the cutover UNKNOWN writer.
+    $lock=New-Object Threading.Mutex($false,'Local\McpCcInstalledOperator');$acquired=$false
+    try{
+        try{$acquired=$lock.WaitOne(0)}catch [Threading.AbandonedMutexException]{throw 'RECOVERY_ABANDONED_OPERATOR_DO_NOT_RETRY'}
+        if(-not $acquired){throw 'CUTOVER_BUSY'}
+        New-SelectedV6Attestation $release $OriginalCutoverSha256 $RecoveryManifestSha256|ConvertTo-Json
+    }finally{if($acquired){$lock.ReleaseMutex()};$lock.Dispose()}
+    exit 0
+}
 if($Action -in @('PlanState','BindState')){
     if(-not $UpgradeFromReleaseRoot){Assert-NoTray}
     $health=Get-Health -Idle
     $baselineRoot=$release.legacyWorkspaceRoot
-    if($UpgradeFromReleaseRoot){$baselineRoot=(Get-InstalledUpgradeState $release $UpgradeFromReleaseRoot -RequireSelected).releaseRoot}
+    if($UpgradeFromReleaseRoot){$baselineRoot=(Get-InstalledUpgradeState $release $UpgradeFromReleaseRoot -RequireSelected -AttestationSha256 $InstalledRecoverySha256).releaseRoot}
     Assert-OwnedReady (Invoke-Controller (Join-Path $baselineRoot 'codex_bridge') Status) $health
     if($health.buildId -cne $release.cutover.rollbackBuildId){throw 'LEGACY_BASELINE_CHANGED'}
     $lock=New-Object Threading.Mutex($false,'Local\McpCcInstalledOperator');$acquired=$false
@@ -1092,13 +1410,13 @@ if($Action -in @('PlanState','BindState')){
         try{$acquired=$lock.WaitOne(0)}catch [Threading.AbandonedMutexException]{$acquired=$true}
         if(-not $acquired){throw 'CUTOVER_BUSY'}
         if($Action -eq 'PlanState'){
-            $plan=Get-StateBindingPlan $release $PreviousReleaseRoot $StateRecoveryReceipt $StateRecoverySha256 -AllowSourceAdvance:$AllowRecoveredSourceAdvance -UpgradeRoot $UpgradeFromReleaseRoot
+            $plan=Get-StateBindingPlan $release $PreviousReleaseRoot $StateRecoveryReceipt $StateRecoverySha256 -AllowSourceAdvance:$AllowRecoveredSourceAdvance -UpgradeRoot $UpgradeFromReleaseRoot -AttestationSha256 $InstalledRecoverySha256
             [pscustomobject]@{phase='STATE_PLAN_READY';releaseId=$release.releaseId;statePlanSha256=(Get-StatePlanHash $plan);
                 roots=$plan.roots;aclEntries=$plan.entries.Count;snapshots=$plan.files.Count;preservesAllDeny=$true;
                 ownerMigration=$(if($plan.migration -and -not $plan.ownerReuse){[pscustomobject]@{source=$plan.migration.source;target=$plan.migration.target;entries=$plan.migration.entries.Count;bytes=$plan.migration.bytes;legacyRetained=$true;skipActiveTrayPid=$true}}else{$null});
                 ownerStateReuse=$plan.ownerReuse;
                 sharedHomeChanged=$false;workspaceAclChanged=$false;productionTouched=$false}|ConvertTo-Json -Depth 6
-        }else{Invoke-StateBinding $release $StatePlanSha256 $PreviousReleaseRoot $StateRecoveryReceipt $StateRecoverySha256 -AllowSourceAdvance:$AllowRecoveredSourceAdvance -UpgradeRoot $UpgradeFromReleaseRoot}
+        }else{Invoke-StateBinding $release $StatePlanSha256 $PreviousReleaseRoot $StateRecoveryReceipt $StateRecoverySha256 -AllowSourceAdvance:$AllowRecoveredSourceAdvance -UpgradeRoot $UpgradeFromReleaseRoot -AttestationSha256 $InstalledRecoverySha256}
     }finally{if($acquired){$lock.ReleaseMutex()};$lock.Dispose()}
     exit 0
 }
@@ -1112,7 +1430,7 @@ if(-not(Test-Path -LiteralPath $runtime)){
     New-Item -ItemType Directory $runtime|Out-Null;Set-NewDirectoryAcl $runtime
 }
 $binding=Get-McpCcInstalledBridgeBinding (Join-Path $ReleaseRoot 'codex_bridge')
-$baselineRoot=if($release.schemaVersion -ge 4){Get-CutoverBaselineRoot $release $runtime}else{$release.legacyWorkspaceRoot}
+$baselineRoot=if($release.schemaVersion -ge 4){Get-CutoverBaselineRoot $release $runtime -ExpectedAttestationSha256 $InstalledRecoverySha256}else{$release.legacyWorkspaceRoot}
 $legacyBridge=Join-Path $baselineRoot 'codex_bridge'
 $legacyCc=Join-Path $baselineRoot 'mcp_control_center'
 $startup=Join-Path ([Environment]::GetFolderPath('Startup')) 'MCP Control Center.lnk'
@@ -1120,6 +1438,8 @@ $receiptPath=Join-Path $runtime 'operator-cutover.json'
 $backup=Join-Path $runtime 'legacy-startup.lnk'
 $isInstalledUpgrade=$baselineRoot -ine $release.legacyWorkspaceRoot
 $baselineRelease=if($isInstalledUpgrade){Read-McpCcInstalledRelease $legacyCc}else{$null}
+if($AutoResume -and (-not $isInstalledUpgrade -or $release.schemaVersion -ne 6 -or $baselineRelease.schemaVersion -ne 6)){throw 'AUTO_RESUME_V6_UPGRADE_REQUIRED'}
+$autoResumeManifestHash=if($AutoResume){(Get-FileHash -LiteralPath $release.sourcePath).Hash.ToLowerInvariant()}else{''}
 $resumeUpgrade=($Action -eq 'Cutover' -and $isInstalledUpgrade -and (Test-Path -LiteralPath $receiptPath) -and
     (Read-BoundedJson $receiptPath 4096).phase -ceq 'UPGRADE_STOPPED')
 $h=if($Action -ne 'Rollback' -and -not $resumeUpgrade){Get-Health -Idle}else{$null}
@@ -1131,33 +1451,26 @@ if($Action -eq 'Preflight'){
     [pscustomobject]@{phase='PREFLIGHT_READY';releaseId=$release.releaseId;livePid=$h.pid;liveBuildId=$h.buildId;allJobsTerminal=$true;host='HOST_NOT_VERIFIED'}|ConvertTo-Json
     exit 0
 }
-# Operator exits the tray UI first. This deliberately does not terminate the owner or
-# invent a second manager. The component remains owned until its existing controller stops it.
+# The original independent operator remains alive and holds the same mutex across
+# cooperative UI exit. No child launcher, task, second manager or receipt store.
 Assert-RemoteReceiptsTerminal $owner
+$handoff=$null
 $lock=New-Object Threading.Mutex($false,'Local\McpCcInstalledOperator');$acquired=$false
 try {
     try {$acquired=$lock.WaitOne(0)}catch [Threading.AbandonedMutexException]{$acquired=$true}
     if(-not $acquired){throw 'CUTOVER_BUSY'}
     if($Action -eq 'Cutover'){
-        if(-not $isInstalledUpgrade -or $resumeUpgrade){Assert-NoTray}
-        Assert-OwnerMigrationSourceUnchanged $release $runtime
+        if(-not $isInstalledUpgrade){Assert-NoTray}
         if($resumeUpgrade){
-            $receipt=Read-BoundedJson $receiptPath 4096
-            if($receipt.contract -cne 'mcpcc-installed-cutover-v1' -or $receipt.releaseId -cne $release.releaseId -or
-                $receipt.operatorSid -cne $operator.sid -or $receipt.oldBuildId -cne $release.cutover.rollbackBuildId -or
-                $null -ne $receipt.newPid -or $null -ne $receipt.newTunnelPid -or
-                (Get-FileHash -LiteralPath $backup).Hash.ToLowerInvariant() -cne $release.cutover.legacyStartupSha256){throw 'UPGRADE_STOP_RECEIPT_CHANGED'}
-            foreach($identity in @(@($receipt.oldPid,$receipt.oldStartTimeUtc),@($receipt.oldTunnelPid,$receipt.oldTunnelStartTimeUtc))){
-                $old=Get-Process -Id $identity[0] -ErrorAction SilentlyContinue
-                if($old){try{if($old.StartTime.ToUniversalTime().ToString('o') -ceq $identity[1]){throw 'UPGRADE_PREVIOUS_STILL_RUNNING'}}finally{$old.Dispose()}}
-            }
-            $listeners=[Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()
-            if(@($listeners|Where-Object{$_.Port -in @(18828,18829)}).Count){throw 'UPGRADE_LISTENER_PRESENT'}
+            $receipt=Get-UpgradeResumeReceipt
         }else{
+            Assert-OwnerMigrationSourceUnchanged $release $runtime
             if(Test-Path -LiteralPath $receiptPath){throw 'CUTOVER_RECEIPT_EXISTS_INSPECT_DO_NOT_RETRY'}
             if($h.buildId -cne $release.cutover.rollbackBuildId -or (Get-FileHash -LiteralPath $startup).Hash.ToLowerInvariant() -cne $release.cutover.legacyStartupSha256){throw 'LEGACY_BASELINE_CHANGED'}
             $before=Invoke-Controller $legacyBridge Status
             Assert-OwnedReady $before $h;Assert-HttpAuthentication -Release $baselineRelease
+            # Capability/identity/ACL failure must occur before stopping anything.
+            if($AutoResume){$handoff=Open-UpgradeTrayHandoff $baselineRelease}
             Copy-Item -LiteralPath $startup -Destination $backup
             $receipt=[ordered]@{contract='mcpcc-installed-cutover-v1';releaseId=$release.releaseId;operatorSid=$operator.sid;phase='STOPPING_LEGACY';
                 oldPid=$h.pid;oldBuildId=$h.buildId;oldStartTimeUtc=(Get-Process -Id $h.pid).StartTime.ToUniversalTime().ToString('o');
@@ -1171,12 +1484,24 @@ try {
                 # The installed controller needs its original tray owner while
                 # draining. Resume only this explicit stopped phase after UI exit.
                 $receipt.phase='UPGRADE_STOPPED';Write-Receipt $receiptPath $receipt
-                [pscustomobject]@{phase='UPGRADE_STOPPED';next='Exit control center only, then repeat Cutover';host='HOST_NOT_VERIFIED'}|ConvertTo-Json
-                exit 0
+                if(-not $AutoResume){
+                    [pscustomobject]@{phase='UPGRADE_STOPPED';next='Exit control center only, then repeat Cutover';host='HOST_NOT_VERIFIED'}|ConvertTo-Json
+                    exit 0
+                }
+                Wait-UpgradeRuntimeStopped $receipt
+                Wait-UpgradeTrayExit $handoff
+                # Re-attest target closure and the same state binding after the wait,
+                # then enter exactly the original resume gates and Cutover tail.
+                if((Get-FileHash -LiteralPath $release.sourcePath).Hash.ToLowerInvariant() -cne $autoResumeManifestHash){throw 'AUTO_RESUME_TARGET_CHANGED'}
+                Assert-McpCcInstalledClosure $release
+                if((Get-CutoverBaselineRoot $release $runtime -ExpectedAttestationSha256 $InstalledRecoverySha256) -ine $baselineRoot){throw 'UPGRADE_BASELINE_CHANGED'}
+                $binding=Get-McpCcInstalledBridgeBinding (Join-Path $ReleaseRoot 'codex_bridge')
+                Assert-RemoteReceiptsTerminal $owner
+                $receipt=Get-UpgradeResumeReceipt
             }
         }
         $shell=New-Object -ComObject WScript.Shell
-        try {$link=$shell.CreateShortcut($startup);$link.TargetPath=$ps;$link.Arguments='-NoProfile -WindowStyle Hidden -File "'+(Join-Path $ReleaseRoot 'mcp_control_center\scripts\tray.ps1')+'" -AutoReconcile';$link.WorkingDirectory=Join-Path $ReleaseRoot 'mcp_control_center';$link.Save()}finally{[void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell)}
+        try {$link=$shell.CreateShortcut($startup);$link.TargetPath=Join-Path $env:WINDIR 'System32\wscript.exe';$link.Arguments='"'+(Join-Path $ReleaseRoot 'mcp_control_center\scripts\start-tray.vbs')+'"';$link.WorkingDirectory=Join-Path $ReleaseRoot 'mcp_control_center';$link.Save()}finally{[void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell)}
         $receipt.phase='SELECTED';Write-Receipt $receiptPath $receipt
         $trayPid=Start-SelectedTray (Join-Path $ReleaseRoot 'mcp_control_center')
         $deadline=[DateTime]::UtcNow.AddSeconds(30)
@@ -1221,8 +1546,11 @@ try {
 } catch {
     # A closed UI prerequisite has no lifecycle side effect and preserves the resumable
     # rollback phase. All other failures require explicit inspection, never a retry loop.
-    if($_.Exception.Message -ne 'CLOSE_CONTROL_CENTER_UI_ONLY_THEN_REPEAT' -and (Test-Path -LiteralPath $receiptPath)){
+    if($_.Exception.Message -notin @('CLOSE_CONTROL_CENTER_UI_ONLY_THEN_REPEAT','UPGRADE_TRAY_EXIT_TIMEOUT','UPGRADE_RUNTIME_EXIT_TIMEOUT') -and (Test-Path -LiteralPath $receiptPath)){
         $r=Read-BoundedJson $receiptPath;$r|Add-Member -NotePropertyName lastPhase -NotePropertyValue $r.phase -Force;$r.phase='UNKNOWN';Write-Receipt $receiptPath $r
     }
     throw
-} finally {if($acquired){$lock.ReleaseMutex()};$lock.Dispose()}
+} finally {
+    if($handoff){$handoff.signal.Dispose();$handoff.process.Dispose()}
+    if($acquired){$lock.ReleaseMutex()};$lock.Dispose()
+}

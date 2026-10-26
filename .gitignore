@@ -20,6 +20,7 @@
 **/logs/
 
 # Private data, exports, and databases
+/codex_bridge/Runtime/
 **/data/
 **/exports/
 **/backups/

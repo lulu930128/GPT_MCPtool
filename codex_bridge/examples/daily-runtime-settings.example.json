@@ -1,0 +1,15 @@
+{
+  "contract": "mcpcc-daily-user-v1",
+  "operatorSid": "REPLACE_WITH_CURRENT_OPERATOR_SID",
+  "dataDir": "C:\\GPT_MCPtool\\codex_bridge\\.local\\runtime",
+  "ownerRoot": "C:\\GPT_MCPtool\\mcp_control_center\\.local\\runtime",
+  "bridgeRuntimeDir": "C:\\GPT_MCPtool\\codex_bridge\\.tmp",
+  "projectsFile": "C:\\GPT_MCPtool\\codex_bridge\\.local\\projects.json",
+  "codexHome": "C:\\Users\\REPLACE_USER\\.codex",
+  "codexCommand": "C:\\REPLACE_EXISTING_TOOLS\\codex.exe",
+  "nodePath": "C:\\REPLACE_EXISTING_TOOLS\\node.exe",
+  "tunnelClientPath": "C:\\GPT_MCPtool\\project_reading\\vendor\\tunnel-client\\tunnel-client.exe",
+  "tunnelProfileDir": "C:\\GPT_MCPtool\\codex_bridge\\.tunnel-client",
+  "keyStorePath": "C:\\GPT_MCPtool\\project_reading\\scripts\\key-store.ps1",
+  "secretPath": "C:\\GPT_MCPtool\\project_reading\\.secrets\\control-plane-api-key.dpapi"
+}

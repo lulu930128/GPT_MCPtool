@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "enabled": false,
+  "rules": [
+    {
+      "root": "projects",
+      "path": "Example Project/notes/**",
+      "operations": ["make_directory", "create_text_file", "append_text_file", "patch_text_file"],
+      "extensions": [".md", ".txt", ".jsonl"]
+    },
+    {
+      "root": "projects",
+      "path": "Example Project/config/preferences.json",
+      "operations": ["update_json_value"],
+      "extensions": [".json"],
+      "jsonFields": {
+        "/display/page_size": { "type": "integer", "minimum": 10, "maximum": 100 },
+        "/display/theme": { "type": "string", "enum": ["light", "dark", "system"] }
+      }
+    }
+  ],
+  "deny": [
+    { "root": "projects", "path": "Example Project/notes/private/**" }
+  ],
+  "limits": {
+    "maxPayloadBytes": 262144,
+    "maxFileBytes": 2097152,
+    "maxOperations": 2048,
+    "maxWrittenBytes": 67108864,
+    "maxStateBytes": 33554432
+  }
+}

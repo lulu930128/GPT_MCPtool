@@ -1,4 +1,6 @@
 import type { EnglishStudyMcpConfig } from "./config.js";
+import type { AssessmentInput } from "./assessment-schema.js";
+import type { ListeningResultInput } from "./listening-result-schema.js";
 
 export type ItemKind = "vocab" | "phrase" | "grammar" | "question";
 export type TargetKind = "vocab" | "phrase" | "grammar";
@@ -43,6 +45,7 @@ export interface PracticeQuestionInput {
 }
 
 export interface PracticeSubmissionInput {
+  assessments?: AssessmentInput[];
   submissionId: string;
   session: {
     sessionId: string;
@@ -126,18 +129,25 @@ export class EnglishStudyHubClient {
       metadata: input.metadata ?? {},
     });
   }
-  previewPractice(submission: PracticeSubmissionInput) {
-    return this.request("POST", "/api/v1/practice/submissions/preview", mapSubmission(submission));
+  previewPractice(submission?: PracticeSubmissionInput, listeningResult?: ListeningResultInput) {
+    return this.request("POST", "/api/v1/practice/submissions/preview", practicePayload(submission, listeningResult));
   }
-  recordPractice(input: { expectedFingerprint: string; submission: PracticeSubmissionInput }) {
+  recordPractice(input: { expectedFingerprint: string; submission?: PracticeSubmissionInput; listeningResult?: ListeningResultInput }) {
     return this.request("POST", "/api/v1/practice/submissions", {
       expected_fingerprint: input.expectedFingerprint,
       actor: "chatgpt_mcp",
-      submission: mapSubmission(input.submission),
+      submission: practicePayload(input.submission, input.listeningResult),
     });
   }
   getPracticeSession(sessionId: string) {
     return this.request("GET", `/api/v1/practice/sessions/${encodeURIComponent(sessionId)}`);
+  }
+
+  listPracticeSessions(input: Record<string, string | number | undefined>) {
+    return this.request("GET", `/api/v1/practice/sessions?${mapFilters(input)}`);
+  }
+  ieltsProgress(input: Record<string, string | number | undefined>) {
+    return this.request("GET", `/api/v1/assessments/ielts/progress?${mapFilters(input)}`);
   }
 
   private async request(method: string, path: string, body?: unknown): Promise<unknown> {
@@ -186,8 +196,14 @@ function mapDraft(draft: ItemDraftInput): Record<string, unknown> {
   };
 }
 
+function practicePayload(submission?: PracticeSubmissionInput, listeningResult?: ListeningResultInput): Record<string, unknown> {
+  if (Boolean(submission) === Boolean(listeningResult)) throw new HubApiError("Provide exactly one of submission or listeningResult.", 422);
+  return listeningResult ? { listening_result: listeningResult } : mapSubmission(submission!);
+}
+
 function mapSubmission(input: PracticeSubmissionInput): Record<string, unknown> {
   return {
+    ...(input.assessments?.length ? { assessments: input.assessments } : {}),
     submission_id: input.submissionId,
     session: {
       session_id: input.session.sessionId,
@@ -217,4 +233,11 @@ function mapSubmission(input: PracticeSubmissionInput): Record<string, unknown> 
       })),
     })),
   };
+}
+
+function mapFilters(input: Record<string, string | number | undefined>): URLSearchParams {
+  const names: Record<string, string> = { practiceType: "practice_type", assessmentSystem: "assessment_system", dateFrom: "date_from", dateTo: "date_to", skill: "skill", module: "module", limit: "limit", offset: "offset" };
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(input)) if (value !== undefined && names[key]) query.set(names[key], String(value));
+  return query;
 }

@@ -4,12 +4,14 @@ from copy import deepcopy
 from hashlib import sha256
 import json
 import os
+from http.client import HTTPException
 from pathlib import Path
 import sys
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
-from urllib.request import Request, urlopen
+from urllib.parse import quote, urlencode, urlsplit
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener, urlopen
+from uuid import UUID
 
 import anyio
 import mcp.types as mcp_types
@@ -46,9 +48,30 @@ SERVER_INSTRUCTIONS = (
     "The adapter maps MCP fields to POST /api/ai/ask, fixes "
     "allow_llm=false and allow_write=false, and returns the unchanged "
     "omi.decision.v4 envelope. OMI backend owns all market and answer "
-    "judgment. refresh_if_missing must be explicit. For the Taiwan "
+    "judgment. For CURRENT Taiwan preopen single-stock quote questions "
+    "(盤前/試撮/試搓), callers should explicitly select quote.auction as primary: "
+    'selection={"include":["quote.auction"],"optional":["quote.snapshot",'
+    '"quote.order_book","data.freshness"]}. Preserve the original question. '
+    "When a live update is intended and user authorization and policy permit, "
+    "use realtime_policy=prefer_live, refresh_if_missing=true (boolean), and a "
+    "bounded tool_budget, e.g. max_calls=3, max_external_fetches=2, "
+    "max_total_seconds=20. Keep refresh_if_missing=false for cache-only, "
+    "retrospective, or explicit no-refresh requests. It defaults to false; "
+    "the adapter never infers refresh permission from question text or target. "
+    "Refresh permission does not guarantee an auction value. For NO_SNAPSHOT, "
+    "use v4 evidence and execution.refresh_reconciliation to distinguish an "
+    "unfetched cache from provider unavailable or indicative match unavailable; "
+    "a cache miss alone does not prove no market data. A follow-up refresh "
+    "requires the same live intent, user authorization and policy permission. "
+    "The adapter never rephrases the response. For the Taiwan "
     "dashboard, call omi.read_tw_market_dashboard before "
-    "omi.open_tw_market_dashboard."
+    "omi.open_tw_market_dashboard. Alternatively, omi_open_tw_workspace opens "
+    "an immediate shell with optional initial selection and independent cache-only panes. "
+    "Runtime management is a separate protected exception: read status first; only "
+    "call omi_restart_backend on an explicit user restart request with the observed "
+    "launcher owner UUID and confirmation. HTTP 202 is acceptance, not completion. "
+    "After an unknown outcome, read omi_read_runtime_operation with the same request "
+    "UUID; never automatically resubmit or generate a replacement UUID."
 )
 API_BASE_URL = (
     os.environ.get("OMI_SEARCH_API_BASE_URL")
@@ -63,6 +86,7 @@ AI_TRUST_TOKEN = (
 ).strip()
 AI_TRUST_TOKEN_HEADER = "X-OMI-AI-Trust-Token"
 TW_DASHBOARD_RESOURCE_URI = "ui://omi/tw-market-dashboard/v2.html"
+TW_WORKSPACE_RESOURCE_URI = "ui://omi/tw-workspace/v1.html"
 TW_DASHBOARD_RESOURCE_MIME_TYPE = "text/html;profile=mcp-app"
 TW_DASHBOARD_SNAPSHOT_PATH = Path(__file__).with_name(
     "tw_market_dashboard_contract_snapshot.json"
@@ -249,7 +273,17 @@ def _adapter_ask_schema(source_schema: Any) -> dict[str, Any]:
         "default": False,
         "description": (
             "Explicitly allow the trusted OMI backend to attempt bounded external "
-            "refresh. The adapter never infers this value from the question or target."
+            "refresh only when a live update is intended and user authorization and "
+            "policy permit. For CURRENT Taiwan preopen single-stock quotes, select "
+            "quote.auction as primary (selection.include); optionally add "
+            "quote.snapshot, quote.order_book, data.freshness (selection.optional). "
+            "Use realtime_policy=prefer_live, literal boolean true and a bounded "
+            "tool_budget, e.g. max_calls=3, max_external_fetches=2, max_total_seconds=20. "
+            "Keep false for cache-only, retrospective, or explicit no-refresh requests. "
+            "Default false; only literal boolean true enables permission. The adapter "
+            "never infers this value from the question or target. Permission does not "
+            "guarantee an auction value; consult v4 evidence and "
+            "execution.refresh_reconciliation for the authoritative reason."
         ),
     }
     properties["include_raw"] = {
@@ -473,6 +507,170 @@ def _build_tw_dashboard_tools() -> list[dict[str, Any]]:
 
 TW_DASHBOARD_TOOLS = _build_tw_dashboard_tools()
 
+# Only transport naming differs from the backend-generated catalog. Paths and
+# both schemas remain owned by the generator, including future schema changes.
+TW_WORKSPACE_ROUTES = {
+    tool["name"].replace(".", "_"): deepcopy(tool)
+    for tool in TW_DASHBOARD_CONTRACT_SNAPSHOT.get("workspace_tools", [])
+}
+TW_WORKSPACE_SELECTION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        key: deepcopy(tool["inputSchema"]["properties"][key])
+        for tool in TW_WORKSPACE_ROUTES.values()
+        for key in ("stock_id", "timeframe", "watchlist_group_id")
+        if key in tool["inputSchema"]["properties"]
+    },
+    "additionalProperties": False,
+}
+
+
+def _build_tw_workspace_tools() -> list[dict[str, Any]]:
+    if not TW_WORKSPACE_ROUTES:
+        return []
+    tools = [
+        {**{key: deepcopy(route[key]) for key in (
+            "description", "inputSchema", "outputSchema", "annotations"
+        )}, "name": name}
+        for name, route in TW_WORKSPACE_ROUTES.items()
+    ]
+    tools.append({
+        "name": "omi_open_tw_workspace",
+        "title": "Open OMI Taiwan Workspace",
+        "description": "Open an immediate Taiwan research shell. Optional initial selection only; no prepared dashboard or backend call is required.",
+        "inputSchema": deepcopy(TW_WORKSPACE_SELECTION_SCHEMA),
+        "outputSchema": deepcopy(TW_WORKSPACE_SELECTION_SCHEMA),
+        "annotations": _read_only_annotations(),
+        "_meta": {
+            "ui": {"resourceUri": TW_WORKSPACE_RESOURCE_URI},
+            "openai/outputTemplate": TW_WORKSPACE_RESOURCE_URI,
+        },
+    })
+    return tools
+
+
+def _workspace_response_constants(schema: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read envelope constants from generated object/RootModel union schemas.
+
+    Resolve only local definitions; this is a transport identity guard, not a
+    replacement for the backend's model validation or the SDK output schema.
+    """
+    def variants(node: dict[str, Any], seen: frozenset[str]) -> list[dict[str, Any]]:
+        if "$ref" in node:
+            ref = node["$ref"]
+            if not isinstance(ref, str) or not ref.startswith("#/$defs/") or ref in seen:
+                raise RuntimeError("Unsupported generated workspace schema reference")
+            target = schema.get("$defs", {}).get(ref[len("#/$defs/"):])
+            if not isinstance(target, dict):
+                raise RuntimeError("Missing generated workspace schema definition")
+            return variants(target, seen | {ref})
+        if "anyOf" in node:
+            return [item for branch in node["anyOf"] for item in variants(branch, seen)]
+        constants = {
+            key: value["const"] for key, value in node.get("properties", {}).items()
+            if "const" in value
+        }
+        if not all(key in constants for key in ("kind", "version")):
+            raise RuntimeError("Generated workspace schema lacks envelope constants")
+        return [constants]
+
+    return variants(schema, frozenset())
+
+
+def _read_tw_workspace(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    route = TW_WORKSPACE_ROUTES[name]
+    if route["method"] != "GET":
+        raise RuntimeError("Workspace contract must use cache-only GET routes")
+    allowed = route["inputSchema"]["properties"]
+    if arguments.keys() - allowed.keys():
+        raise ValueError("Unknown workspace argument")
+    path = route["path"]
+    for key in route["path_parameters"]:
+        value = arguments.get(key)
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"Missing path argument: {key}")
+        path = path.replace("{" + key + "}", quote(value, safe=""))
+    query = {
+        key: str(value).lower() if isinstance(value, bool) else value
+        for key, value in arguments.items()
+        if key not in route["path_parameters"] and value is not None
+    }
+    if query:
+        path += "?" + urlencode(query)
+    response = _api_request(route["method"], path)
+    if not isinstance(response, dict) or not any(
+        all(type(response.get(key)) is type(value) and response[key] == value
+            for key, value in constants.items())
+        for constants in _workspace_response_constants(route["outputSchema"])
+    ):
+        raise RuntimeError("OMI backend returned a malformed workspace response")
+    return response
+
+
+def _build_runtime_tools() -> list[dict[str, Any]]:
+    uuid_schema = {"type": "string", "format": "uuid", "pattern": (
+        "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+        "[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    )}
+    return [
+        {
+            "name": "omi_read_runtime_status",
+            "title": "Read OMI Runtime Status",
+            "description": (
+                "Read authoritative omi.runtime-control.v1 status and launcher owner_id UUID. "
+                "Preserve serving_backend.writer_preflight, restart.blockers, ownership, readiness "
+                "and source loaded identity verbatim. HTTP OK does not mean restart ready. No side effects."
+            ),
+            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+            "annotations": _read_only_annotations(),
+        },
+        {
+            "name": "omi_restart_backend",
+            "title": "Restart OMI Backend (disruptive)",
+            "description": (
+                "Disruptive protected operation. Only on an explicit user request to restart "
+                "the OMI backend. Read runtime status first and supply its launcher instance "
+                "UUID as expected_owner_id, a request UUID and literal confirmation. "
+                "HTTP 202 means queued, not completed. Writer drain or owner mismatch may "
+                "block restart. Never auto retry: look up the same request UUID after "
+                "timeout/unknown or duplicate requests; do not generate a replacement UUID. "
+                "OwnedShutdown transport has source/disposable-fixture evidence only; production "
+                "writer admission/drain, launcher approval and startup adoption remain unavailable. "
+                "The current backend records receipts/evaluates preflight; safe stop is not enabled."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "request_id": deepcopy(uuid_schema),
+                    "expected_owner_id": deepcopy(uuid_schema),
+                    "confirmation": {"type": "string", "const": "restart_backend"},
+                },
+                "required": ["request_id", "expected_owner_id", "confirmation"],
+                "additionalProperties": False,
+            },
+            "annotations": {
+                "readOnlyHint": False, "destructiveHint": True,
+                "idempotentHint": True, "openWorldHint": False,
+            },
+            "_meta": {"omi/runtime-control/disruptive": True},
+        },
+        {
+            "name": "omi_read_runtime_operation",
+            "title": "Read OMI Runtime Operation",
+            "description": (
+                "Read the authoritative durable receipt for an existing request UUID. "
+                "Preserve accepted/running/succeeded/failed/blocked/unknown. "
+                "Preserve optional backend_preflight, backend_preflight_identity, blockers, null "
+                "and opaque extension fields verbatim. Unknown is not permission to resubmit."
+            ),
+            "inputSchema": {
+                "type": "object", "properties": {"request_id": deepcopy(uuid_schema)},
+                "required": ["request_id"], "additionalProperties": False,
+            },
+            "annotations": _read_only_annotations(),
+        },
+    ]
+
 
 def _build_public_tools(
     ask_source: dict[str, Any],
@@ -616,7 +814,7 @@ def _build_public_tools(
             ),
         },
     ]
-    return [*tools, *deepcopy(TW_DASHBOARD_TOOLS)]
+    return [*tools, *deepcopy(TW_DASHBOARD_TOOLS), *_build_tw_workspace_tools(), *_build_runtime_tools()]
 
 
 PUBLIC_TOOLS = _build_public_tools(
@@ -770,12 +968,18 @@ def _tw_dashboard_resources_for_client() -> list[dict[str, Any]]:
                 "Interactive Taiwan preopen and regular-session market dashboard."
             ),
             "mimeType": TW_DASHBOARD_RESOURCE_MIME_TYPE,
+        },
+        {
+            "uri": TW_WORKSPACE_RESOURCE_URI,
+            "name": "omi-tw-workspace",
+            "title": "OMI Taiwan Workspace",
+            "mimeType": TW_DASHBOARD_RESOURCE_MIME_TYPE,
         }
     ]
 
 
 def _read_tw_dashboard_resource(uri: str) -> dict[str, Any]:
-    if uri != TW_DASHBOARD_RESOURCE_URI:
+    if uri not in {TW_DASHBOARD_RESOURCE_URI, TW_WORKSPACE_RESOURCE_URI}:
         raise KeyError(f"Unknown resource: {uri}")
     try:
         widget_html = TW_DASHBOARD_WIDGET_PATH.read_text(encoding="utf-8")
@@ -783,10 +987,12 @@ def _read_tw_dashboard_resource(uri: str) -> dict[str, Any]:
         raise RuntimeError(
             "Taiwan dashboard widget bundle is unavailable. Run its production build."
         ) from exc
+    if uri == TW_WORKSPACE_RESOURCE_URI:
+        widget_html = widget_html.replace('<html ', '<html data-omi-workspace="true" ', 1)
     return {
         "contents": [
             {
-                "uri": TW_DASHBOARD_RESOURCE_URI,
+                "uri": uri,
                 "mimeType": TW_DASHBOARD_RESOURCE_MIME_TYPE,
                 "text": widget_html,
                 "_meta": {
@@ -1179,7 +1385,123 @@ def _capability_status_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+class RuntimeControlError(RuntimeError):
+    """Only fixed, credential-free adapter diagnostics may cross the MCP boundary."""
+
+    def __init__(self, code: str, *, request_id: str | None = None, unknown: bool = False):
+        super().__init__(code)
+        self.payload = {"error": code, "transport_status": "error"}
+        if request_id is not None:
+            self.payload["request_id"] = request_id
+        if unknown:
+            self.payload.update(outcome="unknown", next_action="read_runtime_operation_same_request_id")
+
+
+class _RuntimeNoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # A management credential must never follow a redirect (including 307/308).
+        return None
+
+
+def _runtime_uuid(arguments: dict[str, Any], key: str) -> str:
+    value = arguments.get(key)
+    try:
+        if not isinstance(value, str) or str(UUID(value)) != value.lower():
+            raise ValueError
+    except (ValueError, AttributeError):
+        raise RuntimeControlError("INVALID_RUNTIME_UUID") from None
+    return value
+
+
+def _runtime_contains_secret(value: Any, secret: str) -> bool:
+    if not secret:
+        return False
+    if isinstance(value, str):
+        return secret in value
+    if isinstance(value, list):
+        return any(_runtime_contains_secret(item, secret) for item in value)
+    if isinstance(value, dict):
+        return any(_runtime_contains_secret(item, secret) for pair in value.items() for item in pair)
+    return False
+
+
+def _runtime_request(method: str, path: str, *, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Single fixed-route request; no AI trust, proxies, redirects, retries or raw errors."""
+    request_id = payload["request_id"] if payload else None
+    is_restart = method == "POST"
+    secret = os.environ.get("OMI_SEARCH_RUNTIME_CONTROL_TOKEN", "")
+    if is_restart and (len(secret) != 64 or any(char not in "0123456789abcdef" for char in secret)):
+        raise RuntimeControlError("RUNTIME_CONTROL_TOKEN_MISSING_OR_INVALID", request_id=request_id)
+    headers = {"Accept": "application/json", "User-Agent": f"{SERVER_NAME}/{SERVER_VERSION}"}
+    if is_restart:
+        headers["X-OMI-Runtime-Control-Token"] = secret
+        headers["Content-Type"] = "application/json"
+    try:
+        base = urlsplit(API_BASE_URL)
+        if (base.scheme not in {"http", "https"} or base.hostname not in {"127.0.0.1", "localhost", "::1"}
+                or base.username is not None or base.password is not None
+                or base.path or base.query or base.fragment):
+            raise ValueError
+        request = Request(f"{API_BASE_URL}{path}", method=method, headers=headers,
+                          data=json.dumps(payload).encode("utf-8") if payload else None)
+    except (ValueError, TypeError):
+        raise RuntimeControlError("INVALID_RUNTIME_BACKEND_URL", request_id=request_id) from None
+    try:
+        opener = build_opener(ProxyHandler({}), _RuntimeNoRedirect())
+        try:
+            response = opener.open(request, timeout=API_TIMEOUT_SECONDS)
+        except HTTPError as exc:
+            response = exc
+        with response:
+            status = response.code
+            raw = response.read()
+    except (TimeoutError, URLError, OSError, HTTPException) as exc:
+        timed_out = isinstance(exc, TimeoutError) or isinstance(getattr(exc, "reason", None), TimeoutError)
+        raise RuntimeControlError("RUNTIME_TIMEOUT" if timed_out else "RUNTIME_UNAVAILABLE",
+                                  request_id=request_id, unknown=is_restart) from None
+    except Exception:
+        raise RuntimeControlError("RUNTIME_TRANSPORT_ERROR", request_id=request_id, unknown=is_restart) from None
+    try:
+        body = json.loads(raw.decode("utf-8"))
+        if not isinstance(body, dict):
+            raise ValueError
+        # Validate serializability here so the shared MCP handler cannot echo a secret.
+        json.dumps(body, allow_nan=False)
+    except (UnicodeError, ValueError, TypeError):
+        raise RuntimeControlError("INVALID_RUNTIME_RESPONSE", request_id=request_id, unknown=is_restart) from None
+    if _runtime_contains_secret(body, secret):
+        raise RuntimeControlError("RUNTIME_RESPONSE_REDACTED", request_id=request_id, unknown=is_restart)
+    return {"transport_status": "http_response", "http_status": status, "response": body}
+
+
+def _call_runtime_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    if name == "omi_read_runtime_status":
+        if arguments:
+            raise RuntimeControlError("UNEXPECTED_RUNTIME_ARGUMENTS")
+        return _runtime_request("GET", "/api/system/runtime-control/status")
+    keys = {"request_id", "expected_owner_id", "confirmation"} if name == "omi_restart_backend" else {"request_id"}
+    if arguments.keys() != keys:
+        raise RuntimeControlError("INVALID_RUNTIME_ARGUMENTS")
+    request_id = _runtime_uuid(arguments, "request_id")
+    if name == "omi_read_runtime_operation":
+        return _runtime_request("GET", f"/api/system/runtime-control/operations/{request_id}")
+    owner_id = _runtime_uuid(arguments, "expected_owner_id")
+    if arguments["confirmation"] != "restart_backend":
+        raise RuntimeControlError("INVALID_RUNTIME_CONFIRMATION", request_id=request_id)
+    return _runtime_request("POST", "/api/system/runtime-control/restart-backend", payload={
+        "request_id": request_id, "expected_owner_id": owner_id, "confirmation": "restart_backend",
+    })
+
+
 def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
+    if name in {"omi_read_runtime_status", "omi_restart_backend", "omi_read_runtime_operation"}:
+        return _call_runtime_tool(name, arguments)
+    if name in TW_WORKSPACE_ROUTES:
+        return _read_tw_workspace(name, arguments)
+    if name == "omi_open_tw_workspace":
+        if arguments.keys() - TW_WORKSPACE_SELECTION_SCHEMA["properties"].keys():
+            raise ValueError("Only initial workspace selection is accepted")
+        return deepcopy(arguments)
     if name == "omi_read_tw_market_dashboard":
         return _read_tw_market_dashboard(arguments)
     if name == "omi_open_tw_market_dashboard":
@@ -1207,7 +1529,17 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
     raise KeyError(f"Unknown tool: {name}")
 
 
-def _mcp_tool(tool: dict[str, Any]) -> mcp_types.Tool:
+def _mcp_tool(tool: dict[str, Any], *, protocol_version: str) -> mcp_types.Tool:
+    if (
+        protocol_version in {"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"}
+        and tool["name"] == "omi_read_tw_stock_research"
+        and "type" not in tool["outputSchema"]
+    ):
+        # Both generated anyOf branches are objects. Legacy MCP requires that
+        # redundant root type explicitly; retain every $ref/$defs and leave the
+        # backend-owned catalog and modern wire schema untouched.
+        tool = deepcopy(tool)
+        tool["outputSchema"]["type"] = "object"
     return mcp_types.Tool.model_validate(tool)
 
 
@@ -1218,11 +1550,13 @@ def _mcp_tool_result(value: Any, *, is_error: bool = False) -> mcp_types.CallToo
 
 
 async def _on_list_tools(
-    _context: Any,
+    context: Any,
     _params: mcp_types.PaginatedRequestParams | None,
 ) -> mcp_types.ListToolsResult:
     tools = await anyio.to_thread.run_sync(_tools_for_client)
-    return mcp_types.ListToolsResult(tools=[_mcp_tool(tool) for tool in tools])
+    return mcp_types.ListToolsResult(tools=[
+        _mcp_tool(tool, protocol_version=context.protocol_version) for tool in tools
+    ])
 
 
 async def _on_call_tool(
@@ -1241,6 +1575,8 @@ async def _on_call_tool(
             lambda: _call_tool(name, arguments)
         )
         return _mcp_tool_result(payload, is_error=False)
+    except RuntimeControlError as exc:
+        return _mcp_tool_result(exc.payload, is_error=True)
     except Exception as exc:
         return _mcp_tool_result(
             {"error": str(exc), "tool": name},

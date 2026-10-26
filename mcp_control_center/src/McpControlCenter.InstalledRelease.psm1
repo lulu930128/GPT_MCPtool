@@ -495,9 +495,11 @@ function Assert-McpCcInstalledSelection($Binding,[switch]$TrayBootstrap) {
     $shell=New-Object -ComObject WScript.Shell
     try {
         $link=$shell.CreateShortcut($shortcut)
-        if ($link.TargetPath -ine $ps -or $link.Arguments -cnotin @(
+        if ((($link.TargetPath -ine $ps -or $link.Arguments -cnotin @(
                 ('-NoProfile -File "'+$tray+'" -AutoReconcile'),
-                ('-NoProfile -WindowStyle Hidden -File "'+$tray+'" -AutoReconcile')) -or
+                ('-NoProfile -WindowStyle Hidden -File "'+$tray+'" -AutoReconcile'))) -and
+            ($link.TargetPath -ine (Join-Path $Binding.windowsRoot 'System32\wscript.exe') -or
+                $link.Arguments -cne ('"'+(Join-Path $Binding.releaseRoot 'mcp_control_center\scripts\start-tray.vbs')+'"'))) -or
             $link.WorkingDirectory -ine (Split-Path -Parent (Split-Path -Parent $tray))) { throw 'INSTALLED_STARTUP_NOT_SELECTED' }
     } finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) }
     $native=Join-Path $Binding.releaseRoot 'mcp_control_center\src\RemoteSelfReload.Native.dll'

@@ -1,6 +1,7 @@
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = "Stop"
 $script:Utf8NoBom = New-Object Text.UTF8Encoding($false)
+. (Join-Path $PSScriptRoot 'cooperative-layout.ps1')
 
 function Test-CbPathEqual {
   param([string]$Left, [string]$Right)
@@ -280,7 +281,7 @@ function Test-CbBuildCurrent {
 function Assert-CbCooperativeSourceAvailable {
   param($Context)
   $scripts=Join-Path $Context.projectRoot 'scripts'
-  $native=Join-Path (Split-Path -Parent $Context.projectRoot) 'mcp_control_center\src'
+  $native=Get-CbCooperativeNativeRoot $Context.projectRoot
   $installed=Test-CbInstalledLayout
   $ownedNative=if($installed){'OwnedProcess.Native.dll'}else{'OwnedProcess.Native.cs'}
   $normalNative=if($installed){'NormalOperator.Host.dll'}else{'NormalOperator.Native.cs'}
@@ -389,7 +390,7 @@ function Test-CbExecutableIdentity {
     try{
       $actual=Get-CbProcess ([int]$Process.ProcessId)
       if($null -eq $actual -or $actual.StartTimeUtc -cne $Process.StartTimeUtc){return $false}
-      $command=if($Role -eq 'server'){'"'+$Context.nodePath+'" "'+$Context.httpEntry+'"'}else{'"'+$Context.tunnelClientPath+'" run --profile-dir "'+$Context.tunnelProfileDir+'" --profile "codex-bridge" --log.file "'+$Context.tunnelLogFile+'" --pid.file "'+$Context.tunnelPidFile+'"'}
+      $command=if($Role -eq 'server'){'"'+$Context.nodePath+'" "'+$Context.httpEntry+'"'}else{'"'+$Context.tunnelClientPath+'" '+(Get-CbTunnelArguments $Context)}
       if($actual.CommandLine -ine $command){return $false}
       $cim=Get-CimInstance Win32_Process -Filter "ProcessId=$($Process.ProcessId)" -ErrorAction Stop
       $sid=Invoke-CimMethod -InputObject $cim -MethodName GetOwnerSid -ErrorAction Stop
@@ -487,7 +488,7 @@ function Initialize-CbCooperativeNative {
   param([switch]$IdentityOnly)
   # The controller and its two fixed child adapters share the same native load
   # boundary. Installed execution never compiles source into writable TEMP.
-  $native=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\mcp_control_center\src'))
+  $native=Get-CbCooperativeNativeRoot (Split-Path -Parent $PSScriptRoot)
   $installed=Test-CbInstalledLayout
   $loads=@(@{type='McpCcNormalNative';source='NormalOperator.Native.cs';assembly='NormalOperator.Host.dll'})
   if(-not $IdentityOnly){$loads+=@{type='McpCcReloadNative';source='RemoteSelfReload.Native.cs';assembly='RemoteSelfReload.Native.dll'}}
@@ -614,6 +615,9 @@ function Stop-CbOwnedRole {
 
 function Start-CbServer {
   param($Context)
+  if(Test-Path -LiteralPath (Join-Path $Context.projectRoot '..\daily-mode.json')){
+    if([string]::IsNullOrWhiteSpace($Context.token)){throw 'DAILY_BEARER_REQUIRED'}
+  }
   Assert-CbInstalledMutationBlocked $Context
   $ownership=Resolve-CbRoleOwnership -Context $Context -Role server -ReadOnly
   if(Test-CbServerHealth -Context $Context){if($ownership.canMutate-and$ownership.state-eq'OwnedReady'){return};throw 'OWNERSHIP_MISMATCH: Healthy Bridge server is not controller-owned.'}
@@ -647,6 +651,10 @@ function Set-CbTunnelAuthorizationEnvironment([hashtable]$Environment,$Context) 
 }
 function Start-CbTunnelOnce {
   param($Context)
+  if(Test-Path -LiteralPath (Join-Path $Context.projectRoot '..\daily-mode.json')){
+    . (Join-Path $PSScriptRoot 'daily-bearer.ps1')
+    Assert-CbDailyMcpAuthentication $Context
+  }
   Assert-CbInstalledMutationBlocked $Context
   if ($null -ne $Context.PSObject.Properties['installedBinding']) { Start-CbInstalledTunnel $Context; return }
   Assert-CbTunnelIdentityReady -Context $Context;if(-not(Test-CbServerHealth -Context $Context)){throw 'SERVER_NOT_READY: Tunnel start requires Bridge core.'};$ownership=Resolve-CbRoleOwnership -Context $Context -Role tunnel;if(Test-CbTunnelReady -Context $Context){if($ownership.canMutate-and$ownership.state-eq'OwnedReady'){return};throw 'OWNERSHIP_MISMATCH: Ready tunnel is not controller-owned.'};if(-not$ownership.canMutate){throw "OWNERSHIP_MISMATCH: Cannot start tunnel while ownership is $($ownership.state)."};if($ownership.state-eq'OwnedNotListening'){Stop-CbOwnedRole -Context $Context -Role tunnel};if(-not(Test-Path -LiteralPath $Context.tunnelClientPath -PathType Leaf)){throw 'TUNNEL_CLIENT_MISSING: tunnel-client.exe is missing.'};if(-not(Test-Path -LiteralPath $Context.tunnelProfilePath -PathType Leaf)){throw 'TUNNEL_PROFILE_MISSING: Tunnel profile is missing.'};. $Context.keyStorePath;Set-ControlPlaneApiKeyEnvFromSecret -ProjectRoot $Context.projectRoot -SecretPath $Context.secretPath|Out-Null;if([string]::IsNullOrWhiteSpace($env:CONTROL_PLANE_API_KEY)){throw 'TUNNEL_KEY_MISSING: Control-plane key is unavailable.'};New-Item -ItemType Directory -Force -Path $Context.runtimeDir|Out-Null
@@ -690,6 +698,39 @@ function Invoke-CodexBridgeLifecycleAction {
       } finally {if($null -ne $closedCore){$closedCore.Dispose()}}
     }
   }
+}
+
+function Stop-CbRuntimeForDailyUpdate {
+  param($Context)
+  # Fixed owner action for the user-owned daily layout only. HTTP health is not
+  # authority for drain: the existing cooperative receiver atomically refuses
+  # active jobs and closes its stores. No force-stop fallback for the core.
+  if(Test-CbInstalledLayout){throw 'DAILY_PROTECTED_MIGRATION_REQUIRED'}
+  if(-not(Test-Path -LiteralPath (Join-Path $Context.projectRoot '..\daily-mode.json'))){throw 'DAILY_LAYOUT_REQUIRED'}
+  Assert-CbShutdownPreflight $Context
+  $server=Resolve-CbRoleOwnership -Context $Context -Role server -ReadOnly
+  $tunnel=Resolve-CbRoleOwnership -Context $Context -Role tunnel -ReadOnly
+  if($server.state -eq 'Stopped') {
+    if($tunnel.state -ne 'Stopped'){throw 'DAILY_STOP_EVIDENCE_REQUIRED'}
+    if(Test-Path -LiteralPath (Join-Path $Context.dataDir 'powershell-approval\approval.lock')){throw 'DAILY_STATE_LOCK_PRESENT'}
+    return
+  }
+  $instance=Open-CbOwnedProcess -ProcessId ([int]$server.pid) -QueryOnly
+  try {
+    if($instance.HasExited -or -not(Test-CbExecutableIdentity -Context $Context -Role server -Process $instance) -or
+      -not(Test-CbOwnerMetadata -Context $Context -Role server -Process $instance)){throw 'OWNERSHIP_MISMATCH'}
+    # Exchange also verifies image, start time, SID, session and pipe peer on
+    # the retained process instance. CLOSED alone is insufficient: wait for exit.
+    $retainedPid=$instance.ProcessId;$retainedStart=$instance.StartTimeUtc
+    Invoke-CbCooperativeExchange -Context $Context -ProcessId $retainedPid -Action shutdown -ExpectedInstance $instance
+    try {$waitResult=$instance.WaitForExit(5000)}catch{throw 'DAILY_STOP_UNKNOWN'}
+    if(($waitResult -is [bool] -and -not $waitResult) -or -not $instance.HasExited -or
+      $instance.ProcessId -ne $retainedPid -or $instance.StartTimeUtc -cne $retainedStart){throw 'DAILY_STOP_UNKNOWN'}
+    if(Test-Path -LiteralPath (Join-Path $Context.dataDir 'powershell-approval\approval.lock')){throw 'DAILY_STATE_LOCK_PRESENT'}
+    Remove-CbRuntimeFile -Path $Context.serverPidFile -ExpectedPid $instance.ProcessId
+    Remove-CbRuntimeFile -Path $Context.serverOwnerFile
+    Stop-CbOwnedRole -Context $Context -Role tunnel -StoppedCoreHandle $instance
+  } finally {$instance.Dispose()}
 }
 
 function Test-CbInstalledLayout {

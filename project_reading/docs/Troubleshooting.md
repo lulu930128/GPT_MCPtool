@@ -85,7 +85,7 @@ Normal startup is non-destructive:
 After a source rebuild, use the exact-path replacement entry:
 
 ```powershell
-.\scripts\Restart-Tray.cmd
+.\scripts\runtime-control.ps1 -Action RestartCore
 ```
 
 For controller diagnostics:
@@ -98,6 +98,36 @@ npm run tray:selftest
 
 `RepairConnectivity` must not restart a healthy MCP core. `RestartCore` must not replace the
 tunnel. A foreign listener or unverifiable PID must fail closed and be investigated manually.
+
+## Bounded diagnostics from ChatGPT
+
+Use `check_tcp_port({host:"127.0.0.1",port:18787})`, then
+`http_health_check({url:"http://127.0.0.1:18787/health"})`. Query
+`list_listening_ports({port:18787})` and `inspect_port_owner({port:18787})` for TCP/PID/image-name
+evidence. Use `resolve_dns({hostname:"example.com",family:"ipv4"})` for DNS and
+`ping_host({host:"127.0.0.1"})` for one ICMP probe. No tool can restart/kill a process or run a command.
+
+- `TIMEOUT` or `OUTPUT_LIMIT`: evidence is incomplete; narrow filters or retry a single bounded
+  observation. Do not infer no listener from partial results.
+- `state=no_listener` requires a completed listener snapshot. `identityStatus=unavailable` can
+  indicate a race or inaccessible process. If tasklist is denied, a complete listener snapshot
+  keeps ok=true/complete=true with partial=true, identityComplete=false and identityCode.
+  Identity failure does not invalidate the observed PID; it also never proves executable ownership.
+  Never use this snapshot as authority to kill a PID.
+- `healthy=false` with a statusCode is an HTTP result (including 3xx/4xx/5xx); redirects are
+  intentionally not followed. Check the exact health URL. TCP reachability alone is not health.
+- DNS family errors are reported separately. DNS records can differ from OS hosts-file lookup.
+- ICMP can be blocked while TCP/HTTP work. Ping output is localized; `echoReplyObserved` only
+  recognizes TTL/hlim evidence and may not establish IPv6 echo success. Inspect bounded output.
+- `UNSUPPORTED_PLATFORM`: Windows listener/owner/ping implementation is unavailable; native
+  TCP/DNS/HTTP remain usable. `DIAGNOSTICS_BUSY`: wait for active probes to finish.
+
+After an authorized build/restart, run `npm run smoke:live` and `npm run smoke:live:diagnostics`.
+The latter checks tools/list, annotations, all six calls, the on-disk build fingerprint and runtime
+start time. Set `WORKSPACE_MCP_SMOKE_PREVIOUS_STARTED_AT` to the prior workspace_info value to
+assert restart adoption. Use the existing operator token via `WORKSPACE_MCP_SMOKE_TOKEN` when
+required; never print it. A successful local MCP/tunnel smoke does not prove the ChatGPT action
+cache refreshed; refresh/reconnect ChatGPT if the six tools are missing there.
 
 ## What to capture in a bug report
 

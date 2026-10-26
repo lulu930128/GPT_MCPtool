@@ -21,7 +21,7 @@ ChatGPT tool result 只是投影，不是 system of record。
 6. `turn/start`／`turn/steer` 的文字只由使用者明確輸入與標記為資料的 context、criteria、constraints、
    text artifact 區段組成。Bridge 不把 audit 模板或自訂行為提示注入模型；durable `request.md` 只供
    Bridge 稽核；Full Access 不保證 job folder 隔離。
-7. approval policy 固定 `on-request`；plan 禁用網路，Full Access 寫入工作解除 Codex 網路隔離。
+7. approval policy 固定 `on-request`；plan 保持檔案唯讀並開啟網路，Full Access 寫入工作解除 Codex 網路隔離。
 8. command 與 file change request 只允許 `accept`、`decline`、`cancel`，不提供 `acceptForSession`。
 9. 文字文件只能經 app-only begin／append／finalize contract 進入 server-owned staging。檔名只作 metadata，
    實際路徑永遠使用 Bridge UUID；每段與整體 SHA-256、character count、UTF-8 byte count 均需吻合。
@@ -35,9 +35,14 @@ ChatGPT tool result 只是投影，不是 system of record。
     durable Bridge job，沿用原 `threadId` 由 `thread/resume` 續作。Root、home、system 與 sensitive path
     仍不能作為 discovered project 入口，但 Full Access 不保證對它們的 OS 隔離。
 
-這是持續的全域 Full Access 階段；待 PowerShell NORMAL／ADMIN 執行、授權及 Receipt 管線驗收後，
-原生 Codex 恢復 `:workspace`，Bridge 寫入恢復 `codex-bridge-workspace`。不更動 Windows 管理員
-身分、ACL 或其他 MCP 權限；Commit／Push 明確授權、日誌遮蔽與服務 Owner 契約維持。
+一般工程用途保留 Full Access，不因 PowerShell NORMAL／ADMIN 管線驗收而自動恢復較窄的
+workspace sandbox。Shell／Git／PowerShell／Node／Python／建置／測試／HTTPS 依任務授權使用；
+不要求一般操作經 Control Center。不更動 Windows 管理員身分、ACL 或其他 MCP 權限。
+
+預設不讀秘密，非秘密 `.env.example` 可讀；使用者當次明確指定檔案／資料後，只讀該範圍，
+不跨任務沿用，不自動輸出／外傳。文字授權不覆蓋 OS／平台／Host 拒絕。共用 Profile 尚無
+逐任務可撤回例外，Full Access 同身分秘密硬隔離為 `UNVERIFIED`，見
+[權限邊界與受控方案](../PermissionBoundaries.md)。歷史 Full Access 遷移紀錄保留。
 
 ## State model
 

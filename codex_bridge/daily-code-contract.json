@@ -1,0 +1,8 @@
+{
+  "contract": "mcpcc-daily-compatibility-v1",
+  "persistentStateFormat": 1,
+  "configurationInterface": 1,
+  "credentialStorage": 1,
+  "ownerProtocol": 1,
+  "tunnelProfileFormat": 1
+}

@@ -369,6 +369,7 @@
                 "market.sectors",
                 "market.short_volume",
                 "market.volume_state",
+                "news.company_documents",
                 "news.events",
                 "ownership.distribution",
                 "ownership.insider_transactions",
@@ -385,6 +386,7 @@
                 "resource.metadata",
                 "screening.coverage",
                 "screening.intraday",
+                "screening.price_map",
                 "screening.ranking",
                 "source.health",
                 "target.identity",
@@ -393,6 +395,7 @@
                 "technical.divergence",
                 "technical.fibonacci",
                 "technical.indicators",
+                "technical.price_map",
                 "technical.relative_strength",
                 "technical.structure",
                 "technical.swings",
@@ -457,6 +460,7 @@
                 "market.sectors",
                 "market.short_volume",
                 "market.volume_state",
+                "news.company_documents",
                 "news.events",
                 "ownership.distribution",
                 "ownership.insider_transactions",
@@ -473,6 +477,7 @@
                 "resource.metadata",
                 "screening.coverage",
                 "screening.intraday",
+                "screening.price_map",
                 "screening.ranking",
                 "source.health",
                 "target.identity",
@@ -481,6 +486,7 @@
                 "technical.divergence",
                 "technical.fibonacci",
                 "technical.indicators",
+                "technical.price_map",
                 "technical.relative_strength",
                 "technical.structure",
                 "technical.swings",
@@ -548,6 +554,7 @@
                 "market.sectors",
                 "market.short_volume",
                 "market.volume_state",
+                "news.company_documents",
                 "news.events",
                 "ownership.distribution",
                 "ownership.insider_transactions",
@@ -564,6 +571,7 @@
                 "resource.metadata",
                 "screening.coverage",
                 "screening.intraday",
+                "screening.price_map",
                 "screening.ranking",
                 "source.health",
                 "target.identity",
@@ -572,6 +580,7 @@
                 "technical.divergence",
                 "technical.fibonacci",
                 "technical.indicators",
+                "technical.price_map",
                 "technical.relative_strength",
                 "technical.structure",
                 "technical.swings",
@@ -603,6 +612,32 @@
                     "maximum": 10,
                     "minimum": 1,
                     "type": "integer"
+                  }
+                },
+                "type": "object"
+              },
+              "diagnostics.source_health": {
+                "additionalProperties": false,
+                "properties": {
+                  "dataset": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "index_id": {
+                    "enum": [
+                      "TAIEX",
+                      "TPEX"
+                    ],
+                    "type": "string"
+                  },
+                  "limit": {
+                    "maximum": 500,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "stock_id": {
+                    "minLength": 1,
+                    "type": "string"
                   }
                 },
                 "type": "object"
@@ -790,6 +825,16 @@
                 },
                 "type": "object"
               },
+              "news.company_documents": {
+                "additionalProperties": false,
+                "properties": {
+                  "cursor": {
+                    "maxLength": 2000,
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
               "screening.intraday": {
                 "additionalProperties": false,
                 "properties": {
@@ -801,6 +846,7 @@
                   },
                   "metric": {
                     "default": "change_pct",
+                    "description": "order_book_imbalance requests return unsupported (no full-market depth producer); vwap_deviation_pct returns unavailable until canonical session VWAP is materialized.",
                     "enum": [
                       "change_pct",
                       "estimated_trade_value",
@@ -852,6 +898,97 @@
                       }
                     },
                     "type": "object"
+                  }
+                },
+                "type": "object"
+              },
+              "screening.price_map": {
+                "additionalProperties": false,
+                "properties": {
+                  "lane": {
+                    "default": "actual",
+                    "enum": [
+                      "actual",
+                      "indicative"
+                    ],
+                    "type": "string"
+                  },
+                  "limit": {
+                    "default": 20,
+                    "maximum": 200,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "near_pct": {
+                    "default": 0.5,
+                    "maximum": 5,
+                    "minimum": 0,
+                    "type": "number"
+                  },
+                  "offset": {
+                    "default": 0,
+                    "maximum": 5000,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "relation": {
+                    "default": "near_zone",
+                    "enum": [
+                      "near_zone",
+                      "touching",
+                      "above_zone",
+                      "below_zone",
+                      "support_reaction",
+                      "resistance_reaction",
+                      "breakout_retest",
+                      "breakdown_retest"
+                    ],
+                    "type": "string"
+                  },
+                  "timeframe": {
+                    "default": "daily",
+                    "enum": [
+                      "daily",
+                      "weekly",
+                      "monthly"
+                    ],
+                    "type": "string"
+                  },
+                  "universe": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "markets": {
+                        "items": {
+                          "enum": [
+                            "TWSE",
+                            "TPEX"
+                          ],
+                          "type": "string"
+                        },
+                        "maxItems": 2,
+                        "minItems": 1,
+                        "type": "array"
+                      },
+                      "stock_ids": {
+                        "items": {
+                          "maxLength": 20,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "maxItems": 2500,
+                        "type": "array"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "zone_side": {
+                    "default": "any",
+                    "enum": [
+                      "any",
+                      "upside",
+                      "downside"
+                    ],
+                    "type": "string"
                   }
                 },
                 "type": "object"
@@ -953,6 +1090,26 @@
                   }
                 },
                 "type": "object"
+              },
+              "technical.price_map": {
+                "additionalProperties": false,
+                "properties": {
+                  "candidate_close": {
+                    "exclusiveMinimum": 0,
+                    "type": "number"
+                  },
+                  "timeframe": {
+                    "default": "daily",
+                    "enum": [
+                      "today",
+                      "daily",
+                      "weekly",
+                      "monthly"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "type": "object"
               }
             },
             "type": "object"
@@ -997,6 +1154,7 @@
                 "market.sectors",
                 "market.short_volume",
                 "market.volume_state",
+                "news.company_documents",
                 "news.events",
                 "ownership.distribution",
                 "ownership.insider_transactions",
@@ -1013,6 +1171,7 @@
                 "resource.metadata",
                 "screening.coverage",
                 "screening.intraday",
+                "screening.price_map",
                 "screening.ranking",
                 "source.health",
                 "target.identity",
@@ -1021,6 +1180,7 @@
                 "technical.divergence",
                 "technical.fibonacci",
                 "technical.indicators",
+                "technical.price_map",
                 "technical.relative_strength",
                 "technical.structure",
                 "technical.swings",
@@ -1133,6 +1293,7 @@
     "x-omi-capabilities": [
       {
         "capability_id": "target.identity",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "type",
           "id",
@@ -1182,7 +1343,11 @@
       },
       {
         "capability_id": "quote.snapshot",
+        "compatibility_schema_versions": [
+          "tw.quote.snapshot.v2"
+        ],
         "default_fields": [
+          "current_price",
           "kind",
           "status",
           "schema_version",
@@ -1191,6 +1356,7 @@
           "selected_event_at",
           "facts_usable",
           "research_usable",
+          "decision_usable",
           "limitations",
           "candidates",
           "quote",
@@ -1198,6 +1364,9 @@
           "latest_price",
           "last_price",
           "price_available",
+          "mid_price_estimate",
+          "mid_price_estimate_source",
+          "mid_price_estimate_usable",
           "last_trade_available",
           "last_trade_price",
           "last_trade_time",
@@ -1207,6 +1376,33 @@
           "fallback_quote",
           "fallback_used",
           "previous_close",
+          "market_phase",
+          "capability_expectation",
+          "source_status",
+          "session_date_relation",
+          "current_session_expected",
+          "current_session_satisfied",
+          "expected_trade_date",
+          "event_trade_date",
+          "provider_snapshot_freshness",
+          "trade_recency",
+          "trade_state",
+          "change_reference_price",
+          "change_reference_type",
+          "change_reference_trade_date",
+          "change_reference_source",
+          "change_reference",
+          "change_reference_provider",
+          "change_reference_status",
+          "change_reference_reason_code",
+          "change_reference_applies_to_trade_date",
+          "change_reference_authority",
+          "change_reference_source_field",
+          "change_reference_lineage",
+          "change_reference_prior_close_lineage",
+          "change_reference_calculation_eligible",
+          "change_reference_display_usable",
+          "change_reference_research_usable",
           "open_price",
           "high_price",
           "low_price",
@@ -1281,6 +1477,7 @@
           "fallback_provider",
           "fallback_reason",
           "provider_attempts",
+          "provider_attempts_by_capability",
           "source_grade",
           "cache_hit",
           "cache_written",
@@ -1356,6 +1553,7 @@
         "domain": "quote",
         "event_time_basis": "capability_defined",
         "fields": [
+          "current_price",
           "kind",
           "status",
           "schema_version",
@@ -1364,6 +1562,7 @@
           "selected_event_at",
           "facts_usable",
           "research_usable",
+          "decision_usable",
           "limitations",
           "candidates",
           "quote",
@@ -1371,6 +1570,9 @@
           "latest_price",
           "last_price",
           "price_available",
+          "mid_price_estimate",
+          "mid_price_estimate_source",
+          "mid_price_estimate_usable",
           "last_trade_available",
           "last_trade_price",
           "last_trade_time",
@@ -1381,6 +1583,33 @@
           "fallback_used",
           "previous_close",
           "previous_close_trade_date",
+          "market_phase",
+          "capability_expectation",
+          "source_status",
+          "session_date_relation",
+          "current_session_expected",
+          "current_session_satisfied",
+          "expected_trade_date",
+          "event_trade_date",
+          "provider_snapshot_freshness",
+          "trade_recency",
+          "trade_state",
+          "change_reference_price",
+          "change_reference_type",
+          "change_reference_trade_date",
+          "change_reference_source",
+          "change_reference",
+          "change_reference_provider",
+          "change_reference_status",
+          "change_reference_reason_code",
+          "change_reference_applies_to_trade_date",
+          "change_reference_authority",
+          "change_reference_source_field",
+          "change_reference_lineage",
+          "change_reference_prior_close_lineage",
+          "change_reference_calculation_eligible",
+          "change_reference_display_usable",
+          "change_reference_research_usable",
           "open_price",
           "high_price",
           "low_price",
@@ -1463,6 +1692,7 @@
           "fallback_provider",
           "fallback_reason",
           "provider_attempts",
+          "provider_attempts_by_capability",
           "source_grade",
           "cache_hit",
           "cache_written",
@@ -1535,11 +1765,9 @@
         ],
         "fill_operations": {
           "crypto_asset": "crypto.refresh_ticker",
-          "jp_index": "jp.read_intraday_trend",
-          "jp_stock": "jp.read_intraday_trend",
-          "kr_index": "kr.read_index_intraday_trend",
-          "kr_stock": "kr.read_stock_intraday_trend",
-          "us_stock": "us.read_intraday_trend"
+          "jp_index": "jp.refresh_intraday_trend",
+          "jp_stock": "jp.refresh_intraday_trend",
+          "us_stock": "us.refresh_quote"
         },
         "frequency": "request",
         "markets": [],
@@ -1560,7 +1788,7 @@
           "stock": "reader_fetch"
         },
         "replacement_capabilities": [],
-        "schema_version": "tw.quote.snapshot.v2",
+        "schema_version": "omi.market.quote.snapshot.v1",
         "scopes": [
           "stock",
           "us_stock",
@@ -1582,9 +1810,21 @@
       },
       {
         "capability_id": "quote.order_book",
+        "compatibility_schema_versions": [],
         "default_fields": [
+          "change_reference",
+          "facts_usable",
+          "research_usable",
+          "decision_usable",
           "status",
           "available",
+          "live_available",
+          "snapshot_available",
+          "snapshot_status",
+          "snapshot_semantics",
+          "snapshot_trade_date",
+          "snapshot_session",
+          "snapshot_decision_usable",
           "best_bid_price",
           "best_bid_size_lots",
           "best_ask_price",
@@ -1613,9 +1853,20 @@
         "domain": "quote",
         "event_time_basis": "provider_event_time",
         "fields": [
+          "change_reference",
+          "facts_usable",
+          "research_usable",
+          "decision_usable",
           "kind",
           "status",
           "available",
+          "live_available",
+          "snapshot_available",
+          "snapshot_status",
+          "snapshot_semantics",
+          "snapshot_trade_date",
+          "snapshot_session",
+          "snapshot_decision_usable",
           "best_bid_price",
           "best_bid_size_lots",
           "best_ask_price",
@@ -1673,7 +1924,10 @@
       },
       {
         "capability_id": "quote.auction",
+        "compatibility_schema_versions": [],
         "default_fields": [
+          "historical_capture",
+          "change_reference",
           "status",
           "available",
           "applicability_status",
@@ -1714,6 +1968,8 @@
         "domain": "quote",
         "event_time_basis": "provider_event_time",
         "fields": [
+          "historical_capture",
+          "change_reference",
           "kind",
           "status",
           "available",
@@ -1783,10 +2039,25 @@
       },
       {
         "capability_id": "quote.session_close",
+        "compatibility_schema_versions": [],
         "default_fields": [
+          "change_reference",
           "status",
           "available",
           "price",
+          "closing_match_volume_shares",
+          "closing_match_volume_lots",
+          "session_cumulative_volume_shares",
+          "session_cumulative_volume_lots",
+          "session_cumulative_volume_trade_date",
+          "session_cumulative_volume_event_time",
+          "volume_available",
+          "volume_status",
+          "volume_provider",
+          "volume_source",
+          "volume_event_time",
+          "volume_scope",
+          "volume_decision_usable",
           "trade_date",
           "event_time",
           "confirmed_at",
@@ -1796,6 +2067,8 @@
           "finalization",
           "official_daily",
           "freshness",
+          "facts_usable",
+          "research_usable",
           "decision_usable",
           "reconciliation_status",
           "limitations"
@@ -1806,11 +2079,29 @@
         "domain": "quote",
         "event_time_basis": "provider_event_time",
         "fields": [
+          "change_reference",
           "kind",
           "status",
           "available",
           "price",
           "candidate_price",
+          "closing_match_volume_shares",
+          "closing_match_volume_lots",
+          "closing_match_volume_semantics",
+          "closing_match_volume_source_field",
+          "session_cumulative_volume_shares",
+          "session_cumulative_volume_lots",
+          "session_cumulative_volume_trade_date",
+          "session_cumulative_volume_event_time",
+          "session_cumulative_volume_semantics",
+          "session_cumulative_volume_source_field",
+          "volume_available",
+          "volume_status",
+          "volume_provider",
+          "volume_source",
+          "volume_event_time",
+          "volume_scope",
+          "volume_decision_usable",
           "trade_date",
           "event_time",
           "event_time_basis",
@@ -1866,7 +2157,9 @@
       },
       {
         "capability_id": "quote.official_close",
+        "compatibility_schema_versions": [],
         "default_fields": [
+          "change_reference",
           "status",
           "available",
           "price",
@@ -1885,6 +2178,7 @@
         "domain": "quote",
         "event_time_basis": "taiwan_completed_trade_date",
         "fields": [
+          "change_reference",
           "kind",
           "status",
           "available",
@@ -1930,6 +2224,9 @@
       },
       {
         "capability_id": "intraday.bars",
+        "compatibility_schema_versions": [
+          "tw.intraday.bars.v2"
+        ],
         "default_fields": [
           "as_of",
           "enabled",
@@ -1955,7 +2252,35 @@
           "original_point_count",
           "session",
           "session_scope",
+          "requested_trade_date",
+          "session_coverage",
+          "is_partial",
+          "trade_date",
+          "expected_trade_date",
+          "materialization_state",
+          "is_historical",
           "session_phase",
+          "market_phase",
+          "capability_expectation",
+          "current_source_status",
+          "bar_source_status",
+          "source_status",
+          "change_reference_price",
+          "change_reference_type",
+          "change_reference_trade_date",
+          "change_reference_source",
+          "change_reference",
+          "change_reference_provider",
+          "change_reference_status",
+          "change_reference_reason_code",
+          "change_reference_applies_to_trade_date",
+          "change_reference_authority",
+          "change_reference_source_field",
+          "change_reference_lineage",
+          "change_reference_prior_close_lineage",
+          "change_reference_calculation_eligible",
+          "change_reference_display_usable",
+          "change_reference_research_usable",
           "market_status",
           "official_close_status",
           "delivery_status",
@@ -2013,6 +2338,11 @@
           "window_volume_sum_lots",
           "window_volume_scope",
           "window_trade_date_count",
+          "closing_match_volume_shares",
+          "closing_match_volume_lots",
+          "closing_match_volume_source",
+          "closing_match_volume_source_field",
+          "closing_match_volume_event_time",
           "session_cumulative_volume_shares",
           "session_cumulative_volume_lots",
           "session_cumulative_volume_trade_date",
@@ -2093,7 +2423,35 @@
           "original_point_count",
           "session",
           "session_scope",
+          "requested_trade_date",
+          "session_coverage",
+          "is_partial",
+          "trade_date",
+          "expected_trade_date",
+          "materialization_state",
+          "is_historical",
           "session_phase",
+          "market_phase",
+          "capability_expectation",
+          "current_source_status",
+          "bar_source_status",
+          "source_status",
+          "change_reference_price",
+          "change_reference_type",
+          "change_reference_trade_date",
+          "change_reference_source",
+          "change_reference",
+          "change_reference_provider",
+          "change_reference_status",
+          "change_reference_reason_code",
+          "change_reference_applies_to_trade_date",
+          "change_reference_authority",
+          "change_reference_source_field",
+          "change_reference_lineage",
+          "change_reference_prior_close_lineage",
+          "change_reference_calculation_eligible",
+          "change_reference_display_usable",
+          "change_reference_research_usable",
           "market_status",
           "official_close_status",
           "delivery_status",
@@ -2154,6 +2512,11 @@
           "window_volume_sum_lots",
           "window_volume_scope",
           "window_trade_date_count",
+          "closing_match_volume_shares",
+          "closing_match_volume_lots",
+          "closing_match_volume_source",
+          "closing_match_volume_source_field",
+          "closing_match_volume_event_time",
           "session_cumulative_volume_shares",
           "session_cumulative_volume_lots",
           "session_cumulative_volume_trade_date",
@@ -2212,11 +2575,11 @@
         ],
         "fill_operations": {
           "crypto_asset": "crypto.refresh_ohlcv",
-          "jp_index": "jp.read_intraday_trend",
-          "jp_stock": "jp.read_intraday_trend",
-          "kr_index": "kr.read_index_intraday_trend",
-          "kr_stock": "kr.read_stock_intraday_trend",
-          "us_stock": "us.read_intraday_trend"
+          "jp_index": "jp.refresh_intraday_trend",
+          "jp_stock": "jp.refresh_intraday_trend",
+          "kr_index": "kr.refresh_index_intraday_trend",
+          "kr_stock": "kr.refresh_stock_intraday_trend",
+          "us_stock": "us.refresh_intraday_bars"
         },
         "frequency": "request",
         "markets": [],
@@ -2243,7 +2606,7 @@
           "stock": "reader_fetch"
         },
         "replacement_capabilities": [],
-        "schema_version": "tw.intraday.bars.v2",
+        "schema_version": "omi.market.bars.v1",
         "scopes": [
           "stock",
           "us_stock",
@@ -2266,6 +2629,7 @@
       },
       {
         "capability_id": "daily.ohlcv",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "as_of",
           "kind",
@@ -2275,6 +2639,12 @@
           "expected_trade_date",
           "latest_trade_date",
           "freshness_status",
+          "coverage_status",
+          "missing_dates",
+          "price_basis",
+          "venue_scope_verified",
+          "listing_venue",
+          "listing_board",
           "is_current",
           "selected_provider",
           "selected_source",
@@ -2339,6 +2709,12 @@
           "expected_trade_date",
           "latest_trade_date",
           "freshness_status",
+          "coverage_status",
+          "missing_dates",
+          "price_basis",
+          "venue_scope_verified",
+          "listing_venue",
+          "listing_board",
           "is_current",
           "selected_provider",
           "selected_source",
@@ -2440,6 +2816,7 @@
       },
       {
         "capability_id": "technical.structure",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "analysis",
           "as_of",
@@ -2489,7 +2866,20 @@
           "limitations",
           "quality",
           "input_quality",
-          "lineage"
+          "lineage",
+          "decision_usable",
+          "decision_snapshot",
+          "current_period",
+          "momentum_confirmation",
+          "volatility_context",
+          "breakout_context",
+          "swing_context",
+          "fibonacci_context",
+          "cost_context",
+          "relative_strength",
+          "scenarios",
+          "corporate_action",
+          "warnings"
         ],
         "default_limit": 20,
         "deprecated": false,
@@ -2551,7 +2941,20 @@
           "limitations",
           "quality",
           "input_quality",
-          "lineage"
+          "lineage",
+          "decision_usable",
+          "decision_snapshot",
+          "current_period",
+          "momentum_confirmation",
+          "volatility_context",
+          "breakout_context",
+          "swing_context",
+          "fibonacci_context",
+          "cost_context",
+          "relative_strength",
+          "scenarios",
+          "corporate_action",
+          "warnings"
         ],
         "fill_operations": {},
         "frequency": "daily",
@@ -2566,6 +2969,9 @@
         },
         "paths": [
           "data.resolved_research.technical_structure",
+          "compact.technical_advanced.structure_v2",
+          "data.technical_advanced.structure_v2",
+          "data.technical_evidence.structure_v2",
           "compact.technical",
           "compact.analysis",
           "data.technical",
@@ -2590,6 +2996,7 @@
       },
       {
         "capability_id": "technical.indicators",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "schema_version",
           "status",
@@ -2685,6 +3092,7 @@
       },
       {
         "capability_id": "technical.swings",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "algorithm_version",
           "method",
@@ -2748,6 +3156,7 @@
       },
       {
         "capability_id": "technical.fibonacci",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "algorithm_version",
           "method",
@@ -2817,6 +3226,7 @@
       },
       {
         "capability_id": "technical.divergence",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "algorithm_version",
           "method",
@@ -2874,6 +3284,7 @@
       },
       {
         "capability_id": "technical.breakout",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "algorithm_version",
           "method",
@@ -2969,6 +3380,7 @@
       },
       {
         "capability_id": "technical.volume_profile",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "algorithm_version",
           "status",
@@ -2976,6 +3388,7 @@
           "source_granularity",
           "confidence",
           "price_basis",
+          "volume_unit",
           "lookback_bars",
           "poc",
           "val",
@@ -3000,6 +3413,7 @@
           "source_granularity",
           "confidence",
           "price_basis",
+          "volume_unit",
           "lookback_bars",
           "source_row_count",
           "poc",
@@ -3043,6 +3457,7 @@
       },
       {
         "capability_id": "technical.anchored_vwap",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "algorithm_version",
           "status",
@@ -3116,6 +3531,7 @@
       },
       {
         "capability_id": "technical.relative_strength",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "algorithm_version",
           "status",
@@ -3187,7 +3603,125 @@
         "writes_cache": false
       },
       {
+        "capability_id": "technical.price_map",
+        "compatibility_schema_versions": [],
+        "default_fields": [
+          "version",
+          "market",
+          "stock_id",
+          "stock_name",
+          "status",
+          "decision_usable",
+          "generated_at",
+          "basis_revision",
+          "requested_timeframe",
+          "structure_timeframe",
+          "observation_semantics",
+          "method_applicability",
+          "structure_input_usable",
+          "observation",
+          "evidence_timeframes",
+          "reference",
+          "axis",
+          "markers",
+          "technical",
+          "methodology",
+          "zones",
+          "nearest_upside",
+          "nearest_downside",
+          "decision_changes",
+          "candidate",
+          "corporate_action",
+          "missing",
+          "warnings",
+          "limitations",
+          "source_refs"
+        ],
+        "default_limit": 12,
+        "deprecated": false,
+        "description": "Backend-owned completed-daily price zones, reference, methodology, decision changes, and corporate-action limitations.",
+        "domain": "technical",
+        "event_time_basis": "latest_resolved_completed_market_period",
+        "fields": [
+          "kind",
+          "version",
+          "market",
+          "stock_id",
+          "stock_name",
+          "status",
+          "decision_usable",
+          "generated_at",
+          "basis_revision",
+          "requested_timeframe",
+          "structure_timeframe",
+          "observation_semantics",
+          "method_applicability",
+          "structure_input_usable",
+          "observation",
+          "evidence_timeframes",
+          "reference",
+          "axis",
+          "markers",
+          "technical",
+          "methodology",
+          "parameter_contract",
+          "levels",
+          "zones",
+          "nearest_upside",
+          "nearest_downside",
+          "decision_changes",
+          "candidate",
+          "corporate_action",
+          "missing",
+          "warnings",
+          "limitations",
+          "source_refs"
+        ],
+        "fill_operations": {},
+        "frequency": "daily",
+        "markets": [
+          "TW"
+        ],
+        "parameter_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "candidate_close": {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            "timeframe": {
+              "default": "daily",
+              "enum": [
+                "today",
+                "daily",
+                "weekly",
+                "monthly"
+              ],
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "paths": [
+          "compact.price_map",
+          "data.price_map"
+        ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
+        "replacement_capabilities": [],
+        "schema_version": "tw.stock.price_map.v4",
+        "scopes": [
+          "stock"
+        ],
+        "side_effect_policy": "read_only",
+        "slot": "technical",
+        "title": "Taiwan stock canonical price map",
+        "unit_semantics": "TWD_per_share_and_percent_distance",
+        "writes_cache": false
+      },
+      {
         "capability_id": "chips.institutional",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "trade_date",
           "foreign_investor_net",
@@ -3247,6 +3781,7 @@
       },
       {
         "capability_id": "chips.margin",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "trade_date",
           "margin_buy",
@@ -3318,6 +3853,7 @@
       },
       {
         "capability_id": "broker_branch.summary",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "trade_date",
           "available_days",
@@ -3390,6 +3926,7 @@
       },
       {
         "capability_id": "ownership.distribution",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "trade_date",
           "distribution",
@@ -3437,6 +3974,7 @@
       },
       {
         "capability_id": "ownership.insider_transactions",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "symbol",
           "status",
@@ -3494,6 +4032,7 @@
       },
       {
         "capability_id": "fundamentals.revenue",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "applicability_status",
@@ -3566,6 +4105,7 @@
       },
       {
         "capability_id": "fundamentals.financials",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "applicability_status",
@@ -3651,6 +4191,7 @@
       },
       {
         "capability_id": "cross_market.overnight",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "as_of",
           "stance",
@@ -3737,6 +4278,7 @@
       },
       {
         "capability_id": "cross_market.relations",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "decision_usable",
@@ -3816,6 +4358,7 @@
       },
       {
         "capability_id": "cross_market.parity",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "is_current",
@@ -3895,6 +4438,7 @@
       },
       {
         "capability_id": "company.profile",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "symbol",
           "stock_id",
@@ -3986,6 +4530,7 @@
       },
       {
         "capability_id": "corporate.actions",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "provider",
           "symbol",
@@ -4008,7 +4553,18 @@
           "result_count",
           "total_count",
           "cache_status",
+          "cache_fetched_at",
           "empty_result_is_valid",
+          "facts_usable",
+          "decision_usable",
+          "coverage_status",
+          "coverage_start",
+          "coverage_end",
+          "checked_through_date",
+          "relevant_analysis_start",
+          "relevant_analysis_end",
+          "source_scope",
+          "absence_semantics",
           "warnings"
         ],
         "default_limit": 20,
@@ -4040,7 +4596,18 @@
           "result_count",
           "total_count",
           "cache_status",
+          "cache_fetched_at",
           "empty_result_is_valid",
+          "facts_usable",
+          "decision_usable",
+          "coverage_status",
+          "coverage_start",
+          "coverage_end",
+          "checked_through_date",
+          "relevant_analysis_start",
+          "relevant_analysis_end",
+          "source_scope",
+          "absence_semantics",
           "warnings",
           "fetched_at"
         ],
@@ -4084,7 +4651,96 @@
         "writes_cache": false
       },
       {
+        "capability_id": "news.company_documents",
+        "compatibility_schema_versions": [],
+        "default_fields": [
+          "schema_version",
+          "status",
+          "provider",
+          "stock_id",
+          "market",
+          "stock",
+          "items",
+          "contract_version",
+          "profile",
+          "generated_at",
+          "atlas_generated_at",
+          "freshness",
+          "coverage",
+          "warnings",
+          "pagination",
+          "reason_code",
+          "returned_count",
+          "facts_usable",
+          "decision_usable",
+          "absence_interpretation",
+          "source_refs",
+          "missing",
+          "limitations"
+        ],
+        "default_limit": 20,
+        "deprecated": false,
+        "description": "Exact stock-linked Atlas Documents; preserve original titles, rights and attribution. Supplemental evidence only; no decision score changes.",
+        "domain": null,
+        "event_time_basis": "atlas_document_published_and_observed_timestamps",
+        "fields": [
+          "schema_version",
+          "status",
+          "provider",
+          "stock_id",
+          "market",
+          "stock",
+          "items",
+          "contract_version",
+          "profile",
+          "generated_at",
+          "atlas_generated_at",
+          "freshness",
+          "coverage",
+          "warnings",
+          "pagination",
+          "reason_code",
+          "returned_count",
+          "facts_usable",
+          "decision_usable",
+          "absence_interpretation",
+          "source_refs",
+          "missing",
+          "limitations"
+        ],
+        "fill_operations": {},
+        "frequency": "atlas_scheduler_owned",
+        "markets": [],
+        "parameter_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "cursor": {
+              "maxLength": 2000,
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "paths": [
+          "compact.company_news",
+          "data.company_news"
+        ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
+        "replacement_capabilities": [],
+        "schema_version": "omi.external.company_news.v1",
+        "scopes": [
+          "stock"
+        ],
+        "side_effect_policy": "read_only_local_service",
+        "slot": "company_news",
+        "title": "Company news Documents",
+        "unit_semantics": "source_attributed_company_news_documents",
+        "writes_cache": false
+      },
+      {
         "capability_id": "news.events",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "kind",
           "schema_version",
@@ -4171,6 +4827,7 @@
       },
       {
         "capability_id": "market.short_volume",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "provider",
           "symbol",
@@ -4221,6 +4878,7 @@
       },
       {
         "capability_id": "market.breadth",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "as_of",
           "trade_date",
@@ -4228,6 +4886,9 @@
           "version",
           "state_contract_version",
           "market_session",
+          "session_semantics",
+          "observation_market_session",
+          "finalization",
           "price_semantics",
           "decision_usable",
           "is_provisional",
@@ -4260,6 +4921,19 @@
           "coverage_ratio",
           "classified_count",
           "unknown_count",
+          "received_unclassified_count",
+          "not_received_count",
+          "missing_count",
+          "coverage_reason_counts",
+          "classification_summary",
+          "classification_reason_counts",
+          "classification_diagnostics",
+          "received_count",
+          "received_coverage_ratio",
+          "classified_coverage_ratio",
+          "limits",
+          "published_limits",
+          "partition_total",
           "reconciliation_status",
           "is_full_market",
           "universe_type",
@@ -4289,6 +4963,9 @@
           "version",
           "state_contract_version",
           "market_session",
+          "session_semantics",
+          "observation_market_session",
+          "finalization",
           "price_semantics",
           "decision_usable",
           "is_provisional",
@@ -4321,6 +4998,19 @@
           "coverage_ratio",
           "classified_count",
           "unknown_count",
+          "received_unclassified_count",
+          "not_received_count",
+          "missing_count",
+          "coverage_reason_counts",
+          "classification_summary",
+          "classification_reason_counts",
+          "classification_diagnostics",
+          "received_count",
+          "received_coverage_ratio",
+          "classified_coverage_ratio",
+          "limits",
+          "published_limits",
+          "partition_total",
           "reconciliation_status",
           "reconciliation_formula",
           "universe_definition",
@@ -4388,8 +5078,11 @@
       },
       {
         "capability_id": "market.indices",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
+          "market",
+          "evaluated_at",
           "as_of",
           "oldest_as_of",
           "newest_as_of",
@@ -4400,6 +5093,9 @@
           "is_current",
           "is_complete",
           "coverage_status",
+          "expected_count",
+          "facts_usable",
+          "decision_usable",
           "observation_mix",
           "count",
           "items",
@@ -4409,12 +5105,14 @@
         ],
         "default_limit": 20,
         "deprecated": false,
-        "description": "Canonical TAIEX and TPEx index snapshots from the shared Taiwan market-index summary reader.",
+        "description": "Canonical market-index snapshots from the market-owned aggregate reader, including Taiwan indices and the six US cash indices.",
         "domain": "indices",
         "event_time_basis": "index_quote_or_completed_trade_date",
         "fields": [
           "kind",
+          "market",
           "status",
+          "evaluated_at",
           "as_of",
           "oldest_as_of",
           "newest_as_of",
@@ -4425,6 +5123,9 @@
           "is_current",
           "is_complete",
           "coverage_status",
+          "expected_count",
+          "facts_usable",
+          "decision_usable",
           "observation_mix",
           "count",
           "items",
@@ -4435,7 +5136,8 @@
         "fill_operations": {},
         "frequency": "intraday",
         "markets": [
-          "TW"
+          "TW",
+          "US"
         ],
         "parameter_schema": {
           "additionalProperties": false,
@@ -4455,12 +5157,13 @@
         ],
         "side_effect_policy": "read_only",
         "slot": "market_indices",
-        "title": "Taiwan market indices",
+        "title": "Market indices",
         "unit_semantics": "index_points",
         "writes_cache": false
       },
       {
         "capability_id": "events.upcoming",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "stock_id",
@@ -4540,6 +5243,7 @@
       },
       {
         "capability_id": "events.calendar",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "as_of",
@@ -4726,6 +5430,7 @@
       },
       {
         "capability_id": "events.history",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "stock_id",
@@ -4812,6 +5517,7 @@
       },
       {
         "capability_id": "regulation.disposition",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "stock_id",
@@ -4891,6 +5597,7 @@
       },
       {
         "capability_id": "regulation.trading_restrictions",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "stock_id",
@@ -4963,7 +5670,13 @@
       },
       {
         "capability_id": "market.sectors",
+        "compatibility_schema_versions": [],
         "default_fields": [
+          "facts_usable_for_ranking",
+          "observation_received_freshness",
+          "last_trade_recency",
+          "intraday_research_usable",
+          "execution_grade_usable",
           "status",
           "as_of",
           "observed_trade_date",
@@ -4991,6 +5704,11 @@
         "domain": "sectors",
         "event_time_basis": "taiwan_provider_event_time_or_completed_trade_date",
         "fields": [
+          "facts_usable_for_ranking",
+          "observation_received_freshness",
+          "last_trade_recency",
+          "intraday_research_usable",
+          "execution_grade_usable",
           "kind",
           "version",
           "status",
@@ -5043,6 +5761,7 @@
       },
       {
         "capability_id": "market.index_contributions",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "as_of",
@@ -5170,6 +5889,7 @@
       },
       {
         "capability_id": "market.institutional_flow",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "trade_date",
@@ -5233,6 +5953,7 @@
       },
       {
         "capability_id": "market.margin_short",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "trade_date",
@@ -5298,6 +6019,7 @@
       },
       {
         "capability_id": "market.sample_ranking",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "scope",
@@ -5320,6 +6042,8 @@
           "top_industries",
           "weak_industries",
           "industry_strength_label",
+          "deprecated",
+          "replacement_capabilities",
           "warnings"
         ],
         "default_limit": 20,
@@ -5351,6 +6075,8 @@
           "top_industries",
           "weak_industries",
           "industry_strength_label",
+          "deprecated",
+          "replacement_capabilities",
           "warnings"
         ],
         "fill_operations": {},
@@ -5385,6 +6111,7 @@
       },
       {
         "capability_id": "market.cross_market",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "as_of",
@@ -5435,12 +6162,16 @@
       },
       {
         "capability_id": "market.chips",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "as_of",
           "institutional",
           "margin",
           "official_market",
+          "official_market_aggregate",
+          "institutional_per_stock",
+          "margin_per_stock",
           "summary",
           "coverage",
           "missing",
@@ -5458,6 +6189,9 @@
           "institutional",
           "margin",
           "official_market",
+          "official_market_aggregate",
+          "institutional_per_stock",
+          "margin_per_stock",
           "summary",
           "coverage",
           "missing",
@@ -5493,6 +6227,7 @@
       },
       {
         "capability_id": "screening.ranking",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "snapshot_id",
           "status",
@@ -5663,6 +6398,7 @@
       },
       {
         "capability_id": "screening.coverage",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "snapshot_id",
           "status",
@@ -5678,6 +6414,7 @@
           "complete_window_count",
           "partial_window_count",
           "missing_count",
+          "reconciliation",
           "coverage_ratio",
           "is_full_market_request",
           "is_full_requested_universe",
@@ -5713,6 +6450,7 @@
           "complete_window_count",
           "partial_window_count",
           "missing_count",
+          "reconciliation",
           "coverage_ratio",
           "is_full_market_request",
           "is_full_requested_universe",
@@ -5752,9 +6490,189 @@
         "writes_cache": false
       },
       {
-        "capability_id": "screening.intraday",
+        "capability_id": "screening.price_map",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
+          "freshness_status",
+          "computed_at",
+          "structure_timeframe",
+          "relation",
+          "lane",
+          "empty_result_is_valid",
+          "decision_usable",
+          "zone_side",
+          "expected_basis_date",
+          "rows",
+          "coverage",
+          "pagination",
+          "facts_usable_for_ranking",
+          "intraday_research_usable",
+          "execution_grade_usable",
+          "cache_policy",
+          "missing",
+          "warnings"
+        ],
+        "default_limit": 200,
+        "deprecated": false,
+        "description": "Cache-only screening over revisioned completed-period zones and canonical current observations. Reactions require ordered samples; indicative observations are separate from actual trades.",
+        "domain": "screening",
+        "event_time_basis": "completed_structure_and_current_observation",
+        "fields": [
+          "kind",
+          "version",
+          "status",
+          "freshness_status",
+          "computed_at",
+          "as_of",
+          "empty_result_is_valid",
+          "decision_usable",
+          "zone_side",
+          "structure_timeframe",
+          "relation",
+          "lane",
+          "expected_basis_date",
+          "rows",
+          "coverage",
+          "pagination",
+          "facts_usable",
+          "facts_usable_for_ranking",
+          "intraday_research_usable",
+          "execution_grade_usable",
+          "cache_policy",
+          "missing",
+          "warnings",
+          "source_refs"
+        ],
+        "fill_operations": {},
+        "frequency": "request",
+        "markets": [
+          "TW"
+        ],
+        "parameter_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "lane": {
+              "default": "actual",
+              "enum": [
+                "actual",
+                "indicative"
+              ],
+              "type": "string"
+            },
+            "limit": {
+              "default": 20,
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "near_pct": {
+              "default": 0.5,
+              "maximum": 5,
+              "minimum": 0,
+              "type": "number"
+            },
+            "offset": {
+              "default": 0,
+              "maximum": 5000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "relation": {
+              "default": "near_zone",
+              "enum": [
+                "near_zone",
+                "touching",
+                "above_zone",
+                "below_zone",
+                "support_reaction",
+                "resistance_reaction",
+                "breakout_retest",
+                "breakdown_retest"
+              ],
+              "type": "string"
+            },
+            "timeframe": {
+              "default": "daily",
+              "enum": [
+                "daily",
+                "weekly",
+                "monthly"
+              ],
+              "type": "string"
+            },
+            "universe": {
+              "additionalProperties": false,
+              "properties": {
+                "markets": {
+                  "items": {
+                    "enum": [
+                      "TWSE",
+                      "TPEX"
+                    ],
+                    "type": "string"
+                  },
+                  "maxItems": 2,
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "stock_ids": {
+                  "items": {
+                    "maxLength": 20,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "maxItems": 2500,
+                  "type": "array"
+                }
+              },
+              "type": "object"
+            },
+            "zone_side": {
+              "default": "any",
+              "enum": [
+                "any",
+                "upside",
+                "downside"
+              ],
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "paths": [
+          "compact.screening.price_map",
+          "data.screening.price_map"
+        ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
+        "replacement_capabilities": [],
+        "schema_version": "tw.screening.price_map.v1",
+        "scopes": [
+          "market"
+        ],
+        "side_effect_policy": "scheduler_owned_cache_read_only",
+        "slot": "screening_price_map",
+        "title": "Taiwan Price Map screening",
+        "unit_semantics": "TWD_per_share_and_percent_distance",
+        "writes_cache": false
+      },
+      {
+        "capability_id": "screening.intraday",
+        "compatibility_schema_versions": [],
+        "default_fields": [
+          "facts_usable_for_ranking",
+          "observation_received_freshness",
+          "last_trade_recency",
+          "intraday_research_usable",
+          "execution_grade_usable",
+          "expected_trade_date",
+          "price_semantics",
+          "applicability_status",
+          "reason_code",
+          "status",
+          "freshness_status",
+          "session_semantics",
           "metric",
           "unit",
           "sort_order",
@@ -5771,13 +6689,24 @@
         ],
         "default_limit": 200,
         "deprecated": false,
-        "description": "Deterministic ranking over scheduler-owned Taiwan rolling intraday stock state. The read path is cache-only and never fans out to per-stock providers.",
+        "description": "Deterministic ranking over scheduler-owned Taiwan rolling intraday stock state, with current-trade eligibility applied before pagination. VWAP is unavailable without canonical session volume-weighted evidence; order_book_imbalance is unsupported by the full-market producer. The read path is cache-only and never fans out to per-stock providers.",
         "domain": "screening",
         "event_time_basis": "taiwan_provider_event_time",
         "fields": [
+          "facts_usable_for_ranking",
+          "observation_received_freshness",
+          "last_trade_recency",
+          "intraday_research_usable",
+          "execution_grade_usable",
+          "expected_trade_date",
+          "price_semantics",
+          "applicability_status",
+          "reason_code",
           "kind",
           "version",
           "status",
+          "freshness_status",
+          "session_semantics",
           "metric",
           "unit",
           "frequency",
@@ -5810,6 +6739,7 @@
             },
             "metric": {
               "default": "change_pct",
+              "description": "order_book_imbalance requests return unsupported (no full-market depth producer); vwap_deviation_pct returns unavailable until canonical session VWAP is materialized.",
               "enum": [
                 "change_pct",
                 "estimated_trade_value",
@@ -5884,7 +6814,13 @@
       },
       {
         "capability_id": "market.hot_groups",
+        "compatibility_schema_versions": [],
         "default_fields": [
+          "facts_usable_for_ranking",
+          "observation_received_freshness",
+          "last_trade_recency",
+          "intraday_research_usable",
+          "execution_grade_usable",
           "status",
           "groups",
           "group_count",
@@ -5898,6 +6834,15 @@
           "trade_value_is_estimate",
           "membership_provenance",
           "observed_trade_date",
+          "expected_observation_date",
+          "latest_completed_trade_date",
+          "session_phase",
+          "session_semantics",
+          "freshness_status",
+          "facts_usable",
+          "decision_usable",
+          "current_for_requested_session",
+          "is_complete",
           "event_time",
           "computed_at",
           "data_mode",
@@ -5910,6 +6855,11 @@
         "domain": "screening",
         "event_time_basis": "taiwan_provider_event_time",
         "fields": [
+          "facts_usable_for_ranking",
+          "observation_received_freshness",
+          "last_trade_recency",
+          "intraday_research_usable",
+          "execution_grade_usable",
           "kind",
           "version",
           "status",
@@ -5925,6 +6875,15 @@
           "trade_value_is_estimate",
           "membership_provenance",
           "observed_trade_date",
+          "expected_observation_date",
+          "latest_completed_trade_date",
+          "session_phase",
+          "session_semantics",
+          "freshness_status",
+          "facts_usable",
+          "decision_usable",
+          "current_for_requested_session",
+          "is_complete",
           "event_time",
           "computed_at",
           "data_mode",
@@ -5968,6 +6927,7 @@
       },
       {
         "capability_id": "market.volume_state",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "as_of",
           "trade_date",
@@ -6071,6 +7031,7 @@
       },
       {
         "capability_id": "derivatives.positioning",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "institutional_position",
           "options_sentiment",
@@ -6112,10 +7073,15 @@
       },
       {
         "capability_id": "derivatives.structure",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "as_of",
+          "expected_trade_date",
           "is_stale",
+          "stale",
+          "release_status",
+          "retry",
           "options_chain",
           "large_traders",
           "term_structure",
@@ -6132,6 +7098,9 @@
           "as_of",
           "expected_trade_date",
           "is_stale",
+          "stale",
+          "release_status",
+          "retry",
           "options_chain",
           "large_traders",
           "term_structure",
@@ -6165,6 +7134,7 @@
       },
       {
         "capability_id": "watchlist.ranking",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "rank_by",
           "sort_order",
@@ -6242,6 +7212,7 @@
       },
       {
         "capability_id": "watchlist.radar",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "mode",
           "ranked_count",
@@ -6320,6 +7291,7 @@
       },
       {
         "capability_id": "watchlist.coverage",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "institutional",
           "margin",
@@ -6381,6 +7353,7 @@
       },
       {
         "capability_id": "portfolio.summary",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "holding_count",
           "priced_holding_count",
@@ -6429,6 +7402,7 @@
       },
       {
         "capability_id": "portfolio.holdings",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "market",
           "symbol",
@@ -6495,6 +7469,7 @@
       },
       {
         "capability_id": "portfolio.valuation",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "cost_by_currency",
           "market_value_by_currency",
@@ -6539,6 +7514,7 @@
       },
       {
         "capability_id": "macro.series",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "series_id",
           "series_name",
@@ -6584,6 +7560,7 @@
       },
       {
         "capability_id": "macro.observations",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "observation_date",
           "value",
@@ -6631,6 +7608,7 @@
       },
       {
         "capability_id": "resource.metadata",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "symbol",
           "display_name",
@@ -6685,6 +7663,7 @@
       },
       {
         "capability_id": "crypto.order_book",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "provider",
           "symbol",
@@ -6758,6 +7737,7 @@
       },
       {
         "capability_id": "crypto.derivatives",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "provider",
           "symbol",
@@ -6828,6 +7808,7 @@
       },
       {
         "capability_id": "diagnostics.capabilities",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "kind",
           "version",
@@ -6883,6 +7864,7 @@
       },
       {
         "capability_id": "diagnostics.data_freshness",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "kind",
           "version",
@@ -6936,11 +7918,13 @@
       },
       {
         "capability_id": "diagnostics.source_health",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "as_of",
           "filters",
           "summary",
+          "resolved_datasets",
           "entries",
           "problems_preview",
           "provider_events",
@@ -6960,6 +7944,7 @@
           "as_of",
           "filters",
           "summary",
+          "resolved_datasets",
           "entries",
           "problems_preview",
           "provider_events",
@@ -6976,7 +7961,28 @@
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
-          "properties": {},
+          "properties": {
+            "dataset": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "index_id": {
+              "enum": [
+                "TAIEX",
+                "TPEX"
+              ],
+              "type": "string"
+            },
+            "limit": {
+              "maximum": 500,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "stock_id": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           "type": "object"
         },
         "paths": [
@@ -7000,6 +8006,7 @@
       },
       {
         "capability_id": "source.health",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "as_of",
@@ -7049,6 +8056,7 @@
       },
       {
         "capability_id": "data.freshness",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "as_of",
@@ -7099,10 +8107,10 @@
         "writes_cache": false
       }
     ],
-    "x-omi-capability-registry-digest": "107685377b25ccd1bcca72f4273a321d2aeeb4f15bbdbd172725622412f1321b",
+    "x-omi-capability-registry-digest": "bdffd32134558affc4f7ea053c87e4a6a17f7e75fc2fc80e22d193bf564eba81",
     "x-omi-capability-registry-version": "omi.capability.registry.v3",
     "x-omi-capability-selection-version": "omi.capability.selection.v2",
-    "x-omi-public-contract-digest": "107685377b25ccd1bcca72f4273a321d2aeeb4f15bbdbd172725622412f1321b",
+    "x-omi-public-contract-digest": "bdffd32134558affc4f7ea053c87e4a6a17f7e75fc2fc80e22d193bf564eba81",
     "x-omi-targets": [
       {
         "deprecated": false,
@@ -7388,6 +8396,7 @@
     "technical.volume_profile",
     "technical.anchored_vwap",
     "technical.relative_strength",
+    "technical.price_map",
     "chips.institutional",
     "chips.margin",
     "broker_branch.summary",
@@ -7400,6 +8409,7 @@
     "cross_market.parity",
     "company.profile",
     "corporate.actions",
+    "news.company_documents",
     "news.events",
     "market.short_volume",
     "market.breadth",
@@ -7418,6 +8428,7 @@
     "market.chips",
     "screening.ranking",
     "screening.coverage",
+    "screening.price_map",
     "screening.intraday",
     "market.hot_groups",
     "market.volume_state",
@@ -7442,7 +8453,7 @@
   ],
   "capability_registry_version": "omi.capability.registry.v3",
   "contract_version": "omi.decision.v4",
-  "digest": "107685377b25ccd1bcca72f4273a321d2aeeb4f15bbdbd172725622412f1321b",
+  "digest": "bdffd32134558affc4f7ea053c87e4a6a17f7e75fc2fc80e22d193bf564eba81",
   "schema_version": "omi.mcp.public_contract_snapshot.v1",
   "selection_version": "omi.capability.selection.v2",
   "target_types": [

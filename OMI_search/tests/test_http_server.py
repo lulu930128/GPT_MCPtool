@@ -81,7 +81,7 @@ class OmiSearchHttpServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertRegex(body["buildId"], r"^[0-9a-f]{16}$")
         self.assertEqual(body["mcpSdk"], MCP_SDK_VERSION)
         self.assertEqual(body["mcpArchitecture"], MCP_ARCHITECTURE)
-        self.assertEqual(body["toolCount"], 11)
+        self.assertEqual(body["toolCount"], 20)
         self.assertIn("/mcp", body["mcp_url"])
 
     async def test_upstream_health_ready_contract(self) -> None:
@@ -172,7 +172,7 @@ class OmiSearchHttpServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(acknowledged.status_code, {200, 202})
         self.assertEqual(tools.status_code, 200)
         names = [tool["name"] for tool in tools.json()["result"]["tools"]]
-        self.assertEqual(len(names), 11)
+        self.assertEqual(len(names), 20)
         self.assertNotIn("omi.search", names)
         self.assertEqual(read.status_code, 200)
         self.assertEqual(
@@ -191,8 +191,8 @@ class OmiSearchHttpServerTests(unittest.IsolatedAsyncioTestCase):
                 protocol_version = client.protocol_version
 
         self.assertEqual(protocol_version, "2026-07-28")
-        self.assertEqual(len(tools.tools), 11)
-        self.assertEqual(len(resources.resources), 1)
+        self.assertEqual(len(tools.tools), 20)
+        self.assertEqual(len(resources.resources), 2)
 
     async def test_refresh_status_result_semantics(self) -> None:
         backend_response = {

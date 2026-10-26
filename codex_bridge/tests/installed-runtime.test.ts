@@ -3,6 +3,8 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
 import test from "node:test";
+import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { loadBridgeConfig, resolveInstalledCodexLaunch } from "../src/config.js";
 import { createBridgeRuntime } from "../src/runtime.js";
 import { assertInstalledEnvironment, hasInstalledLayout, installedCodexEnvironment, loadInstalledBinding, parseInstalledBinding, type InstalledBridgeBinding } from "../src/installed-runtime.js";
@@ -56,13 +58,48 @@ test("installed Full Access default retains plan and rollback sandbox definition
   assert.ok(!launch.args.some((arg) => /--(require|import|loader)|cmd\.exe|powershell/i.test(arg)));
   for (const name of ["read-only", "workspace"]) {
     const profile = launch.args.find((arg) => arg.startsWith(`permissions.codex-bridge-${name}=`))!;
-    for (const path of [binding.releaseRoot, binding.ownerRoot, binding.runtimeRoot, binding.projectsFile, binding.dataDir,
+    assert.ok(profile.includes(`${JSON.stringify(binding.releaseRoot)} = "read"`));
+    assert.ok(!profile.includes(`${JSON.stringify(binding.releaseRoot)} = "deny"`));
+    assert.ok(profile.includes('network = { enabled = true }'));
+    for (const path of [binding.ownerRoot, binding.runtimeRoot, binding.projectsFile, binding.dataDir,
       win32.join(binding.configRoot, ".local"), win32.join(binding.configRoot, ".secrets"), win32.join(binding.configRoot, ".tunnel-client"),
       win32.dirname(binding.secretPath)]) assert.ok(profile.includes(`${JSON.stringify(path)} = "deny"`), path);
     assert.ok(profile.includes(`${JSON.stringify(binding.handoffDir)} = "read"`));
   }
   // Codex profiles do not prove a different plugin's or the OS's effective write denial.
   assert.equal(binding.activationReady, false);
+});
+
+test("installed profiles reject deny parents of code or handoff instead of weakening the deny", () => {
+  const binding = bindingFixture();
+  for (const patch of [{ dataDir: binding.configRoot }, { dataDir: win32.dirname(binding.handoffDir) },
+    { ownerRoot: binding.releaseRoot }]) {
+    assert.throws(() => resolveInstalledCodexLaunch({ ...binding, ...patch }, []), /PERMISSION_PROFILE_DENIED_PARENT/);
+  }
+});
+
+test("installed PATH restores only existing fixed Git and Python tools without inherited environment", {
+  skip: process.platform !== "win32",
+}, () => {
+  const binding = { ...bindingFixture(), nodePath: process.execPath };
+  const env = installedCodexEnvironment(binding);
+  const oldEnv = { ...env, PATH: env.PATH!.split(";").slice(0, 3).join(";") };
+  for (const [command, path, versionArgs] of [
+    ["git", "C:\\work\\Git\\cmd\\git.exe", ["--version"]],
+    ["python", "C:\\miniconda3\\python.exe", ["-I", "-S", "--version"]],
+  ] as const) {
+    if (!existsSync(path)) { assert.ok(!env.PATH!.includes(win32.dirname(path))); continue; }
+    const before = spawnSync("C:\\Windows\\System32\\where.exe", [command], { env: oldEnv, cwd: binding.windowsRoot, encoding: "utf8" });
+    assert.equal(before.status, 1, `old PATH must miss ${command}`);
+    const after = spawnSync("C:\\Windows\\System32\\where.exe", [command], { env, cwd: binding.windowsRoot, encoding: "utf8" });
+    assert.equal(after.status, 0);
+    assert.equal(after.stdout.trim().toLowerCase(), path.toLowerCase());
+    assert.equal(spawnSync(path, [...versionArgs], { env, encoding: "utf8" }).status, 0);
+  }
+  assert.equal(env.NODE_OPTIONS, undefined);
+  assert.equal(env.OPENAI_API_KEY, undefined);
+  assert.equal(env.CODEX_BRIDGE_HTTP_TOKEN, undefined);
+  assert.deepEqual(env.PATH!.split(";").slice(3).filter((entry) => !["C:\\work\\Git\\cmd", "C:\\miniconda3"].includes(entry)), []);
 });
 
 test("v2 binding pins private deployment snapshots and preserves the canonical store and shared home", () => {
@@ -96,7 +133,8 @@ test("installed child environment has a closed loader/PATH set and does not inhe
   const env = installedCodexEnvironment(binding);
   assert.equal(env.CODEX_HOME, binding.codexHome);
   assert.equal(env.USERPROFILE, binding.userProfile);
-  assert.deepEqual(Object.keys(env).sort(), ["SystemRoot", "WINDIR", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "CODEX_HOME", "TEMP", "TMP", "PATH"].sort());
+  assert.deepEqual(Object.keys(env).sort(), ["SystemRoot", "WINDIR", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "CODEX_HOME", "TEMP", "TMP", "PATH", "PATHEXT"].sort());
+  assert.equal(env.PATHEXT, ".COM;.EXE;.BAT;.CMD");
   assert.equal(env.PATH!.split(";")[0], win32.dirname(binding.nodePath));
   for (const name of ["NODE_OPTIONS", "node_path", "NODE_REPL_EXTERNAL_MODULE", "OPENSSL_CONF", "CODEX_BRIDGE_CODEX_COMMAND",
     "CODEX_BRIDGE_CODEX_ARGS", "CODEX_BRIDGE_NODE_PATH", "CODEX_BRIDGE_TUNNEL_CLIENT_PATH", "CODEX_BRIDGE_KEY_STORE_PATH", "CODEX_BRIDGE_EXPECTED_TEST_BUILD"]) {

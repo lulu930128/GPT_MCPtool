@@ -91,7 +91,7 @@ function sendJsonRpcError(res: ServerResponse, status: number, code: number, mes
 function sendJson(res: ServerResponse, status: number, body: unknown): void { res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" }); res.end(JSON.stringify(body)); }
 function computeBuildId(): string {
   try {
-    const hashes = ["./api-client.js", "./config.js", "./http-server.js", "./server.js"].map((artifact) => createHash("sha256").update(readFileSync(new URL(artifact, import.meta.url))).digest("hex"));
+    const hashes = ["./api-client.js", "./assessment-schema.js", "./listening-result-schema.js", "./config.js", "./http-server.js", "./server.js"].map((artifact) => createHash("sha256").update(readFileSync(new URL(artifact, import.meta.url))).digest("hex"));
     return createHash("sha256").update(hashes.join(""), "utf8").digest("hex").slice(0, 16);
   } catch { return "unavailable"; }
 }

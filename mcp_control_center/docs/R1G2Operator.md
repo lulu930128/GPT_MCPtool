@@ -1,5 +1,24 @@
 # R1 本機 installed release 與 operator cutover
 
+2026-10-25 live 核對：selected `normal-direct-bearer-20261023` 為 registry v4／release v6，
+installed activation PASS；執行中的 Tray PID `14352` 仍使用只初始化 v3 receiver 的舊程式，
+同 release 缺少 `WorkspaceLocal.Native.dll`，固定 pipe 不存在。這是 `NOT_CONNECTED` 的直接缺口。
+目前 source 已支援 v4；本次補上隱藏啟動仍可見的 `Workspace IPC` 選單狀態，顯示安全錯誤碼或
+exception type／HRESULT、PID、registry 版本，並由原 timer 區分 LISTENING 與 listener stopped。
+LISTENING 不代表 Workspace 已 CONNECTED，也不代表 E2E／獨立 owner attestation。
+不增加 listener、poller 或狀態儲存。10 loader、3 Tray composition、5 diagnostic 案例通過。
+正式 Preflight 在 Codex Job Object 回 `INDEPENDENT_OPERATOR_REQUIRED`，未進行 Prepare／Install／Cutover。
+精確交接見 [2026-10-25 接續紀錄](../../project_reading/docs/agent-runs/seven-component-restart/Progress.md#2026-10-25-installed-v4-接續)。
+
+2026-10-24 WorkspaceLocal 修補（Source-only）：registry v4 沿用 Tray 啟動前唯一的
+`Assert-McpCcInstalledActivation` 與原單例 mutex，初始化既有 WorkspaceLocal Owner；v3 保留原開發路徑。
+Prepare 的固定 nativeBuilds 新增 `WorkspaceLocal.Native.dll`（參照 `System.Web.Extensions.dll`），
+在完整 tree hash 前編譯封裝，拒絕既存 DLL。v4 loader 僅使用同一 release 固定受保護路徑，
+核對實際 Assembly.Location／assembly identity；不重複 import verifier、掃描 closure 或建立新收據門檻。
+缺檔／錯來源會留下具體 warning 並保持 channel 不可用，不回退編譯 C#。
+隔離回歸：`tests/test-workspace-installed-native.ps1` 與 Bridge `tests/test-installed-operator.ps1`。
+固定 pipe、七目標、HTTP auth 與 controller 拒絕政策不變；此修補尚未部署或完成 runtime adoption。
+
 2026-10-13。本頁是目前 G2 操作規格；取代舊 bootstrap 的 installed 部分。
 
 | Gate | 本輪證據 |

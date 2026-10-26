@@ -1,5 +1,9 @@
 # Codex Handoff Bridge
 
+安全停止 transport 的兩個 native helper 以 CC 的 `src/NormalOperator.Native.cs`、`src/RemoteSelfReload.Native.cs` 為 canonical source；daily Stage 複製到版本內的 `scripts/shared-native` 並驗 hash。CC caller 依獨立 CC selector 與 wrapper inventory 驗證，不需要內附 CC owner。
+
+日常 code-only 換版入口：[daily-code-update.ps1](scripts/daily-code-update.ps1)。部署根固定為本目錄的 `Runtime`，package 只含 Bridge；CC 獨立選版並持有 tray／Startup 責任，Bridge Start／Update／rollback 不操作托盤。2026-10-25 已啟動 `pathfix-20261025-06`，Bridge/Tunnel 均 OwnedReady，MCP 認證及 ApprovalStore OPEN 已驗證。使用者後續要求啟用新版 Startup，現已指向 CC 穩定入口並帶 `--boot`，登入後安全啟動八個元件；protected NORMAL／ADMIN Host 尚未部署。Source、版本、既有資料與首次交接見 [日常換版](docs/DailyCodeUpdate.md)。
+
 目前 application release 為 `1.1.0`；MCP Apps、Codex App Server 與 approval contract 仍各自保留相容性邊界。
 
 Codex Handoff Bridge 是私人、allowlist-first 的 MCP Apps 對話工作區。它讓 ChatGPT 將已整理的
@@ -106,7 +110,16 @@ bearer 的入口會回 `AUTHENTICATED_MCP_REQUIRED`。本輪未部署、未驗�
 第一版不接受 caller 指定任意本機路徑，也不提供二進位附件、專案檔案瀏覽或雙向目錄同步。App Server
 發現的 project 必須是存在的實際目錄並通過敏感路徑 deny rules；只有經過
 Widget 驗證的純文字文件會取得固定、唯讀的 `codex-inbox` 路徑。Bridge 也沒有 commit、push、發布、
-刪除資料、背景網路存取或自動接受核准的工具。
+刪除資料、背景網路存取或自動接受核准的工具。這是 MCP 工具邊界，不禁止 Codex 在明確授權的
+任務範圍使用本機 Git、add、commit、branch、push；同一授權不要求逐步重複確認，也不因歷史
+文件禁令一律拒絕。Push 必須包含在任務意圖中，不從開發或 commit 授權外推；公開發布、force push、
+reset --hard 等破壞性操作須明確授權。精準 Stage 並保留無關 WIP，commit／push 前依根目錄
+公開安全規則篩查 staged paths／diff、秘密、私有資料與大型檔案。
+
+既有 `approvalPolicy=on-request` 與 reviewer 不變；Git account、sandbox、Windows／NTFS ACL、
+遠端 branch protection 或 Host policy 實際拒絕時停止回報，不改權限、設定或換入口繞過。
+`work-package.ts` 的 `renderRequestMarkdown` 產生保存的 `request.md`；初始 Turn 由
+`conversation-input.ts` 的 `buildInitialTurnUserInput` 組成使用者輸入，不直接注入該 Markdown。
 
 ## 架構
 
@@ -166,12 +179,15 @@ Copy-Item config\projects.example.json .local\projects.json
 並各自映射到操作者授權的根目錄。省略時不新增 shared roots；設定後所有 Bridge 工作的
 唯讀與保留供回退的 Workspace Profile 都會加入這些 roots。`plan` 仍唯讀；Full Access 不受 roots 限制。
 
-唯讀與回退 Profile 都拒絕讀寫本元件的 `.local`、`.env`／`.env.*`、`.secrets`、`.tunnel-client`、
+唯讀與回退 Profile 都拒絕讀寫本元件的 `.local`、`.env`／`.env.*`（排除 `.env.example`）、`.secrets`、`.tunnel-client`、
 實際 projects allowlist、`CODEX_BRIDGE_DATA_DIR` 與共用的 `project_reading/.secrets`。
 這些規則不適用於 Full Access；`.env`、`.git`、其他專案與使用者檔案不再享有 Codex Sandbox 隔離。
 Windows 對 Bridge child process 保留 `windows.sandbox="elevated"`，支援唯讀／回退 Profile；
 它不是 Full Access 授權來源，也不改變 Windows 管理員身分或 ACL。
-`.env.*` 採原生 glob 規則，匹配於 sandbox 啟動前展開；執行期間新增秘密檔後應重載再啟動工作。
+`.env.*` 以互不覆蓋 `.env.example` 的 glob 表示，匹配於 sandbox 啟動前展開；
+執行期間新增秘密檔不具有即時保護保證。Plan 與 Native Review 開啟正常網路能力，檔案仍唯讀。
+Installed release 的工具程式目錄改為 read；owner/runtime 與秘密目錄仍 deny。
+若專案／handoff／工具目錄落在 Deny 父目錄下，Source 會在啟動前拒絕配置，不嘗試重新開放子目錄。
 
 附件鏡像使用 `.tmp/codex-inbox`，避開 Windows 無法在拒絕存取的父目錄中重新開放子目錄的限制。
 舊 `.local/codex-inbox` 副本保留；續接附件時 JobStore 由已驗證的 inbox 內容重建新位置。
@@ -353,8 +369,14 @@ Bridge App Server 預設為內建 `:danger-full-access`，所有專案的 `works
 明確選用它；不使用自訂 Profile 繼承 Full Access。`plan` 與 Native Review 明確選用
 `codex-bridge-read-only`。`codex-bridge-workspace` 定義保留供回退，正常寫入不再選用。
 Controller 先用 `permissionProfile/list` 驗證所需 Profile 存在且 allowed，失敗時不降級或繼續執行。
-此模式持續生效，直到 PowerShell NORMAL／ADMIN 的正式執行、授權與 Receipt 管線驗收後再恢復。
-全域設定、回退方式與驗收狀態見 [遷移紀錄](docs/agent-runs/full-access-20261018/Progress.md)。
+一般工程用途保留此模式，不因 NORMAL／ADMIN 驗收而自動回到 workspace sandbox。
+Shell／Git／PowerShell／Node／Python／建置／測試／HTTPS 依任務授權使用，不要求一般操作經 Control Center。
+Installed child 只增加核對過且存在的固定 Git／Python 目錄與固定 `PATHEXT`，不繼承完整 env／PATH。
+預設不讀真實秘密；當次明確指定的檔案／資料可在實際權限允許時限範圍讀取，不跨任務沿用，
+不自動帶入模型結果、日誌、外部 API、Git 或驗收資料。實際 OS／平台／Host 拒絕仍須停止。
+同身分 Full Access 秘密硬隔離與共用 Profile 的逐任務例外均未達成，見
+[權限邊界與驗證](docs/PermissionBoundaries.md)。歷史[遷移紀錄](docs/agent-runs/full-access-20261018/Progress.md)保留，
+其中 NORMAL 完成後自動回退的承諾已由本決策取代。
 
 ## 驗證
 

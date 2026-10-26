@@ -1,8 +1,8 @@
 {
   "name": "gpt-project-workspace-mcp",
-  "version": "1.5.0",
-  "toolContractVersion": "2026-09-10.1",
-  "description": "Read-only Streamable HTTP MCP server that exposes bounded multi-root workspace context to ChatGPT.",
+  "version": "1.7.0",
+  "toolContractVersion": "2026-10-14.2",
+  "description": "Multi-root workspace MCP with read-only defaults and policy-controlled text operations.",
   "type": "module",
   "bin": {
     "gpt-project-workspace-mcp": "./dist/src/http-main.js",
@@ -11,8 +11,10 @@
   "scripts": {
     "build": "node scripts/write-build-metadata.mjs && tsc -p tsconfig.json",
     "test": "npm run build && node scripts/run-tests.mjs",
+    "test:write": "npm run build && node dist/tests/write-tools.test.js",
     "smoke:http": "npm run build && node scripts/smoke-http.mjs",
     "smoke:assets": "npm run build && node scripts/smoke-assets.mjs",
+    "smoke:live:diagnostics": "node scripts/smoke-live-diagnostics.mjs",
     "smoke:live": "node scripts/smoke-live-mcp.mjs",
     "smoke:live:assets": "node scripts/smoke-live-assets.mjs",
     "smoke:roots": "npm run build && node scripts/smoke-roots.mjs",

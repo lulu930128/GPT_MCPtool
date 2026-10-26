@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { loadWritePolicy, type WritePolicy } from "./write-policy.js";
 import {
   detectSearchRuntime,
   loadRuntimeIdentity,
@@ -65,6 +66,7 @@ export const DEFAULT_DENY_EXTENSIONS = [
 ] as const;
 
 export interface ServerConfig {
+  writePolicy: WritePolicy;
   defaultRootId: string;
   root: string;
   roots: Map<string, WorkspaceRootConfig>;
@@ -195,6 +197,7 @@ export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<
   ]);
 
   return {
+    writePolicy: await loadWritePolicy(env, roots),
     defaultRootId,
     root,
     roots,
@@ -204,11 +207,11 @@ export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<
     searchRuntime,
     maxFileBytes: parsePositiveInt(env.WORKSPACE_MCP_MAX_FILE_BYTES, 20_971_520),
     maxReturnedBytes: parsePositiveInt(env.WORKSPACE_MCP_MAX_RETURNED_BYTES, 262_144),
-    maxReadLines: parsePositiveInt(env.WORKSPACE_MCP_MAX_READ_LINES, 300),
-    maxBatchFiles: parsePositiveInt(env.WORKSPACE_MCP_MAX_BATCH_FILES, 10),
-    maxBatchTotalLines: parsePositiveInt(env.WORKSPACE_MCP_MAX_BATCH_TOTAL_LINES, 1_000),
+    maxReadLines: parsePositiveInt(env.WORKSPACE_MCP_MAX_READ_LINES, 600),
+    maxBatchFiles: parsePositiveInt(env.WORKSPACE_MCP_MAX_BATCH_FILES, 12),
+    maxBatchTotalLines: parsePositiveInt(env.WORKSPACE_MCP_MAX_BATCH_TOTAL_LINES, 2_400),
     maxBatchTotalBytes: parsePositiveInt(env.WORKSPACE_MCP_MAX_BATCH_TOTAL_BYTES, 524_288),
-    maxSearchResults: parsePositiveInt(env.WORKSPACE_MCP_MAX_SEARCH_RESULTS, 80),
+    maxSearchResults: parsePositiveInt(env.WORKSPACE_MCP_MAX_SEARCH_RESULTS, 120),
     maxSearchReturnedBytes: parsePositiveInt(
       env.WORKSPACE_MCP_MAX_SEARCH_RETURNED_BYTES,
       524_288,

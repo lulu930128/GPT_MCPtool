@@ -23,6 +23,8 @@ import {
   type SearchTextArgs,
 } from "./search-tools.js";
 import { assertTextSource, readTextWindow } from "./text-reader.js";
+import { writeCapabilities } from "./write-policy.js";
+import { DIAGNOSTIC_LIMITS } from "./diagnostic-inputs.js";
 
 export interface RootScopedArgs {
   root?: string;
@@ -40,6 +42,7 @@ export interface ReadFileArgs extends RootScopedArgs {
   path: string;
   startLine?: number;
   maxLines?: number;
+  includeSha256?: boolean;
 }
 
 export interface ReadFilesArgs extends RootScopedArgs {
@@ -65,6 +68,7 @@ export type { SearchTextArgs };
 export type GitStatusArgs = GitScopedArgs;
 
 export async function getWorkspaceInfo(config: ServerConfig): Promise<unknown> {
+  const capabilities = await writeCapabilities(config.writePolicy);
   return {
     root: config.root,
     defaultRoot: config.defaultRootId,
@@ -82,7 +86,8 @@ export async function getWorkspaceInfo(config: ServerConfig): Promise<unknown> {
       path: scope.path,
       originalFileReturnAllowed: config.fileReturnScopeIds.has(scope.id),
     })),
-    mode: "read-only",
+    mode: capabilities.enabled ? "operate" : "read-only",
+    writeCapabilities: capabilities,
     transport: "stdio-or-streamable-http",
     applicationVersion: config.runtimeIdentity.applicationVersion,
     toolContractVersion: config.runtimeIdentity.toolContractVersion,
@@ -98,6 +103,7 @@ export async function getWorkspaceInfo(config: ServerConfig): Promise<unknown> {
       source: config.searchRuntime.source,
     },
     limits: {
+      diagnostics: DIAGNOSTIC_LIMITS,
       text: {
         maxSourceBytes: config.maxFileBytes,
         maxReturnedBytes: config.maxReturnedBytes,
@@ -266,6 +272,7 @@ export async function readWorkspaceFile(config: ServerConfig, args: ReadFileArgs
     maxLines: clampInt(args.maxLines ?? config.maxReadLines, 1, config.maxReadLines),
     maxSourceBytes: config.maxFileBytes,
     maxReturnedBytes: config.maxReturnedBytes,
+    includeSha256: args.includeSha256,
   });
   return {
     root: resolved.rootId,
@@ -278,15 +285,24 @@ export async function readWorkspaceFiles(config: ServerConfig, args: ReadFilesAr
   if (args.files.length === 0 || args.files.length > config.maxBatchFiles) {
     throw new WorkspaceAccessError(`read_files accepts 1-${config.maxBatchFiles} files.`);
   }
-  const requestedLines = args.files.reduce(
-    (total, file) => total + clampInt(file.maxLines ?? config.maxReadLines, 1, config.maxReadLines),
-    0,
-  );
+  for (const file of args.files) {
+    if (file.maxLines !== undefined &&
+        (!Number.isSafeInteger(file.maxLines) || file.maxLines < 1 || file.maxLines > config.maxReadLines)) {
+      throw new WorkspaceAccessError(`maxLines must be an integer between 1 and ${config.maxReadLines}.`);
+    }
+  }
+  const requestedLines = args.files.reduce((total, file) => total + (file.maxLines ?? 0), 0);
   if (requestedLines > config.maxBatchTotalLines) {
     throw new WorkspaceAccessError(
       `Requested line budget ${requestedLines} exceeds ${config.maxBatchTotalLines}.`,
     );
   }
+  const defaultLines = distributeBudget(
+    args.files.filter((file) => file.maxLines === undefined).map(() => config.maxReadLines),
+    config.maxBatchTotalLines - requestedLines,
+  );
+  let defaultIndex = 0;
+  const lineBudgets = args.files.map((file) => file.maxLines ?? defaultLines[defaultIndex++]);
   const preflight = [];
   for (const file of args.files) {
     const resolved = await resolveWorkspacePath(config, file.path, "file", args.root);
@@ -297,27 +313,58 @@ export async function readWorkspaceFiles(config: ServerConfig, args: ReadFilesAr
   const files = [];
   let remainingBytes = config.maxBatchTotalBytes;
   let totalReturnedBytes = 0;
+  let totalReturnedLines = 0;
   let truncated = false;
-  for (const item of preflight) {
-    const maxReturnedBytes = Math.min(config.maxReturnedBytes, Math.max(remainingBytes, 0));
+  const byteDemands = preflight.map((item, index) =>
+    lineBudgets[index] === 0 ? 0 : Math.min(config.maxReturnedBytes, item.resolved.stat.size));
+  for (const [index, item] of preflight.entries()) {
+    // Reserve a bounded fair share for every remaining file. Source sizes cap
+    // small-file demand; unused earlier shares are released to later files.
+    const maxReturnedBytes = distributeBudget(byteDemands.slice(index), remainingBytes)[0];
+    const maxLines = lineBudgets[index];
     const window = await readTextWindow(item.resolved.absolute, item.resolved.stat.size, {
       startLine: item.file.startLine ?? 1,
-      maxLines: clampInt(item.file.maxLines ?? config.maxReadLines, 1, config.maxReadLines),
+      maxLines,
       maxSourceBytes: config.maxFileBytes,
       maxReturnedBytes,
     });
-    files.push({ root: item.resolved.rootId, path: item.resolved.relative, ...window });
+    if (window.truncationReasons.includes("max_lines") && item.file.maxLines === undefined && maxLines < config.maxReadLines) {
+      window.truncationReasons.push("batch_total_lines");
+    }
+    if (window.truncationReasons.includes("max_returned_bytes") && maxReturnedBytes < byteDemands[index]) {
+      window.truncationReasons.push("batch_total_bytes");
+    }
+    files.push({
+      root: item.resolved.rootId,
+      path: item.resolved.relative,
+      ...window,
+      appliedLimits: { maxLines, maxReturnedBytes },
+    });
     totalReturnedBytes += window.returnedBytes;
+    totalReturnedLines += window.returnedLines;
     remainingBytes -= window.returnedBytes;
-    truncated ||= window.truncated || remainingBytes <= 0;
+    truncated ||= window.truncated;
   }
   return {
     root: preflight[0]?.resolved.rootId,
     count: files.length,
     totalReturnedBytes,
+    totalReturnedLines,
     truncated,
     files,
   };
+}
+
+function distributeBudget(demands: readonly number[], budget: number): number[] {
+  const allocated = demands.map(() => 0);
+  const ordered = demands.map((demand, index) => ({ demand, index }))
+    .sort((left, right) => left.demand - right.demand || left.index - right.index);
+  let remaining = budget;
+  for (const [position, { demand, index }] of ordered.entries()) {
+    allocated[index] = Math.min(demand, Math.floor(remaining / (ordered.length - position)));
+    remaining -= allocated[index];
+  }
+  return allocated;
 }
 
 export async function readProjectContext(config: ServerConfig, args: ProjectContextArgs): Promise<unknown> {

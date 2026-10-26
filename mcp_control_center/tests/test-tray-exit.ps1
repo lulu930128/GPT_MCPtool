@@ -8,7 +8,7 @@ $script:checks = 0
 function Check([bool]$Value, [string]$Message) {
     if (-not $Value) { throw "CHECK_FAILED: $Message" }; $script:checks++
 }
-foreach ($name in @('Get-TrayControllerState', 'Test-TrayMaintenanceBusy', 'Show-TrayControllerWarning', 'Complete-TrayExit', 'Request-TrayExit', 'Update-TrayControllerLifecycle', 'Update-TrayPendingRestart', 'Start-ControllerAction', 'Start-NormalOperatorHost')) {
+foreach ($name in @('Get-TrayWorkspaceLocalStatusText', 'New-TrayExitSignal', 'Initialize-TrayExitSignal', 'Get-TrayControllerState', 'Test-TrayMaintenanceBusy', 'Show-TrayControllerWarning', 'Complete-TrayExit', 'Request-TrayExit', 'Update-TrayControllerLifecycle', 'Update-TrayPendingRestart', 'Start-ControllerAction', 'Start-NormalOperatorHost')) {
     $node = $ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name }, $true)
     . ([scriptblock]::Create($node.Extent.Text))
 }
@@ -25,12 +25,15 @@ function Set-TrayRestartFeedback { param($Message, [switch]$Warning) $script:bal
 function Update-UiFromReconcileProgress { $script:progress++; return $true }
 function Reset-Fixture {
     $script:Closing = $false; $script:ExitRequested = $false; $script:ExitClock = $null
+    $script:UpgradeExitSignal = $null
     $script:ControllerProcess = $null; $script:PendingAction = $null; $script:PendingLabel = $null; $script:PendingOperationId = $null
     $script:PendingRestartMcp = $null
     $script:PendingComponent = $null
     $script:StatusProcess = $null; $script:StatusClock = $null; $script:StatusStopAttempted = $false; $script:StatusStopClock = $null
     $script:ControllerWarningShown = $false; $script:SecondsSinceRefresh = 30
     $script:WorkspaceLocalOwner = $null; $script:WorkspaceLocalWorker = $null
+    $script:WorkspaceLocalStartupReason = 'WORKSPACE_LOCAL_NATIVE_MISSING'
+    $script:workspaceLocalItem = [pscustomobject]@{ Text = '' }
     $script:NormalOperatorWorker = $null; $script:SelfReloadWorker = $null; $script:SelfReloadShutdown = $null
     $script:exitCalls = 0; $script:warnings = 0; $script:updates = 0; $script:balloons = 0; $script:progress = 0
     $script:timer = [pscustomobject]@{ stops = 0 }
@@ -38,7 +41,7 @@ function Reset-Fixture {
     $script:notifyIcon = [pscustomobject]@{ Visible = $true }
     $script:notifyIcon | Add-Member ScriptMethod ShowBalloonTip { param($ms, $title, $message, $kind) $script:balloons++ }
     $script:trayDisplayName = 'fixture'
-    $script:manifest = [pscustomobject]@{ settings = @{ refreshIntervalSeconds = 30 } }
+    $script:manifest = [pscustomobject]@{ schemaVersion = 4; settings = @{ refreshIntervalSeconds = 30 } }
 }
 function Set-Controller([string]$Action = 'Status', [bool]$Exited = $false) {
     $script:ControllerProcess = [pscustomobject]@{ HasExited = $Exited; ExitCode = 0; kills = 0; disposals = 0; denyKill = $false; killCompletes = $true }
@@ -55,7 +58,7 @@ function Set-Controller([string]$Action = 'Status', [bool]$Exited = $false) {
     }
 }
 function New-Owner {
-    $owner = [pscustomobject]@{ HasActiveRequest = $false; closing = $false; race = $false; gateCalls = 0; takes = 0 }
+    $owner = [pscustomobject]@{ Running = $true; HasActiveRequest = $false; closing = $false; race = $false; gateCalls = 0; takes = 0 }
     $owner | Add-Member ScriptMethod TryBeginShutdown {
         $this.gateCalls++
         if ($this.race) { $this.HasActiveRequest = $true; $this.race = $false }
@@ -164,6 +167,59 @@ foreach ($mode in @('idle', 'active')) {
     & $script:tick
     Check ($script:Closing) "$mode R1 owner completion releases pending exit"
     $script:SelfReloadShutdown.Dispose()
+}
+
+# Exercise the actual one-shot named event and timer callback in this fixture
+# process only; its PID/start-time name cannot address the production tray.
+foreach($mode in @('idle','status','workspace','worker','controller','unknown','race','r1')){
+    Reset-Fixture
+    $script:manifest | Add-Member NoteProperty installedRelease @{state=@{operatorSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value}}
+    $script:UpgradeExitSignal=New-TrayExitSignal
+    $duplicate=$null
+    try {New-TrayExitSignal|Out-Null}catch{$duplicate=$_.Exception.Message}
+    Check ($duplicate -ceq 'UPGRADE_TRAY_SIGNAL_ALREADY_EXISTS') 'signal never adopts a preexisting event'
+    try {
+        switch($mode){
+            'status' {Set-Controller}
+            'workspace' {$script:WorkspaceLocalOwner=New-Owner;$script:WorkspaceLocalOwner.HasActiveRequest=$true}
+            'worker' {$script:WorkspaceLocalWorker=@{pending=@{IsCompleted=$false}}}
+            'controller' {Set-Controller -Action RestartMcp}
+            'unknown' {Set-Controller;$script:ControllerProcess.HasExited=$null}
+            'race' {$script:WorkspaceLocalOwner=New-Owner;$script:WorkspaceLocalOwner.race=$true}
+            'r1' {$script:SelfReloadShutdown=[Threading.CancellationTokenSource]::new();$script:SelfReloadWorker=@{pending=@{IsCompleted=$false}}}
+        }
+        $null=$script:UpgradeExitSignal.Set()
+        & $script:tick
+        Check ($script:warnings -eq 0) "$mode event never blocks timer on a modal warning"
+        Check (-not $script:UpgradeExitSignal.WaitOne(0)) "$mode event is consumed once"
+        if($mode -in @('workspace','worker','controller','unknown')){
+            Check (-not $script:ExitRequested -and -not $script:Closing -and $script:balloons -eq 1) "$mode rejects automatic exit"
+            $script:ControllerProcess=$null;$script:WorkspaceLocalOwner=$null;$script:WorkspaceLocalWorker=$null
+            $script:SecondsSinceRefresh=0
+            & $script:tick
+            Check (-not $script:ExitRequested) "$mode rejection is not replayed after work finishes"
+        } elseif($mode -eq 'idle') {Check $script:Closing 'idle event reaches existing Complete-TrayExit'}
+        else {
+            Check ($script:ExitRequested -and -not $script:Closing) "$mode cooperative exit waits for drain"
+            if($mode -eq 'status'){$script:ControllerProcess.HasExited=$true}
+            if($mode -eq 'race'){$script:WorkspaceLocalOwner.HasActiveRequest=$false}
+            if($mode -eq 'r1'){$script:SelfReloadWorker.pending.IsCompleted=$true}
+            & $script:tick
+            Check $script:Closing "$mode event completes only after original worker/controller drains"
+        }
+    } finally {
+        $script:UpgradeExitSignal.Dispose();$script:UpgradeExitSignal=$null
+        if($script:SelfReloadShutdown){$script:SelfReloadShutdown.Dispose()}
+    }
+}
+
+Reset-Fixture
+& {
+    function New-TrayExitSignal {throw 'FIXTURE_EVENT_API_OR_ACL_UNAVAILABLE'}
+    Initialize-TrayExitSignal -WarningAction SilentlyContinue
+    Check ($null -eq $script:UpgradeExitSignal -and -not $script:Closing) 'optional event initialization failure leaves ordinary tray alive'
+    & $script:click
+    Check $script:Closing 'ordinary Exit remains usable without the optional event'
 }
 
 # Verify the real lock-protected Workspace gate without constructing a pipe,

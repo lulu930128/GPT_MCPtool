@@ -78,7 +78,7 @@ override an employer or workspace policy.
 | Path traversal in filenames | Server-generated ids; filenames reject separators, `..`, controls, and unsupported extensions | Malicious plain text can still contain misleading instructions |
 | Public App Server exposure | Controller starts App Server over local stdio only | A custom unsupported launcher could weaken the boundary |
 | Stale approval after restart | Pending approvals become expired; active jobs become interrupted and are not auto-replayed | User must decide how to resume or replace interrupted work |
-| Hidden network activity | Plan disables network; write tasks use Full Access | Write tasks have no Codex network isolation; approval policy does not imply a prompt for every operation |
+| Hidden network activity | Plan enables network for authorized engineering; write tasks use Full Access | Neither mode is an exfiltration barrier; approval policy does not imply a prompt for every operation |
 | Runtime data enters Git | Repo-external data directory and ignored local configuration | Manual copying or support bundles can still leak data |
 
 ## Text bundle controls
@@ -110,16 +110,32 @@ govern whether text is treated as context or a request.
 The optional `sharedWorkspaceProjectIds` setting adds only validated allowlist paths as profile-defined
 workspace roots in the read-only and retained rollback profiles; it does not confine Full Access.
 Those two sandbox profiles deny
-the component's `.local`, `.env`/`.env.*`, `.secrets`, `.tunnel-client`, the actual projects file,
+the component's `.local`, `.env`/`.env.*` (excluding exactly `.env.example`), `.secrets`, `.tunnel-client`, the actual projects file,
 the job data directory, and the shared `project_reading/.secrets` tunnel credential store. These protected
 directories cannot be selected through native workspace discovery. Entry restrictions remain workflow
 controls; Full Access can reach paths allowed by its Windows identity. Source files remain editable.
 Native Windows retains the elevated sandbox backend for plan and rollback, not as Full Access authority.
 Deny globs are expanded before sandbox startup; newly created secret files require a reload before new work.
 `codex-bridge-workspace` remains defined for rollback but is not selected for normal writes. The global
-Full Access phase lasts until PowerShell NORMAL/ADMIN execution, authorization and Receipt acceptance.
+Full Access engineering policy does not automatically end after PowerShell NORMAL/ADMIN acceptance.
 No Windows administrator elevation, ACL/Deny removal, or independent MCP permission change is implied.
 Editable Bridge source is trusted operator code, not an immutable security boundary.
+
+The installed release tree is read-only, not deny-read: Node/Codex tools live below it. Owner/runtime,
+deployment settings and credential denies remain. A readable project/handoff/code root below an exact
+deny fails configuration instead of attempting to reopen it. This is lexical configuration validation,
+not reparse-point/OS isolation proof. Duplicate parent/child denies are retained: removing a lexical
+child can lose protection of its resolved reparse target. The Windows helper applies persistent deny
+ACLs synchronously and can fail before loading AGENTS; readiness/profile enumeration cannot prove a turn.
+
+Default secret non-reading is a workflow rule across all projects, not a complete secret classifier.
+The profile only covers its declared paths. Same-user Full Access can read what that Windows identity
+can read, including unclassified secrets, and can execute arbitrary code; redaction is not hard isolation.
+Explicit per-task authorization permits only the named reads, never automatic disclosure to model results,
+logs, external APIs, Git or evidence. Existing profiles cannot safely provide task-local revocable
+exceptions. Hard isolation and native deny enforcement remain `UNVERIFIED`; the controlled alternative
+and outstanding gates are in [PermissionBoundaries](PermissionBoundaries.md). OS/platform/Host denials
+must not be bypassed with prose, profile changes or another tool.
 
 `workspace_write` does not guarantee a prompt before every individual file edit. Use `plan` first
 when strict diff-before-apply review is required.

@@ -703,10 +703,16 @@ function Start-PrTunnelOnce {
     $startInfo = New-Object Diagnostics.ProcessStartInfo
     $startInfo.FileName = $Context.tunnelClientPath
     $startInfo.Arguments = "run --profile-dir `"$($Context.tunnelProfileDir)`" --profile `"$($Context.tunnelProfile)`" --log.file `"$($Context.tunnelLogFile)`" --pid.file `"$($Context.tunnelPidFile)`""
+    $tunnelEnvironment = @{ CONTROL_PLANE_API_KEY = $env:CONTROL_PLANE_API_KEY }
+    if (-not [string]::IsNullOrWhiteSpace($Context.token)) {
+      # Pass only an environment reference in process arguments, never the token.
+      $startInfo.Arguments += ' --mcp.extra-headers "Authorization: env:PROJECT_WORKSPACE_TUNNEL_AUTHORIZATION" --mcp.discovery-extra-headers "Authorization: env:PROJECT_WORKSPACE_TUNNEL_AUTHORIZATION"'
+      $tunnelEnvironment['PROJECT_WORKSPACE_TUNNEL_AUTHORIZATION'] = "Bearer $($Context.token)"
+    }
     $startInfo.WorkingDirectory = $Context.projectRoot
     $startInfo.UseShellExecute = $true
     $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
-    $process = Start-PrChildProcess -StartInfo $startInfo -Environment @{ CONTROL_PLANE_API_KEY = $env:CONTROL_PLANE_API_KEY }
+    $process = Start-PrChildProcess -StartInfo $startInfo -Environment $tunnelEnvironment
   }
   finally { [Environment]::SetEnvironmentVariable('CONTROL_PLANE_API_KEY', $savedKey, [EnvironmentVariableTarget]::Process) }
   if ($null -eq $process) { throw "TUNNEL_START_FAILED: Tunnel process did not start." }

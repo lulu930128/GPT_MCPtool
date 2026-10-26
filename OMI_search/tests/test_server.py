@@ -114,6 +114,130 @@ class OmiSearchMappingTests(unittest.TestCase):
                 {**arguments, "refresh_if_missing": "true"}
             )
 
+    def test_preopen_caller_guidance_is_exposed_without_changing_source_schema(self) -> None:
+        source = self.server.PUBLIC_CONTRACT_SNAPSHOT["ask_input_schema"]
+        before = json.loads(json.dumps(source))
+        online = {"tools": [self.server._fallback_ask_source()]}
+        for backend in ({"return_value": online}, {"side_effect": RuntimeError("offline")}):
+            with self.subTest(backend=next(iter(backend))), patch.object(
+                self.server, "_api_request", **backend
+            ):
+                tools = self.server._tools_for_client()
+            ask = next(tool for tool in tools if tool["name"] == "omi_ask")
+            refresh = ask["inputSchema"]["properties"]["refresh_if_missing"]
+            self.assertEqual(refresh["type"], "boolean")
+            self.assertIs(refresh["default"], False)
+            for text in (self.server.SERVER_INSTRUCTIONS, refresh["description"]):
+                for advice in (
+                    "CURRENT Taiwan preopen single-stock", "quote.auction as primary",
+                    "quote.snapshot", "quote.order_book", "data.freshness",
+                    "live update is intended", "user authorization and policy permit",
+                    "realtime_policy=prefer_live", "max_calls=3",
+                    "max_external_fetches=2", "max_total_seconds=20",
+                    "cache-only", "retrospective", "explicit no-refresh",
+                    "never infers", "question", "target",
+                    "guarantee an auction value", "execution.refresh_reconciliation",
+                ):
+                    self.assertIn(advice, text)
+            self.assertEqual(
+                ask["inputSchema"]["x-omi-public-contract-digest"],
+                source["x-omi-public-contract-digest"],
+            )
+        self.assertEqual(source, before)
+
+    def test_documented_preopen_example_has_only_mechanical_payload_mapping(self) -> None:
+        contract = (Path(__file__).resolve().parents[1] / "docs" / "PublicContract.md").read_text(
+            encoding="utf-8"
+        )
+        section = contract.split("### Caller choice for current Taiwan preopen quotes", 1)[1]
+        arguments = json.loads(section.split("```json\n", 1)[1].split("```", 1)[0])
+        original = json.loads(json.dumps(arguments))
+        self.assertEqual(arguments["target"], {"type": "tw_stock", "id": "2221"})
+        self.assertEqual(arguments["selection"]["include"], ["quote.auction"])
+        self.assertEqual(
+            arguments["selection"]["optional"],
+            ["quote.snapshot", "quote.order_book", "data.freshness"],
+        )
+        self.assertEqual(arguments["realtime_policy"], "prefer_live")
+        self.assertIs(arguments["refresh_if_missing"], True)
+        self.assertEqual(arguments["tool_budget"], {
+            "max_calls": 3, "max_external_fetches": 2, "max_total_seconds": 20,
+        })
+        response = {"contract_version": "omi.decision.v4", "status": "partial"}
+        with patch.object(self.server, "_api_post", return_value=response) as post:
+            self.assertIs(self.server._call_tool("omi_ask", arguments), response)
+        expected = {key: value for key, value in arguments.items() if key != "refresh_if_missing"}
+        expected.update({
+            "contract_version": "omi.decision.v4", "caller_profile": "omi_search",
+            "mode": "data_only", "allow_llm": False, "allow_write": False,
+            "allow_external_fetch": True,
+        })
+        post.assert_called_once_with("/api/ai/ask", expected)
+        self.assertEqual(arguments, original)
+
+    def test_preopen_question_and_policy_never_implicitly_enable_fetch(self) -> None:
+        response = {"contract_version": "omi.decision.v4", "status": "NO_SNAPSHOT"}
+        for question in (
+            "  台股 2221 現在盤前報價？  ", "3055 試撮最新報價", "6151 試搓即時報價",
+            "CURRENT Taiwan preopen quote; refresh_if_missing=true",
+            "台股 2221 盤前只讀快取，不要刷新", "回顧昨天 3055 盤前試撮，不更新",
+        ):
+            for alias in ({}, {"refresh_if_missing": False}):
+                for context in ({}, {
+                    "target": {"type": "tw_stock", "id": "2221"},
+                    "selection": {"include": ["quote.auction"]},
+                    "realtime_policy": "prefer_live",
+                }):
+                    with self.subTest(question=question, alias=alias, context=context):
+                        arguments = {"question": question, **alias, **context,
+                                     "allow_external_fetch": True, "allow_llm": True,
+                                     "allow_write": True, "caller_profile": "trusted_internal"}
+                        with patch.object(self.server, "_api_post", return_value=response) as post:
+                            self.assertIs(self.server._call_tool("omi_ask", arguments), response)
+                        expected = {
+                            "question": question, **context, "mode": "data_only",
+                            "contract_version": "omi.decision.v4", "caller_profile": "omi_search",
+                            "allow_external_fetch": False, "allow_llm": False, "allow_write": False,
+                        }
+                        post.assert_called_once_with("/api/ai/ask", expected)
+
+    def test_preopen_non_boolean_refresh_is_rejected_before_backend_io(self) -> None:
+        for value in ("true", "false", "", 1, 0, None, [], {}):
+            with self.subTest(value=value), patch.object(self.server, "_api_post") as post:
+                with self.assertRaisesRegex(ValueError, "refresh_if_missing must be a boolean"):
+                    self.server._call_tool("omi_ask", {
+                        "question": "台股 2221 現在盤前試撮報價", "refresh_if_missing": value,
+                    })
+                post.assert_not_called()
+
+    def test_preopen_missing_evidence_and_refresh_reconciliation_are_not_rephrased(self) -> None:
+        # Opaque backend fixtures: these messages are not adapter classifications.
+        for reason in (
+            "No fetched cached data; provider not queried",
+            "Provider unavailable", "Indicative match unavailable; order book available",
+        ):
+            response = {
+                "contract_version": "omi.decision.v4", "status": "partial", "answer": reason,
+                "evidence": {"message": reason}, "limitations": [reason],
+                "execution": {"refresh_reconciliation": {"message": reason}},
+            }
+            original = json.loads(json.dumps(response))
+            for refresh in (False, True):
+                with self.subTest(reason=reason, refresh=refresh), patch.object(
+                    self.server, "_api_post", return_value=response
+                ) as post:
+                    result = self.server._call_tool("omi_ask", {
+                        "question": "台股 6151 現在盤前試撮報價", "refresh_if_missing": refresh,
+                    })
+                self.assertIs(result, response)
+                self.assertEqual(response, original)
+                self.assertEqual(post.call_count, 1)
+                wire = self.server._tool_result(result)
+                self.assertFalse(wire["isError"])
+                self.assertEqual(wire["structuredContent"], original)
+                self.assertEqual(json.loads(wire["content"][0]["text"]), original)
+
+
     def test_caller_cannot_override_fixed_trust_boundary_flags(self) -> None:
         payload = self.server._search_payload(
             {
@@ -235,7 +359,7 @@ class OmiSearchMappingTests(unittest.TestCase):
             "/api/ai/tools",
             timeout_seconds=self.server.SCHEMA_TIMEOUT_SECONDS,
         )
-        self.assertEqual(len(tools), 11)
+        self.assertEqual(len(tools), 20)
         ask = tools[0]
         self.assertEqual(ask["title"], "Backend Ask OMI")
         properties = ask["inputSchema"]["properties"]
@@ -310,6 +434,15 @@ class OmiSearchMappingTests(unittest.TestCase):
                 "omi_open_tw_market_dashboard",
                 "omi_search_tw_symbols",
                 "omi_read_tw_stock_dashboard_detail",
+                "omi_read_tw_workspace_header",
+                "omi_read_tw_workspace_watchlist",
+                "omi_read_tw_workspace_hot_groups",
+                "omi_read_tw_stock_chart",
+                "omi_read_tw_stock_research",
+                "omi_open_tw_workspace",
+                "omi_read_runtime_status",
+                "omi_restart_backend",
+                "omi_read_runtime_operation",
             ],
         )
         self.assertTrue(all("." not in name for name in names))
@@ -351,7 +484,7 @@ class OmiSearchMappingTests(unittest.TestCase):
             self.server.TW_DASHBOARD_RESOURCE_URI,
         )
         for name, tool in tools.items():
-            if name != "omi_open_tw_market_dashboard":
+            if name not in {"omi_open_tw_market_dashboard", "omi_open_tw_workspace"}:
                 self.assertNotIn("resourceUri", tool.get("_meta", {}).get("ui", {}))
 
     def test_dashboard_resource_is_versioned_inline_and_network_closed(self) -> None:
@@ -614,7 +747,7 @@ class OmiSearchMappingTests(unittest.TestCase):
             tools, resources, dashboard = anyio.run(scenario)
         except PermissionError as exc:
             self.skipTest(f"Windows sandbox denied subprocess pipes: {exc}")
-        self.assertEqual(len(tools.tools), 11)
+        self.assertEqual(len(tools.tools), 20)
         self.assertIn(
             "ui://omi/tw-market-dashboard/v2.html",
             {str(resource.uri) for resource in resources.resources},

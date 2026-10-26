@@ -805,7 +805,6 @@ export function App({ bridge }: { bridge: McpAppsBridge }) {
     setSelectedStockId(stockId);
     setSelectedStockName(stockName);
     setDetailTimeframe(timeframe);
-    setDetail(null);
     setDetailLoading(true);
     setDetailError(null);
     try {
@@ -970,7 +969,8 @@ export function App({ bridge }: { bridge: McpAppsBridge }) {
   const technicalRows = list(selectedTechnical.rows);
   const detailChart = isRecord(detail?.chart) ? detail.chart : {};
   const detailIntradayChart = isRecord(detail?.intraday_chart) ? detail.intraday_chart : {};
-  const activeDetailChart = detailTimeframe === "today" ? detailIntradayChart : detailChart;
+  const displayedDetailTimeframe = (detail?.timeframe ?? detailTimeframe) as DashboardChartTimeframe;
+  const activeDetailChart = displayedDetailTimeframe === "today" ? detailIntradayChart : detailChart;
   const detailPoints = useMemo(() => list(activeDetailChart.points), [activeDetailChart]);
   const detailAverages = useMemo(() => list(detail?.moving_averages), [detail]);
   const latestPoint = detailPoints.at(-1) ?? {};
@@ -1156,10 +1156,12 @@ export function App({ bridge }: { bridge: McpAppsBridge }) {
               )}
               {detail && (
                 <div className="fullscreen-detail-panel">
+                  <p className="workspace-pending" role="status">目前顯示 {text(detail.stock_id)} / {text(detail.timeframe)}{detailLoading ? `；待載入 ${selectedStockId} / ${detailTimeframe}` : ""}</p>
+                  {detailError && <p role="alert">{detailError} <button onClick={() => void readDetail(selectedStockId, selectedStockName)}>重試</button></p>}
                   <div className="fullscreen-quote-grid">
                     <div>
-                      <span>{detailTimeframe === "today" ? "時間" : "日期"}</span>
-                      <strong>{formatDetailPointTime(latestPoint.time, detailTimeframe)}</strong>
+                      <span>{displayedDetailTimeframe === "today" ? "時間" : "日期"}</span>
+                      <strong>{formatDetailPointTime(latestPoint.time, displayedDetailTimeframe)}</strong>
                     </div>
                     <div><span>開</span><strong>{formatNumber(latestPoint.open)}</strong></div>
                     <div><span>高</span><strong>{formatNumber(latestPoint.high)}</strong></div>
@@ -1188,7 +1190,7 @@ export function App({ bridge }: { bridge: McpAppsBridge }) {
                       ))}
                     </div>
                     <small>
-                      {detailTimeframe === "today"
+                      {displayedDetailTimeframe === "today"
                         ? `${text(detailIntradayChart.source, "INTRADAY CACHE")} · ${text(detailIntradayChart.interval, "1m")}`
                         : "BACKEND OHLC"}
                       {" · CACHE ONLY"}
@@ -1196,9 +1198,8 @@ export function App({ bridge }: { bridge: McpAppsBridge }) {
                   </div>
                   <div className="fullscreen-chart-stage fullscreen-interactive-chart-stage">
                     <InteractiveMarketChart
-                      key={`${selectedStockId}:${detailTimeframe}`}
-                      stockId={selectedStockId}
-                      timeframe={detailTimeframe}
+                      stockId={text(detail.stock_id)}
+                      timeframe={displayedDetailTimeframe}
                       points={detailPoints}
                       averages={detailAverages}
                     />
@@ -1461,6 +1462,7 @@ export function App({ bridge }: { bridge: McpAppsBridge }) {
             )}
             {detail && (
               <div className="detail-panel">
+                {detailError && <p role="alert">{detailError} <button onClick={() => void readDetail(selectedStockId, selectedStockName)}>重試</button></p>}
                 <div className="detail-heading">
                   <div><span>{text(detail.market)} / {text(detail.timeframe).toUpperCase()}</span><h3>{text(detail.stock_name, "未命名標的")} <small>{text(detail.stock_id)}</small></h3></div>
                   <div className="detail-price"><strong>{formatNumber(latestPoint.close)}</strong><Status value={detailChart.freshness_status} /></div>

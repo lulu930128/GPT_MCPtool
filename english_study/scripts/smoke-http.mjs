@@ -9,7 +9,7 @@ const handle = await startEnglishStudyHttpServer({
 try {
   const response = await fetch(new URL("/health", handle.url));
   const health = await response.json();
-  if (!response.ok || health.service !== "english-study-mcp" || health.toolCount !== 15 || health.contractVersion !== "english-learning-v1") {
+  if (!response.ok || health.service !== "english-study-mcp" || health.toolCount !== 17 || health.contractVersion !== "english-learning-v1") {
     throw new Error(`Unexpected health payload: ${JSON.stringify(health)}`);
   }
   console.log(JSON.stringify({ ok: true, health }));

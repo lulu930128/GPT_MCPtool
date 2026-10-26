@@ -7,10 +7,12 @@ import {
   type PracticeSubmissionInput,
 } from "./api-client.js";
 import type { EnglishStudyMcpConfig } from "./config.js";
+import { assessmentSchema, historyFilter, skillSchema, moduleSchema } from "./assessment-schema.js";
+import { listeningResultSchema } from "./listening-result-schema.js";
 
-export const ENGLISH_STUDY_MCP_VERSION = "0.3.0";
+export const ENGLISH_STUDY_MCP_VERSION = "0.4.0";
 export const ENGLISH_STUDY_CONTRACT_VERSION = "english-learning-v1";
-export const ENGLISH_STUDY_TOOL_COUNT = 15;
+export const ENGLISH_STUDY_TOOL_COUNT = 17;
 
 const itemKindSchema = z.enum(["vocab", "phrase", "grammar", "question"]);
 const targetKindSchema = z.enum(["vocab", "phrase", "grammar"]);
@@ -49,13 +51,14 @@ const practiceQuestionSchema = z.object({
   answer: z.record(z.unknown()).optional(),
   answerResult: z.enum(["correct", "partial", "wrong", "void", "unscored"]),
   awardedPoints: z.number().nonnegative().max(1000),
-  maxPoints: z.number().positive().max(1000),
+  maxPoints: z.number().nonnegative().max(1000),
   gradingRationale: z.string().max(4000).optional(),
   submittedAt: offsetDateTimeSchema,
   targets: z.array(practiceTargetSchema).max(20).optional(),
   metadata: z.record(z.unknown()).optional(),
 }).strict();
 const practiceSubmissionSchema = z.object({
+  assessments: z.array(assessmentSchema).max(20).optional(),
   submissionId: z.string().min(8).max(160),
   session: z.object({
     sessionId: z.string().min(8).max(160),
@@ -192,19 +195,19 @@ export function createEnglishStudyMcpServer(config: EnglishStudyMcpConfig): McpS
 
   server.registerTool("english_preview_practice_record", {
     title: "預覽英文練習紀錄",
-    description: "Validate and score one complete English practice without writing. Preserve partial, void, unscored, and missing-target states.",
+    description: "Preview exactly one of submission or completed listeningResult (listening-result-v2 from Trainer). Assessment fields use canonical snake_case. Preserve estimated scores and scope; rubric-only answers use unscored with zero points. Preview never writes. Listening results are caller-supplied evidence, not authenticated official scores.",
     annotations: readOnlyAnnotations,
-    inputSchema: { submission: practiceSubmissionSchema },
+    inputSchema: { submission: practiceSubmissionSchema.optional(), listeningResult: listeningResultSchema.optional() },
     outputSchema: { ...baseOutputSchema, can_record: z.boolean().optional(), missing_item_ids: z.array(z.string()).optional(), summary: z.record(z.unknown()).optional(), fingerprint: z.string().optional(), contract_version: z.string().optional(), scoring_policy_version: z.string().optional() },
-  }, async ({ submission }) => safeResult(() => client.previewPractice(submission as PracticeSubmissionInput), "已預覽完整英文練習紀錄。"));
+  }, async ({ submission, listeningResult }) => safeResult(() => client.previewPractice(submission as PracticeSubmissionInput | undefined, listeningResult), "已預覽完整英文練習紀錄。"));
 
   server.registerTool("english_record_practice", {
     title: "保存英文練習紀錄",
     description: "Atomically save one completed, previewed English practice. Use only after recording is authorized and reuse submissionId only for an exact retry.",
     annotations: retrySafeWriteAnnotations,
-    inputSchema: { expectedFingerprint: z.string().regex(/^[0-9a-f]{64}$/), submission: practiceSubmissionSchema },
+    inputSchema: { expectedFingerprint: z.string().regex(/^[0-9a-f]{64}$/), submission: practiceSubmissionSchema.optional(), listeningResult: listeningResultSchema.optional() },
     outputSchema: { ...baseOutputSchema, submission_id: z.string().optional(), session_id: z.string().optional(), inserted: z.boolean().optional(), replayed: z.boolean().optional(), summary: z.record(z.unknown()).optional() },
-  }, async (args) => safeResult(() => client.recordPractice(args as { expectedFingerprint: string; submission: PracticeSubmissionInput }), "已原子保存完整英文練習。"));
+  }, async (args) => safeResult(() => client.recordPractice(args), "已原子保存完整英文練習。"));
 
   server.registerTool("english_get_practice_session", {
     title: "取得英文練習歷史",
@@ -214,6 +217,17 @@ export function createEnglishStudyMcpServer(config: EnglishStudyMcpConfig): McpS
     outputSchema: { ...baseOutputSchema, session: z.record(z.unknown()).optional() },
   }, async ({ sessionId }) => safeResult(() => client.getPracticeSession(sessionId), "已取得英文練習歷史。"));
 
+  server.registerTool("english_list_practice_sessions", {
+    title: "列出英文練習紀錄", description: "List bounded practice history without essays or answer keys. Dates use timezone-aware [dateFrom, dateTo). Assessment summaries distinguish task, section, and whole-skill estimates.",
+    annotations: readOnlyAnnotations, inputSchema: historyFilter,
+    outputSchema: { ...baseOutputSchema, items: z.array(z.record(z.unknown())).optional(), count: z.number().optional(), total: z.number().optional(), limit: z.number().optional(), offset: z.number().optional(), has_more: z.boolean().optional() },
+  }, async args => safeResult(() => client.listPracticeSessions(args), "已取得英文練習紀錄列表。"));
+  server.registerTool("english_get_ielts_progress", {
+    title: "查詢 IELTS 練習進度", description: "Read evidence-linked IELTS history grouped by comparable scope, module, source and grading policy. Estimated practice changes do not prove ability improvement. Missing scores remain missing; no overall IELTS score is inferred.",
+    annotations: readOnlyAnnotations,
+    inputSchema: { skill: skillSchema.optional(), module: moduleSchema.optional(), dateFrom: offsetDateTimeSchema.optional(), dateTo: offsetDateTimeSchema.optional(), limit: z.number().int().min(1).max(500).optional() },
+    outputSchema: { ...baseOutputSchema, system: z.string().optional(), groups: z.array(z.record(z.unknown())).optional(), count: z.number().optional(), has_more: z.boolean().optional(), status: z.string().optional(), window: z.record(z.unknown()).optional(), limitations: z.array(z.string()).optional() },
+  }, async args => safeResult(() => client.ieltsProgress(args), "已取得 IELTS 練習評分與證據。"));
   return server;
 }
 

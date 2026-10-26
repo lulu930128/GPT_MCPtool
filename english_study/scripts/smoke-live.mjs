@@ -4,12 +4,12 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 
 const url = process.env.ESTUDY_MCP_URL || "http://127.0.0.1:18886/mcp";
 const allowWrite = process.env.ESTUDY_ALLOW_TEST_WRITE === "1";
-const client = new Client({ name: "english-study-live-smoke", version: "0.3.0" });
+const client = new Client({ name: "english-study-live-smoke", version: "0.4.0" });
 const transport = new StreamableHTTPClientTransport(new URL(url));
 try {
   await client.connect(transport);
   const listed = await client.listTools();
-  if (listed.tools.length !== 15) throw new Error(`Expected 15 tools, received ${listed.tools.length}.`);
+  if (listed.tools.length !== 17) throw new Error(`Expected 17 tools, received ${listed.tools.length}.`);
   for (const required of ["english_search_reference_entries", "english_get_reference_entry", "english_preview_item_enrichment"]) {
     if (!listed.tools.some((tool) => tool.name === required)) throw new Error(`Missing Reference Catalog tool: ${required}`);
   }

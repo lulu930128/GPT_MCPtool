@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, parse } from "node:path";
+import { dirname, join, matchesGlob, parse } from "node:path";
 import test from "node:test";
 import { loadBridgeConfig } from "../src/config.js";
 import { JobStore } from "../src/job-store.js";
@@ -41,16 +41,44 @@ test("Full Access is the default; plan and the rollback profile retain sandbox r
     assert.ok(profile);
     assert.ok(profile.includes('workspace_roots = {  }'));
     for (const path of [join(f.component, ".local"), join(f.component, ".env"),
-      join(f.component, ".env.*"), join(f.component, ".secrets"), join(f.component, ".tunnel-client"),
+      join(f.component, ".secrets"), join(f.component, ".tunnel-client"),
       f.projectsFile, f.dataDir, join(dirname(f.component), "project_reading", ".secrets")]) {
       assert.ok(profile.includes(`${JSON.stringify(path)} = "deny"`), path);
     }
     assert.ok(profile.includes(`${JSON.stringify(join(f.component, ".tmp", "codex-inbox"))} = "read"`));
-    assert.ok(profile.includes('network = { enabled = false }'));
+    assert.ok(profile.includes('network = { enabled = true }'));
     assert.ok(profile.includes(`extends = ":${name === "workspace" ? "workspace" : "read-only"}"`));
     assert.ok(!profile.includes("package.json"));
   }
   if (process.platform === "win32") assert.ok(config.codexArgs.includes('windows.sandbox="elevated"'));
+});
+
+test("environment deny globs exclude only the example and preserve synthetic secret variants", async (t) => {
+  const f = await fixture(t);
+  const config = await loadBridgeConfig(f.env);
+  const profile = config.codexArgs.find((arg) => arg.startsWith("permissions.codex-bridge-read-only="))!;
+  const denies = [...profile.matchAll(/("(?:[^"\\]|\\.)*") = "deny"/g)].map((match) => JSON.parse(match[1]!) as string);
+  const denied = (name: string) => denies.some((glob) => matchesGlob(join(f.component, name), glob));
+  for (const name of [".env", ".env.local", ".env.production", ".env.e", ".env.ex", ".env.exampl",
+    ".env.example.bak", ".env.examples", ".env.EXAMPLES", ".env.exAmple.private", ".env.x"]) {
+    await writeFile(join(f.component, name), "SYNTHETIC_FIXTURE_ONLY=not-a-credential");
+    assert.equal(denied(name), true, name);
+  }
+  for (const name of [".env.example", ".env.EXAMPLE", "AGENTS.md", "package.json"]) {
+    assert.equal(denied(name), false, name);
+  }
+});
+
+test("handoff cannot be reopened beneath a denied data parent", async (t) => {
+  const f = await fixture(t);
+  await assert.rejects(loadBridgeConfig({ ...f.env, CODEX_BRIDGE_DATA_DIR: join(f.component, ".tmp") }),
+    /PERMISSION_PROFILE_DENIED_PARENT/);
+  await assert.rejects(loadBridgeConfig({ ...f.env, CODEX_BRIDGE_DATA_DIR: f.component }),
+    /PERMISSION_PROFILE_DENIED_PARENT/);
+  await assert.rejects(loadBridgeConfig({ ...f.env, CODEX_BRIDGE_DATA_DIR: f.project }),
+    /PERMISSION_PROFILE_DENIED_PARENT/);
+  // A sibling whose name shares a prefix is not a parent.
+  await assert.doesNotReject(loadBridgeConfig({ ...f.env, CODEX_BRIDGE_DATA_DIR: `${f.component}-state` }));
 });
 
 test("Windows default data belongs to the component local runtime", { skip: process.platform !== "win32" }, async (t) => {

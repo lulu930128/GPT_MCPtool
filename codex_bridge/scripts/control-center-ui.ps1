@@ -25,6 +25,11 @@ $tunnelUiUrl = "http://127.0.0.1:18829/ui"
 if ($installed) {
     $runtimeDir=$installedContext.runtimeDir;$dataDir=$installedContext.dataDir
     $tunnelId=$installedContext.tunnelIdentity.resolvedTunnelId
+} elseif(Test-Path -LiteralPath (Join-Path $projectRoot '..\daily-mode.json')) {
+    . (Join-Path $PSScriptRoot 'daily-runtime-settings.ps1')
+    $dailyContext=New-CbDailyContext $projectRoot
+    $runtimeDir=$dailyContext.runtimeDir;$dataDir=$dailyContext.dataDir
+    $tunnelId=$dailyContext.tunnelIdentity.resolvedTunnelId
 } else {
 $runtimeDir = Join-Path $projectRoot ".tmp"
 $dataDir = Join-Path $projectRoot '.local\runtime'

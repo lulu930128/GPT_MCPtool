@@ -14,7 +14,7 @@ try{
   foreach($dir in @('scripts','src','web','dist','runtime')){New-Item -ItemType Directory -Force -Path (Join-Path $fixture $dir)|Out-Null}
   Copy-Item -LiteralPath (Join-Path $root 'dist\src') -Destination (Join-Path $fixture 'dist') -Recurse
   Copy-Item -LiteralPath (Join-Path $root 'scripts\codex-bridge-runtime.psm1'),(Join-Path $root 'scripts\runtime-build-id.mjs') -Destination (Join-Path $fixture 'scripts')
-  foreach($name in @('OwnedProcess.Native.cs','cooperative-shutdown-host.ps1','process-identity.ps1')){
+  foreach($name in @('OwnedProcess.Native.cs','cooperative-shutdown-host.ps1','process-identity.ps1','cooperative-layout.ps1')){
     Copy-Item -LiteralPath (Join-Path $root "scripts\$name") -Destination (Join-Path $fixture "scripts\$name")
   }
   $nativeFixture=Join-Path $fixtureRoot 'mcp_control_center\src'

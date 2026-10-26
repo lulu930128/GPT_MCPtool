@@ -83,11 +83,20 @@ Bridge state, secrets, `.git`, other projects and user files. Project entry chec
 association, redaction and explicit commit/push instructions remain application/workflow controls,
 not OS isolation. `on-request` is retained; it is not changed to `never`.
 
-Plan and Native Review retain their read-only profile and disabled network. `codex-bridge-workspace`
+Plan and Native Review retain their read-only filesystem profile with network enabled. `codex-bridge-workspace`
 is defined only for rollback, not selected for normal writes. A required profile missing or denied by
 native policy stops dispatch/resume. Windows ACLs, administrator identity and independent MCP policies
-are unchanged. Restore isolation after the PowerShell NORMAL/ADMIN execution, authorization and Receipt
-pipeline passes acceptance, not on a calendar deadline.
+are unchanged. General engineering includes authorized shell, Git, PowerShell, Node, Python, builds,
+tests and HTTPS. NORMAL/ADMIN acceptance does not automatically restore a more restrictive Codex profile.
+The earlier rollback milestone is historical, not the current product decision.
+
+Secret reads are denied by default; non-secret `.env.example` is readable. Explicit user authorization
+for named files/data permits only that task's specified reads, not later tasks, writes or disclosure.
+Do not repeatedly reject the same lawful authorization solely because of the default. Never automatically
+include secrets in model results, logs, external APIs, Git or evidence. OS/platform/Host denial still stops
+execution. The shared profiles have no task-scoped revocable exception mechanism; do not mutate shared
+denies or switch to Full Access as an exception. Hard isolation remains `UNVERIFIED`;
+see [PermissionBoundaries](PermissionBoundaries.md) for the controlled execution design.
 
 ## Approval reviewers
 
@@ -107,7 +116,9 @@ permission profile, exact workspace roots and `approvalPolicy=on-request`. Each 
 selects its profile: App Server 0.154 can rejoin a loaded thread without applying `thread/resume`
 permission overrides. Follow-up turns and inline Native Review first apply `thread/settings/update`
 and wait for the matching `thread/settings/updated` notification, then read back the exact profile,
-sandbox, approval policy and reviewer before starting work. The update acknowledgement alone only
+sandbox (including enabled network for Plan), approval policy and reviewer before starting work. New Plan
+threads also verify the returned profile and read-only/network policy before `turn/start`. This verifies
+reported settings, not successful sandbox execution or HTTPS. The update acknowledgement alone only
 confirms enqueueing. A five-second application timeout or an
 unavailable or mismatched result blocks the operation. Native Review always requires read-only.
 For write resumes, native 0.154 requires applying `sandboxPolicy=dangerFullAccess` before selecting

@@ -10,20 +10,20 @@ const expectedTools = [
   "english_get_practice_session", "english_get_summary", "english_preview_item_creation",
   "english_preview_practice_record", "english_record_attempt", "english_record_practice",
   "english_search_items", "english_set_manual_labels", "english_search_reference_entries",
-  "english_get_reference_entry", "english_preview_item_enrichment",
+  "english_get_reference_entry", "english_preview_item_enrichment", "english_list_practice_sessions", "english_get_ielts_progress",
 ].sort();
 
-test("MCP publishes the independent strict 15-tool contract", async () => {
+test("MCP publishes the independent strict 17-tool contract", async () => {
   const handle = await startEnglishStudyHttpServer({ hubBaseUrl: "http://127.0.0.1:1", hubTimeoutMs: 2000, host: "127.0.0.1", port: 0 });
-  const client = new Client({ name: "contract-test", version: "0.3.0" });
+  const client = new Client({ name: "contract-test", version: "0.4.0" });
   const transport = new StreamableHTTPClientTransport(new URL(handle.url));
   try {
     const healthResponse = await fetch(new URL("/health", handle.url));
     const health = await healthResponse.json() as Record<string, unknown>;
     assert.equal(health.service, "english-study-mcp");
-    assert.equal(health.version, "0.3.0");
+    assert.equal(health.version, "0.4.0");
     assert.equal(health.contractVersion, "english-learning-v1");
-    assert.equal(health.toolCount, 15);
+    assert.equal(health.toolCount, 17);
     assert.match(String(health.buildId), /^[0-9a-f]{16}$/);
     await client.connect(transport);
     const tools = await client.listTools();
@@ -54,7 +54,7 @@ test("representative output validates and Hub errors stay typed", async () => {
   await new Promise<void>((resolve) => hub.listen(0, "127.0.0.1", resolve));
   const address = hub.address(); assert.ok(address && typeof address === "object");
   const handle = await startEnglishStudyHttpServer({ hubBaseUrl: `http://127.0.0.1:${address.port}`, hubTimeoutMs: 2000, host: "127.0.0.1", port: 0 });
-  const client = new Client({ name: "projection-test", version: "0.3.0" });
+  const client = new Client({ name: "projection-test", version: "0.4.0" });
   const transport = new StreamableHTTPClientTransport(new URL(handle.url));
   try {
     await client.connect(transport);

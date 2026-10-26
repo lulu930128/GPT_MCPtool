@@ -24,6 +24,7 @@ export interface SearchTextArgs {
   fixedString?: boolean;
   beforeLines?: number;
   afterLines?: number;
+  contextMode?: "per_match" | "merged";
 }
 
 interface SearchMatch {
@@ -51,6 +52,7 @@ interface SearchOptions {
   fixedString: boolean;
   beforeLines: number;
   afterLines: number;
+  contextMode: "per_match" | "merged";
 }
 
 export async function searchWorkspaceText(
@@ -73,7 +75,11 @@ export async function searchWorkspaceText(
     fixedString: args.fixedString !== false,
     beforeLines: clampInt(args.beforeLines ?? 0, 0, 20),
     afterLines: clampInt(args.afterLines ?? 0, 0, 20),
+    contextMode: args.contextMode ?? "per_match",
   };
+  if (options.contextMode !== "per_match" && options.contextMode !== "merged") {
+    throw new WorkspaceAccessError("contextMode must be per_match or merged.");
+  }
   if (!options.fixedString) {
     try {
       new RegExp(query, options.caseSensitive ? "" : "i");
@@ -103,7 +109,7 @@ export async function searchWorkspaceText(
     collection = await searchWithJavaScript(config, workspaceRoot, scope.absolute, options);
   }
 
-  const bounded = await addContext(config, collection.matches, options);
+  const bounded = await addContext(config, collection.matches, options, workspaceRoot.id);
   return {
     engine: collection.engine,
     preferredEngine: config.searchRuntime.preferred,
@@ -118,6 +124,7 @@ export async function searchWorkspaceText(
     truncated: collection.truncated || bounded.truncated,
     limitReason: bounded.limitReason ?? collection.limitReason,
     results: bounded.results,
+    ...(options.contextMode === "merged" ? { contextMode: "merged", contexts: bounded.contexts } : {}),
   };
 }
 
@@ -192,7 +199,7 @@ async function searchWithRipgrep(
           path: toWorkspaceRelative(workspaceRoot.path, absolute),
           absolute,
           line: event.data.line_number,
-          matchText: truncateUtf8((event.data.lines?.text ?? "").trimEnd(), 500).text,
+          matchText: truncateUtf8((event.data.lines?.text ?? "").replace(/\r?\n$/, ""), 500).text,
         });
         if (rawMatches.length >= options.maxResults) {
           stoppedForResults = true;
@@ -368,8 +375,10 @@ async function addContext(
   config: ServerConfig,
   matches: SearchMatch[],
   options: SearchOptions,
+  rootId: string,
 ): Promise<{
   results: unknown[];
+  contexts?: unknown[];
   truncated: boolean;
   limitReason?: "timeout" | "output";
 }> {
@@ -385,22 +394,30 @@ async function addContext(
   let timedOut = false;
   let matchId = 0;
   const ids = new Map<SearchMatch, number>();
-  for (const [absolute, fileMatches] of grouped) {
+  for (const fileMatches of grouped.values()) {
     if (Date.now() > deadline) {
       timedOut = true;
       break;
     }
-    const stat = await fsp.stat(absolute);
-    const windows = fileMatches.map((match) => {
+    const resolved = await resolveWorkspacePath(config, fileMatches[0].path, "file", rootId);
+    const ordered = options.contextMode === "merged"
+      ? [...fileMatches].sort((left, right) => left.line - right.line)
+      : fileMatches;
+    const windows: Array<{ id: number; startLine: number; endLine: number }> = [];
+    for (const match of ordered) {
+      const startLine = Math.max(1, match.line - options.beforeLines);
+      const endLine = match.line + options.afterLines;
+      const previous = windows.at(-1);
+      if (options.contextMode === "merged" && previous && startLine <= previous.endLine + 1) {
+        previous.endLine = Math.max(previous.endLine, endLine);
+        ids.set(match, previous.id);
+        continue;
+      }
       const id = matchId++;
       ids.set(match, id);
-      return {
-        id,
-        startLine: Math.max(1, match.line - options.beforeLines),
-        endLine: match.line + options.afterLines,
-      };
-    });
-    const collected = await collectLineWindows(absolute, stat.size, windows, config.maxFileBytes);
+      windows.push({ id, startLine, endLine });
+    }
+    const collected = await collectLineWindows(resolved.absolute, resolved.stat.size, windows, config.maxFileBytes);
     for (const window of collected) {
       contexts.set(window.id, window);
       collectedIds.add(window.id);
@@ -409,6 +426,62 @@ async function addContext(
       timedOut = true;
       break;
     }
+  }
+
+  if (options.contextMode === "merged") {
+    // Reserve all hit identities before spending the remaining output budget on
+    // context. A missing context is explicit and never silently loses a hit.
+    const results: Array<{ path: string; line: number; matchText: string; contextId: number | null }> = [];
+    const mergedContexts: Array<{ id: number; path: string; startLine: number; endLine: number; text: string; truncated: boolean }> = [];
+    const payloadBytes = () => Buffer.byteLength(JSON.stringify({ results, contexts: mergedContexts }), "utf8");
+    let truncated = timedOut;
+    for (const match of matches) {
+      results.push({ path: match.path, line: match.line, matchText: match.matchText, contextId: null });
+      if (payloadBytes() > config.maxSearchReturnedBytes) {
+        results.pop();
+        truncated = true;
+        break;
+      }
+    }
+    for (const [id, context] of contexts) {
+      const indexes = results.map((_, index) => index).filter((index) => ids.get(matches[index]) === id);
+      if (indexes.length === 0) continue;
+      const entry = { id, path: results[indexes[0]].path, startLine: context.startLine,
+        endLine: context.startLine - 1, text: "", truncated: true };
+      mergedContexts.push(entry);
+      for (const index of indexes) results[index].contextId = id;
+      // JSON escaping also consumes bytes. Search the UTF-8 text budget while
+      // measuring the serialized payload, so quotes/control characters fit too.
+      let low = 0;
+      let high = Math.min(Buffer.byteLength(context.text, "utf8"), config.maxSearchReturnedBytes);
+      const setText = (bytes: number) => {
+        const bounded = truncateUtf8(context.text, bytes);
+        entry.text = bounded.text;
+        entry.truncated = bounded.truncated;
+        entry.endLine = !bounded.truncated ? context.endLine : bounded.text.length === 0 ? context.startLine - 1
+          : context.startLine + bounded.text.split("\n").length - 1;
+      };
+      setText(0);
+      const baseBytes = payloadBytes() - Buffer.byteLength(JSON.stringify(entry), "utf8");
+      const fits = () => baseBytes + Buffer.byteLength(JSON.stringify(entry), "utf8") <= config.maxSearchReturnedBytes;
+      if (!fits()) {
+        mergedContexts.pop();
+        for (const index of indexes) results[index].contextId = null;
+        truncated = true;
+        continue;
+      }
+      while (low < high) {
+        const middle = Math.ceil((low + high) / 2);
+        setText(middle);
+        if (fits()) low = middle;
+        else high = middle - 1;
+      }
+      setText(low);
+      truncated ||= entry.truncated;
+    }
+    truncated ||= results.some((match) => match.contextId === null);
+    return { results, contexts: mergedContexts, truncated,
+      limitReason: timedOut ? "timeout" : truncated ? "output" : undefined };
   }
 
   const results: unknown[] = [];

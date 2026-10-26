@@ -71,7 +71,10 @@ const port = Number(process.env.WORKSPACE_MCP_HTTP_PORT);
 const server = http.createServer((request, response) => {
   if (request.url === "/health") {
     response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ ok: true, service: "gpt-project-workspace-mcp" }));
+    response.end(JSON.stringify({ ok: true, service: "gpt-project-workspace-mcp",
+      tokenConfigured: process.env.WORKSPACE_MCP_HTTP_TOKEN === "isolated-local-token-12345678901234567890",
+      policyConfigured: Boolean(process.env.WORKSPACE_MCP_WRITE_POLICY),
+      stateConfigured: Boolean(process.env.WORKSPACE_MCP_WRITE_STATE_DIR) }));
     return;
   }
   response.writeHead(200, { "content-type": "text/plain" });
@@ -107,6 +110,10 @@ public static class FakeTunnel
             File.WriteAllText(pidPath, Process.GetCurrentProcess().Id.ToString());
         }
         int port = int.Parse(File.ReadAllText(Path.Combine(profileDir, "test-port.txt")));
+        File.WriteAllText(Path.Combine(profileDir, "auth-check.txt"),
+            (Environment.GetEnvironmentVariable("PROJECT_WORKSPACE_TUNNEL_AUTHORIZATION") == "Bearer isolated-local-token-12345678901234567890"
+            && Array.IndexOf(args, "--mcp.extra-headers") >= 0
+            && Array.IndexOf(args, "--mcp.discovery-extra-headers") >= 0).ToString());
         TcpListener listener = new TcpListener(IPAddress.Loopback, port);
         listener.Start();
         while (true)
@@ -134,6 +141,12 @@ public static class FakeTunnel
   [IO.File]::WriteAllText((Join-Path $testRoot ".tunnel-client\test-port.txt"), [string]$tunnelPort, (New-Object Text.UTF8Encoding($false)))
   $env:CONTROL_PLANE_API_KEY = "isolated-test-placeholder"
   $env:PROJECT_READING_TEST_TUNNEL_PORT = [string]$tunnelPort
+  New-Item -ItemType Directory -Force -Path (Join-Path $testRoot ".local") | Out-Null
+  $testTokenFile = Join-Path $testRoot ".local\http-token"
+  [IO.File]::WriteAllText($testTokenFile, "isolated-local-token-12345678901234567890")
+  $testSettings = @{ workspaceRoot = $testRoot; workspaceRoots = ""; defaultWorkspaceRoot = "projects"; workspaceRootDenyDirs = ""; assetScopes = "";
+    httpTokenFile = $testTokenFile; writePolicyPath = (Join-Path $testRoot "write-policy.json"); writeStateDirectory = (Join-Path $testRoot "write-state") }
+  [IO.File]::WriteAllText((Join-Path $testRoot ".local\tray-settings.json"), ($testSettings | ConvertTo-Json))
 
   $selfTest = Invoke-TestController -Action SelfTest
   Assert-Equal $selfTest.document.runtimeContract "unified-lifecycle-v3" "controller self-test contract is v3"
@@ -196,6 +209,9 @@ public static class FakeTunnel
   $serverPid1 = [int]$ensure.document.after.server.pid
   $tunnelPid1 = [int]$ensure.document.after.tunnel.pid
   Assert-True ($serverPid1 -gt 0 -and $tunnelPid1 -gt 0) "ensure running records both exact owned PIDs"
+  $configuredHealth = Invoke-RestMethod -Uri "http://127.0.0.1:$serverPort/health" -TimeoutSec 5
+  Assert-True ($configuredHealth.tokenConfigured -and $configuredHealth.policyConfigured -and $configuredHealth.stateConfigured) "controller persists writer settings to its server child"
+  Assert-Equal ([IO.File]::ReadAllText((Join-Path $testRoot ".tunnel-client\auth-check.txt"))) "True" "tunnel receives authentication through environment references"
 
   $repair = Invoke-TestController -Action RepairConnectivity
   Assert-Equal $repair.document.after.status "Ready" "repair connectivity is idempotent when ready"

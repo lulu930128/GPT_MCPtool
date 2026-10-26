@@ -66,3 +66,74 @@ Startup 接線、同入口啟動與實際 Windows 冷開機是不同證據；未
 v5 → v6 必須使用上述 migration actions；一般 v5 → v5 與 v6 → v6 升級沿用
 `Prepare / PlanState / BindState -UpgradeFromReleaseRoot` 與既有 Cutover 流程，保留相同正式 state。
 禁止用一般 upgrade 跨越 v5/v6 資料邊界；初次遷移的回復也不能走會回退 Source 的舊 Rollback。
+
+## v6 已選取但歷史 Cutover 不完整的獨立證明
+
+`AttestSelectedV6` 是既有 Installed Release Operator 的額外本機動作，僅適用於 v6
+`STATE_BOUND`、原 `operator-cutover.json` 為 `UNKNOWN / lastPhase=SELECTED`，且全部
+`newPid/newTunnelPid/newBuildId/newStartTimeUtc/newTunnelStartTimeUtc` 為 null 的情形。
+Cutover 在保存 SELECTED 後若後續驗證失敗，catch 會留下這種歷史；後來程序能運作並不能補足它。
+此動作不重放 Cutover、不啟停程序、不改 Startup、ACL、資料或舊 receipt，也不把 UNKNOWN
+改成 LOCAL_ACCEPTED。v5 的 Source recovery 與正常 LOCAL_ACCEPTED 升級路徑保持原契約。
+
+目前只完成 Source／隔離合成驗證，沒有執行正式 attestation 或換版。以下是下一階段需要
+獨立授權、人工核對的操作規格，不是本輪的 Runtime 驗收紀錄。
+
+1. 原操作者從桌面開啟新的、非管理員 Windows PowerShell 5.1；不得由 Codex／Bridge 程序鏈
+   執行。先核對已審閱 Operator source 的 SHA-256、selected release 路徑、受保護 manifest
+   SHA-256 與原 cutover receipt SHA-256。不要就地改寫 installed code 來加上這個動作；可以使用
+   已審閱的 source Operator，它仍須載入 selected release 的受保護 native code，通過獨立操作者檢查。
+2. 執行 `installed-release-operator.ps1 -Action AttestSelectedV6 -ReleaseRoot <selected-v6>
+   -OriginalCutoverSha256 <original-receipt-sha256> -RecoveryManifestSha256 <selected-manifest-sha256>`。
+   Operator 在同一 `Local\McpCcInstalledOperator` mutex 內，先完成全部必要證據，再保存新的檔案。
+   權限拒絕、abandoned mutex、時間倒退、觀測超過 120 秒、任何必要證據未知都停止，不自動重試。
+3. 證據包括完整 protected closure／原有 manifest hash 與 reseal baseline 驗證、同一 operator SID
+   與 State Binding／plan、rollback Startup hash／old Build linkage、exact Startup selector、
+   canonical tray selection／無平行 owner、selected controller 的 native ownership／listener／Build，
+   以及 retained process handle 上 core／tunnel 的 PID、建立時間 ticks、image、SID、session、
+   非提權與 job membership。MCP discovery／auth、tunnel ready、兩次取得的實際 loaded HTML UTF-8
+   hash 與 installed `codex_bridge/web/codex-console.html` 必須相同。最後再核對歷史、selection、
+   全量 health idle、R1 terminal receipts 及相同 OS process instances。
+4. 新 receipt 位於同一 Owner 的 `installed-bridge/<release-id>/selected-v6-attestation-<sha256>.json`，
+   phase 是 `ATTESTED_SELECTED_V6`。採 CreateNew、durable flush、寫後重驗；保留所有歷史 bytes，
+   不新增 ReceiptStore。回傳的 SHA-256 必須由操作者核對，不能把任意 JSON 或檔名當作授權。
+   中途失敗留下的檔案不得修改或刪除；沒有成功回傳與獨立核對，不繼續升級。這是原 operator／
+   私有 ACL 與明確 hash pin 的信任模型，不是新的數位簽章或對原操作者本身的防偽機制。
+5. 後續已授權的 v6→v6 `Prepare / PlanState / BindState -UpgradeFromReleaseRoot <selected-v6>`
+   額外帶入 `-InstalledRecoverySha256 <attestation-sha256>`。每次都重驗實際 selected evidence；
+   receipt 有效期固定四小時，PID／start time／Build／UI／Startup／歷史 hash 改變皆拒絕。
+   Prepare 前後都驗證；BindState 保存同一 `ownerReuse.attestationSha256`，不搬移正式資料或變更
+   既有 ACL。資料遷移仍須用原 Migration actions，不能混用 recovery 參數。
+6. 新 release 的 `Preflight / Cutover / Rollback` 從已綁定的 state plan 取回固定 pin；若另外提供
+   `-InstalledRecoverySha256`，必須與保存值相同。Preflight／初次 Cutover 仍要求新鮮現役證據。
+   已進入原有 `UPGRADE_STOPPED` 的續接，才使用已綁定歷史證據並執行原本的 UI exit、exact old
+   process exit、無 listener 等檢查；不能用一個參數捏造停機階段。停止後不再要求舊程序存活或
+   四小時 freshness，以免阻斷合法續接／rollback，但所有 hash、原收據、manifest 與 plan linkage
+   必須保持一致。更換 pin 不能修補已綁定 successor；須重新審閱新 candidate／plan。
+
+證據範圍沿用成功 Cutover 的 gate：`Get-Health -Idle` 必須為 `jobs.scope=all`、active=0、
+awaitingApproval=0；這裡的 approval 是 Bridge jobs 的等待核准，並非 PowerShell ApprovalStore
+所有 request 的逐筆狀態。R1 receipt 必須由原 `Assert-RemoteReceiptsTerminal` 判為 terminal。
+不外部讀取 `powershell-approval/receipts.jsonl`、不改 sharing mode、不解鎖或重開 Store。
+停機 migration 使用的完整 Journal replay 不屬於一般 Cutover；隔離 Windows 實驗也確認，
+Node 以 `a+` 持有合成 journal 時，PowerShell Get-FileHash 不能讀取它。
+
+一般 Cutover 不要求 PowerShell ReviewStore OPEN，因此這項恢復也不新增該要求。既有
+`Assert-HttpAuthentication -MigrationStoreStatus` 的 OPEN／THIS_INSTANCE 檢查仍保留給 migration。
+即使現役 status 回報 `STORE_LOCKED / UNVERIFIED / EXECUTION_DISABLED`，也不能修改或繞過 Store；
+attestation 永遠將 `powerShellReviewStore` 與 `powerShellHost` 記為 `UNVERIFIED`，不證明 Journal
+完整性、NORMAL 可執行、Host readiness、外部 MCP 可達或 cold boot。這些維持各自的獨立 gate。
+
+回復邊界：attestation 本身沒有 Runtime／Startup 變更可回復，失敗時保留新舊證據並停止。
+一旦 successor 完成原有 LOCAL_ACCEPTED，才依既有 `Rollback` 的 exact instance、saved Startup、
+previous installed controller 與 UI exit 流程回復；不得對原 UNKNOWN release 重放 Rollback，
+也不得把資料退回 Source／v5。對未涵蓋的 UNKNOWN 或改變的 instance，交由獨立操作審核。
+
+定點驗證（全部只使用隔離檔案／合成權威觀測，不執行 Operator entrypoint）：
+
+```powershell
+powershell.exe -NoProfile -File codex_bridge/tests/test-selected-v6-attestation.ps1
+powershell.exe -NoProfile -File codex_bridge/tests/test-installed-upgrade.ps1
+powershell.exe -NoProfile -File codex_bridge/tests/test-installed-owner-migration.ps1
+git diff --check -- codex_bridge
+```

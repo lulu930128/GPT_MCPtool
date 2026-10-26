@@ -38,6 +38,7 @@ class FakeTransport extends EventEmitter implements AppServerTransport {
   deferPermissionNotification = false;
   pendingPermissionNotification?: JsonRpcNotification;
   permissionReadbackOverride?: Record<string, unknown>;
+  permissionStartOverride?: Record<string, unknown>;
   permissionsByTurn = new Map<string, string>();
   permissionProfiles = [
     { id: "codex-bridge-read-only", allowed: true },
@@ -85,13 +86,14 @@ class FakeTransport extends EventEmitter implements AppServerTransport {
       this.activePermissions = String(params?.permissions);
       this.activeSandbox = this.activePermissions === "codex-bridge-read-only" ? "readOnly" : "dangerFullAccess";
       this.activeReviewer = String(params?.approvalsReviewer);
-      return { thread: { id: "thread-1" } } as T;
+      return { thread: { id: "thread-1" }, activePermissionProfile: { id: this.activePermissions },
+        sandbox: { type: this.activeSandbox, networkAccess: true }, ...this.permissionStartOverride } as T;
     }
     // Native 0.154 rejoins a loaded session without changing its permissions.
     if (method === "thread/resume") return {
       thread: { id: String(params?.threadId) },
       activePermissionProfile: this.activePermissions ? { id: this.activePermissions } : null,
-      sandbox: { type: this.activeSandbox },
+      sandbox: { type: this.activeSandbox, networkAccess: true },
       approvalPolicy: "on-request", approvalsReviewer: this.activeReviewer,
       ...this.permissionReadbackOverride,
     } as T;
@@ -112,7 +114,7 @@ class FakeTransport extends EventEmitter implements AppServerTransport {
       const notification = { method: "thread/settings/updated", params: {
         threadId: params?.threadId,
         threadSettings: { activePermissionProfile: this.activePermissions ? { id: this.activePermissions } : null,
-          sandboxPolicy: { type: this.activeSandbox },
+          sandboxPolicy: { type: this.activeSandbox, networkAccess: true },
           approvalPolicy: "on-request", approvalsReviewer: this.activeReviewer },
       } };
       if (this.deferPermissionNotification) this.pendingPermissionNotification = notification;
@@ -280,7 +282,8 @@ test("native approval identity rejects mixed identities across two jobs", async 
   const { controller, store, fake, jobId } = await activeRecoveryFixture(context, { approvalReviewer: "user" });
   const request = fake.request.bind(fake);
   context.mock.method(fake, "request", async <T>(method: string, params?: Record<string, unknown>): Promise<T> => {
-    if (method === "thread/start") return { thread: { id: "thread-2" } } as T;
+    if (method === "thread/start") return { thread: { id: "thread-2" },
+      activePermissionProfile: { id: "codex-bridge-read-only" }, sandbox: { type: "readOnly", networkAccess: true } } as T;
     return request<T>(method, params);
   });
   const preview = previewWorkPackage({ projectId: "omi", title: "Second job", objective: "Offline fixture", approvalReviewer: "user" });
@@ -1285,6 +1288,40 @@ for (const failure of ["ignored", "unavailable"] as const) {
   });
 }
 
+test("Plan helper failure stops once without Full Access fallback or a turn", async (context) => {
+  const { controller, store, fake } = await idleControlFixture(context);
+  const request = fake.request.bind(fake);
+  let starts = 0;
+  context.mock.method(fake, "request", async <T>(method: string, params?: Record<string, unknown>): Promise<T> => {
+    if (method === "thread/start") {
+      starts += 1;
+      assert.equal(params?.permissions, "codex-bridge-read-only");
+      throw new Error("windows sandbox failed: helper_unknown_error: apply deny-read ACLs (-32603)");
+    }
+    return request<T>(method, params);
+  });
+  const startedBefore = fake.requests.filter((call) => call.method === "turn/start").length;
+  const preview = previewWorkPackage({ projectId: "omi", title: "Helper failure", objective: "Offline fixture", executionMode: "plan" });
+  const { record } = await controller.dispatch({ preview, previewDigest: preview.previewDigest, idempotencyKey: "helper-failed-plan" });
+  await waitFor(() => store.get(record.id)?.status === "failed");
+  assert.match(store.get(record.id)?.result?.message ?? "", /apply deny-read ACLs/);
+  assert.equal(starts, 1);
+  assert.equal(fake.requests.filter((call) => call.method === "turn/start").length, startedBefore);
+});
+
+for (const sandbox of [{ type: "readOnly", networkAccess: false }, { type: "readOnly" }, { type: "dangerFullAccess" }]) {
+  test(`new plan starts no turn with unverified sandbox ${JSON.stringify(sandbox)}`, async (context) => {
+    const { controller, store, fake } = await idleControlFixture(context);
+    fake.permissionStartOverride = { sandbox };
+    const startedBefore = fake.requests.filter((call) => call.method === "turn/start").length;
+    const preview = previewWorkPackage({ projectId: "omi", title: "Plan verification", objective: "Offline fixture", executionMode: "plan" });
+    const { record } = await controller.dispatch({ preview, previewDigest: preview.previewDigest, idempotencyKey: "unverified-new-plan" });
+    await waitFor(() => store.get(record.id)?.status === "failed");
+    assert.match(store.get(record.id)?.result?.message ?? "", /PERMISSION_PROFILE_UNVERIFIED/);
+    assert.equal(fake.requests.filter((call) => call.method === "turn/start").length, startedBefore);
+  });
+}
+
 test("plan resume waits for applied settings from its exact thread before starting work", async (context) => {
   const { controller, store, fake, input } = await idleControlFixture(context, { executionMode: "workspace_write", approvalReviewer: "user" });
   fake.deferPermissionNotification = true;
@@ -1305,6 +1342,8 @@ test("plan resume waits for applied settings from its exact thread before starti
 for (const [failure, readback] of [
   ["missing profile", { activePermissionProfile: null }],
   ["wrong sandbox", { sandbox: { type: "dangerFullAccess" } }],
+  ["disabled network", { sandbox: { type: "readOnly", networkAccess: false } }],
+  ["missing network evidence", { sandbox: { type: "readOnly" } }],
   ["wrong approval policy", { approvalPolicy: "never" }],
   ["wrong reviewer", { approvalsReviewer: "auto_review" }],
 ] as const) {

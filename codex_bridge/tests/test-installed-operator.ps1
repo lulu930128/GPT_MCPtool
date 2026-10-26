@@ -120,7 +120,7 @@ try {
     & $copyScripts
     Check-Package ([IO.File]::ReadAllText((Join-Path $bridge 'scripts\powershell-host-transport.ps1')) -ceq [IO.File]::ReadAllText($transport)) 'TRANSPORT_COPY_MISMATCH'
     $normalSources=@('NormalOperator.Native.cs','NormalOperator.Pipe.cs','NormalOperator.Security.cs','NormalOperator.Execution.cs','NormalOperator.Host.cs')
-    foreach($name in @('RemoteSelfReload.Native.cs','InstalledRelease.Native.cs')+$normalSources){
+    foreach($name in @('RemoteSelfReload.Native.cs','InstalledRelease.Native.cs','WorkspaceLocal.Native.cs')+$normalSources){
         Copy-Item -LiteralPath (Join-Path $managerSource ('src\'+$name)) -Destination (Join-Path $cc ('src\'+$name))
     }
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\scripts\OwnedProcess.Native.cs') -Destination (Join-Path $bridge 'scripts\OwnedProcess.Native.cs') -Force
@@ -128,8 +128,12 @@ try {
     [IO.File]::WriteAllText((Join-Path $cc 'src\NormalOperator.Unlisted.cs'),'NOT VALID C#')
     . ([scriptblock]::Create((Get-PrepareAssignment 'nativeBuilds').Extent.Text))
     $hostBuild=@($nativeBuilds | Where-Object {(Split-Path -Leaf $_.output) -ceq 'NormalOperator.Host.dll'})
-    Check-Package ($nativeBuilds.Count -eq 4 -and $hostBuild.Count -eq 1 -and
+    Check-Package ($nativeBuilds.Count -eq 5 -and $hostBuild.Count -eq 1 -and
         (($hostBuild[0].sources | ForEach-Object {Split-Path -Leaf $_}) -join ',') -ceq ($normalSources -join ',')) 'HOST_NATIVE_SOURCE_SET_CHANGED'
+    $workspaceBuild=@($nativeBuilds | Where-Object {(Split-Path -Leaf $_.output) -ceq 'WorkspaceLocal.Native.dll'})
+    Check-Package ($workspaceBuild.Count -eq 1 -and $workspaceBuild[0].sources.Count -eq 1 -and
+        $workspaceBuild[0].sources[0] -ceq (Join-Path $cc 'src\WorkspaceLocal.Native.cs') -and
+        ($workspaceBuild[0].references -join ',') -ceq 'System.Web.Extensions.dll') 'WORKSPACE_NATIVE_SOURCE_SET_CHANGED'
     $outputs=@($nativeBuilds | ForEach-Object {$_.output})
     foreach($output in $outputs){
         [IO.File]::WriteAllText($output,'prebuilt sentinel')
@@ -137,7 +141,7 @@ try {
         Check-Package ([IO.File]::ReadAllText($output) -ceq 'prebuilt sentinel') 'PREBUILT_OUTPUT_OVERWRITTEN'
         foreach($built in $outputs){if(Test-Path -LiteralPath $built){[IO.File]::Delete($built)}}
     }
-    foreach($name in $normalSources){
+    foreach($name in @('WorkspaceLocal.Native.cs')+$normalSources){
         $missing=Join-Path $cc ('src\'+$name);$bytes=[IO.File]::ReadAllBytes($missing);[IO.File]::Delete($missing)
         Denied-Package {& $compileNative} 'PathNotFound|ItemNotFound'
         Check-Package (-not(Test-Path -LiteralPath $hostBuild[0].output)) 'MISSING_SOURCE_PRODUCED_HOST_DLL'
@@ -171,6 +175,15 @@ try {
         $type=$assembly.GetType($name,$true)
         Check-Package ($type.Assembly -eq $assembly) 'HOST_TYPES_MUST_SHARE_ASSEMBLY'
     }
+    $workspaceAssembly=[Reflection.Assembly]::ReflectionOnlyLoad([IO.File]::ReadAllBytes($workspaceBuild[0].output))
+    Check-Package ($workspaceAssembly.ImageRuntimeVersion -ceq 'v4.0.30319' -and
+        $workspaceAssembly.GetName().Name -ceq 'WorkspaceLocal.Native') 'WORKSPACE_FRAMEWORK_ASSEMBLY_MISMATCH'
+    foreach($name in @('Owner','Contract','Row','ProbeDetail','Detail','Snapshot','RestartRequest','Receipt','RefusalDiagnostic')){
+        Check-Package ($workspaceAssembly.GetType(('McpCc.WorkspaceLocal.'+$name),$true).Assembly -eq $workspaceAssembly) 'WORKSPACE_TYPE_MISSING'
+    }
+    Check-Package (@($workspaceAssembly.GetReferencedAssemblies() | Where-Object {
+        $_.FullName -ceq 'System.Web.Extensions, Version=4.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'
+    }).Count -eq 1) 'WORKSPACE_SERIALIZER_DEPENDENCY_MISSING'
     # Real tree hashing and closure mismatch rejection, with only protected-ACL/native
     # acquisition replaced by the existing digest-only fixture. Not OS acceptance.
     [void][IO.Directory]::CreateDirectory((Join-Path $PackageRoot 'dependencies'))
@@ -186,7 +199,8 @@ try {
         Check-Package ([McpCcInstalledHashFixture]::VerifyTree($componentRoot) -ceq $trees[$component]) 'PACKAGE_NATIVE_TREE_HASH_MISMATCH'
     }
     $release=[pscustomobject]@{root=$PackageRoot;sourcePath=$hostBuild[0].output;schemaVersion=3;treeHashes=$trees}
-    foreach($target in @($hostBuild[0].output,(Join-Path $bridge 'scripts\powershell-host-transport.ps1'),(Join-Path $cc 'src\NormalOperator.Host.cs'))){
+    foreach($target in @($hostBuild[0].output,$workspaceBuild[0].output,(Join-Path $cc 'src\WorkspaceLocal.Native.cs'),
+        (Join-Path $bridge 'scripts\powershell-host-transport.ps1'),(Join-Path $cc 'src\NormalOperator.Host.cs'))){
         # Use an unchanged existing file for the preliminary manifest path guard.
         $release.sourcePath=Join-Path $cc 'src\InstalledRelease.Native.cs'
         $bytes=[IO.File]::ReadAllBytes($target)

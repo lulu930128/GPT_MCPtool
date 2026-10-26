@@ -623,29 +623,80 @@ function Wait-OmiCondition {
   return [bool](& $Condition)
 }
 
+function Read-OmiRuntimeControlUserToken {
+  # The controller's actual account owns this HKCU store. Never fall back to
+  # Process/Machine, load another user's hive, or cache/persist the credential.
+  return [Environment]::GetEnvironmentVariable('OMI_SEARCH_RUNTIME_CONTROL_TOKEN', 'User')
+}
+
+function Set-OmiCoreRuntimeCredential {
+  param(
+    [Parameter(Mandatory = $true)]$StartInfo,
+    [Parameter(Mandatory = $true)]$Context
+  )
+  $name = 'OMI_SEARCH_RUNTIME_CONTROL_TOKEN'
+  $StartInfo.EnvironmentVariables.Remove($name)
+  $token = $null
+  $diagnostic = 'RUNTIME_CONTROL_AUTH_USER_UNAVAILABLE'
+  try {
+    $token = Read-OmiRuntimeControlUserToken
+    # \z (not $) rejects a trailing newline; .NET matching is case sensitive.
+    if ($null -ne $token -and [regex]::IsMatch($token, '\A[0-9a-f]{64}\z')) {
+      $StartInfo.EnvironmentVariables[$name] = $token
+      $diagnostic = 'RUNTIME_CONTROL_AUTH_USER_VALID'
+    }
+  }
+  catch {
+    # Registry/account errors must neither disclose details nor stop market MCP.
+    $StartInfo.EnvironmentVariables.Remove($name)
+  }
+  finally { $token = $null }
+  try {
+    # One bounded local-only code, never projected to health/receipts/manager.
+    # Diagnostic IO failure must not turn unavailable restart auth into outage.
+    New-Item -ItemType Directory -Force -Path $Context.runtimeDir | Out-Null
+    [IO.File]::WriteAllText((Join-Path $Context.runtimeDir 'runtime-control-auth.log'), $diagnostic, $script:Utf8NoBom)
+  }
+  catch { }
+}
+
 function Start-OmiChildProcess {
   param(
     [Parameter(Mandatory = $true)]$StartInfo,
-    [Parameter(Mandatory = $true)][hashtable]$Environment
+    [Parameter(Mandatory = $true)][hashtable]$Environment,
+    $CoreContext = $null,
+    [switch]$Detached
   )
   $overrides = @{}
   foreach ($name in @("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")) { $overrides[$name] = $null }
   $overrides["NO_PROXY"] = "127.0.0.1,localhost"
   $overrides["no_proxy"] = "127.0.0.1,localhost"
   foreach ($entry in $Environment.GetEnumerator()) { $overrides[[string]$entry.Key] = $entry.Value }
-  $previous = @{}
+  $StartInfo.UseShellExecute = $false
+  $StartInfo.CreateNoWindow = $true
+  $StartInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+  foreach ($entry in $overrides.GetEnumerator()) {
+    $name = [string]$entry.Key
+    if ($null -eq $entry.Value) { $StartInfo.EnvironmentVariables.Remove($name) }
+    else { $StartInfo.EnvironmentVariables[$name] = [string]$entry.Value }
+  }
+  # All children start without inherited restart authority, including the
+  # dependency probe and tunnel. Only Start-OmiServer supplies CoreContext.
+  $StartInfo.EnvironmentVariables.Remove('OMI_SEARCH_RUNTIME_CONTROL_TOKEN')
+  if ($null -ne $CoreContext) { Set-OmiCoreRuntimeCredential -StartInfo $StartInfo -Context $CoreContext }
   try {
-    foreach ($entry in $overrides.GetEnumerator()) {
-      $name = [string]$entry.Key
-      $previous[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
-      [Environment]::SetEnvironmentVariable($name, $entry.Value, [EnvironmentVariableTarget]::Process)
+    if ($Detached) {
+      if (-not ('OmiSearchChildProcess' -as [type])) {
+        Add-Type -Path (Join-Path $PSScriptRoot 'OmiSearchChildProcess.cs')
+      }
+      return [OmiSearchChildProcess]::StartDetached($StartInfo)
     }
     return [Diagnostics.Process]::Start($StartInfo)
   }
   finally {
-    foreach ($entry in $previous.GetEnumerator()) {
-      [Environment]::SetEnvironmentVariable([string]$entry.Key, $entry.Value, [EnvironmentVariableTarget]::Process)
-    }
+    # The child owns its environment copy; release the controller's copy even
+    # when Process.Start fails. No transient parent environment mutation.
+    $StartInfo.EnvironmentVariables.Remove('OMI_SEARCH_RUNTIME_CONTROL_TOKEN')
   }
 }
 
@@ -666,7 +717,7 @@ function Get-OmiLauncherBackendCandidates {
   if (-not (Test-Path -LiteralPath $launcherRoot -PathType Container)) { return @() }
   $candidates = New-Object Collections.Generic.List[string]
   foreach ($file in @(Get-ChildItem -LiteralPath $launcherRoot -Recurse -File -Filter "launcher.log" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 5)) {
-    try { $lines = Get-Content -LiteralPath $file.FullName -Encoding UTF8 -Tail 200 -ErrorAction Stop }
+    try { $lines = @(Get-Content -LiteralPath $file.FullName -Encoding UTF8 -Tail 200 -ErrorAction Stop) }
     catch { continue }
     for ($index = $lines.Count - 1; $index -ge 0; $index--) {
       foreach ($pattern in @("selected=(http://127\.0\.0\.1:\d+)", "Starting backend .* on (http://127\.0\.0\.1:\d+)")) {
@@ -735,16 +786,28 @@ function Start-OmiServer {
   foreach ($required in @($Context.pythonPath) + @($Context.sourceBuildArtifacts)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "SERVER_ENTRY_MISSING: Adapter source is incomplete." }
   }
-  $dependencyProbe = & $Context.pythonPath -B -c "import importlib.metadata; assert importlib.metadata.version('mcp') == '2.1.1'; import uvicorn" 2>&1
-  if ($LASTEXITCODE -ne 0) {
-    throw "SERVER_DEPENDENCY_MISMATCH: Locked MCP runtime is unavailable. $dependencyProbe"
+  $probeInfo = New-Object Diagnostics.ProcessStartInfo
+  $probeInfo.FileName = $Context.pythonPath
+  $probeInfo.Arguments = '-B -c "import importlib.metadata; assert importlib.metadata.version(''mcp'') == ''2.1.1''; import uvicorn"'
+  $probeInfo.WorkingDirectory = $Context.projectRoot
+  $probeInfo.RedirectStandardOutput = $true
+  $probeInfo.RedirectStandardError = $true
+  $probe = Start-OmiChildProcess -StartInfo $probeInfo -Environment @{}
+  try {
+    $probeOutput = $probe.StandardOutput.ReadToEndAsync()
+    $probeError = $probe.StandardError.ReadToEndAsync()
+    $probe.WaitForExit()
+    $null = $probeOutput.GetAwaiter().GetResult()
+    $null = $probeError.GetAwaiter().GetResult()
+    if ($probe.ExitCode -ne 0) { throw "SERVER_DEPENDENCY_MISMATCH: Locked MCP runtime is unavailable." }
   }
+  finally { $probe.Dispose() }
   $resolvedBackend = Resolve-OmiBackendUrl -Context $Context
   $startInfo = New-Object Diagnostics.ProcessStartInfo
   $startInfo.FileName = $Context.pythonPath
   $startInfo.Arguments = "-B `"$($Context.httpEntry)`" --host $($Context.hostName) --port $($Context.port)"
   $startInfo.WorkingDirectory = $Context.projectRoot
-  $startInfo.UseShellExecute = $true
+  $startInfo.UseShellExecute = $false
   $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
   $serverEnvironment = @{
     OMI_SEARCH_API_BASE_URL = $resolvedBackend
@@ -752,7 +815,7 @@ function Start-OmiServer {
     OMI_SEARCH_MCP_HTTP_PORT = [string]$Context.port
     OMI_SEARCH_MCP_HTTP_TOKEN = $(if ([string]::IsNullOrWhiteSpace($Context.token)) { $null } else { $Context.token })
   }
-  $process = Start-OmiChildProcess -StartInfo $startInfo -Environment $serverEnvironment
+  $process = Start-OmiChildProcess -StartInfo $startInfo -Environment $serverEnvironment -CoreContext $Context -Detached
   if ($null -eq $process) { throw "SERVER_START_FAILED: Python process did not start." }
   Write-OmiAtomicText -Path $Context.serverPidFile -Value ([string]$process.Id)
   $started = Get-OmiProcess -ProcessId $process.Id
@@ -819,9 +882,9 @@ function Start-OmiTunnelOnce {
   $startInfo.FileName = $Context.tunnelClientPath
   $startInfo.Arguments = "run --profile-dir `"$($Context.tunnelProfileDir)`" --profile `"$($Context.tunnelProfile)`" --log.file `"$($Context.tunnelLogFile)`" --pid.file `"$($Context.tunnelPidFile)`""
   $startInfo.WorkingDirectory = $Context.projectRoot
-  $startInfo.UseShellExecute = $true
+  $startInfo.UseShellExecute = $false
   $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
-  $process = Start-OmiChildProcess -StartInfo $startInfo -Environment @{ CONTROL_PLANE_API_KEY = $env:CONTROL_PLANE_API_KEY }
+  $process = Start-OmiChildProcess -StartInfo $startInfo -Environment @{ CONTROL_PLANE_API_KEY = $env:CONTROL_PLANE_API_KEY } -Detached
   if ($null -eq $process) { throw "TUNNEL_START_FAILED: Tunnel process did not start." }
   Write-OmiAtomicText -Path $Context.tunnelPidFile -Value ([string]$process.Id)
   $started = Get-OmiProcess -ProcessId $process.Id

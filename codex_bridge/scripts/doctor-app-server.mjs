@@ -7,6 +7,7 @@ const config = await loadBridgeConfig(process.env);
 const client = new CodexAppServerClient({
   command: config.codexCommand,
   args: config.codexArgs,
+  environment: config.codexEnvironment,
   requestTimeoutMs: 20_000,
 });
 
@@ -47,6 +48,7 @@ try {
     throw new Error("Control-plane protocol normalization failed.");
   }
   console.log(JSON.stringify({ ok: true, verification: "isolated-read-only-capabilities", realTurnStarted: false,
+    planStartup: "UNVERIFIED", planHttps: "UNVERIFIED", secretIsolation: "UNVERIFIED",
     controlPlane,
     profiles: profiles.filter((profile) => profile.id.startsWith("codex-bridge-") || profile.id === ":danger-full-access").map(({ id, allowed }) => ({ id, allowed })),
     models: models.map((model) => ({ id: model.id, isDefault: model.isDefault, efforts: model.supportedReasoningEfforts?.map((option) => option.reasoningEffort) })),

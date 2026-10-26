@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 
 const mcpUrl = process.env.WORKSPACE_MCP_SMOKE_URL?.trim() || "http://127.0.0.1:18787/mcp";
+const bearerToken = process.env.WORKSPACE_MCP_SMOKE_TOKEN?.trim();
 let nextId = 1;
 let sessionId;
 
@@ -10,6 +11,7 @@ async function rpc(method, params) {
     headers: {
       accept: "application/json, text/event-stream",
       "content-type": "application/json; charset=utf-8",
+      ...(bearerToken ? { authorization: `Bearer ${bearerToken}` } : {}),
       ...(sessionId ? { "mcp-session-id": sessionId } : {}),
     },
     body: JSON.stringify({
@@ -50,9 +52,9 @@ async function callTool(name, args) {
 const initialized = await rpc("initialize", {
   protocolVersion: "2025-06-18",
   capabilities: {},
-  clientInfo: { name: "multi-root-live-smoke", version: "1.5.0" },
+  clientInfo: { name: "multi-root-live-smoke", version: "1.7.0" },
 });
-assert.equal(initialized.serverInfo.version, "1.5.0");
+assert.equal(initialized.serverInfo.version, "1.7.0");
 
 const resourceTemplates = await rpc("resources/templates/list", {});
 assert.ok(
@@ -63,7 +65,9 @@ assert.ok(
 
 const listedTools = await rpc("tools/list", {});
 const tools = listedTools.tools;
-assert.equal(tools.length, 25);
+const registeredWrites = tools.filter((tool) => tool.annotations?.readOnlyHint === false && tool.name !== "mcp_component_restart");
+assert.ok([0, 5].includes(registeredWrites.length));
+assert.equal(tools.length, registeredWrites.length ? 43 : 37);
 const projectMapTool = tools.find((tool) => tool.name === "project_map");
 assert.ok(projectMapTool, "project_map is missing from tools/list");
 assert.match(projectMapTool.inputSchema.properties.maxFiles.description, /Defaults to 30/);
@@ -78,7 +82,7 @@ assert.equal(
 );
 assert.equal(
   tools.filter((tool) => tool.inputSchema?.properties?.root).length,
-  14,
+  14 + registeredWrites.length,
 );
 assert.deepEqual(
   tools
@@ -103,8 +107,9 @@ const workspaceInfo = await callTool("workspace_info", {});
 const rootIds = workspaceInfo.roots.map((root) => root.id);
 assert.ok(rootIds.length > 0);
 assert.ok(rootIds.includes(workspaceInfo.defaultRoot));
-assert.equal(workspaceInfo.applicationVersion, "1.5.0");
-assert.equal(workspaceInfo.toolContractVersion, "2026-09-10.1");
+assert.equal(workspaceInfo.applicationVersion, "1.7.0");
+assert.equal(workspaceInfo.toolContractVersion, "2026-10-13.3");
+assert.equal(workspaceInfo.mode, workspaceInfo.writeCapabilities.enabled ? "operate" : "read-only");
 assert.equal(workspaceInfo.limits.fetch.maxFileBytes, 12_582_912);
 assert.ok(workspaceInfo.limits.fetch.enabledScopes.includes("projects"));
 assert.equal(typeof workspaceInfo.buildId, "string");

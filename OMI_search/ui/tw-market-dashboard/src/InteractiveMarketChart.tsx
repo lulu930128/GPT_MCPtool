@@ -8,6 +8,7 @@ import {
   type CandlestickData,
   type HistogramData,
   type IChartApi,
+  type ISeriesApi,
   type LineData,
   type Logical,
   type LogicalRange,
@@ -161,6 +162,13 @@ export default function InteractiveMarketChart({
   const chartContainerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const pointCountRef = useRef(0);
+  const seriesRef = useRef<{
+    candles: ISeriesApi<"Candlestick">;
+    volume: ISeriesApi<"Histogram">;
+    averages: Record<"ma5" | "ma20" | "ma60", ISeriesApi<"Line">>;
+  } | null>(null);
+  const previousPointsRef = useRef<NormalizedPoint[]>([]);
+  const visibleRangeRef = useRef<LogicalRange | null>(null);
   const [hovered, setHovered] = useState<HoveredPoint | null>(null);
   const normalized = useMemo(
     () => normalizePoints(points, timeframe),
@@ -169,7 +177,7 @@ export default function InteractiveMarketChart({
 
   useEffect(() => {
     const container = chartContainerRef.current;
-    if (!container || normalized.length === 0) return;
+    if (!container) return;
 
     const chart = createChart(container, {
       autoSize: false,
@@ -206,6 +214,7 @@ export default function InteractiveMarketChart({
         fixRightEdge: false,
         rightBarStaysOnScroll: false,
         lockVisibleTimeRangeOnResize: true,
+        shiftVisibleRangeOnNewBar: false,
       },
       crosshair: {
         mode: CrosshairMode.MagnetOHLC,
@@ -239,24 +248,6 @@ export default function InteractiveMarketChart({
       },
     });
     chartRef.current = chart;
-    pointCountRef.current = normalized.length;
-
-    const candles = normalized.map<CandlestickData<Time>>((point) => ({
-      time: point.time,
-      open: point.open,
-      high: point.high,
-      low: point.low,
-      close: point.close,
-    }));
-    const volumes = normalized.flatMap<HistogramData<Time>>((point) => (
-      point.volume === null
-        ? []
-        : [{
-            time: point.time,
-            value: point.volume,
-            color: point.close >= point.open ? "#ff4d6178" : "#16b8a678",
-          }]
-    ));
     const candleSeries = chart.addSeries(CandlestickSeries, {
       title: "K",
       upColor: palette.up,
@@ -267,7 +258,6 @@ export default function InteractiveMarketChart({
       wickDownColor: palette.down,
       priceFormat: { type: "price", precision: 2, minMove: 0.01 },
     });
-    candleSeries.setData(candles);
 
     const volumeSeries = chart.addSeries(HistogramSeries, {
       title: "成交量",
@@ -277,14 +267,10 @@ export default function InteractiveMarketChart({
       lastValueVisible: false,
       priceLineVisible: false,
     });
-    volumeSeries.setData(volumes);
     chart.priceScale("").applyOptions({
       scaleMargins: { top: 0.82, bottom: 0 },
     });
 
-    const averageByTime = new Map(
-      averages.map((point) => [String(point.time), point]),
-    );
     const addAverage = (key: "ma5" | "ma20" | "ma60", color: string) => {
       const series = chart.addSeries(LineSeries, {
         title: key.toUpperCase(),
@@ -294,15 +280,18 @@ export default function InteractiveMarketChart({
         lastValueVisible: false,
         crosshairMarkerVisible: false,
       });
-      const data = normalized.flatMap<LineData<Time>>((point) => {
-        const value = finite(averageByTime.get(point.rawTime)?.[key]);
-        return value === null ? [] : [{ time: point.time, value }];
-      });
-      series.setData(data);
+      return series;
     };
-    addAverage("ma5", palette.ma5);
-    addAverage("ma20", palette.ma20);
-    addAverage("ma60", palette.ma60);
+    seriesRef.current = {
+      candles: candleSeries,
+      volume: volumeSeries,
+      averages: {
+        ma5: addAverage("ma5", palette.ma5),
+        ma20: addAverage("ma20", palette.ma20),
+        ma60: addAverage("ma60", palette.ma60),
+      },
+    };
+    setHovered(null);
 
     chart.subscribeCrosshairMove((event) => {
       if (!event.time || !event.point) {
@@ -325,8 +314,6 @@ export default function InteractiveMarketChart({
       });
     });
 
-    chart.timeScale().setVisibleLogicalRange(latestRange(normalized.length, timeframe));
-
     const resizeObserver = new ResizeObserver(([entry]) => {
       const width = Math.floor(entry.contentRect.width);
       const height = Math.floor(entry.contentRect.height);
@@ -339,8 +326,47 @@ export default function InteractiveMarketChart({
       chart.remove();
       chartRef.current = null;
       pointCountRef.current = 0;
+      seriesRef.current = null;
+      previousPointsRef.current = [];
+      visibleRangeRef.current = null;
     };
-  }, [averages, normalized, timeframe]);
+  }, [stockId, timeframe]);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    const series = seriesRef.current;
+    if (!chart || !series) return;
+    const range = chart.timeScale().getVisibleLogicalRange() ?? visibleRangeRef.current;
+    const previous = previousPointsRef.current;
+    // Preserve the same time anchor even when a bounded response drops old bars.
+    const anchorIndex = normalized.findIndex((point) => previous.some((old) => old.rawTime === point.rawTime));
+    const oldAnchorIndex = anchorIndex < 0 ? -1 : previous.findIndex((point) => point.rawTime === normalized[anchorIndex].rawTime);
+    const shift = oldAnchorIndex < 0 ? 0 : anchorIndex - oldAnchorIndex;
+    series.candles.setData(normalized.map((point) => ({
+      time: point.time, open: point.open, high: point.high, low: point.low, close: point.close,
+    })));
+    series.volume.setData(normalized.flatMap((point) => point.volume === null ? [] : [{
+      time: point.time, value: point.volume,
+      color: point.close >= point.open ? "#ff4d6178" : "#16b8a678",
+    }]));
+    const averageByTime = new Map(averages.map((point) => [String(point.time), point]));
+    for (const key of ["ma5", "ma20", "ma60"] as const) {
+      series.averages[key].setData(normalized.flatMap<LineData<Time>>((point) => {
+        const value = finite(averageByTime.get(point.rawTime)?.[key]);
+        return value === null ? [] : [{ time: point.time, value }];
+      }));
+    }
+    if (range && previous.length && normalized.length) {
+      chart.timeScale().setVisibleLogicalRange({
+        from: (range.from + shift) as Logical, to: (range.to + shift) as Logical,
+      });
+    } else if (normalized.length) {
+      chart.timeScale().setVisibleLogicalRange(latestRange(normalized.length, timeframe));
+    }
+    visibleRangeRef.current = chart.timeScale().getVisibleLogicalRange() ?? range;
+    pointCountRef.current = normalized.length;
+    if (normalized.length) previousPointsRef.current = normalized;
+  }, [stockId, timeframe, normalized, averages]);
 
   const adjustRange = (kind: "left" | "right" | "zoom-in" | "zoom-out") => {
     const chart = chartRef.current;
@@ -371,12 +397,9 @@ export default function InteractiveMarketChart({
 
   const all = () => chartRef.current?.timeScale().fitContent();
 
-  if (normalized.length === 0) {
-    return <div className="interactive-chart-empty">本機尚無此週期可繪製的 OHLCV</div>;
-  }
-
   return (
     <div className="interactive-chart-shell">
+      {normalized.length === 0 && <div className="interactive-chart-empty interactive-chart-empty-overlay">本機尚無此週期可繪製的 OHLCV</div>}
       <div className="interactive-chart-controls" aria-label="K 線瀏覽控制">
         <span>{timeframe === "today" ? `${normalized.length} 根 1m K · 拖曳瀏覽` : `${normalized.length} 根 K 線`}</span>
         <div>

@@ -245,6 +245,7 @@ async function makeFixture(): Promise<ServerConfig> {
     denyDirs: new Set(denyDirs),
   };
   return {
+    writePolicy: { enabled: false, reason: "not_configured", protectedPaths: [] },
     defaultRootId: "projects",
     root: realRoot,
     roots: new Map([["projects", workspaceRoot]]),

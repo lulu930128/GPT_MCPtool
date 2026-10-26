@@ -11,6 +11,9 @@ param(
   [string]$HostName = "127.0.0.1",
   [int]$Port = 18787,
   [string]$Token = $env:WORKSPACE_MCP_HTTP_TOKEN,
+  [string]$HttpTokenFile = $env:WORKSPACE_MCP_HTTP_TOKEN_FILE,
+  [string]$WritePolicyPath = $env:WORKSPACE_MCP_WRITE_POLICY,
+  [string]$WriteStateDirectory = $env:WORKSPACE_MCP_WRITE_STATE_DIR,
   [string]$NodePath,
   [string]$TunnelClientPath,
   [string]$TunnelProfileDir,
@@ -39,7 +42,25 @@ if (Test-Path -LiteralPath $localSettingsPath -PathType Leaf) {
   if (-not $PSBoundParameters.ContainsKey("AssetScopes") -and [string]::IsNullOrWhiteSpace($AssetScopes) -and -not [string]::IsNullOrWhiteSpace([string]$localSettings.assetScopes)) { $AssetScopes = [string]$localSettings.assetScopes }
   $fileReturnScopesProperty = $localSettings.PSObject.Properties["fileReturnScopes"]
   if (-not $PSBoundParameters.ContainsKey("FileReturnScopes") -and [string]::IsNullOrWhiteSpace($FileReturnScopes) -and $null -ne $fileReturnScopesProperty -and -not [string]::IsNullOrWhiteSpace([string]$fileReturnScopesProperty.Value)) { $FileReturnScopes = [string]$fileReturnScopesProperty.Value }
+  foreach ($setting in @(@("HttpTokenFile", "httpTokenFile"), @("WritePolicyPath", "writePolicyPath"), @("WriteStateDirectory", "writeStateDirectory"))) {
+    $property = $localSettings.PSObject.Properties[$setting[1]]
+    if (-not $PSBoundParameters.ContainsKey($setting[0]) -and [string]::IsNullOrWhiteSpace([string](Get-Variable -Name $setting[0] -ValueOnly)) -and $null -ne $property) {
+      Set-Variable -Name $setting[0] -Value ([string]$property.Value)
+    }
+  }
 }
+foreach ($configuredPath in @($HttpTokenFile, $WritePolicyPath, $WriteStateDirectory)) {
+  if (-not [string]::IsNullOrWhiteSpace($configuredPath) -and -not [IO.Path]::IsPathRooted($configuredPath)) { throw "Writer settings require absolute paths." }
+}
+if ([string]::IsNullOrWhiteSpace($Token) -and -not [string]::IsNullOrWhiteSpace($HttpTokenFile)) {
+  try { $Token = [IO.File]::ReadAllText($HttpTokenFile).Trim() }
+  catch { throw "Configured HTTP token file is unavailable." }
+  if ($Token.Length -lt 32) { throw "Configured HTTP token must contain at least 32 characters." }
+}
+if ([string]::IsNullOrWhiteSpace($WritePolicyPath)) { Remove-Item Env:\WORKSPACE_MCP_WRITE_POLICY -ErrorAction SilentlyContinue }
+else { $env:WORKSPACE_MCP_WRITE_POLICY = $WritePolicyPath }
+if ([string]::IsNullOrWhiteSpace($WriteStateDirectory)) { Remove-Item Env:\WORKSPACE_MCP_WRITE_STATE_DIR -ErrorAction SilentlyContinue }
+else { $env:WORKSPACE_MCP_WRITE_STATE_DIR = $WriteStateDirectory }
 if ([string]::IsNullOrWhiteSpace($DefaultWorkspaceRoot)) { $DefaultWorkspaceRoot = "projects" }
 
 $modulePath = Join-Path $PSScriptRoot "component-runtime.psm1"

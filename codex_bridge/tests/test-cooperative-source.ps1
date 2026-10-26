@@ -2,6 +2,7 @@
 Set-StrictMode -Version 3.0
 $ErrorActionPreference='Stop'
 $root=Split-Path -Parent $PSScriptRoot
+. (Join-Path $root 'scripts/cooperative-layout.ps1')
 $count=0
 foreach($file in @('scripts/process-identity.ps1','scripts/cooperative-shutdown-host.ps1','scripts/codex-bridge-runtime.psm1',
   'tests/diagnose-fixture-listener.ps1','tests/test-cooperative-source.ps1','tests/test-runtime-control.ps1','tests/test-lifecycle-preflight.ps1')){
@@ -136,6 +137,7 @@ $module=Import-Module (Join-Path $root 'scripts/codex-bridge-runtime.psm1') -Pas
   $script:missingSource=$false
   function script:Test-CbInstalledLayout {return $false}
   function script:Test-Path {param($LiteralPath,$PathType)
+    if($LiteralPath -like '*daily-mode.json'){return $false}
     $script:checkedPaths.Add($LiteralPath)
     return -not($script:missingSource-and$LiteralPath-like'*process-identity.js')
   }

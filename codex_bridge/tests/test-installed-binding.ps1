@@ -30,7 +30,7 @@ try {
     $manifestPath=Join-Path $manager 'config\installed-release.json'
     $sid='S-1-5-21-100-200-300-1001'
     New-Item -ItemType Directory -Force -Path $legacy,$runtime,(Join-Path $private 'jobs'),(Join-Path $private 'codex-home')|Out-Null
-    foreach($name in @('codex-bridge-runtime.psm1','runtime-control.ps1','component-runtime.psm1','runtime-build-id.mjs','OwnedProcess.Native.cs','self-reload-pipe-client.ps1')){
+    foreach($name in @('codex-bridge-runtime.psm1','cooperative-layout.ps1','runtime-control.ps1','component-runtime.psm1','runtime-build-id.mjs','OwnedProcess.Native.cs','self-reload-pipe-client.ps1')){
         Put (Join-Path $bridge "scripts\$name") ([IO.File]::ReadAllText((Join-Path $source "scripts\$name")))
     }
     Put (Join-Path $manager 'src\McpControlCenter.InstalledRelease.psm1') ([IO.File]::ReadAllText((Join-Path $workspace 'mcp_control_center\src\McpControlCenter.InstalledRelease.psm1')))

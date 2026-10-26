@@ -1,12 +1,13 @@
 # GPT Project Workspace MCP
 
-目前 application release 為 `1.5.0`，tool contract 為 `2026-09-10.1`。Workspace root、asset scope 與 tool contract 仍依各自的安全契約演進。
+目前 application release 為 `1.7.0`，source tool contract 為 `2026-10-14.2`（本次新增診斷尚未 live adoption）。Workspace root、asset scope 與 tool contract 仍依各自的安全契約演進。
 
 圖片、Office 與 PDF 檔案的公開讀取設計、限制與設定方式請見
 [docs/Asset-Readers.md](docs/Asset-Readers.md)。
 
 ## 文件導覽
 
+- [受限寫入與修改](docs/Write-Operations.md)：通用 write policy、工具、hash、操作收據、audit 與恢復限制。
 - [安全模型](docs/SecurityModel.md)：root／asset scope allowlist、realpath containment、
   deny policy、工具權限與輸出限制。
 - [故障排除](docs/Troubleshooting.md)：build、root/path、local MCP、tunnel、ChatGPT action
@@ -14,7 +15,7 @@
 - [ChatGPT 掛載](docs/ChatGPT-Setup.md)：Secure MCP Tunnel 與 Developer Mode 設定。
 - [圖片、Office 與 PDF 讀取](docs/Asset-Readers.md)：格式、container safety、隔離解析與 bounded output。
 
-這是一個 read-only 的 MCP server，目標是讓 ChatGPT 以受限方式讀取明確 allowlist 內的多個本機 workspace root。
+這是一個預設 read-only 的 MCP server，可讀取明確 allowlist 內的多個本機 workspace root。Operator 可透過獨立 policy 啟用受限的文字建立／追加／修改能力；設定 `defaultRootAccess: "read-write"` 後，明確加入的 workspace roots 自動套用文字讀寫權限，既有 deny 與工具自身保護仍有效。
 
 預設範例提供三個 root id：
 
@@ -22,23 +23,34 @@
 - `mcp_tools` → `C:\GPT_MCPtool`
 - `work` → `C:\work`
 
-每個工具都接受可選的 `root`；省略時使用 `projects`。路徑仍必須相對於所選 root，不能傳入其他磁碟或任意絕對路徑。
+Workspace 檔案工具接受可選的 `root`；省略時使用 `projects`。路徑仍必須相對於所選 root，不能傳入其他磁碟或任意絕對路徑。Runtime diagnostics 不接受 root 或檔案路徑。
 
 額外 root 與 root-specific deny rule 屬於本機設定。可把
 `examples/tray-settings.example.json` 複製成 ignored 的
 `.local/tray-settings.json`，再加入實際核准的路徑；不要把個人路徑提交到 Git。
 
-本服務刻意不提供寫檔、刪檔、任意 shell、commit、push 或 database mutation。它只提供可審計的 workspace browsing、文字搜尋、靜態 code intelligence、Git review 與受限 asset 讀取。
+本服務提供 workspace browsing、文字搜尋、靜態 code intelligence、Git review、受限 asset 讀取，以及明確啟用的通用文字寫入。它不提供刪檔、搬移、任意 shell、commit、push 或 database mutation；不預設授權任何既有專案的寫入範圍。
 
 ## 工具
 
+Git 工具仍僅提供 read-only status／diff inspection；Git mutation 交由 Codex 在使用者明確授權的
+任務範圍使用本機 Git、add、commit、branch、push，依根目錄 Git 與公開安全規則執行。
+MCP 沒有 Git mutation 工具不代表 Codex 被禁止執行 Git；不新增任意 shell 或第二套 Git Manager。
+同一授權範圍不逐步重複確認，未包含 Push 的任務不外推 Push／公開發布；破壞性 Git 操作須另行
+明確指定，實際平台／ACL 拒絕須停止回報，不繞過。
+
+- `mcp_component_status`、`mcp_component_preview`、`mcp_component_receipt` 與 `mcp_component_restart`：七個其他 MCP 的既有 CC 狀態／預覽與 durable receipt；七個固定目標皆可在明確確認中斷後人工 reload；同 UUID 換目標會拒絕。重用現有 authenticated HTTP 與唯一 CC tray／component controller，不做額外真人身分驗證。詳見 [本機元件維護與人工採用](docs/LocalComponentManagement.md)。本輪只做 source／隔離驗證。
+
+- `check_tcp_port`、`list_listening_ports`、`inspect_port_owner`、`resolve_dns`、`ping_host`、`http_health_check`：受限 runtime/connectivity 觀察，參數與限制見下節。
+- `create_text_file`、`append_text_file`、`patch_text_file`、`update_json_value`、`make_directory`：只在有效 write policy 啟用時提供，寫入須明確指定 root、路徑與 operation_id。
+- `get_write_operation`：operate mode 的唯讀操作收據查詢，處理回應遺失與不確定結果。
 - `read_audio`：以 MCP AudioContent 回傳原始音訊；不提供自訂播放器或診斷卡，host 是否播放取決於其支援。
 - `workspace_info`：回傳目前 root allowlist、預設 root、限制與安全政策摘要。
 - `list_projects`：列出指定 root 的直接子資料夾，標示 README、AGENTS、git repo。
 - `project_context`：讀取某個專案的 README、AGENTS、package scripts、pyproject 等入口資訊摘要。
 - `list_dir`：受限目錄瀏覽，有深度與筆數上限。
-- `read_file`：讀取 root 內允許的文字檔，有大小與行數上限。
-- `read_files`：一次讀取最多十個已預先通過相同 path guard 的文字視窗。
+- `read_file`：讀取 root 內允許的文字檔，有大小與行數上限；`includeSha256=true` 從同一份完整原始 UTF-8 快照產生 hash 與文字視窗，供後續修改使用。
+- `read_files`：依目前設定的檔數、總行數與 bytes 上限，批次讀取已預先通過相同 path guard 的文字視窗。
 - `find_files`：以 relative glob 與副檔名尋找檔案，不回傳絕對路徑。
 - `search_text`：在允許範圍內搜尋文字並可回傳前後文；優先使用 npm platform package 內不進 Git 的 `rg`，沒有時使用 bounded JavaScript fallback。
 - `git_status_summary`、`git_diff`、`git_diff_file`：只讀且 project-scoped 的 Git status／patch；denied、binary、symlink、submodule 內容不會外流。
@@ -48,6 +60,64 @@
 - `inspect_pdf`、`read_pdf_text`、`read_pdf_page`：隔離 worker 內的 PDF metadata、文字與單頁 PNG reader。
 
 `workspace_info` 另回傳 application／contract／build fingerprint、runtime start time 與 active search backend，方便確認目前實際載入的 build。
+
+### 文字預算、續讀與搜尋去重
+
+Source 預設上限為單檔 600 行、批次 12 檔／2400 行、搜尋 120 筆；單檔文字
+256 KiB、批次文字與搜尋結果各 512 KiB。實際值由 `WORKSPACE_MCP_MAX_READ_LINES`、
+`WORKSPACE_MCP_MAX_BATCH_FILES`、`WORKSPACE_MCP_MAX_BATCH_TOTAL_LINES`、
+`WORKSPACE_MCP_MAX_SEARCH_RESULTS` 及既有 bytes 環境變數控制，tool schemas 與說明同步使用設定值。
+以現役 `workspace_info.limits` 為準；source Build 不代表現役已採用。
+
+`read_files` 先保留明確指定的 `maxLines`，再將剩餘行數公平分給省略者；明確預算總和超限仍拒絕。
+Bytes 依剩餘檔案需求公平保留（每檔仍受單檔上限約束），小檔及前檔未用完的額度可釋出給後檔。
+回傳每檔 `appliedLimits`、批次 `totalReturnedLines`／`totalReturnedBytes`；bytes 計算 UTF-8 文字，
+不含 JSON 包裝、metadata 或 MCP 相容性保留的重複文字副本。
+
+`read_file`／`read_files` 保留原欄位，另回傳 `completedLines`、`nextStartLine`、
+`partialLine`、`truncationReasons`（`max_lines`、`max_returned_bytes`、`partial_line`，
+批次可加 `batch_total_lines`／`batch_total_bytes`）。`nextStartLine=null` 才表示讀完；
+完整行後放不下的下一行不回傳部分內容，直接從該行續讀。
+只有首行可能回傳 UTF-8 安全的部分文字：此時 `completedLines=0`、`eof=false`、
+`nextStartLine` 留在原行，並以 `continuationRequiresMoreBytes`／`requiredBytesForNextLine`
+指出須提高 bytes 預算才能完成。批次可改用 `read_file`；超過單檔 cap 則需 operator 調整設定，
+重複相同預算不會前進。續讀假設檔案未被外部修改；一般讀取不是跨請求快照。
+
+`search_text` 預設維持 `contextMode=per_match` 與原有 `results` schema。
+Opt-in `contextMode=merged` 將同檔重疊或緊鄰視窗合併為唯一 `contexts`，每筆
+`results` 保留 `path`、`line`、`matchText` 與 `contextId`；`count` 仍為命中數。
+Context 的 `id` 對應 `contextId`，並提供 `path`、`startLine`、`endLine`、`text`、`truncated`。
+輸出預算先保留命中識別，再放前後文；`contextId=null` 表示前後文因限制未回傳，
+不表示沒有命中。部分 context 會標記 `truncated`；命中本身超限也會以頂層 `truncated`／`limitReason` 說明。
+兩種模式均沿用既有 path guard、deny policy、ripgrep／JavaScript fallback。
+
+### Runtime／connectivity diagnostics
+
+六個工具均為 readOnlyHint=true、destructiveHint=false；加上元件管理工具共 35 個，檔案 operate mode 為 41 個；只有固定七目標的 restart 工具標記 destructive。
+TCP／DNS／HTTP 使用 Node API，Windows listener／PID／ping 使用固定 System32 命令與既有 bounded runner。
+不接受任意 command、flags、executable、cwd、env，也不能啟停任何目標程序或服務。
+
+| 工具 | 結構化參數 | 結果 |
+| --- | --- | --- |
+| `check_tcp_port` | `host`, `port`, `timeoutMs?` | TCP connect、錯誤碼、耗時；不傳送 application payload |
+| `list_listening_ports` | `port?`, `address?`, `family?`, `maxResults?`, `timeoutMs?` | Windows TCP listener、PID；精確 port/address 及 ipv4/ipv6 篩選 |
+| `inspect_port_owner` | `port`, `address?`, `maxResults?`, `timeoutMs?` | listener／PID／process image name；不是 executable path 或 lifecycle ownership 證明 |
+| `resolve_dns` | `hostname`, `family?`, `maxResults?`, `timeoutMs?` | A／AAAA；family=ipv4/ipv6/all；不讀 hosts file，IP literal 直接回傳 |
+| `ping_host` | `host`, `timeoutMs?` | 單次 ICMP probe、exitCode、bounded output；exitCode=0 不等於 echo 成功 |
+| `http_health_check` | `url`, `timeoutMs?`, `maxBodyBytes?` | HTTP(S) GET、statusCode、healthy、bounded bodyPreview |
+
+`timeoutMs` 預設 3000，範圍 100–10000；`maxResults` 預設 50、最高 100；HTTP body 預設
+1024 bytes、最高 16384 bytes，可設 0；header cap 為 8192 bytes。同一 runtime 最多八個進行中的
+診斷，超過回傳 `DIAGNOSTICS_BUSY`。Windows subprocess stdout／stderr 上限為 256 KiB／4 KiB，
+ping 回傳最多 2048 個字元。Timeout、截斷及 partial evidence 會明確標記。
+
+可觀察 localhost、private 與 public host；此能力不受 workspace root 範圍限制。只對已知唯讀
+health endpoint 使用 HTTP GET；禁止 credentials、custom headers、request body、redirect，TLS 保持驗證。
+body／命令輸出一律當作不可信資料。`healthy=false` 的 HTTP 非 2xx 仍可是一筆成功取得的觀測；
+TCP refusal／ICMP failure 不足以證明服務不存在。Windows PID／image name 是不同時間點的快照，
+程序消失、權限或 PID reuse 都可能影響 identity；不提供 kill/start，也不取代 lifecycle controller。
+`inspect_port_owner` 的 `ok`／`complete` 描述 listener snapshot；identity 失敗時保留有效 PID，
+回傳 `partial=true`、`identityComplete=false`、`identityCode` 及逐列 `identityStatus=unavailable`。
 
 ### `project_map` 輸出限制
 
@@ -268,4 +338,20 @@ startup_timeout_sec = 10
 - 使用 Secure MCP Tunnel，或使用有 HTTPS、auth、log review 的受控部署。
 - 不要把 `C:\project` read endpoint 無驗證公開。
 - 不要用 `C:\` 或使用者家目錄取代明確的 `WORKSPACE_MCP_ROOTS` allowlist。
-- 保持工具 read-only；新增寫入工具前先做獨立安全設計。
+- 寫入須使用已審查的 policy 與 authenticated transport；詳見受限寫入文件。
+
+## 本機 Control Center 通道（source candidate）
+
+Workspace 已改接現有 source schema 3 tray 的固定 local pipe。status／preview 採用
+有時間戳的 CC 快照；七個固定元件的明確單一目標人工 reload 使用既有 controller 與 durable UUID 收據。
+未驗證 HTTP／STDIO 不啟用 restart；沿用現有 authenticated HTTP，不另外驗證真人身分。
+沒有 Program Files G2、跨 SID、第二個 manager 或通用 shell。
+本輪未 restart／部署。詳見 [本機維護、限制與採用](docs/LocalComponentManagement.md)。
+舊 [G2 證據](docs/ReadOnlyG2Evidence.md) 保留為已被取代的 prototype 記錄。
+
+`workspace_runtime_status()` 讀取 Workspace 開機 identity、目前權限、HTTP listener context、
+MCP transport 與 CC 控制通道，彼此獨立標示。`mcp_component_diagnostics({componentId})`
+從同一 CC owner 的既有記憶體快照讀取七元件詳細狀態；Ready 不代表 Idle，
+缺值／過期／舊版 CC 回報 UNVERIFIED。兩者皆為嚴格 schema 的唯讀工具，
+不新增 probe、維護請求或 controller；原 `mcp_component_status` 保持精簡摘要。
+來源、工作量判定與限制見 [runtime 診斷契約](docs/RuntimeDiagnostics.md)。

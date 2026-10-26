@@ -18,6 +18,9 @@ Import-Module $modulePath -Force
 if ([string]::IsNullOrWhiteSpace($ManifestPath)) { $ManifestPath = Get-McpCcDefaultManifestPath }
 if ([string]::IsNullOrWhiteSpace($RuntimeRoot)) { $RuntimeRoot = Get-McpCcDefaultRuntimeRoot }
 $manifest = Read-McpCcManifest -Path $ManifestPath
+if ($null -ne $manifest.PSObject.Properties['codeDeployment'] -and $ReplaceExisting) {
+    throw 'CC_DEPLOYMENT_REQUIRES_ORDINARY_START'
+}
 if ($manifest.schemaVersion -eq 4) {
     Import-Module (Join-Path $projectRoot 'src\McpControlCenter.InstalledRelease.psm1')
     if ($manifest.installedRelease.schemaVersion -lt 3) { throw 'INSTALLED_LIFECYCLE_BINDINGS_REQUIRED' }
@@ -97,6 +100,12 @@ if (-not $createdNew) {
     $mutex.Dispose()
     exit 0
 }
+if ($null -ne $manifest.PSObject.Properties['codeDeployment']) {
+    try {
+        Import-Module (Join-Path $projectRoot 'src\McpControlCenter.Deployment.psm1')
+        Assert-McpCcDeploymentSelected $manifest.codeDeployment
+    } catch { $mutex.ReleaseMutex(); $mutex.Dispose(); throw }
+}
 New-Item -ItemType Directory -Force -Path $RuntimeRoot | Out-Null
 [IO.File]::WriteAllText($trayPidPath, [string]$PID, (New-Object Text.UTF8Encoding($false)))
 
@@ -111,6 +120,7 @@ $script:SecondsSinceRefresh = 0
 $script:Closing = $false
 $script:ExitRequested = $false
 $script:ExitClock = $null
+$script:UpgradeExitSignal = $null
 $script:PendingAction = $null
 $script:PendingComponent = $null
 $script:PendingRestartMcp = $null
@@ -122,13 +132,31 @@ $script:ControllerWarningShown = $false
 $script:ComponentUi = @{}
 $script:WorkspaceLocalOwner = $null
 $script:WorkspaceLocalWorker = $null
+$script:WorkspaceLocalStartupReason = 'WORKSPACE_LOCAL_REGISTRY_UNSUPPORTED'
 # The existing tray mutex is already acquired. No second manager or poller.
-# This source-workspace path does not participate in the installed R1 operator.
-if ($manifest.schemaVersion -eq 3) {
+# Installed v4 has already passed activation above; retain the same singleton.
+if ($manifest.schemaVersion -in @(3,4)) {
     try {
         Import-Module (Join-Path $projectRoot 'src\McpControlCenter.WorkspaceLocal.psm1')
-        $script:WorkspaceLocalOwner = New-McpCcWorkspaceLocalOwner -RuntimeRoot $RuntimeRoot
-    } catch { Write-Warning 'Workspace local channel unavailable; existing tray continues.' }
+        $script:WorkspaceLocalOwner = New-McpCcWorkspaceLocalOwner -RuntimeRoot $RuntimeRoot -Manifest $manifest
+        $script:WorkspaceLocalStartupReason = 'LISTENING'
+    } catch {
+        $failure=$_.Exception.GetBaseException()
+        $reason=if ($failure.Message -cmatch '^[A-Z][A-Z0-9_]{2,95}$') { $failure.Message } else {
+            '{0}, HRESULT=0x{1:X8}' -f $failure.GetType().Name,$failure.HResult
+        }
+        $script:WorkspaceLocalStartupReason = $reason
+        Write-Warning ('Workspace local channel unavailable ({0}); existing tray continues.' -f $reason)
+    }
+}
+# Keep startup failures visible when the installed launcher hides the console.
+# This is an observation of the existing owner, not a probe or another listener.
+function Get-TrayWorkspaceLocalStatusText {
+    $code = $script:WorkspaceLocalStartupReason
+    if ($null -ne $script:WorkspaceLocalOwner) {
+        $code = if ($script:WorkspaceLocalOwner.Running) { 'LISTENING (E2E unverified)' } else { 'WORKSPACE_LOCAL_LISTENER_STOPPED' }
+    }
+    return ('Workspace IPC: {0} | PID {1} | registry v{2}' -f $code,$PID,$manifest.schemaVersion)
 }
 $script:SelfReloadWorker = $null
 $script:SelfReloadShutdown = $null
@@ -297,6 +325,37 @@ function Stop-TrayApplication {
     [Windows.Forms.Application]::Exit()
 }
 
+function New-TrayExitSignal {
+    # Only the existing installed singleton owns this signal. It carries no path,
+    # command, request ID or receipt; the timer uses the ordinary Exit admission.
+    $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
+    if($manifest.schemaVersion -eq 4){$expectedSid=$manifest.installedRelease.state.operatorSid}
+    elseif($null -ne $manifest.PSObject.Properties['codeDeployment']){$expectedSid=$sid.Value}
+    elseif(Test-Path -LiteralPath (Join-Path $projectRoot '..\daily-mode.json')){
+        . (Join-Path $projectRoot '..\codex_bridge\scripts\daily-runtime-settings.ps1')
+        $expectedSid=(Read-CbDailySettings (Split-Path -Parent $projectRoot)).operatorSid
+    }else{throw 'UPGRADE_TRAY_SIGNAL_LAYOUT_REJECTED'}
+    if($sid.Value -cne $expectedSid){throw 'UPGRADE_TRAY_SIGNAL_SID_REJECTED'}
+    $acl=New-Object Security.AccessControl.EventWaitHandleSecurity
+    $acl.SetOwner($sid)
+    $acl.SetAccessRuleProtection($true,$false)
+    $acl.AddAccessRule([Security.AccessControl.EventWaitHandleAccessRule]::new(
+        [Security.Principal.SecurityIdentifier]::new('S-1-5-2'),[Security.AccessControl.EventWaitHandleRights]::FullControl,[Security.AccessControl.AccessControlType]::Deny))
+    $acl.AddAccessRule([Security.AccessControl.EventWaitHandleAccessRule]::new(
+        $sid,[Security.AccessControl.EventWaitHandleRights]::FullControl,[Security.AccessControl.AccessControlType]::Allow))
+    $self=Get-Process -Id $PID
+    try {$name='Local\McpCc.InstalledTrayExit.v1.'+$PID+'.'+$self.StartTime.ToUniversalTime().Ticks}finally{$self.Dispose()}
+    $created=$false
+    $signal=[Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::AutoReset,$name,[ref]$created,$acl)
+    if(-not $created){$signal.Dispose();throw 'UPGRADE_TRAY_SIGNAL_ALREADY_EXISTS'}
+    return $signal
+}
+function Initialize-TrayExitSignal {
+    $script:UpgradeExitSignal=$null
+    try {$script:UpgradeExitSignal=New-TrayExitSignal}
+    catch {Write-Warning 'Installed upgrade auto-resume signal unavailable; ordinary Control Center operation continues.'}
+}
+
 function Complete-TrayExit {
     if (-not $script:ExitRequested -or $script:Closing) { return }
     if ((Get-TrayControllerState) -ne 'Idle' -or (Test-TrayMaintenanceBusy)) { return }
@@ -316,18 +375,21 @@ function Complete-TrayExit {
 }
 
 function Request-TrayExit {
+    param([switch]$NonInteractive)
     if ($script:Closing -or $script:ExitRequested) { return }
     if ($null -ne $script:PendingRestartMcp) {
         $script:PendingRestartMcp = $null
         Set-TrayRestartFeedback 'Cancelled: Exit requested; not dispatched.' -Warning
     }
     if (Test-TrayMaintenanceBusy) {
-        Show-Warning 'Wait for manual maintenance to finish before closing.'
+        if($NonInteractive){Set-TrayRestartFeedback 'Exit refused: wait for manual maintenance to finish.' -Warning}
+        else {Show-Warning 'Wait for manual maintenance to finish before closing.'}
         return
     }
     $state = Get-TrayControllerState
     if ($state -eq 'Unknown' -or ($state -eq 'Running' -and $script:PendingAction -ne 'Status')) {
-        Show-Warning "Wait for $($script:PendingLabel) to finish before closing the control center."
+        if($NonInteractive){Set-TrayRestartFeedback 'Exit refused: controller is busy or unconfirmed.' -Warning}
+        else {Show-Warning "Wait for $($script:PendingLabel) to finish before closing the control center."}
         return
     }
     $script:ExitRequested = $true
@@ -587,6 +649,9 @@ $lastRefreshItem = New-Object Windows.Forms.MenuItem "Last update: none"
 $lastRefreshItem.Enabled = $false
 $contextMenu.MenuItems.Add($overallItem) | Out-Null
 $contextMenu.MenuItems.Add($lastRefreshItem) | Out-Null
+$workspaceLocalItem = New-Object Windows.Forms.MenuItem (Get-TrayWorkspaceLocalStatusText)
+$workspaceLocalItem.Enabled = $false
+$contextMenu.MenuItems.Add($workspaceLocalItem) | Out-Null
 $restartResultItem = New-Object Windows.Forms.MenuItem 'Restart MCP | No request in this session'
 $restartResultItem.Enabled = $false
 $contextMenu.MenuItems.Add($restartResultItem) | Out-Null
@@ -672,6 +737,11 @@ $timer = New-Object Windows.Forms.Timer
 $timer.Interval = 1000
 $timer.add_Tick({
     if ($script:Closing) { return }
+    $workspaceLocalItem.Text = Get-TrayWorkspaceLocalStatusText
+    if($null -ne $script:UpgradeExitSignal -and $script:UpgradeExitSignal.WaitOne(0)){
+        Request-TrayExit -NonInteractive
+        return # Consume once; let the next ordinary tick continue active work.
+    }
     if ($null -ne $script:WorkspaceLocalWorker -and $script:WorkspaceLocalWorker.pending.IsCompleted) {
         try { $null=$script:WorkspaceLocalWorker.shell.EndInvoke($script:WorkspaceLocalWorker.pending) }
         catch { Write-Warning 'Workspace maintenance result unknown; inspect its request receipt.' }
@@ -731,12 +801,16 @@ $timer.add_Tick({
 $timer.Start()
 
 try {
+    if($null -ne $manifest.PSObject.Properties['codeDeployment'] -or (Test-Path -LiteralPath (Join-Path $projectRoot '..\daily-mode.json')) -or ($manifest.schemaVersion -eq 4 -and $manifest.installedRelease.schemaVersion -eq 6)){
+        Initialize-TrayExitSignal
+    }
     Update-UiFromState
     if ($AutoReconcile) { Start-ControllerAction -Action Reconcile }
     else { Start-ControllerAction -Action Status }
     [Windows.Forms.Application]::Run()
 }
 finally {
+    if($null -ne $script:UpgradeExitSignal){$script:UpgradeExitSignal.Dispose()}
     if ($null -ne $script:WorkspaceLocalOwner) { $script:WorkspaceLocalOwner.Dispose() }
     if ($null -ne $script:WorkspaceLocalWorker) { $script:WorkspaceLocalWorker.shell.Dispose() }
     if ($null -ne $script:NormalOperatorWorker) {

@@ -4,10 +4,10 @@ This is the independent bounded MCP adapter for
 `C:\project\english-study-hub`. It does not share source, data, runtime,
 ports, or tool identity with Japanese Study.
 
-The current application release is `0.3.0`. The `english-learning-v1`
+The current application release is `0.4.0`. The `english-learning-v1`
 contract version evolves independently from the package release.
 
-V1 exposes fifteen tools:
+The compatible V1 envelope exposes seventeen tools:
 
 - `english_get_summary`
 - `english_search_items`
@@ -24,6 +24,8 @@ V1 exposes fifteen tools:
 - `english_preview_practice_record`
 - `english_record_practice`
 - `english_get_practice_session`
+- `english_list_practice_sessions`
+- `english_get_ielts_progress`
 
 There are intentionally no file, SQL, shell, delete/reset, bulk import, audio,
 speech-recognition, Anki, or migration/admin tools.
@@ -87,3 +89,7 @@ npm run tunnel:health
 Do not put the control-plane key in `.env`, the generated YAML profile, source,
 logs, or Git. Local `/readyz`, remote registration, and ChatGPT connector proof
 are separate validation scopes.
+
+## IELTS assessment and listening results
+
+Hub schema 2 adds typed assessments, practice history, and evidence-linked progress. Completed English Listening results use the same preview/record path. See [AssessmentContract.md](docs/AssessmentContract.md) for fields, score limits, migration and isolated MCP verification.

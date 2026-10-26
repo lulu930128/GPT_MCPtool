@@ -25,7 +25,7 @@ try {
     $CandidateRoot=Join-Path $fixture 'candidate';$PackageRoot=Join-Path $fixture 'package'
     $operator=Parse (Join-Path $source 'installed-release-operator.ps1')
     $assign=$operator.Find({param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -ceq '$scriptLists'},$true)
-    $loop=$operator.Find({param($n) $n -is [Management.Automation.Language.ForEachStatementAst] -and $n.Variable.VariablePath.UserPath -ceq 'componentName'},$true)
+    $loop=$operator.Find({param($n) $n -is [Management.Automation.Language.ForEachStatementAst] -and $n.Variable.VariablePath.UserPath -ceq 'componentName' -and $n.Condition.Extent.Text -ceq '$scriptLists.Keys'},$true)
     Check ($null -ne $assign -and $null -ne $loop) 'Actual Prepare copy statements missing'
     $copy=[scriptblock]::Create($assign.Extent.Text+"`n"+$loop.Extent.Text)
     . ([scriptblock]::Create($assign.Extent.Text))
@@ -36,7 +36,7 @@ try {
         }
         [void][IO.Directory]::CreateDirectory((Join-Path $PackageRoot $component))
     }
-    foreach($name in @('process-identity.ps1','cooperative-shutdown-host.ps1')){
+    foreach($name in @('process-identity.ps1','cooperative-shutdown-host.ps1','cooperative-layout.ps1')){
         Check (@($scriptLists.codex_bridge|Where-Object{$_ -ceq $name}).Count -eq 1) ('Missing helper in actual Prepare: '+$name)
         Copy-Item -LiteralPath (Join-Path $source $name) -Destination (Join-Path $CandidateRoot ('codex_bridge\scripts\'+$name))
     }
@@ -109,11 +109,13 @@ try {
     $manager=Join-Path $PackageRoot 'mcp_control_center'
     Write-Fixture (Join-Path $manager 'config\installed-release.json') '{}'
     $verifier=New-Module {function Assert-McpCcProtectedCodePath([string]$p){if(-not(Test-Path -LiteralPath $p -PathType Leaf)){throw 'FIXTURE_NATIVE_MISSING'}}}
+    $Action='Prepare';$InstalledRecoverySha256=$null
     & $loadOperator
     Check ([McpCcReloadNative].Assembly.Location -ieq $reloadDll) 'Installed operator must use the same protected DLL'
     $otherRoot=Join-Path $fixture 'other-release'
     $otherModulePath=Join-Path $otherRoot 'codex_bridge\scripts\codex-bridge-runtime.psm1'
     Write-Fixture $otherModulePath ([IO.File]::ReadAllText((Join-Path $source 'codex-bridge-runtime.psm1')))
+    Write-Fixture (Join-Path (Split-Path -Parent $otherModulePath) 'cooperative-layout.ps1') ([IO.File]::ReadAllText((Join-Path $source 'cooperative-layout.ps1')))
     $other=Import-Module $otherModulePath -PassThru -Force
     & $other {
         function script:Test-CbInstalledLayout {return $true}

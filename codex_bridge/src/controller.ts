@@ -922,6 +922,12 @@ export class CodexBridgeController {
       }
       this.jobsByThread.set(threadId, jobId);
       await this.store.setThread(jobId, threadId);
+      if (permissionProfile === "codex-bridge-read-only" &&
+        (!isObject(threadResponse.activePermissionProfile) || threadResponse.activePermissionProfile.id !== permissionProfile
+          || !isObject(threadResponse.sandbox) || threadResponse.sandbox.type !== "readOnly"
+          || threadResponse.sandbox.networkAccess !== true)) {
+        throw new DirectOperationError("PERMISSION_PROFILE_UNVERIFIED");
+      }
       const inputArtifacts = await this.store.readInputArtifacts(jobId, job.workPackage.inputBundleIds);
 
       const turnResponse = await this.appServer.request<Record<string, unknown>>("turn/start", {
@@ -1076,6 +1082,7 @@ export class CodexBridgeController {
           if (isObject(settings) && (expectedProfile === null ? settings.activePermissionProfile === null
             : isObject(settings.activePermissionProfile) && settings.activePermissionProfile.id === expectedProfile)
             && isObject(settings.sandboxPolicy) && settings.sandboxPolicy.type === sandboxType
+            && (sandboxType !== "readOnly" || settings.sandboxPolicy.networkAccess === true)
             && settings.approvalPolicy === "on-request" && settings.approvalsReviewer === approvalReviewer) resolve();
         };
         this.appServer.on("notification", appliedHandler);
@@ -1101,6 +1108,7 @@ export class CodexBridgeController {
     if (nestedId(verified, "thread") !== threadId
       || !isObject(verified.activePermissionProfile) || verified.activePermissionProfile.id !== permissions
       || !isObject(verified.sandbox) || verified.sandbox.type !== sandboxType
+      || (sandboxType === "readOnly" && verified.sandbox.networkAccess !== true)
       || verified.approvalPolicy !== "on-request" || verified.approvalsReviewer !== approvalReviewer) {
       throw new DirectOperationError("PERMISSION_PROFILE_UNVERIFIED");
     }

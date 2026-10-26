@@ -84,9 +84,9 @@ try {
   const initialized = await rpc("initialize", {
     protocolVersion: "2025-06-18",
     capabilities: {},
-    clientInfo: { name: "asset-smoke", version: "1.5.0" },
+    clientInfo: { name: "asset-smoke", version: "1.7.0" },
   });
-  assert.equal(initialized.serverInfo.version, "1.5.0");
+  assert.equal(initialized.serverInfo.version, "1.7.0");
   const resourceTemplates = await rpc("resources/templates/list", {});
   assert.ok(
     resourceTemplates.resourceTemplates.some(
@@ -95,7 +95,7 @@ try {
     "Missing workspace asset resource template",
   );
   const listed = await rpc("tools/list", {});
-  assert.equal(listed.tools.length, 25);
+  assert.equal(listed.tools.length, 35);
   for (const required of [
     "read_files",
     "find_files",

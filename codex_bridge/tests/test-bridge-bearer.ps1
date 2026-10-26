@@ -51,6 +51,64 @@ Set-CbInstalledStartEnvironment $info $environment $context
 Check (-not $info.EnvironmentVariables.ContainsKey('CODEX_BRIDGE_TUNNEL_AUTHORIZATION')) 'Tokenless start clears stale header'
 $environment.Clear();$info.EnvironmentVariables.Clear()
 
+# The installed verifier must accept the exact launcher command, including the
+# bearer environment references, without accepting altered identity or arguments.
+# All process/SID observations are synthetic and confined to this child scope.
+& {
+    param([string]$AuthenticatedArguments)
+    foreach($definition in Load-Functions $runtime @('Test-CbPathEqual','Get-CbRoleDefinition','Test-CbExecutableIdentity')){. ([scriptblock]::Create($definition))}
+    $identityContext=$context.PSObject.Copy()
+    $identityContext.installedBinding=$binding.PSObject.Copy()
+    $identityContext.installedBinding|Add-Member NoteProperty operatorSid 'S-1-5-21-100-200-300-1001'
+    foreach($entry in @{tunnelOwnerFile='C:\fixture\tunnel.owner.json';tunnelHealthPort=18829;serverPidFile='C:\fixture\server.pid';serverOwnerFile='C:\fixture\server.owner.json';port=18828}.GetEnumerator()){$identityContext|Add-Member NoteProperty $entry.Key $entry.Value}
+    $identityContext.token='synthetic-bearer-only-0000000000000000'
+    $process=[pscustomobject]@{ProcessId=123;ExecutablePath=$identityContext.tunnelClientPath;StartTimeUtc='2026-10-25T00:00:00.0000000Z'}
+    $observedProcess=$process.PSObject.Copy()
+    $command='"'+$identityContext.tunnelClientPath+'" '+$AuthenticatedArguments
+    $observedProcess|Add-Member NoteProperty CommandLine $command
+    $ownerResult=[pscustomobject]@{ReturnValue=0;Sid=$identityContext.installedBinding.operatorSid}
+    $lookupFailure=$false
+    function Get-CbProcess {param($ProcessId) if($lookupFailure -or $ProcessId -ne 123){throw 'FIXTURE_LOOKUP_FAILED'};return $observedProcess}
+    function Get-CimInstance {param($ClassName,$Filter,$ErrorAction) if($ClassName -cne 'Win32_Process' -or $Filter -cne 'ProcessId=123'){throw 'FIXTURE_QUERY_REJECTED'};return [pscustomobject]@{ProcessId=123}}
+    function Invoke-CimMethod {param($InputObject,$MethodName,$ErrorAction) if($InputObject.ProcessId -ne 123 -or $MethodName -cne 'GetOwnerSid'){throw 'FIXTURE_OWNER_QUERY_REJECTED'};return $ownerResult}
+    Check (Test-CbExecutableIdentity $identityContext tunnel $process) 'Installed verifier accepts the authenticated launcher command'
+    foreach($badCommand in @(
+        ('"'+$identityContext.tunnelClientPath+'" '+$plain),
+        $command.Replace('CODEX_BRIDGE_TUNNEL_AUTHORIZATION','UNTRUSTED_REFERENCE'),
+        ($command+' --unreviewed-option value'),
+        $command.Replace('--profile "codex-bridge"','--profile "foreign-bridge"'),
+        $command.Replace($identityContext.tunnelPidFile,'C:\fixture\foreign.pid'),
+        ($command+' --mcp.extra-headers "Authorization: env:CODEX_BRIDGE_TUNNEL_AUTHORIZATION"')
+    )) {
+        $observedProcess.CommandLine=$badCommand
+        Check (-not(Test-CbExecutableIdentity $identityContext tunnel $process)) 'Altered installed tunnel command is rejected'
+    }
+    $observedProcess.CommandLine=$command
+    $identityContext.token=$null
+    Check (-not(Test-CbExecutableIdentity $identityContext tunnel $process)) 'Tokenless release rejects authenticated command'
+    $observedProcess.CommandLine='"'+$identityContext.tunnelClientPath+'" '+$plain
+    Check (Test-CbExecutableIdentity $identityContext tunnel $process) 'Tokenless installed launcher remains compatible'
+    $identityContext.token='synthetic-bearer-only-0000000000000000';$observedProcess.CommandLine=$command
+    $process.ExecutablePath='C:\fixture\foreign.exe'
+    Check (-not(Test-CbExecutableIdentity $identityContext tunnel $process)) 'Foreign executable remains rejected'
+    $process.ExecutablePath=$identityContext.tunnelClientPath
+    $ownerResult.Sid='S-1-5-21-100-200-300-1002'
+    Check (-not(Test-CbExecutableIdentity $identityContext tunnel $process)) 'Foreign SID remains rejected'
+    $ownerResult.Sid=$identityContext.installedBinding.operatorSid;$ownerResult.ReturnValue=5
+    Check (-not(Test-CbExecutableIdentity $identityContext tunnel $process)) 'Unknown owner remains rejected'
+    $ownerResult.ReturnValue=0;$observedProcess.StartTimeUtc='2026-10-25T00:00:01.0000000Z'
+    Check (-not(Test-CbExecutableIdentity $identityContext tunnel $process)) 'Reused PID remains rejected'
+    $observedProcess.StartTimeUtc=$process.StartTimeUtc;$lookupFailure=$true
+    Check (-not(Test-CbExecutableIdentity $identityContext tunnel $process)) 'Failed process lookup remains rejected'
+    $lookupFailure=$false;$observedProcess=$null
+    Check (-not(Test-CbExecutableIdentity $identityContext tunnel $process)) 'Exited process remains rejected'
+    $process.ExecutablePath=$identityContext.nodePath;$observedProcess=$process.PSObject.Copy()
+    $observedProcess|Add-Member NoteProperty CommandLine ('"'+$identityContext.nodePath+'" "'+$identityContext.httpEntry+'"')
+    Check (Test-CbExecutableIdentity $identityContext server $process) 'Server exact command remains accepted'
+    $observedProcess.CommandLine+=' --unreviewed-option'
+    Check (-not(Test-CbExecutableIdentity $identityContext server $process)) 'Server extra arguments remain rejected'
+} $args
+
 # Real Bridge credential reader, synthetic ciphertext and synthetic DPAPI adapter.
 # No production paths, RNG, DPAPI encryption, ACL writes or process launches.
 $base=[IO.Path]::GetFullPath((Join-Path $workspace 'codex_bridge\.tmp'))

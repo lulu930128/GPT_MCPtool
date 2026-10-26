@@ -2,6 +2,7 @@ param([Parameter(Mandatory=$true)][int]$CoreId,[Parameter(Mandatory=$true)][Guid
 # Transport adapter owned by http-main. No launch, stop, approval, Journal or secret API.
 Set-StrictMode -Version 3.0
 $ErrorActionPreference='Stop'
+. (Join-Path $PSScriptRoot 'cooperative-layout.ps1')
 $pipe=$null;$core=$null;$client=$null;$reader=$null;$stage='LOAD_NATIVE'
 function Read-LineBounded($stream,[int]$Milliseconds=5000) {
   $bytes=New-Object byte[] 8192;$length=0;$clock=[Diagnostics.Stopwatch]::StartNew()
@@ -43,9 +44,9 @@ function Test-CbCooperativeControllerCommandLine([string]$CommandLine) {
       $CommandLine-match '(?i)-Action\s+"?(RestartCore|ReloadRuntime|ShutdownRuntime)"?(\s|$)')
   }
   # CC runs the controller in this wrapper's runspace, so the pipe client PID
-  # belongs to the wrapper. Trust only the sibling in this source/release tree
-  # and the complete fixed Invoke-McpCcBoundedPowerShell argument shape.
-  $wrapperPath=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\mcp_control_center\scripts\invoke-component-controller.ps1'))
+  # belongs to the wrapper. Daily execution binds the independent CC selection;
+  # source/installed execution retains its exact sibling and fixed argument shape.
+  try {$wrapperPath=Get-CbCooperativeControllerWrapper (Split-Path -Parent $PSScriptRoot)} catch {return $false}
   $wrapper=[regex]::Escape($wrapperPath)
   $pattern='\A'+$executable+'[ \t]+-NoProfile[ \t]+-ExecutionPolicy[ \t]+Bypass[ \t]+-File[ \t]+(?:"'+$wrapper+'"|'+$wrapper+')'+
     '[ \t]+-ControllerPath[ \t]+'+$controller+'[ \t]+-ArgumentsBase64[ \t]+(?<payload>[A-Za-z0-9+/=]{1,256})'+

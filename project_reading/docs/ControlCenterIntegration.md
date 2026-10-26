@@ -13,7 +13,7 @@ Project Reading is the reference implementation for a tunnel-enabled
 - `tests/test-runtime-control.ps1` is the standard targeted-test entrypoint and
   delegates to the existing isolated lifecycle matrix.
 
-The facade must not weaken Project Reading's read-only MCP boundary, broaden
+The facade must not weaken Project Reading's policy-controlled MCP boundary, broaden
 `WORKSPACE_MCP_ROOTS`, read tunnel credentials, or duplicate lifecycle logic.
 
 ## Capabilities and traits
@@ -29,7 +29,10 @@ The descriptor declares `tunnel` and `diagnostic-ui`. The controller provides:
 
 The optional diagnostic tray is component-owned. Closing it does not stop the
 MCP server or tunnel. Control Center never reads workspace payloads, local
-settings, tunnel profiles, DPAPI data or component runtime logs.
+settings, tunnel profiles, DPAPI data or component runtime logs. The component
+controller loads optional write policy/state paths and an HTTP token file from
+its own local settings. The tunnel receives the token through an environment
+reference for MCP and discovery headers; token values never enter process arguments.
 
 The descriptor also declares `component-menu-v1`. Control Center renders the
 original Copy MCP URL, Copy health URL, Copy tunnel ID, Open MCP health, Open

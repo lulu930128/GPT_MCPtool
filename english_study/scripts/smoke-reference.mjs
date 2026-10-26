@@ -2,7 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 const url = process.env.ESTUDY_MCP_URL || "http://127.0.0.1:18886/mcp";
-const client = new Client({ name: "english-study-reference-smoke", version: "0.3.0" });
+const client = new Client({ name: "english-study-reference-smoke", version: "0.4.0" });
 const transport = new StreamableHTTPClientTransport(new URL(url));
 
 try {

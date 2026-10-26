@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { lstat, readFile } from "node:fs/promises";
+import { lstatSync } from "node:fs";
 import { dirname, join, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -142,11 +143,30 @@ export async function loadInstalledBinding(env: NodeJS.ProcessEnv): Promise<Inst
 }
 
 export function installedCodexEnvironment(binding: InstalledBridgeBinding): NodeJS.ProcessEnv {
-  // No inherited Node preloads, OpenSSL configuration, external command or PATH entries.
+  // Only the existing host's verified tool locations; never inherit ambient PATH
+  // or env values. Node/npm remain pinned to the release dependency directory.
+  const toolPaths = process.platform === "win32" ? [
+    "C:\\work\\Git\\cmd\\git.exe", "C:\\miniconda3\\python.exe",
+  ].filter(isRegularToolPath).map((path) => win32.dirname(path)) : [];
   return { SystemRoot: binding.windowsRoot, WINDIR: binding.windowsRoot, USERPROFILE: binding.userProfile,
     LOCALAPPDATA: binding.localAppData, APPDATA: win32.join(binding.userProfile, "AppData", "Roaming"), CODEX_HOME: binding.codexHome,
     TEMP: win32.join(binding.localAppData, "Temp"), TMP: win32.join(binding.localAppData, "Temp"),
-    PATH: [win32.dirname(binding.nodePath), win32.join(binding.windowsRoot, "System32"), win32.dirname(powershell)].join(";") };
+    PATHEXT: ".COM;.EXE;.BAT;.CMD",
+    PATH: [win32.dirname(binding.nodePath), win32.join(binding.windowsRoot, "System32"), win32.dirname(powershell), ...toolPaths].join(";") };
+}
+
+function isRegularToolPath(path: string): boolean {
+  try {
+    if (!lstatSync(path).isFile()) return false;
+    for (let parent = win32.dirname(path); parent !== win32.dirname(parent); parent = win32.dirname(parent)) {
+      const info = lstatSync(parent);
+      if (!info.isDirectory() || info.isSymbolicLink()) return false;
+    }
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 export async function assertInstalledRuntimeActivation(expected?: InstalledBridgeBinding): Promise<void> {

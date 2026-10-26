@@ -1,5 +1,11 @@
 # MCP Control Center
 
+`NormalOperator.Native.cs` 與 `RemoteSelfReload.Native.cs` 同時提供 Bridge cooperative transport 的 native primitives。Bridge daily Stage 僅複製這兩個 code dependency 到自己的版本包並驗 hash；canonical source 仍在此處，CC owner／launcher／registry 維持獨立。
+
+CC 獨立部署使用本元件的 `Runtime/versions/<version>` 與 `Runtime/current.json`，既有 state 固定沿用 `.local/runtime`。先用 [runtime-update.ps1](scripts/runtime-update.ps1) 的 `Stage`／`Status`；這兩個操作不搬資料、不改 Startup、不重啟元件。2026-10-25 已啟動 `cc-20261025-d`，實際 tray 路徑、唯一 mutex 與八元件 Ready 已核對。使用者後續要求啟用新版開機自動啟動，唯一捷徑現指向 `scripts/start-runtime-tray.vbs --boot`。操作見 [獨立 Runtime](docs/IndependentRuntime.md)。
+
+CC 是唯一 tray／Startup owner。Bridge 的 [daily-code-update.ps1](../codex_bridge/scripts/daily-code-update.ps1) 使用既有 `McpControlCenter.DailyCode.psm1` 協調 Bridge 自身版本與回復，但不打包、不啟動或停止 CC。本次在停機及使用者重開機後，以既有 Adopt／SelectStopped／Start 直接採用新版，沒有恢復舊 release 或建立 Startup，詳見 [日常換版](../codex_bridge/docs/DailyCodeUpdate.md)。
+
 2026-10-23 DIRECT NORMAL source：沿用既有單例 Owner 與 Native Host，接受 Bridge 經驗證的
 一次明確遠端請求；不再加本機密碼或確認。完整 closure 在 context setup 沿用既有 OwnerBinding
 核對，每次 native 連線仍重新完整驗證；同次連線 handler 只重查受保護 manifest／retained peer，
@@ -201,16 +207,20 @@ Control Center 的元件子選單。中樞只渲染 descriptor 內固定的 acti
 
 ## 採用單一 Startup 入口
 
-InstalledRelease 的 Startup 由安裝 operator 管理，固定指向該 release 的 Windows PowerShell
-與 `tray.ps1`。背景啟動修正使用 `-NoProfile -WindowStyle Hidden -File "<installed tray.ps1>" -AutoReconcile`；
-selection、owner command 與後續升版檢查同時接受此命令及既有非隱藏命令，其他參數仍拒絕。
+InstalledRelease 的 Startup 由安裝 operator 管理，固定使用 Windows `wscript.exe` 執行該 release
+內的 `scripts/start-tray.vbs`。Launcher 使用 `WScript.Shell.Run(..., 0, True)` 在建立時隱藏
+console，並讓 launcher 持續存在以供 tray 核對 Explorer lineage；tray 結束時 launcher 一併結束。
+子程序仍是固定的 Windows PowerShell 與 `-NoProfile -WindowStyle Hidden -File "<installed tray.ps1>" -AutoReconcile`。
+selection 與後續升版檢查也保留既有直接 PowerShell 捷徑相容性，其他路徑與參數仍拒絕。
+Windows Terminal 下單靠 `-WindowStyle Hidden` 仍可能顯示終端視窗；`MainWindowHandle=0`
+也不足以證明視窗已隱藏。驗證必須涵蓋實際可見的 Terminal／console 視窗。
 舊版不能只修改捷徑，否則會回報 `INSTALLED_STARTUP_NOT_SELECTED`。使用者可選擇同一版本的
-局部修補：備份並更新三個啟動相關程式檔、同步 code tree hash、最後更新捷徑；不需重跑整套升版。
+局部修補：備份並更新啟動相關程式檔、同步 code tree hash、最後更新捷徑；不需重跑整套升版。
 原 manifest 以受保護的 `config/startup-presentation-baseline.json` 保留，state-plan 驗證只在
 其 hash 與歷史 pin 一致，且除 code tree hash 外所有設定完全相同時接受此修補。
 歷史切換收據仍維持原狀；`UNKNOWN` 不因此變成驗收成功。Program Files 寫入仍需管理員權限。
-InstalledRelease 不包含 source 的
-`start-tray.vbs`，不得直接把已安裝捷徑改指向它。此修正尚未代表冷開機驗收通過。
+沒有隨包附帶 `start-tray.vbs` 的舊 release 必須先完成上述局部修補，不能指向 source workspace
+的 launcher。重複修補保留最初的 manifest baseline。此修正尚未代表冷開機驗收通過。
 隔離驗證：`powershell -NoProfile -File tests\test-installed-hidden-startup.ps1`。
 
 先預覽目前已註冊的 legacy shortcut；任何 target conflict 都會阻止 adoption：

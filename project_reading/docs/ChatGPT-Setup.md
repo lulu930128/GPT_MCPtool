@@ -1,6 +1,6 @@
 # ChatGPT 掛載教學
 
-這個專案會在本機開一個 read-only MCP endpoint，讓 ChatGPT 透過受控 tunnel 讀取五個明確 allowlist root：`projects`、`mcp_tools`、`work`、`data` 與 `desktop`。省略 root 時使用 `projects`。
+這個專案會在本機開一個預設 read-only 的 MCP endpoint，讓 ChatGPT 透過受控 tunnel 讀取 operator 明確設定的 allowlist roots。讀取工具省略 root 時使用 configured default root。受限寫入需另行啟用獨立 policy 與 HTTP token，並明確指定 root；設定與限制見 [受限寫入與修改](Write-Operations.md)。
 
 ## 1. 先建置一次
 

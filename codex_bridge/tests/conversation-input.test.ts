@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildCodexUserInput, buildInitialTurnUserInput } from "../src/conversation-input.js";
-import { previewWorkPackage } from "../src/work-package.js";
+import { previewWorkPackage, renderRequestMarkdown } from "../src/work-package.js";
 
 const BRIDGE_PROMPT_PATTERNS = [
   /Perform the following work package/i,
@@ -12,6 +12,25 @@ const BRIDGE_PROMPT_PATTERNS = [
   /Bridge safety requirements/i,
   /Explain what was verified/i,
 ];
+
+test("initial Git turn preserves user scope without injecting persisted request policy", () => {
+  for (const objective of [
+    "Add, commit, and push the reviewed changes.",
+    "Commit the reviewed changes; do not push.",
+  ]) {
+    const { workPackage } = previewWorkPackage({
+      projectId: "omi", title: "Git task", objective, executionMode: "workspace_write",
+      constraints: ["Preserve unrelated WIP."],
+    });
+    const markdown = renderRequestMarkdown(workPackage, "fixture-job");
+    const input = buildInitialTurnUserInput(workPackage, []);
+    assert.match(markdown, /Bridge safety requirements/);
+    assert.match(markdown, /Codex may use local Git/);
+    assert.equal(input, `${objective}\n\n[USER_CONSTRAINTS]\n1. Preserve unrelated WIP.\n[/USER_CONSTRAINTS]`);
+    for (const pattern of BRIDGE_PROMPT_PATTERNS) assert.doesNotMatch(input, pattern);
+    assert.doesNotMatch(input, /Codex may use local Git|Push must be included|Stop and report actual/);
+  }
+});
 
 test("initial turn preserves an exact plain user message", () => {
   const preview = previewWorkPackage({

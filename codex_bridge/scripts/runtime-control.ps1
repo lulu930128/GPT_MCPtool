@@ -35,7 +35,12 @@ if($isInstalled){
   & $installedModule {param($c) Assert-CbInstalledMutationBlocked $c} $context
 }
 elseif($Action -eq 'InstalledBinding'){throw 'INSTALLED_RELEASE_REQUIRED'}
-if(-not $isInstalled){
+if(-not $isInstalled -and (Test-Path -LiteralPath (Join-Path $ProjectRoot '..\daily-mode.json'))){
+  . (Join-Path $PSScriptRoot 'daily-runtime-settings.ps1')
+  if(@($PSBoundParameters.Keys | Where-Object {$_ -notin @('Action','ProjectRoot')}).Count){throw 'DAILY_CALLER_OVERRIDE_REJECTED'}
+  $context=New-CbDailyContext $ProjectRoot -RequireBearer:($Action -in @('EnsureRunning','RepairConnectivity','RestartCore','ReloadRuntime'))
+}
+elseif(-not $isInstalled){
 $explicitTunnelId=if($PSBoundParameters.ContainsKey('TunnelId')){$TunnelId}else{$null};$settingsTunnelId=$null
 
 $settingsPath=Join-Path $ProjectRoot '.local\tray-settings.json'

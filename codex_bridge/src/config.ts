@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, parse, resolve } from "node:path";
+import { dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import type { BridgeProject } from "./types.js";
@@ -57,8 +57,9 @@ export async function loadBridgeConfig(env: NodeJS.ProcessEnv = process.env): Pr
   const handoffDir = installedBinding?.handoffDir ?? join(configRoot, ".tmp", "codex-inbox");
   const codexHome = installedBinding?.codexHome ?? resolve(env.CODEX_HOME?.trim() || join(homedir(), ".codex"));
   const { projects, sharedWorkspaceRoots } = await loadProjectPolicy(projectsFile);
-  const codexLaunch = installedBinding ? resolveInstalledCodexLaunch(installedBinding, sharedWorkspaceRoots) :
-    await resolveCodexLaunch(projectRoot, handoffDir, projectsFile, dataDir, sharedWorkspaceRoots, env);
+  const projectPaths = [...projects.values()].map((project) => project.path);
+  const codexLaunch = installedBinding ? resolveInstalledCodexLaunch(installedBinding, sharedWorkspaceRoots, projectPaths) :
+    await resolveCodexLaunch(projectRoot, handoffDir, projectsFile, dataDir, sharedWorkspaceRoots, env, projectPaths);
 
   return {
     projectRoot,
@@ -219,11 +220,12 @@ async function resolveCodexLaunch(
   dataDir: string,
   sharedWorkspaceRoots: string[],
   env: NodeJS.ProcessEnv,
+  projectPaths: string[],
 ): Promise<{ command: string; args: string[] }> {
   const configuredCommand = env.CODEX_BRIDGE_CODEX_COMMAND?.trim();
   const configuredArgs = parseCommandArgs(env.CODEX_BRIDGE_CODEX_ARGS);
   const args = withHandoffPermissionProfiles(configuredArgs ?? ["app-server"], {
-    projectRoot, handoffDir, projectsFile, dataDir, sharedWorkspaceRoots,
+    projectRoot, handoffDir, projectsFile, dataDir, sharedWorkspaceRoots, projectPaths,
   });
   if (configuredCommand) {
     return { command: configuredCommand, args };
@@ -241,10 +243,11 @@ async function resolveCodexLaunch(
   return { command: "codex", args };
 }
 
-export function resolveInstalledCodexLaunch(binding: InstalledBridgeBinding, sharedWorkspaceRoots: string[]): { command: string; args: string[] } {
+export function resolveInstalledCodexLaunch(binding: InstalledBridgeBinding, sharedWorkspaceRoots: string[], projectPaths: string[] = []): { command: string; args: string[] } {
   return { command: binding.nodePath, args: [binding.codexLauncher, ...withHandoffPermissionProfiles(["app-server"], {
     projectRoot: binding.configRoot, handoffDir: binding.handoffDir, projectsFile: binding.projectsFile,
-    dataDir: binding.dataDir, sharedWorkspaceRoots, authorityPaths: [binding.releaseRoot, binding.ownerRoot, binding.runtimeRoot],
+    dataDir: binding.dataDir, sharedWorkspaceRoots, authorityPaths: [binding.ownerRoot, binding.runtimeRoot],
+    readOnlyPaths: [binding.releaseRoot], projectPaths,
   })] };
 }
 
@@ -255,6 +258,8 @@ function withHandoffPermissionProfiles(args: string[], policy: {
   dataDir: string;
   sharedWorkspaceRoots: string[];
   authorityPaths?: string[];
+  readOnlyPaths?: string[];
+  projectPaths?: string[];
 }): string[] {
   if (!args.includes("app-server")) {
     throw new Error("CODEX_BRIDGE_CODEX_ARGS must launch the Codex app-server subcommand.");
@@ -267,7 +272,6 @@ function withHandoffPermissionProfiles(args: string[], policy: {
     ...(process.platform === "win32" && process.env.LOCALAPPDATA ? [join(process.env.LOCALAPPDATA, "McpControlCenter")] : []),
     join(projectRoot, ".local"),
     join(projectRoot, ".env"),
-    join(projectRoot, ".env.*"),
     join(projectRoot, ".secrets"),
     join(projectRoot, ".tunnel-client"),
     projectsFile,
@@ -275,8 +279,17 @@ function withHandoffPermissionProfiles(args: string[], policy: {
     // The Bridge's tunnel uses the shared Project Reading credential store.
     join(dirname(projectRoot), "project_reading", ".secrets"),
   ];
+  // Never try to reopen a child beneath a deny. In particular an installed
+  // release contains Node/Codex themselves: protect its writes, not its reads.
+  for (const readable of [projectRoot, handoffDir, ...sharedWorkspaceRoots, ...(policy.projectPaths ?? []), ...(policy.readOnlyPaths ?? [])]) {
+    if (deniedPaths.some((denied) => isWithinPath(denied, readable))) {
+      throw new Error("PERMISSION_PROFILE_DENIED_PARENT");
+    }
+  }
   const filesystem = [
     ...[...new Set(deniedPaths)].map((path) => `${JSON.stringify(path)} = "deny"`),
+    ...environmentDenyGlobs(projectRoot).map((path) => `${JSON.stringify(path)} = "deny"`),
+    ...(policy.readOnlyPaths ?? []).map((path) => `${JSON.stringify(path)} = "read"`),
     `${JSON.stringify(handoffDir)} = "read"`,
   ].join(", ");
   const workspaceRoots = sharedWorkspaceRoots.map((path) => `${JSON.stringify(path)} = true`).join(", ");
@@ -285,14 +298,14 @@ function withHandoffPermissionProfiles(args: string[], policy: {
     'extends = ":read-only"',
     `workspace_roots = { ${workspaceRoots} }`,
     `filesystem = { ${filesystem} }`,
-    'network = { enabled = false }',
+    'network = { enabled = true }',
   ].join(", ");
   const workspaceProfile = [
     'description = "Approved workspace writes with protected Bridge settings and read-only text handoff."',
     'extends = ":workspace"',
     `workspace_roots = { ${workspaceRoots} }`,
     `filesystem = { ${filesystem} }`,
-    'network = { enabled = false }',
+    'network = { enabled = true }',
   ].join(", ");
   return [
     ...args,
@@ -306,6 +319,27 @@ function withHandoffPermissionProfiles(args: string[], policy: {
     // does not sandbox Full Access and does not change the user's global config.
     ...(process.platform === "win32" ? ["-c", 'windows.sandbox="elevated"'] : []),
   ];
+}
+
+function isWithinPath(parent: string, child: string): boolean {
+  const rel = relative(parent, child);
+  return rel === "" || (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`));
+}
+
+function environmentDenyGlobs(root: string): string[] {
+  // Windows deny-read expansion ignores read exceptions to deny globs. Express
+  // .env.* minus exactly .env.example as disjoint globs, never deny then reopen.
+  // Bracketed prefixes keep even short suffixes as globs (no missing-file mkdir).
+  const example = "example";
+  const patterns: string[] = [];
+  let prefix = ".env.";
+  for (const char of example) {
+    if (prefix !== ".env.") patterns.push(join(root, prefix));
+    patterns.push(join(root, `${prefix}[!${char}${char.toUpperCase()}]*`));
+    prefix += `[${char}${char.toUpperCase()}]`;
+  }
+  patterns.push(join(root, `${prefix}?*`));
+  return patterns;
 }
 
 function parseBoundedInt(value: string | undefined, fallback: number, min: number, max: number): number {

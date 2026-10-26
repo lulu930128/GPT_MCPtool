@@ -27,7 +27,13 @@ quality and safety expectations; it is not a software license.
 - Do not copy domain logic into an adapter.
 - Do not perform unrelated dependency upgrades, broad formatting, large rewrites, or cleanup.
 - Treat an existing dirty worktree as user-owned. Never revert unrelated changes.
-- Do not commit or push unless the repository owner explicitly requests it.
+- Codex may use local Git, add, commit, branch, and push within the owner's explicitly authorized
+  task scope, without repeated per-step confirmation or blanket denial from historical docs.
+  Push must be included in that intent; development or commit authorization does not imply push
+  or publication. Force push, reset --hard, and other destructive Git operations need separate
+  explicit authorization. Preserve exact-path staging, public-repository screening, and unrelated WIP.
+- Stop and report actual Git account, sandbox, Windows/NTFS ACL, remote branch protection, or Host
+  policy denial; do not change permissions/settings or switch entrypoints to bypass it.
 
 ## Component boundaries
 
@@ -35,7 +41,9 @@ quality and safety expectations; it is not a software license.
   in OMI.
 - `japanese_study` uses the versioned Japanese Study Hub API; schema, persistence, imports, and
   domain rules stay in the Hub.
-- `project_reading` remains read-only and all filesystem access uses the shared path guard.
+- `project_reading` defaults to read-only; operate mode enables policy-authorized bounded text writes.
+  All filesystem access uses the shared path guard. Git tools remain read-only inspection;
+  authorized Git mutations belong to Codex's task, not a new shell or Git MCP tool.
 - `Memory Core` formal writes go through API/application services and candidate review boundaries.
 - `personal-asset-os` formal accounting truth is immutable `transactions + postings`.
 - `codex_bridge` keeps project allowlisting, app-only approvals, and the local App Server boundary.

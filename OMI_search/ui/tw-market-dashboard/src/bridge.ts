@@ -214,7 +214,10 @@ export class McpAppsBridge {
       );
     } catch (error) {
       if (signal?.aborted) throw error;
-      if (window.openai?.callTool) {
+      // A timeout/internal error may arrive after the backend completed the read.
+      // Only an explicit unsupported method proves it is safe to use legacy transport.
+      if (typeof error === "object" && error !== null && "code" in error
+        && error.code === -32601 && window.openai?.callTool) {
         return window.openai.callTool(name, arguments_);
       }
       throw error;
@@ -258,7 +261,7 @@ export class McpAppsBridge {
   private updatePresentation(
     patch: Partial<Omit<PresentationDiagnostic, "apiAvailable" | "actualDisplayMode" | "viewportWidth" | "viewportHeight" | "maxHeight" | "updatedAt">>,
   ): void {
-    this.presentation = {
+    const next = {
       ...this.presentation,
       ...patch,
       apiAvailable: typeof window.openai?.requestDisplayMode === "function",
@@ -266,8 +269,12 @@ export class McpAppsBridge {
       viewportWidth: window.innerWidth,
       viewportHeight: window.innerHeight,
       maxHeight: readMaxHeight(),
-      updatedAt: new Date().toISOString(),
     };
+    // Resize/globals notifications can repeat without an environment change.
+    // Preserve object identity and updatedAt so subscribers do not rerender.
+    if ((Object.keys(next) as (keyof PresentationDiagnostic)[])
+      .every((key) => Object.is(next[key], this.presentation[key]))) return;
+    this.presentation = { ...next, updatedAt: new Date().toISOString() };
     for (const listener of this.presentationListeners) listener(this.presentation);
   }
 

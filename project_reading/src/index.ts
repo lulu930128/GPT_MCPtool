@@ -4,6 +4,6 @@ import { loadConfig } from "./config.js";
 import { createWorkspaceMcpServer } from "./server.js";
 
 const config = await loadConfig();
-const server = createWorkspaceMcpServer(config);
+const server = createWorkspaceMcpServer(config, { runtimeContext: () => ({ transport: "stdio", httpListening: null }) });
 const transport = new StdioServerTransport();
 await server.connect(transport);

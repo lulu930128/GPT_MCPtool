@@ -1,5 +1,21 @@
+param(
+  [string]$PythonPath,
+  [switch]$UseDisposablePython
+)
+
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = "Stop"
+# This file runs in a disposable PowerShell host; never read a real credential.
+$testPath = [Environment]::GetEnvironmentVariable('PATH', 'Process')
+[Environment]::SetEnvironmentVariable('PATH', $null, 'Process')
+[Environment]::SetEnvironmentVariable('Path', $null, 'Process')
+[Environment]::SetEnvironmentVariable('PATH', $testPath, 'Process')
+$env:OMI_SEARCH_RUNTIME_CONTROL_TOKEN = 'b' * 64
+$env:CONTROL_PLANE_API_KEY = 'isolated-test-placeholder'
+$env:OMI_SEARCH_MCP_HTTP_TOKEN = ''
+foreach ($name in @('OMI_SEARCH_AI_TRUST_TOKEN', 'OMI_MCP_AI_TRUST_TOKEN', 'OMI_AI_TRUST_TOKEN', 'OMI_RUNTIME_CONTROL_TOKEN_SHA256', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY')) {
+  [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+}
 
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $tempBase = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
@@ -18,7 +34,7 @@ function Assert-True([bool]$Condition, [string]$Message) {
 
 function Assert-Equal($Actual, $Expected, [string]$Message) {
   if ([string]$Actual -ne [string]$Expected) {
-    throw "Assertion failed: $Message. Expected '$Expected', got '$Actual'."
+    throw "Assertion failed: $Message. Values withheld."
   }
   $script:Passed += 1
 }
@@ -87,9 +103,35 @@ function Invoke-TestController {
     "-ServerReadyTimeoutSeconds", "5",
     "-TunnelRecoveryDelaysSeconds", "2"
   )
-  $output = @(& powershell.exe @arguments 2>&1)
-  $exitCode = $LASTEXITCODE
-  $document = ($output -join [Environment]::NewLine) | ConvertFrom-Json
+  $controllerInfo = New-Object Diagnostics.ProcessStartInfo
+  $controllerInfo.FileName = (Get-Command powershell.exe).Source
+  $controllerInfo.Arguments = (($arguments | ForEach-Object { '"' + $_ + '"' }) -join ' ')
+  $controllerInfo.UseShellExecute = $false
+  $controllerInfo.CreateNoWindow = $true
+  $controllerInfo.RedirectStandardOutput = $true
+  $controllerInfo.RedirectStandardError = $true
+  $controller = [Diagnostics.Process]::Start($controllerInfo)
+  try {
+    $null = $controller.Handle
+    $stdoutTask = $controller.StandardOutput.ReadToEndAsync()
+    $stderrTask = $controller.StandardError.ReadToEndAsync()
+    if (-not $controller.WaitForExit(45000)) { throw 'FIXTURE_CONTROLLER_EXIT_TIMEOUT' }
+    # This must complete while owned Core/Tunnel remain alive. Inherited output
+    # handles fail here instead of hanging the test until the children stop.
+    if (-not $stdoutTask.Wait(2000) -or -not $stderrTask.Wait(2000)) { throw 'FIXTURE_CONTROLLER_OUTPUT_HANDLE_LEAK' }
+    $outputText = $stdoutTask.GetAwaiter().GetResult()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
+    Assert-True ([string]::IsNullOrWhiteSpace($stderr)) 'controller has no unexpected stderr'
+    $exitCode = $controller.ExitCode
+  }
+  finally {
+    if (-not $controller.HasExited) { $controller.Kill(); $null = $controller.WaitForExit(5000) }
+    $controller.Dispose()
+  }
+  foreach ($synthetic in @(('a' * 64), ('b' * 64), 'isolated-test-placeholder')) {
+    Assert-True (-not $outputText.Contains($synthetic)) 'controller output excludes synthetic credentials'
+  }
+  $document = $outputText | ConvertFrom-Json
   if ($ExpectSuccess -and $exitCode -ne 0) {
     throw "Controller action $Action failed unexpectedly with $($document.errorCode): $($document.message)"
   }
@@ -99,9 +141,35 @@ function Invoke-TestController {
 
 try {
   New-Item -ItemType Directory -Force -Path (Join-Path $testRoot "scripts"), (Join-Path $testRoot "vendor\tunnel-client"), (Join-Path $testRoot ".tunnel-client") | Out-Null
-  foreach ($name in @("runtime-control.ps1", "component-runtime.psm1", "omi-search-runtime.psm1")) {
+  foreach ($name in @("runtime-control.ps1", "component-runtime.psm1", "omi-search-runtime.psm1", "OmiSearchChildProcess.cs")) {
     Copy-Item -LiteralPath (Join-Path $projectRoot "scripts\$name") -Destination (Join-Path $testRoot "scripts\$name")
   }
+  # Replace only the private User-store boundary in the DISPOSABLE copy. No
+  # production switch/env hook, and no access to the test account's real HKCU.
+  $fixtureModule = Join-Path $testRoot 'scripts\omi-search-runtime.psm1'
+  $parseErrors = $null; $parseTokens = $null
+  $moduleAst = [Management.Automation.Language.Parser]::ParseFile($fixtureModule, [ref]$parseTokens, [ref]$parseErrors)
+  Assert-True ($parseErrors.Count -eq 0) 'fixture module parses'
+  $readers = @($moduleAst.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Read-OmiRuntimeControlUserToken' }, $true))
+  Assert-True ($readers.Count -eq 1) 'one private credential source to mock'
+  $mockReader = @'
+function Read-OmiRuntimeControlUserToken {
+  switch ([IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\credential-mode.txt'))) {
+    valid { return ('a' * 64) }
+    missing { return $null }
+    invalid { return (('a' * 64) + "`n") }
+    wrong_account { throw [UnauthorizedAccessException]::new('synthetic denied') }
+    default { throw 'FIXTURE_MODE_INVALID' }
+  }
+}
+'@
+  $moduleSource = [IO.File]::ReadAllText($fixtureModule)
+  $extent = $readers[0].Extent
+  $moduleSource = $moduleSource.Substring(0, $extent.StartOffset) + $mockReader + $moduleSource.Substring($extent.EndOffset)
+  Assert-True (-not $moduleSource.Contains("GetEnvironmentVariable('OMI_SEARCH_RUNTIME_CONTROL_TOKEN', 'User')")) 'registry boundary removed from fixture'
+  [IO.File]::WriteAllText($fixtureModule, $moduleSource, $utf8NoBom)
+  $modePath = Join-Path $testRoot 'credential-mode.txt'
+  [IO.File]::WriteAllText($modePath, 'valid', $utf8NoBom)
   Copy-Item -LiteralPath (Join-Path $projectRoot "http_server.py") -Destination (Join-Path $testRoot "http_server.py")
   Copy-Item -LiteralPath (Join-Path $projectRoot "server.py") -Destination (Join-Path $testRoot "server.py")
   Copy-Item -LiteralPath (Join-Path $projectRoot "pyproject.toml") -Destination (Join-Path $testRoot "pyproject.toml")
@@ -110,9 +178,62 @@ try {
   Copy-Item -LiteralPath (Join-Path $projectRoot "tw_market_dashboard_contract_snapshot.json") -Destination (Join-Path $testRoot "tw_market_dashboard_contract_snapshot.json")
   New-Item -ItemType Directory -Force -Path (Join-Path $testRoot "ui\tw-market-dashboard\dist") | Out-Null
   Copy-Item -LiteralPath (Join-Path $projectRoot "ui\tw-market-dashboard\dist\index.html") -Destination (Join-Path $testRoot "ui\tw-market-dashboard\dist\index.html")
-  Copy-Item -LiteralPath "C:\GPT_MCPtool\project_reading\scripts\key-store.ps1" -Destination (Join-Path $testRoot "scripts\key-store.ps1")
+  [IO.File]::WriteAllText((Join-Path $testRoot 'scripts\key-store.ps1'), 'function Set-ControlPlaneApiKeyEnvFromSecret { param($ProjectRoot, $SecretPath) return $true }', $utf8NoBom)
 
-  $pythonPath = Join-Path $projectRoot ".venv\Scripts\python.exe"
+  # Assert real Core environment before importing the unchanged application.
+  # Source build identity is computed from this disposable copy on both sides.
+  $coreCheck = @'
+import os as _fixture_os
+from pathlib import Path as _FixturePath
+_fixture_mode = _FixturePath(__file__).with_name("credential-mode.txt").read_text()
+_fixture_raw = _fixture_os.environ.get("OMI_SEARCH_RUNTIME_CONTROL_TOKEN")
+if (_fixture_raw == ("a" * 64)) if _fixture_mode == "valid" else (_fixture_raw is None):
+    pass
+else:
+    raise RuntimeError("FIXTURE_CORE_AUTH_FAILED")
+if any(_fixture_os.environ.get(key) for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")):
+    raise RuntimeError("FIXTURE_CORE_PROXY_FAILED")
+_FixturePath(__file__).with_name("core-environment-verified.txt").write_text(_fixture_mode)
+del _fixture_raw
+'@
+  $coreFile = Join-Path $testRoot 'http_server.py'
+  $coreSource = [IO.File]::ReadAllText($coreFile).Replace('from __future__ import annotations', "from __future__ import annotations`n$coreCheck")
+  $coreSource = $coreSource.Replace('def _health_document(*, host: str, port: int) -> dict[str, Any]:', @'
+def _health_document(*, host: str, port: int) -> dict[str, Any]:
+    # Exercise BOTH output handles on every health request, including requests
+    # made after the spawning Controller has exited. Broken pipes fail health.
+    print("FIXTURE_CORE_STDOUT_OK", flush=True)
+    print("FIXTURE_CORE_STDERR_OK", file=sys.stderr, flush=True)
+'@)
+  [IO.File]::WriteAllText($coreFile, $coreSource, $utf8NoBom)
+
+  if ([string]::IsNullOrWhiteSpace($PythonPath)) { $PythonPath = Join-Path $projectRoot '.venv\Scripts\python.exe' }
+  if ($UseDisposablePython) {
+    # No install/download. Exercise a real Windows venv redirector built from
+    # the supplied available interpreter; retain its own compiled dependencies.
+    & $PythonPath -B -m venv --without-pip --system-site-packages (Join-Path $testRoot '.venv')
+    if ($LASTEXITCODE -ne 0) { throw 'FIXTURE_VENV_CREATION_FAILED' }
+    $supportDir = Join-Path $testRoot 'python-support'
+    New-Item -ItemType Directory -Path $supportDir | Out-Null
+    $support = @'
+import importlib.util
+import sys
+import types
+from pathlib import Path
+sys.path.append(Path(__file__).with_name("sdk-path.txt").read_text())
+if sys.platform == "win32" and importlib.util.find_spec("pywintypes") is None:
+    def blocked(*args, **kwargs):
+        raise AssertionError("FIXTURE_STDIO_PROCESS_IO_FORBIDDEN")
+    win = types.ModuleType("mcp.os.win32.utilities")
+    for name in ("ServerProcess", "close_process_job", "create_windows_process", "get_windows_executable_command", "terminate_windows_process_tree", "rebind_std_handle_to_fd"):
+        setattr(win, name, blocked)
+    sys.modules[win.__name__] = win
+'@
+    [IO.File]::WriteAllText((Join-Path $supportDir 'sitecustomize.py'), $support, $utf8NoBom)
+    [IO.File]::WriteAllText((Join-Path $supportDir 'sdk-path.txt'), (Join-Path $projectRoot '.venv\Lib\site-packages'), $utf8NoBom)
+    $env:PYTHONPATH = $supportDir
+    $PythonPath = Join-Path $testRoot '.venv\Scripts\python.exe'
+  }
   if (-not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) {
     throw "Managed test Python is missing: $pythonPath. Run 'uv sync --frozen' first."
   }
@@ -158,6 +279,10 @@ public static class FakeTunnel
 {
     public static int Main(string[] args)
     {
+        if (Environment.GetEnvironmentVariable("OMI_SEARCH_RUNTIME_CONTROL_TOKEN") != null) return 11;
+        if (Environment.GetEnvironmentVariable("CONTROL_PLANE_API_KEY") != "isolated-test-placeholder") return 12;
+        foreach (string name in new [] {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"})
+            if (Environment.GetEnvironmentVariable(name) != null) return 13;
         string pidPath = null;
         string profileDir = null;
         for (int i = 0; i + 1 < args.Length; i++)
@@ -181,6 +306,10 @@ public static class FakeTunnel
                 byte[] request = new byte[4096];
                 int requestBytes = stream.Read(request, 0, request.Length);
                 if (requestBytes <= 0) continue;
+                Console.Out.WriteLine("FIXTURE_TUNNEL_STDOUT_OK");
+                Console.Out.Flush();
+                Console.Error.WriteLine("FIXTURE_TUNNEL_STDERR_OK");
+                Console.Error.Flush();
                 byte[] body = Encoding.UTF8.GetBytes("ready");
                 byte[] headers = Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: " + body.Length + "\r\nConnection: close\r\n\r\n");
                 stream.Write(headers, 0, headers.Length);
@@ -252,6 +381,23 @@ public static class FakeTunnel
   $serverPid1 = [int]$ensure.document.after.server.pid
   $tunnelPid1 = [int]$ensure.document.after.tunnel.pid
   Assert-True ($serverPid1 -gt 0 -and $tunnelPid1 -gt 0) "ensure records both exact owned PIDs"
+  Assert-Equal ([IO.File]::ReadAllText((Join-Path $testRoot 'core-environment-verified.txt'))) 'valid' 'Core adopted User token over stale parent'
+  # Invoke-TestController has proved controller exit AND output EOF. These
+  # subsequent requests cause fresh stdout/stderr writes in the live children.
+  $postExitCore = Invoke-RestMethod -UseBasicParsing -Uri "http://127.0.0.1:$serverPort/health" -TimeoutSec 3
+  $postExitTunnel = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$tunnelPort/readyz" -TimeoutSec 3
+  Assert-True ($postExitCore.ok -eq $true) 'Core survives stdout/stderr writes after controller exit'
+  Assert-Equal $postExitTunnel.Content.Trim() 'ready' 'Tunnel survives stdout/stderr writes after controller exit'
+
+  foreach ($mode in @('missing', 'invalid', 'wrong_account')) {
+    [IO.File]::WriteAllText($modePath, $mode, $utf8NoBom)
+    $noAuth = Invoke-TestController -Action RestartCore
+    Assert-Equal $noAuth.document.after.status 'Ready' 'market readiness survives unavailable restart auth'
+    Assert-Equal $noAuth.document.after.tunnel.pid $tunnelPid1 'auth changes preserve tunnel owner'
+    Assert-Equal ([IO.File]::ReadAllText((Join-Path $testRoot 'core-environment-verified.txt'))) $mode 'new Core has no stale inherited credential'
+    Assert-Equal ([IO.File]::ReadAllText((Join-Path $testRoot '.tmp\runtime-control-auth.log'))) 'RUNTIME_CONTROL_AUTH_USER_UNAVAILABLE' 'auth diagnostic is bounded and local'
+    $serverPid1 = [int]$noAuth.document.after.server.pid
+  }
 
   $repair = Invoke-TestController -Action RepairConnectivity
   Assert-Equal $repair.document.after.status "Ready" "repair is idempotent when ready"
@@ -289,6 +435,8 @@ public static class FakeTunnel
 
   $previousBaseUrl = $env:OMI_SEARCH_API_BASE_URL
   $env:OMI_SEARCH_API_BASE_URL = "http://127.0.0.1:$backendPort"
+  # This deliberately foreign fixture starts directly, without the controller.
+  $env:OMI_SEARCH_RUNTIME_CONTROL_TOKEN = $null
   $foreignProcess = Start-Process -FilePath $pythonPath -ArgumentList "-B `"$(Join-Path $testRoot 'http_server.py')`" --host 127.0.0.1 --port $serverPort" -WorkingDirectory $testRoot -WindowStyle Hidden -PassThru
   Assert-True (Wait-TcpPort -Port $serverPort -Open $true) "foreign adapter listener started"
   $staleForeignProcess = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-Command", "Start-Sleep -Seconds 120") -WindowStyle Hidden -PassThru
@@ -309,12 +457,18 @@ public static class FakeTunnel
   $actionLogPath = Join-Path $testRoot ".tmp\runtime-control.jsonl"
   Assert-True (Test-Path -LiteralPath $actionLogPath -PathType Leaf) "controller writes a component-owned action audit"
   $auditText = [IO.File]::ReadAllText($actionLogPath)
+  Assert-True (-not $auditText.Contains(('a' * 64)) -and -not $auditText.Contains(('b' * 64))) 'audit excludes runtime control credentials'
+  Assert-True (-not $auditText.Contains('RUNTIME_CONTROL_AUTH_USER_')) 'auth diagnostic stays out of Control Center action receipts'
   Assert-True ($auditText.IndexOf("isolated-test-placeholder", [StringComparison]::Ordinal) -lt 0) "audit excludes runtime secrets"
   Assert-True ($auditText.IndexOf("http://127.0.0.1:$backendPort", [StringComparison]::OrdinalIgnoreCase) -lt 0) "audit excludes dependency endpoint details"
 
   [pscustomobject]@{
     ok = $true
     assertions = $script:Passed
+    userRegistryAccess = $false
+    disposableVenv = [bool]$UseDisposablePython
+    controllerOutputEofBeforeChildShutdown = $true
+    childOutputAfterControllerExit = $true
     actions = @("SelfTest", "Status", "EnsureRunning", "RepairConnectivity", "BlockedUpstream", "RestartCore", "ReloadRuntime", "ShutdownRuntime", "ForeignOwnerGuard")
   } | ConvertTo-Json -Depth 4
 }

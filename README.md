@@ -1,5 +1,9 @@
 # GPT MCP Tool Workspace
 
+Bridge daily package 的安全停止 transport 使用 CC 維護的 `NormalOperator.Native.cs` 與 `RemoteSelfReload.Native.cs`，Stage 僅將這兩個 native code dependency 複製到 Bridge 的 `scripts/shared-native` 並核對 hash；不打包 CC owner、launcher 或 registry。CC caller 依 CC 自己的 selector 與 wrapper inventory 驗證。
+
+CC 與 Bridge 分別使用各自的 `Runtime\versions` 與 `current.json`；唯一 Startup 由 CC 的 `start-runtime-tray.vbs --boot` 持有，Bridge 換版只處理自身程序。資料仍在各自既有位置，不搬移也不打包。首次交接沿用舊 owner 的正常停機，驗收後才清除舊 Program Files 程式；Live 尚未完成，詳見 [日常換版](codex_bridge/docs/DailyCodeUpdate.md) 與 [CC 獨立 Runtime](mcp_control_center/docs/IndependentRuntime.md)。
+
 InstalledRelease 沿用唯一 Bridge ApprovalStore 與 Control Center owner。v5 保留舊根目錄契約；明確的 v6 遷移將正式資料綁定至各元件 Git-ignored 的 `.local/runtime`。v6 仍要求受保護 release、完整祖先 ACL 與獨立 operator，不能只改環境變數或複製資料即視為部署完成。操作與回復邊界見 [Runtime 資料遷移](codex_bridge/docs/RuntimeStateMigration.md)。
 
 這個 repository 保存八個本機 MCP 專案、一個非 MCP 的 KGI Broker Bridge 與一個 Windows
@@ -101,6 +105,14 @@ proxy 時，必須使用 component-owned 明確設定，不依賴啟動 session 
 再更新 README、啟動捷徑與驗證命令。
 
 ## Git 與公開安全
+
+Git 是正常開發能力。Codex 可在使用者明確授權的任務範圍使用本機 Git、add、commit、branch、push，
+不因歷史文件禁令一律拒絕，也不要求同一授權範圍逐步重複確認。Push 必須包含在任務意圖中，
+不得從開發或 commit 授權外推 Push／公開發布；force push、reset --hard 等破壞性操作須另行明確指定。
+Git account、sandbox、Windows／NTFS ACL、遠端 branch protection 或 Host policy 實際拒絕時須停止回報，
+不得改權限、設定或換入口繞過。這不新增任何 Shell／Git Manager／MCP 工具。
+只精準 Stage 本次授權的路徑／變更並保留無關 WIP；commit 與 push 前檢查 staged file list、
+staged diff、secret pattern 與大型檔案。
 
 GitHub repository 目前是 public。提交前至少要確認：
 

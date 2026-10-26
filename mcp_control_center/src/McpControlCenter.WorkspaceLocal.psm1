@@ -1,12 +1,51 @@
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = 'Stop'
 
+# Only the source registry may compile C#. Installed code is pinned by the
+# existing immutable tree, not a second manifest or caller-selected DLL path.
+function Initialize-McpCcWorkspaceLocalNative {
+    param($Manifest)
+    $installed=Test-Path -LiteralPath (Join-Path $PSScriptRoot '..\config\installed-release.json') -PathType Leaf
+    $version=if ($null -eq $Manifest) { 3 } else { $Manifest.schemaVersion }
+    if ($version -notin @(3,4) -or ($installed -and $version -ne 4)) { throw 'WORKSPACE_LOCAL_REGISTRY_VERSION_REJECTED' }
+    if ($version -eq 3) {
+        if ($null -eq ('McpCc.WorkspaceLocal.Owner' -as [type])) {
+            Add-Type -Path (Join-Path $PSScriptRoot 'WorkspaceLocal.Native.cs') -ReferencedAssemblies System.Web.Extensions,System.Core
+        }
+        return
+    }
+    $manager=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+    # tray.ps1 already imported the verifier and checked activation/closure
+    # before taking its mutex. Reuse its exported protected-path validator;
+    # do not re-import, repeat the tree scan or create another activation gate.
+    $release=$Manifest.installedRelease
+    if ($release.schemaVersion -lt 3) { throw 'INSTALLED_LIFECYCLE_BINDINGS_REQUIRED' }
+    if ((Join-Path $release.root 'mcp_control_center') -ine $manager) { throw 'WORKSPACE_LOCAL_RELEASE_MISMATCH' }
+    $native=Join-Path $manager 'src\WorkspaceLocal.Native.dll'
+    if (-not (Test-Path -LiteralPath $native -PathType Leaf)) { throw 'WORKSPACE_LOCAL_NATIVE_MISSING' }
+    Assert-McpCcProtectedCodePath $native
+    # Resolve the required framework serializer explicitly before the helper.
+    $serializer='System.Web.Extensions, Version=4.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'
+    Add-Type -AssemblyName $serializer
+    $names=@('Owner','Contract','Row','ProbeDetail','Detail','Snapshot','RestartRequest','Receipt','RefusalDiagnostic')
+    # Reject an earlier source/other-release load before Add-Type can reuse it.
+    foreach ($name in $names) {
+        $type=('McpCc.WorkspaceLocal.'+$name) -as [type]
+        if ($null -ne $type -and $type.Assembly.Location -ine $native) { throw 'WORKSPACE_LOCAL_ASSEMBLY_SOURCE_REJECTED' }
+    }
+    if ($null -eq ('McpCc.WorkspaceLocal.Owner' -as [type])) { Add-Type -Path $native }
+    foreach ($name in $names) {
+        $type=('McpCc.WorkspaceLocal.'+$name) -as [type]
+        if ($null -eq $type -or $type.Assembly.Location -ine $native) { throw 'WORKSPACE_LOCAL_ASSEMBLY_SOURCE_REJECTED' }
+        if ($type.Assembly.GetName().Name -cne 'WorkspaceLocal.Native' -or
+            $type.Assembly.ImageRuntimeVersion -cne 'v4.0.30319') { throw 'WORKSPACE_LOCAL_ASSEMBLY_VERSION_REJECTED' }
+    }
+}
+
 # Composition only: the existing tray owns this object and its lifetime.
 function New-McpCcWorkspaceLocalOwner {
-    param([Parameter(Mandatory=$true)][string]$RuntimeRoot)
-    if ($null -eq ('McpCc.WorkspaceLocal.Owner' -as [type])) {
-        Add-Type -Path (Join-Path $PSScriptRoot 'WorkspaceLocal.Native.cs') -ReferencedAssemblies System.Web.Extensions,System.Core
-    }
+    param([Parameter(Mandatory=$true)][string]$RuntimeRoot, $Manifest)
+    Initialize-McpCcWorkspaceLocalNative -Manifest $Manifest
     $owner=[McpCc.WorkspaceLocal.Owner]::Open($RuntimeRoot)
     try { $owner.Start(); return $owner } catch { $owner.Dispose(); throw }
 }
