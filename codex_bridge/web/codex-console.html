@@ -3091,24 +3091,52 @@
           if (!receipt || receipt.availability !== "AVAILABLE" || receipt.requestId !== requestId ||
             !["DIRECT", "CODEX_DERIVED"].includes(receipt.origin) || receipt.evidence !== "SAVED_JOURNAL_ONLY" ||
             receipt.hostAcceptance !== "UNVERIFIED" || receipt.productionEnabled !== false ||
+            receipt.productionEnabledScope !== undefined && receipt.productionEnabledScope !== "THIS_READ_ONLY_PROJECTION" ||
             receipt.automaticResume !== false || receipt.retryAllowed !== false ||
             !receipt.correlation || receipt.correlation.request !== "MATCHED_CANONICAL_REQUEST") return invalid;
-          const opinion = receipt.reviewOpinion, execution = receipt.osExecutionReceipt;
-          const review = receipt.kind === "REVIEW_ONLY_NONEXECUTABLE" && opinion && execution === null &&
+          const opinion = receipt.reviewOpinion, execution = receipt.osExecutionReceipt, host = receipt.hostApproval;
+          const states = ["PROPOSED", "APPROVED", "CONSUMED", "DENIED", "EXPIRED", "SUCCEEDED", "FAILED", "UNKNOWN"];
+          const review = receipt.kind === "REVIEW_ONLY_NONEXECUTABLE" && opinion &&
             opinion.evidence === "REVIEW_ONLY_NONEXECUTABLE" && ["PENDING", "ACCEPTED", "DECLINED", "EXPIRED"].includes(opinion.effectiveState);
           const production = receipt.kind === "PRODUCTION" && opinion === null &&
-            ["PROPOSED", "APPROVED", "CONSUMED", "DENIED", "EXPIRED", "SUCCEEDED", "FAILED", "UNKNOWN"].includes(receipt.state);
+            states.includes(receipt.state);
           if (!review && !production) return invalid;
-          if (execution !== null && (!production || execution.requestId !== requestId || execution.receiptId !== receipt.receiptId ||
+          // Review identity stays at the top level. A linked production request
+          // has its own IDs and state; PENDING review is not pending execution.
+          const linked = review && host && states.includes(host.state);
+          if (review && host && host.reviewRequestId !== requestId) return invalid;
+          if (linked && (host.evidence !== "SAVED_JOURNAL_ONLY" || host.verification !== "UNVERIFIED" ||
+            host.reviewRequestId !== requestId || typeof host.requestId !== "string" || !host.requestId ||
+            typeof host.receiptId !== "string" || !host.receiptId ||
+            host.requestId === requestId || host.receiptId === receipt.receiptId ||
+            typeof receipt.digest !== "string" || !/^[0-9a-f]{64}$/.test(receipt.digest) ||
+            host.sourceReviewDigest !== receipt.digest || receipt.correlation.execution !== "MATCHED_SOURCE_REVIEW")) return invalid;
+          if (review && !linked && (execution !== null || host && host.state !== "NOT_ADMITTED")) return invalid;
+          if (production && host && (host.requestId !== requestId || host.receiptId !== receipt.receiptId ||
+            host.state !== receipt.state || host.verification !== "UNVERIFIED")) return invalid;
+          const savedState = linked ? host.state : production ? receipt.state : null;
+          const executionRequestId = linked ? host.requestId : requestId;
+          const executionReceiptId = linked ? host.receiptId : receipt.receiptId;
+          if (execution !== null && ((!production && !linked) || execution.requestId !== executionRequestId || execution.receiptId !== executionReceiptId ||
             execution.verification !== "UNVERIFIED" || !["SUCCEEDED", "FAILED", "UNKNOWN"].includes(execution.outcome) ||
-            execution.outcome !== receipt.state || !(execution.exitCode === null || Number.isSafeInteger(execution.exitCode)) ||
+            execution.outcome !== savedState || !(execution.exitCode === null || Number.isSafeInteger(execution.exitCode)) ||
             execution.outcome === "SUCCEEDED" && execution.exitCode !== 0 ||
             execution.outcome === "FAILED" && (execution.exitCode === null || execution.exitCode === 0))) return invalid;
+          if (execution === null && ["SUCCEEDED", "FAILED"].includes(savedState)) return invalid;
+          const output = execution && execution.output;
+          if (output && output.availability === "AVAILABLE" && (typeof output.stdout !== "string" || typeof output.stderr !== "string" ||
+            !Number.isSafeInteger(output.offset) || output.offset < 0 || !Number.isSafeInteger(output.totalChars) || output.totalChars < output.offset ||
+            !(output.nextOffset === null || Number.isSafeInteger(output.nextOffset) && output.nextOffset > output.offset && output.nextOffset <= output.totalChars))) return invalid;
           return statusRows([
             ["Request", requestId], ["來源", receipt.origin],
             ["審閱意見（不可執行）", review ? opinion.effectiveState + " · NONEXECUTABLE" : "無審閱意見"],
-            ["Production 保存狀態", production ? receipt.state + " · SAVED_JOURNAL_ONLY" : "無 Production Grant"],
+            ["Production 保存狀態", savedState ? savedState + " · SAVED_JOURNAL_ONLY" : "無 Production Grant"],
+            ...(linked ? [["執行關聯", "MATCHED_SOURCE_REVIEW"], ["Production Request", host.requestId], ["Production Receipt", host.receiptId]] : []),
+            ["目前 Host 準備度", "NOT_PROBED · 本次查詢只讀保存紀錄"],
             ["OS 執行收據", execution ? execution.outcome + " · Exit " + String(execution.exitCode) + " · UNVERIFIED" : "未有 OS 執行收據 · UNVERIFIED"],
+            ...(output ? output.availability === "AVAILABLE" ? [["stdout", output.stdout], ["stderr", output.stderr],
+              ["輸出範圍", "offset " + output.offset + " · total " + output.totalChars + " · next " + String(output.nextOffset)]]
+              : [["輸出", output.availability === "UNAVAILABLE_OR_EXPIRED" || output.availability === "EXPIRED" ? "UNAVAILABLE_OR_EXPIRED" : "UNVERIFIED"]] : []),
             ["失敗來源關聯", receipt.correlation.completion === "MATCHED_SAVED_COMPLETION" ? "已對應保存的失敗 item" : "UNVERIFIED"],
             ["權限失敗／Host／OS 效果", "UNVERIFIED；非零 Exit 或審閱接受不證明 OS 授權或成功"],
           ]);

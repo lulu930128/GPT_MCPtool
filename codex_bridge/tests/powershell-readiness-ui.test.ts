@@ -88,19 +88,22 @@ test("existing MCP status and job preview schemas are strict and read-only, with
   assert.deepEqual(response.structuredContent, {
     ...deploymentStatus(), deployment: "EXECUTION_DISABLED", sourceDeclaration: deploymentStatus(),
     host: { enabled: false, authority: "BLOCKED_CANONICAL_HOST_AUTHORITY_REQUIRED",
-      humanApproval: "LOCAL_HOST_CONFIRMATION_REQUIRED", reviewOpinionIsAuthorization: false,
+      humanApproval: "AUTHENTICATED_DIRECT_REQUEST", reviewOpinionIsAuthorization: false,
       authenticatedReceiver: "SOURCE_IMPLEMENTED_NOT_DEPLOYED", protectedInstallation: "NOT_VERIFIED",
-      normalRunner: "LOCAL_CONFIRMATION_AND_DURABLE_CLAIM", admin: "BLOCKED_AWAITING_LOCAL_UAC",
+      normalRunner: "AUTHENTICATED_REQUEST_AND_DURABLE_CLAIM", admin: "BLOCKED_AWAITING_LOCAL_UAC",
       journal: "EXISTING_APPROVAL_STORE_ONLY", automaticRetry: false, evidence: "SOURCE_DECLARATION" },
+    hostDeployment: { mode: "unverified", evidence: "TRANSPORT_CONTEXT_ONLY",
+      independentOwner: false, currentSelection: "NOT_PROBED" },
     installedRuntime: { evidence: "LOADED_RUNTIME_BINDING", binding: "ABSENT",
       activationAtStartup: "NOT_VERIFIED", currentInstallation: "NOT_PROBED" },
     authenticatedOwner: "UNVERIFIED",
     nativeTransport: { available: false, active: null, closed: null, observation: "CACHED_PREFLIGHT_ONLY",
-      code: "HOST_TRANSPORT_UNAVAILABLE", observedAt: null, provesCurrentReadiness: false },
-    externalBlockers: ["BLOCKED_CANONICAL_HOST_AUTHORITY_REQUIRED", "LOCAL_HOST_CONFIRMATION_REQUIRED", "BLOCKED_AWAITING_LOCAL_UAC"],
-    normalExecution: { entry: "codex_powershell_normal_execute", consent: "WINDOWS_LOCAL_HOST_EACH_REQUEST",
-      configured: false, remoteHumanAttestation: "NOT_REQUIRED_FOR_LOCAL_CONFIRMATION", currentHostVerified: false,
-      outputLimitBytes: 16384, outputRetentionMs: 600000, automaticRetry: false },
+      code: "HOST_TRANSPORT_UNAVAILABLE", checkState: "FAILED", observedAt: null, provesCurrentReadiness: false },
+    externalBlockers: ["HOST_TRANSPORT_UNAVAILABLE"],
+    separateModes: { CODEX_DERIVED: "FAILURE_ATTRIBUTION_UNVERIFIED", ADMIN: "BLOCKED_AWAITING_LOCAL_UAC" },
+    normalExecution: { entry: "codex_powershell_normal_execute", consent: "AUTHENTICATED_DIRECT_REQUEST",
+      configured: false, localConfirmation: "NOT_REQUIRED", currentHostVerified: false,
+      outputLimitBytes: null, outputRetentionMs: 600000, automaticRetry: false },
     bounds: { timeoutMs: 60_000, frameBytes: 131028, concurrency: 1, automaticRetry: false },
     reviewStore: { availability: "UNAVAILABLE" },
   });
@@ -312,4 +315,81 @@ test("receipt lookup does not replace another entered request with a late respon
   assert.equal(failed.calls.length, 1);
   assert.match(failed.element("#powershell-receipt-result").textContent, /UNVERIFIED/);
   assert.doesNotMatch(failed.element("#powershell-receipt-result").textContent, /private failure/);
+});
+
+// Captured public MCP readback, 2026-10-28 15:05Z. No Host, Store or execution
+// capability is injected. Additional linkage fields are the new read projection;
+// the original review/production IDs, PENDING/SUCCEEDED and output stay verbatim.
+const liveLinkedReceipt = JSON.parse(readFileSync("tests/fixtures/powershell-direct-linked-receipt.json", "utf8"));
+function linkedReceipt() {
+  const receipt = structuredClone(liveLinkedReceipt);
+  const host = receipt.hostApproval;
+  const declaration = Object.fromEntries(Object.entries(host).filter(([key]) =>
+    !["state", "recordedInterface", "requestId", "reviewRequestId", "grant", "consumption", "verification"].includes(key)));
+  receipt.hostApproval = { state: host.state, recordedInterface: host.recordedInterface, requestId: host.requestId,
+    reviewRequestId: host.reviewRequestId, grant: host.grant, consumption: host.consumption, verification: host.verification,
+    receiptId: receipt.osExecutionReceipt.receiptId, sourceReviewDigest: receipt.digest,
+    sourceDeclaration: { ...declaration, evidence: "SOURCE_DECLARATION" }, evidence: "SAVED_JOURNAL_ONLY",
+    readiness: { state: "NOT_PROBED", evidence: "NO_LIVE_PROBE" } };
+  receipt.correlation.execution = "MATCHED_SOURCE_REVIEW";
+  receipt.productionEnabledScope = "THIS_READ_ONLY_PROJECTION";
+  return receipt;
+}
+
+test("captured DIRECT review plus linked execution shows saved success, exit and output without claiming live readiness", () => {
+  const ui = fixture(null), receipt = linkedReceipt();
+  const text = ui.renderPowerShellReceipt(receipt, receipt.requestId);
+  assert.match(text, /PENDING · NONEXECUTABLE/);
+  assert.match(text, /SUCCEEDED · SAVED_JOURNAL_ONLY/);
+  assert.match(text, /SUCCEEDED · Exit 0 · UNVERIFIED/);
+  assert.match(text, /WORKSPACE_REFRESH_POWERSHELL_SMOKE_20261028/);
+  assert.match(text, /sum(?:&quot;|&#34;):5/);
+  assert.match(text, /MATCHED_SOURCE_REVIEW/);
+  assert.match(text, /NOT_PROBED/);
+  assert.doesNotMatch(text, /NOT_DEPLOYED|BLOCKED_CANONICAL_HOST_AUTHORITY_REQUIRED/);
+  // The older response lacks a production receipt/digest linkage attestation.
+  assert.match(ui.renderPowerShellReceipt(liveLinkedReceipt, liveLinkedReceipt.requestId), /收據無法確認/);
+});
+
+test("linked receipt rejects crossed request, review, receipt, digest, correlation and execution state", () => {
+  const ui = fixture(null);
+  const patches = [
+    (r: any) => { r.hostApproval.reviewRequestId = otherJobId; },
+    (r: any) => { r.hostApproval.requestId = otherJobId; },
+    (r: any) => { r.hostApproval.receiptId = otherJobId; },
+    (r: any) => { r.hostApproval.sourceReviewDigest = "0".repeat(64); },
+    (r: any) => { r.correlation.execution = "UNVERIFIED"; },
+    (r: any) => { r.hostApproval.state = "FAILED"; },
+    (r: any) => { r.hostApproval.verification = "VERIFIED"; },
+    (r: any) => { r.osExecutionReceipt.exitCode = 1; },
+    (r: any) => { r.hostApproval.requestId = r.osExecutionReceipt.requestId = r.requestId; },
+    (r: any) => { r.hostApproval.receiptId = r.osExecutionReceipt.receiptId = r.receiptId; },
+    (r: any) => { r.hostApproval.state = "NOT_ADMITTED"; r.osExecutionReceipt = null; r.hostApproval.reviewRequestId = otherJobId; },
+  ];
+  for (const patch of patches) {
+    const receipt = linkedReceipt(); patch(receipt);
+    assert.match(ui.renderPowerShellReceipt(receipt, receipt.requestId), /收據無法確認/);
+  }
+});
+
+test("linked pending, failed, unknown and paged or expired output retain evidence boundaries", () => {
+  const ui = fixture(null);
+  for (const state of ["PROPOSED", "APPROVED", "CONSUMED", "DENIED", "EXPIRED", "UNKNOWN"]) {
+    const receipt = linkedReceipt(); receipt.hostApproval.state = state; receipt.osExecutionReceipt = null;
+    assert.match(ui.renderPowerShellReceipt(receipt, receipt.requestId), new RegExp(state + " · SAVED_JOURNAL_ONLY"));
+  }
+  for (const [state, exitCode] of [["FAILED", 2], ["UNKNOWN", null]] as const) {
+    const receipt = linkedReceipt(); receipt.hostApproval.state = state;
+    Object.assign(receipt.osExecutionReceipt, { outcome: state, exitCode });
+    receipt.osExecutionReceipt.output.stdout = "<script>unsafe</script>";
+    receipt.osExecutionReceipt.output.stderr = "<b>error</b>";
+    receipt.osExecutionReceipt.output.nextOffset = 119;
+    receipt.osExecutionReceipt.output.totalChars = 200;
+    const text = ui.renderPowerShellReceipt(receipt, receipt.requestId);
+    assert.match(text, new RegExp(state + " · Exit " + exitCode));
+    assert.match(text, /&lt;script&gt;unsafe/); assert.match(text, /&lt;b&gt;error/);
+    assert.doesNotMatch(text, /<script>|<b>error/); assert.match(text, /119/);
+    receipt.osExecutionReceipt.output = { availability: "EXPIRED" };
+    assert.match(ui.renderPowerShellReceipt(receipt, receipt.requestId), /EXPIRED/);
+  }
 });

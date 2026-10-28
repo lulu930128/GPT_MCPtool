@@ -154,6 +154,15 @@ test("new sourceReview linkage replays in the sole Journal and original Request 
   assert.equal(result.reviewOpinion?.state, "PENDING");
   assert.equal(result.osExecutionReceipt?.requestId, request.requestId);
   assert.equal(result.osExecutionReceipt?.verification, "UNVERIFIED");
-  assert.equal(result.hostApproval.enabled, false);
+  assert.equal(result.hostApproval.sourceDeclaration.enabled, false);
+  assert.equal(result.hostApproval.sourceDeclaration.evidence, "SOURCE_DECLARATION");
+  assert.equal("enabled" in result.hostApproval, false);
+  assert.deepEqual(result.hostApproval.readiness, { state: "NOT_PROBED", evidence: "NO_LIVE_PROBE" });
+  assert.equal(result.hostApproval.evidence, "SAVED_JOURNAL_ONLY");
+  assert.equal(result.hostApproval.receiptId, request.receiptId);
+  assert.equal(result.hostApproval.reviewRequestId, review.request.requestId);
+  assert.equal(result.hostApproval.sourceReviewDigest, review.digest);
+  assert.equal(result.correlation.execution, "MATCHED_SOURCE_REVIEW");
+  assert.equal(result.productionEnabledScope, "THIS_READ_ONLY_PROJECTION");
   assert.equal(await f.journal(), original + entries);
 });

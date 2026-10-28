@@ -99,7 +99,8 @@ export async function projectRequestReceipt(approvals: Pick<ApprovalStore, "read
         ? "REQUEST_CORRELATION_REJECTED" : "RECEIPT_SOURCE_UNAVAILABLE");
     }
   }
-  if (review && production && production.request.sourceReview?.digest !== review.digest)
+  if (review && production && (production.request.sourceReview?.requestId !== requestId
+    || production.request.sourceReview.digest !== review.digest))
     throw new ApprovalError("REQUEST_CORRELATION_REJECTED");
   const request = review?.request ?? production!.request;
   const sourceFailure = review?.request.sourceFailure;
@@ -133,9 +134,12 @@ export async function projectRequestReceipt(approvals: Pick<ApprovalStore, "read
     createdAt: request.createdAt, expiresAt: request.expiresAt,
     reviewOpinion: summary ? { state: summary.state, effectiveState: summary.effectiveState,
       reason: summary.reason, effectiveReason: summary.effectiveReason, evidence: REVIEW_KIND } : null,
-    hostApproval: { ...hostReadiness(), state: production?.state ?? "NOT_ADMITTED",
+    hostApproval: { sourceDeclaration: { ...hostReadiness(), evidence: "SOURCE_DECLARATION" },
+      readiness: { state: "NOT_PROBED", evidence: "NO_LIVE_PROBE" },
+      evidence: "SAVED_JOURNAL_ONLY", state: production?.state ?? "NOT_ADMITTED",
       recordedInterface: production?.request.approvalIdentity.interface ?? null,
       requestId: production?.request.requestId ?? null, reviewRequestId: production?.request.sourceReview?.requestId ?? (review ? requestId : null),
+      receiptId: production?.request.receiptId ?? null, sourceReviewDigest: production?.request.sourceReview?.digest ?? null,
       grant: production?.grant ? "RECORDED" : "NOT_ISSUED", consumption: production?.consumption ? "RECORDED" : "NOT_CONSUMED",
       verification: "UNVERIFIED" },
     osExecutionReceipt: production?.result ? { requestId: production.request.requestId, receiptId: production.request.receiptId,
@@ -149,10 +153,11 @@ export async function projectRequestReceipt(approvals: Pick<ApprovalStore, "read
       } } : {}),
       verification: "UNVERIFIED" } : null,
     correlation: { request: "MATCHED_CANONICAL_REQUEST", job: jobCorrelation,
+      execution: production ? (review ? "MATCHED_SOURCE_REVIEW" : "MATCHED_CANONICAL_REQUEST") : "NOT_RECORDED",
       completion: completionCorrelation, currentTurnMatches,
       ...(request.origin === "CODEX_DERIVED" ? { jobId: request.jobId, turnId: request.turnId } : {}),
       cause: "UNKNOWN", permissionAttribution: "UNVERIFIED", fullFaultEvidence: "UNVERIFIED",
       candidateCommandMatch: "UNVERIFIED" },
     evidence: "SAVED_JOURNAL_ONLY", hostAcceptance: "UNVERIFIED", osSideEffects: "UNVERIFIED", businessSuccess: "UNVERIFIED",
-    productionEnabled: false, automaticResume: false, retryAllowed: false });
+    productionEnabled: false, productionEnabledScope: "THIS_READ_ONLY_PROJECTION", automaticResume: false, retryAllowed: false });
 }

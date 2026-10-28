@@ -373,3 +373,26 @@ test("linked review receipt source errors are normalized without journal mutatio
   }
   assert.equal(await readFile(path, "utf8"), before);
 });
+
+test("request receipt checks linked source review identity and digest before marking execution correlation", async t => {
+  const values = records(), { store, path } = await saved(t, values);
+  const review = await store.createReview({ origin: "DIRECT", projectId: "projection", dataClassification: "personal",
+    idempotencyKey: randomUUID(), userIntent: "EXPLICIT_USER_REQUEST", contentPolicy: "PERSONAL_PUBLIC_NO_SECRETS_OR_REGULATED_ORDERS",
+    target: "inert linkage fixture", executionMode: "NORMAL", cwd: "C:\\inert-data",
+    scriptSnapshot: "# inert fixture, never executed", args: [], risk: "none", sideEffects: "none" });
+  const before = await readFile(path, "utf8");
+  for (const sourceReview of [{ requestId: randomUUID(), digest: review.digest },
+    { requestId: review.request.requestId, digest: "0".repeat(64) }, undefined]) {
+    const production = { ...values[3]!, request: { ...values[3]!.request, sourceReview } };
+    const mock = t.mock.method(ApprovalStore.prototype, "readReviewExecution", async () => production as any);
+    await assert.rejects(projectRequestReceipt(store, review.request.requestId), rejects("REQUEST_CORRELATION_REJECTED"));
+    mock.mock.restore();
+  }
+  const pureReview = await projectRequestReceipt(store, review.request.requestId);
+  assert.equal(pureReview.correlation.execution, "NOT_RECORDED");
+  assert.equal(pureReview.hostApproval.receiptId, null);
+  assert.equal(pureReview.hostApproval.sourceReviewDigest, null);
+  assert.equal(pureReview.hostApproval.state, "NOT_ADMITTED");
+  assert.equal(pureReview.productionEnabled, false);
+  assert.equal(await readFile(path, "utf8"), before);
+});

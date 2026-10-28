@@ -46,7 +46,8 @@ test("runtime HostPort snapshot and receipt read the exact single canonical Stor
   assert.equal(JSON.parse(snapshot.requestJson).scriptSnapshot, "literal inert text\r\n中文");
   const receipt = await f.port.receipt(f.review.requestId);
   assert.equal(receipt.requestId, f.review.requestId);
-  assert.equal(receipt.hostApproval.enabled, false);
+  assert.equal(receipt.hostApproval.sourceDeclaration.enabled, false);
+  assert.equal(receipt.hostApproval.sourceDeclaration.evidence, "SOURCE_DECLARATION");
   assert.equal(await f.journal(), before);
 });
 
