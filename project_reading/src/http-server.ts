@@ -46,6 +46,10 @@ export async function startWorkspaceHttpServer(
       sendJson(res, 200, {
         ok: true,
         service: "gpt-project-workspace-mcp",
+        version: config.runtimeIdentity.applicationVersion,
+        toolContractVersion: config.runtimeIdentity.toolContractVersion,
+        buildId: config.runtimeIdentity.buildId,
+        runtimeStartedAt: config.runtimeIdentity.runtimeStartedAt,
         mode: capabilities.enabled ? "operate" : "read-only",
         writeEnabled: capabilities.enabled,
         manualMaintenanceEnabled: authenticatedMaintenance,

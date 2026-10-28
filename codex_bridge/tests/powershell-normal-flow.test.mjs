@@ -16,7 +16,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 const build = process.env.NORMAL_TEST_BUILD ? pathToFileURL(resolve(process.env.NORMAL_TEST_BUILD)+"/")
   : new URL("../.tmp/host-diagnostics-check/src/", import.meta.url);
-mock.module(new URL("installed-runtime.js", build).href, { namedExports: { assertInstalledRuntimeActivation: async () => {} } });
+mock.module(new URL("installed-runtime.js", build).href, { namedExports: { resolvePowerShellHostContext: async (installed, root) => ({ mode: installed ? "installed" : "daily", codeRoot: installed?.codeRoot ?? root }) } });
 const { ApprovalStore } = await import(new URL("powershell-approval/store.js", build));
 const { createPowerShellHostPort } = await import(new URL("powershell-approval/host-admission.js", build));
 const { createNativeHostTransport } = await import(new URL("powershell-approval/host-transport.js", build));

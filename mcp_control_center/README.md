@@ -1,5 +1,9 @@
 # MCP Control Center
 
+Phase 2 的 Workspace source 更新使用同一 local pipe 的 v2 request，與原固定七列 v1 status/reload 分開。元件 owned `control-center/update.json` sidecar 不改動 descriptor schema1。CC 在 dispatch 前保存 requestId、參數 digest 與 canonical operationId；相同 request 重送觀察／恢復原操作，終態不可被晚到 worker 改回進行中。CC self-update 由短命 `runtime-bootstrap.ps1` 接管，正常 Exit 只關 CC，不停止 Bridge；selected tree、exact tray 與綁定 PID/starttime 的 Workspace IPC 都核對後才接受。Build source drift、未知執行／owner、migration 需要與權限拒絕均保留明確結果。正式 Phase 2 入口／採用狀態見 [Phase2-Result](../codex_bridge/docs/agent-runs/reliable-daily-update-20261028/Phase2-Result.md)。
+
+Bridge 日常更新與 Reconcile／Workspace `reload_runtime` 共用 component action mutex；取得 mutex 後才由既有 helper 重讀 Bridge selector。CC 修補仍經 Stage → 正常 tray Exit → SelectStopped → 無 `--boot` 的穩定 launcher 導入，見 [可靠更新交接](../codex_bridge/docs/agent-runs/reliable-daily-update-20261028/Handoff.md)。本機直接呼叫 controller 不等於 Workspace MCP 驗收。
+
 `NormalOperator.Native.cs` 與 `RemoteSelfReload.Native.cs` 同時提供 Bridge cooperative transport 的 native primitives。Bridge daily Stage 僅複製這兩個 code dependency 到自己的版本包並驗 hash；canonical source 仍在此處，CC owner／launcher／registry 維持獨立。
 
 CC 獨立部署使用本元件的 `Runtime/versions/<version>` 與 `Runtime/current.json`，既有 state 固定沿用 `.local/runtime`。先用 [runtime-update.ps1](scripts/runtime-update.ps1) 的 `Stage`／`Status`；這兩個操作不搬資料、不改 Startup、不重啟元件。2026-10-25 已啟動 `cc-20261025-d`，實際 tray 路徑、唯一 mutex 與八元件 Ready 已核對。使用者後續要求啟用新版開機自動啟動，唯一捷徑現指向 `scripts/start-runtime-tray.vbs --boot`。操作見 [獨立 Runtime](docs/IndependentRuntime.md)。

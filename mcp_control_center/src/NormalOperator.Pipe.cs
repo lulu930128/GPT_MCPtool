@@ -289,10 +289,45 @@ public static class McpCcNormalPipe {
         }
         public void Dispose() { if(!disposed) { disposed=true;pipe.Dispose();Array.Clear(binding,0,binding.Length); } }
     }
-    public static void Connect(Guid name,Peer server,Action<Channel> handler,Peer guardian=null) {
+    static void RequestOwnerRecovery(Peer owner) {
+        // The existing CC endpoint belongs to the same retained OS owner. This
+        // fixed request can only ask its tray to restore the NORMAL listener.
+        // It contains no candidate, Grant, command or alternate process target.
+        using(var pipe=new NamedPipeClientStream(".","mcpcc-workspace-local-v1",PipeDirection.InOut,
+            PipeOptions.Asynchronous,TokenImpersonationLevel.Identification)) {
+            pipe.Connect(1800); owner.AssertServer(pipe);var clock=Stopwatch.StartNew();
+            var challenge=Encoding.UTF8.GetString(Read(pipe,clock,1800));
+            if(!System.Text.RegularExpressions.Regex.IsMatch(challenge,"\\A[a-f0-9]{64}\\z")) throw new InvalidOperationException("NORMAL_HOST_CONNECTION_FAILED");
+            string nonce=Guid.NewGuid().ToString("N")+Guid.NewGuid().ToString("N");
+            string request="{\"v\":\"2\",\"nonce\":\""+nonce+"\",\"challenge\":\""+challenge+
+                "\",\"operation\":\"ensure_normal_host\",\"componentId\":\"codex_bridge\",\"action\":\"\",\"requestId\":\"\",\"confirmation\":\"\",\"versionId\":\"\",\"expectedSourceDigest\":\"\",\"idlePolicy\":\"\"}";
+            Write(pipe,Encoding.UTF8.GetBytes(request),clock,1800);
+            var replyBytes=Read(pipe,clock,1800);if(replyBytes.Length>16384) throw new InvalidOperationException("NORMAL_HOST_CONNECTION_FAILED");
+            var reply=new UTF8Encoding(false,true).GetString(replyBytes);owner.AssertServer(pipe);
+            var nonces=System.Text.RegularExpressions.Regex.Matches(reply,@"""nonce""\s*:\s*""([a-f0-9]{64})""");
+            var codes=System.Text.RegularExpressions.Regex.Matches(reply,@"""code""\s*:\s*""([A-Z_]+)""");
+            if(nonces.Count!=1 || nonces[0].Groups[1].Value!=nonce || codes.Count!=1 || codes[0].Groups[1].Value!="NORMAL_HOST_RECOVERY_QUEUED")
+                throw new InvalidOperationException("NORMAL_HOST_LISTENER_NOT_RUNNING");
+        }
+    }
+    public static void Connect(Guid name,Peer server,Action<Channel> handler,Peer guardian=null,bool recoverListener=false) {
         server.Check();
         var handle=CreateFile(Name(name),ReadWriteSynchronize,0,IntPtr.Zero,3,Overlapped|SqosPresent|Identification,IntPtr.Zero);
-        if(handle.IsInvalid) { int error=Marshal.GetLastWin32Error();handle.Dispose();throw new Win32Exception(error); }
+        if(handle.IsInvalid) {
+            int error=Marshal.GetLastWin32Error();handle.Dispose();
+            if(error==2 && recoverListener) {
+                // CreateFile failed before any bytes/claim were dispatched.
+                // One owner request and one reconnect; never retry a connection
+                // that reached handshake or any command execution stage.
+                RequestOwnerRecovery(server);Thread.Sleep(1500);server.Check();
+                handle=CreateFile(Name(name),ReadWriteSynchronize,0,IntPtr.Zero,3,Overlapped|SqosPresent|Identification,IntPtr.Zero);
+                if(handle.IsInvalid) { error=Marshal.GetLastWin32Error();handle.Dispose(); }
+                else error=0;
+            }
+            if(error==2) throw new InvalidOperationException("NORMAL_HOST_LISTENER_NOT_RUNNING");
+            if(error==231) throw new InvalidOperationException("HOST_TRANSPORT_BUSY");
+            if(error!=0) throw new Win32Exception(error);
+        }
         using(var pipe=new NamedPipeClientStream(PipeDirection.InOut,true,true,handle)) {
             Action check=() => { server.AssertServer(pipe); if(guardian!=null) guardian.Check(); }; check(); var clock=Stopwatch.StartNew();
             Wait(pipe.WriteAsync(new byte[]{1},0,1),clock,pipe);

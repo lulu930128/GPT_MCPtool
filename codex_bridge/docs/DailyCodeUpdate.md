@@ -1,10 +1,16 @@
 # Bridge 日常換版與首次退役交接
 
+2026-10-28 可靠更新修補的 source／隔離測試已完成，修補版 Stage 與操作指令見 [同一工作包交接](agent-runs/reliable-daily-update-20261028/Handoff.md)。本次現役為 `model-free-fix-20261028-01`，application Build `782282c1702cfe4b`；新 source 唯讀 Verify 已確認 core／MCP／reviewStore OPEN。修補版尚未 live 採用，以下 2026-10-25 的紀錄保留歷史用途。
+
 CC 與 Bridge 各自在自己的 `Runtime/versions` 執行，分別以 `current.json` 選版。CC 持有唯一托盤與 Windows Startup；Bridge package 不包含 CC，Start／Update／rollback 都只操作 Bridge。既有 `McpControlCenter.DailyCode.psm1` 是部署協調器，Bridge controller 仍是 Bridge 停機、程序與資料的唯一 owner。
 
 **目前已採用 Bridge `pathfix-20261025-06` 與 CC `cc-20261025-d`。** 兩者實際程序位置已核對，Bridge/Tunnel 均為 OwnedReady，CC probe Ready、匿名 MCP 401／認證 initialize PASS、ApprovalStore OPEN／THIS_INSTANCE。舊 release 程序為 0。使用者後續要求啟用新版 Startup：唯一捷徑現指向 `wscript.exe "C:\GPT_MCPtool\mcp_control_center\scripts\start-runtime-tray.vbs" --boot`，八元件 Reconcile 已驗證 Ready，實際下次登入仍未驗收。17 個 Program Files 舊 release 已由原帳號管理員刪除，RETIRED 收據與目錄消失已獨立核對；只保留 maintenance 修補備份，現行資料與 ACL 未變。protected NORMAL／ADMIN Host 未部署，不能把一般 Bridge Ready 視為該能力通過。
 
 新版 JobStore 會建立空的 `.tmp/codex-inbox`。版本完整性檢查只允許該精確空目錄，仍核對全部 code hash；Stage 輸入、任何 inbox 內容、額外暫存檔或 reparse point 仍拒絕，且不刪資料。此限制不能當作已完成 inbox 持久化位置遷移。
+
+2026-10-28 路徑修復：Daily controller 現在明確傳入穩定 `configRoot` 與 settings 的實際 `secretPath`，permission profiles 與新 handoff 目錄不再從 immutable codeRoot 推導。既有 release 內的資料保持原位；JobStore 原有機制可從 canonical job inbox 重建新 handoff，不搬移或刪除舊副本。
+
+舊版 `pathfix-20261025-06` 的 sandbox 曾把錯誤的精確 deny 路徑建立成空目錄。僅在該版本的 `daily-release.json` SHA256 為 `66073f64efd71e39fe94bcad53a18cd0b03d98c4e580a4bc69cd4a51685ffedf` 時，驗證容忍 `project_reading/.secrets`（父目錄只能有這一個空子目錄）與 `codex_bridge/{.local,.env,.secrets,.tunnel-client}` 的精確空目錄。它們不列入 code inventory，不讀內容、不刪除；任何檔案、額外子項或 reparse point 仍拒絕。全部 manifest code hashes 與 native dependency 必須通過；其他版本與 Stage 輸入不適用此特例。
 
 ## 舊版已退役、重開機後直接啟動
 
@@ -72,18 +78,34 @@ powershell.exe -NoProfile -File C:\GPT_MCPtool\codex_bridge\scripts\repair-legac
 # repository 根目錄；先建置 Bridge，再 Stage 新名稱。
 npm.cmd --prefix C:\GPT_MCPtool\codex_bridge run build
 powershell.exe -NoProfile -File C:\GPT_MCPtool\codex_bridge\scripts\daily-code-update.ps1 -Action Stage -CandidateRoot C:\GPT_MCPtool -Version fix-20261026-01
+powershell.exe -NoProfile -File C:\GPT_MCPtool\codex_bridge\scripts\daily-code-update.ps1 -Action Preflight -Version fix-20261026-01 -CodeOnly
 powershell.exe -NoProfile -File C:\GPT_MCPtool\codex_bridge\scripts\daily-code-update.ps1 -Action Update -Version fix-20261026-01 -CodeOnly
 ```
 
 `-CodeOnly` 聲明持久資料、設定、credential storage、owner protocol、tunnel profile 相容，不授予權限。`daily-code-contract.json`、dependency／package、schema migration 的變更走另外審閱的遷移，不以 CodeOnly 隱藏。
 
-Stage 只複製 Bridge 明列 code trees，不讀 workspace 的 `.env`、`.local`、Runtime、DB 或 credential。拒絕 reparse／缺檔／重複版本。Update 正常 drain 原 Bridge、確認停止、原子選版、啟動並驗證；已知啟動失敗才經原 owner 正常停止新版並回到上一個 **Bridge** 版本，CC 不動。不能安全停止或結果不明時保留 UNKNOWN，不刪 lock、不 force kill、不重放操作。
+`dist/tests` 僅允許 TypeScript 產生的 `.js`／`.js.map` 變更；SQL、migration 目錄、schema/config/dependency 檔案仍受原 gate 限制。`Preflight` 唯讀驗證舊／新完整 inventory、settings/adoption 一致性、pending operations 與確切 changed paths，不建立 lock／operation、不解密 bearer、不呼叫 owner lifecycle。它不證明 idle、owner 或新 runtime Ready；完整 owner Preflight、active-work/drain、Stopped、Ready／認證仍由獨立 Update 執行。禁止在依附舊 Bridge 的 Codex Job 內直接 Update 或安排背景 Update；先等 Job terminal，再由已認證的獨立 NORMAL 路徑執行。
+
+Stage 只複製 Bridge 明列 code trees，不讀 workspace 的 `.env`、`.local`、Runtime、DB 或 credential。拒絕 reparse／缺檔／重複版本。`Update -CandidateRoot` 在同一 transaction 內先 Build，再 Stage；已 Stage 且 source 全部 code hashes 相同可重用，版本內容不同必須使用新版本識別。Build／Stage 失敗不停止健康舊服務。
+
+Update 正常 drain 原 Bridge、確認停止、原子選版、啟動並 Verify；Verify 同時核對角色、application Build、完整 MCP 握手與 `reviewStore.startup.OPEN/current.OPEN/PRESENT/THIS_INSTANCE`。新版啟動／驗證失敗則驗證回退到舊 **Bridge**，CC 不動。已知結果為 ACCEPTED、ROLLED_BACK、REJECTED、NOT_APPLIED、SUPERSEDED 或 DEGRADED；仍無法證實安全狀態時為 RECOVERY_REQUIRED。CLI 的非成功結果會回傳非零 exit，歷史結果不覆寫。
+
+一般 daily operation 可在同 boot 恢復；Update／Start 先收斂 pending，或明確執行：
+
+```powershell
+powershell.exe -NoProfile -File C:\GPT_MCPtool\codex_bridge\scripts\daily-code-update.ps1 -Action Status -OperationId <32hex>
+powershell.exe -NoProfile -File C:\GPT_MCPtool\codex_bridge\scripts\daily-code-update.ps1 -Action Recover -OperationId <32hex>
+```
+
+Status／Preflight 唯讀。Recover 依當前 selector、process instance、store 與完整 inventory 接續同 operation；已完成階段不重播，健康第三版不倒退。舊 owner 已退出但留下 lock 或 partial-stop 時，由 source 協調層核對現況並補完；不覆寫 old snapshot。只退休確認 core absent、原 owner exited、file identity／raw hash 未變的 approval.lock，原 bytes 留在旁檔及 receipt。journal 不讀、不改；store 故障保留 DEGRADED，不能用 core Ready 掩蓋。截斷 terminal／resolution 保留原 bytes 並追加新 resolution；新的 receipt 先完整寫入再原子發布。
+
+鎖序固定為 CC action mutex → update.lock → 短命 owner lifecycle mutex。source 管理自己建立的有限期 probe／Stop／compiler 子樹，涵蓋舊 owner 的短命 controller；timeout／父死亡會收斂確定的子樹。Start 另以 retained-parent lease watchdog 約束短命 adapter，長命 server／tunnel 不繼承 delegation、也不放入有限期 JobObject。這不授權依名稱終止任何正式 runtime。
 
 ## 歷史：第一次停機中斷後的恢復
 
 操作 `cutover-c452a9b2c0714c47a9c6c565c48d056d` 在 `STOPPING_LEGACY` 得到 `CUTOVER_CONTROLLER_FAILED`，terminal 保留 `UNKNOWN`。底層 stderr 當時未保存，不能斷言根因。使用者重新由 Startup 捷徑開啟舊 CC 後，原 controller Status 確認 server PID 8292 與 tunnel PID 42712 均為 OwnedReady，沒有選版或 Startup 變更。
 
-不能在同一次開機直接重跑。儲存工作、由使用者重新啟動 Windows 後，確認原 CC 已正常出現，再在普通 Windows PowerShell 執行：
+以下僅適用該歷史 `cutover-*` 退役操作，不能在同一次開機直接重跑；一般 daily operation 使用前述同 boot Recover。歷史 cutover 需儲存工作、由使用者重新啟動 Windows 後，確認原 CC 已正常出現，再在普通 Windows PowerShell 執行：
 
 ```powershell
 & 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -NoProfile -File 'C:\GPT_MCPtool\codex_bridge\scripts\cutover-daily-code.ps1' -Version pathfix-20261025-05 -ControlCenterVersion cc-20261025-c -RecoverAfterReboot cutover-c452a9b2c0714c47a9c6c565c48d056d
@@ -97,6 +119,8 @@ Stage 只複製 Bridge 明列 code trees，不讀 workspace 的 `.env`、`.local
 
 ```powershell
 powershell.exe -NoProfile -File codex_bridge\tests\test-daily-code-update.ps1
+powershell.exe -NoProfile -File codex_bridge\tests\test-daily-path-regression.ps1
+powershell.exe -NoProfile -File codex_bridge\tests\test-daily-config-paths.ps1
 powershell.exe -NoProfile -File codex_bridge\tests\test-daily-cutover.ps1
 powershell.exe -NoProfile -File codex_bridge\tests\test-daily-cooperative-package.ps1
 powershell.exe -NoProfile -File codex_bridge\tests\test-cutover-reboot-recovery.ps1

@@ -307,7 +307,8 @@ test("local UI synthetic E2E: session/Host/Origin/CSRF/strict form, password nev
 
 test("MCP registry separates read-only tools from explicit Host actions; unconfigured execution stays blocked", async t => {
   const blocked = new Proxy({}, { get: () => { throw new Error("Unexpected lifecycle/JobStore access"); } });
-  const runtime = { privilegedBroker: RemotePrivilegedBroker.notConfigured(), controller: blocked, store: blocked, conversations: blocked, textBundles: blocked, widgetHtml: "" } as unknown as BridgeRuntime;
+  const runtime = { config: { httpToken: undefined }, privilegedBroker: RemotePrivilegedBroker.notConfigured(),
+    controller: blocked, store: blocked, conversations: blocked, textBundles: blocked, widgetHtml: "" } as unknown as BridgeRuntime;
   const server = createCodexBridgeMcpServer(runtime);
   const client = new Client({ name: "powershell-offline-test", version: "1" });
   const [a, b] = InMemoryTransport.createLinkedPair();
@@ -327,7 +328,10 @@ test("MCP registry separates read-only tools from explicit Host actions; unconfi
     requestId: randomUUID(), digest: "a".repeat(64), userIntent: "EXPLICIT_USER_EXECUTION_REQUEST",
   } });
   assert.equal(execution.isError, true);
-  assert.match(JSON.stringify(execution.structuredContent), /REVIEW_UNAVAILABLE/);
+  // This in-memory client has no verified bearer. The auth boundary runs before
+  // a Store or Host is consulted, including when execution is unconfigured.
+  assert.deepEqual(execution.structuredContent, { code: "AUTHENTICATED_MCP_REQUIRED", requestId: undefined,
+    retryAllowed: false, nextAction: "READ_ORIGINAL_REQUEST_RECEIPT" });
   const status = await client.callTool({ name: "codex_powershell_status", arguments: {} });
   assert.equal((status.structuredContent as Record<string, unknown>).enabled, false);
   for (const mode of ["NORMAL", "ADMIN"]) {

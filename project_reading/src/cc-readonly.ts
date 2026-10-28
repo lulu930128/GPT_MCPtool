@@ -3,13 +3,15 @@ import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import { COMPONENT_IDS, PREVIEW_ACTIONS, componentRecoverySchemas, componentStatus, componentPreview, componentReceipt } from "./component-recovery.js";
 import { componentDiagnosticsInput, diagnosticsResponseSchema } from "./runtime-diagnostics-contract.js";
+import { componentUpdateSchemas, UPDATE_OPERATIONS, updateResponseSchema, type UpdateOperation } from "./component-update-contract.js";
+import { createComponentUpdates } from "./component-update.js";
 
 const pipe = "\\\\.\\pipe\\mcpcc-workspace-local-v1";
 export const CC_READONLY_LIMITS = Object.freeze({ maxConcurrent: 2, timeoutMs: 1800, maxBytes: 16384 });
 const unavailableCodes = z.enum(["UNSUPPORTED_PLATFORM", "CHANNEL_UNAVAILABLE", "NOT_CONNECTED", "SNAPSHOT_UNAVAILABLE", "IPC_TIMEOUT", "IPC_INVALID_RESPONSE", "IPC_BUSY"]);
 type FailureCode = z.infer<typeof unavailableCodes>;
 type Operation = "status" | "preview" | "receipt" | "restart";
-export type ReadOnlyQuery = (operation: Operation | "diagnostics", args: Record<string, unknown>) => Promise<unknown>;
+export type ReadOnlyQuery = (operation: Operation | "diagnostics" | UpdateOperation, args: Record<string, unknown>) => Promise<unknown>;
 const row = z.object({
   componentId: z.enum(COMPONENT_IDS),
   status: z.enum(["Ready", "Degraded", "BlockedUpstream", "Stopped", "Unhealthy", "OwnershipMismatch", "OwnershipUnknown", "Misconfigured", "NotInstalled", "UNVERIFIED"]),
@@ -36,7 +38,11 @@ type OwnerResponse = z.infer<typeof responseSchema>;
 // Service process ownership stays in the component controller. No retries.
 let active = 0;
 export const queryReadOnlyOwner: ReadOnlyQuery = async (operation, args) => {
-  const parsed = (operation === "diagnostics" ? componentDiagnosticsInput : componentRecoverySchemas[`mcp_component_${operation}`]).parse(args);
+  const updateOperation = UPDATE_OPERATIONS.includes(operation as UpdateOperation);
+  const schema = operation === "diagnostics" ? componentDiagnosticsInput : updateOperation
+    ? componentUpdateSchemas[`mcp_component_${operation as UpdateOperation}`]
+    : componentRecoverySchemas[`mcp_component_${operation as Operation}`];
+  const parsed = schema.parse(args);
   if (active >= CC_READONLY_LIMITS.maxConcurrent) return { unavailable: "IPC_BUSY" };
   active++;
   try {
@@ -46,7 +52,12 @@ export const queryReadOnlyOwner: ReadOnlyQuery = async (operation, args) => {
     const action = "action" in parsed && typeof parsed.action === "string" ? parsed.action : "";
     const requestId = "requestId" in parsed && typeof parsed.requestId === "string" ? parsed.requestId : "";
     const confirmation = "confirmation" in parsed && typeof parsed.confirmation === "string" ? parsed.confirmation : "";
-    return await exchangePipe({ v: "1", operation, componentId, action, requestId, nonce, confirmation });
+    const request = { v: updateOperation ? "2" : "1", operation, componentId, action, requestId, nonce, confirmation };
+    if (updateOperation) return await exchangePipe({ ...request,
+      versionId: "versionId" in parsed && typeof parsed.versionId === "string" ? parsed.versionId : "",
+      expectedSourceDigest: "expectedSourceDigest" in parsed && typeof parsed.expectedSourceDigest === "string" ? parsed.expectedSourceDigest : "",
+      idlePolicy: "idlePolicy" in parsed && typeof parsed.idlePolicy === "string" ? parsed.idlePolicy : "" });
+    return await exchangePipe(request);
   } catch { return { unavailable: "CHANNEL_UNAVAILABLE" }; }
   finally { active--; }
 };
@@ -83,7 +94,7 @@ export function exchangePipe(request: Record<string, string>, connect = () => ne
             socket!.write(Buffer.concat([header, body]));
           } else {
             try {
-              const response = (request.operation === "diagnostics" ? diagnosticsResponseSchema : responseSchema).parse(JSON.parse(text));
+              const response = (request.v === "2" ? updateResponseSchema : request.operation === "diagnostics" ? diagnosticsResponseSchema : responseSchema).parse(JSON.parse(text));
               if (buffered.length || response.nonce !== request.nonce) return fail("IPC_INVALID_RESPONSE");
               finish(response);
             } catch { fail("IPC_INVALID_RESPONSE"); }
@@ -197,5 +208,6 @@ export function createReadOnlyRecovery(query: ReadOnlyQuery = queryReadOnlyOwner
       return { ...connected(result), ...args, found: result.found, completed: result.completed, receipt: result.receipt,
         instruction: "Accepted is not completed. Query receipt with the same requestId; UNKNOWN must not be retried with a new id." };
     },
+    ...createComponentUpdates(query, authenticatedMaintenance),
   };
 }

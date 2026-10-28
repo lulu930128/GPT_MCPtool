@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { InstalledBridgeBinding } from "../installed-runtime.js";
-import { assertInstalledRuntimeActivation } from "../installed-runtime.js";
+import { resolvePowerShellHostContext } from "../installed-runtime.js";
 import { ApprovalError, digest, identity, type ProductionReceipt } from "./contract.js";
 import { waitForClose } from "../close-resources.js";
 import type { PowerShellHostPort } from "./host-admission.js";
@@ -43,29 +43,33 @@ export function observedNativeChannel(value: unknown, session: string): string {
 /** Owned stdio is the Node/native boundary. Only the fixed protected helper can
  * reach it; no HTTP route, tool JSON auth field, socket address or verifier option.
  * The helper authenticates the installed Tray and its own retained Node parent. */
-export function createNativeHostTransport(port: PowerShellHostPort, installed?: InstalledBridgeBinding) {
+export function createNativeHostTransport(port: PowerShellHostPort, installed?: InstalledBridgeBinding, codeRoot?: string) {
   let active: Promise<{ code: string }> | undefined, stopping = false;
   let cancel: (() => void) | undefined;
   let retainedExit: Promise<void> | undefined;
   let lastCode = "NOT_DEPLOYED";
+  let deploymentMode: "installed" | "daily" | "unverified" = installed ? "installed" : "unverified";
   let preflightObservation = { code: "NOT_CHECKED", observedAt: null as string | null };
   const run = (review?: { requestId: string; digest: string }): Promise<{ code: string }> => {
       if (stopping) return Promise.resolve({ code: "HOST_TRANSPORT_CLOSED" });
-      if (!installed || process.platform !== "win32") return Promise.resolve({ code: "NOT_DEPLOYED" });
+      if ((!installed && !codeRoot) || process.platform !== "win32") return Promise.resolve({ code: "NOT_DEPLOYED" });
       if (active) return Promise.resolve({ code: "HOST_TRANSPORT_BUSY" });
       active = (async () => {
-        await assertInstalledRuntimeActivation(installed);
+        const context = await resolvePowerShellHostContext(installed, codeRoot);
+        if (!context) return { code: "NORMAL_DEPLOYMENT_MISSING" };
+        deploymentMode = context.mode;
         if (stopping) return { code: "HOST_TRANSPORT_CLOSED" };
         const receiver = review ? createHostReceiver(port, review) : undefined;
         const session = receiver?.session ?? randomUUID(), expiresAt = receiver?.expiresAt ?? Date.now() + 120_000;
         const child = spawn("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", ["-NoProfile", "-NonInteractive", "-File",
-          join(installed.codeRoot, "scripts", "powershell-host-transport.ps1"), "-CoreId", String(process.pid)], {
-          cwd: installed.codeRoot, windowsHide: true, shell: false, stdio: ["pipe", "pipe", "pipe"],
+          join(context.codeRoot, "scripts", "powershell-host-transport.ps1"), "-CoreId", String(process.pid)], {
+          cwd: context.codeRoot, windowsHide: true, shell: false, stdio: ["pipe", "pipe", "pipe"],
           env: { SystemRoot: "C:\\Windows", WINDIR: "C:\\Windows", PSModulePath: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules" },
         });
         let buffer = Buffer.alloc(0), pending = false, ended = false, final: string | undefined, failed = false;
         let dispatch: Promise<void> = Promise.resolve();
         let nativeChannel: object | undefined;
+        let startupCode: string | undefined;
         const stop = () => { failed = true; child.stdin.destroy(); void receiver?.close().catch(() => undefined); };
         cancel = stop;
         const timer = setTimeout(stop, 120_000);
@@ -76,7 +80,15 @@ export function createNativeHostTransport(port: PowerShellHostPort, installed?: 
         retainedExit = complete;
         void complete.then(() => { if (retainedExit === complete) retainedExit = undefined; });
         child.stdin.on("error", stop);
-        child.stderr.on("data", () => stop()); // Never forward raw native errors/output.
+        child.stderr.on("data", (chunk: Buffer) => {
+          // Fixed safe classifications only, and only before authenticated
+          // dispatch. Raw native text never reaches tools or journals.
+          const code = chunk.toString("utf8").trim();
+          if (!nativeChannel && ["NORMAL_DEPLOYMENT_MISSING", "NORMAL_HOST_BINARY_MISSING",
+            "NORMAL_HOST_LISTENER_NOT_RUNNING", "NORMAL_HOST_ACCESS_DENIED", "NORMAL_HOST_OWNER_REJECTED",
+            "NORMAL_HOST_CONNECTION_FAILED", "HOST_TRANSPORT_BUSY"].includes(code)) startupCode = code;
+          stop();
+        });
         child.stdout.on("data", (chunk: Buffer) => {
           if (failed || ended) return;
           if (buffer.length + chunk.length > HOST_FRAME_BYTES) { stop(); return; }
@@ -137,9 +149,11 @@ export function createNativeHostTransport(port: PowerShellHostPort, installed?: 
           await dispatch;
           // A completed helper failure closes only this exchange. New requests
           // may use a fresh channel; an uncertain still-running helper seals it.
-          return { code: !failed && final ? final : "HOST_TRANSPORT_UNKNOWN" };
+          return { code: !failed && final ? final : startupCode ?? "HOST_TRANSPORT_UNKNOWN" };
         } finally { clearTimeout(timer); if (nativeChannel) channels.delete(nativeChannel); await receiver?.close(); cancel = undefined; }
-      })().catch(() => ({ code: "HOST_TRANSPORT_UNAVAILABLE" })).then(value => { lastCode = value.code; return value; })
+      })().catch(error => ({ code: error instanceof Error && ["NORMAL_DEPLOYMENT_MISSING", "NORMAL_DEPLOYMENT_INVALID",
+        "NORMAL_DEPLOYMENT_SELECTION_CHANGED", "NORMAL_HOST_ACCESS_DENIED"].includes(error.message)
+        ? error.message : "HOST_TRANSPORT_UNAVAILABLE" })).then(value => { lastCode = value.code; return value; })
         .finally(() => { active = undefined; });
       return active;
   };
@@ -159,7 +173,7 @@ export function createNativeHostTransport(port: PowerShellHostPort, installed?: 
       return result;
     },
     inspect: (requestId: string, digest: string) => run({ requestId, digest }),
-    status: () => ({ code: lastCode, active: !!active, closed: stopping,
+    status: () => ({ code: lastCode, active: !!active, closed: stopping, deploymentMode,
       preflight: { ...preflightObservation }, authorization: "AUTHENTICATED_DIRECT_REQUEST" }),
     async close() {
       stopping = true; cancel?.();

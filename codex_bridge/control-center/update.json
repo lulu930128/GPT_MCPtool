@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "componentId": "codex_bridge",
+  "owner": "daily_code",
+  "entrypoint": "scripts/daily-code-update.ps1",
+  "sourcePaths": ["src", "web", "scripts", "control-center", "package.json", "package-lock.json", "tsconfig.json", "daily-code-contract.json"]
+}

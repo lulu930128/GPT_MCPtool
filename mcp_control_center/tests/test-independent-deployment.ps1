@@ -34,8 +34,11 @@ Check (-not $missing.selected -and $missing.versions.Count -eq 0) 'empty status'
 Check (-not (Test-Path (Join-Path $cc 'Runtime'))) 'status creates nothing'
 Check ($missing.bridgeStatus -ceq 'CC_BRIDGE_SELECTION_UNAVAILABLE') 'no dev fallback'
 $stage = New-McpCcDeploymentCandidate $cc 'fixture-a'
-Check ($stage.phase -ceq 'STAGED' -and $stage.fileCount -eq $allowlist.Count) 'complete code candidate'
+Check ($stage.phase -ceq 'STAGED' -and $stage.fileCount -eq ($allowlist.Count+1)) 'complete code candidate'
 $a = $stage.codeRoot
+Check (Test-Path -LiteralPath (Join-Path $a 'src\NormalOperator.Host.dll') -PathType Leaf) 'compiled native Host packaged'
+$hostRow=@((Get-Content -LiteralPath (Join-Path $a 'code-inventory.json') -Raw -Encoding UTF8 | ConvertFrom-Json).files | Where-Object path -ceq 'src/NormalOperator.Host.dll')
+Check ($hostRow.Count -eq 1 -and $hostRow[0].sha256 -ceq (Get-FileHash -LiteralPath (Join-Path $a 'src\NormalOperator.Host.dll')).Hash) 'native Host hash inventoried'
 $root = Join-Path $cc 'Runtime'
 Check (-not (Test-Path (Join-Path $root 'current.json'))) 'stage never selects'
 foreach ($relative in @('.local','.env','config\unlisted-private.json','src\unlisted.ps1','config\installed-release.json')) {
@@ -43,6 +46,14 @@ foreach ($relative in @('.local','.env','config\unlisted-private.json','src\unli
 }
 Check ((Get-FileHash (Join-Path $cc '.local\runtime\state.json')).Hash -ceq $stateHash) 'existing state unchanged'
 Reject { New-McpCcDeploymentCandidate $cc 'fixture-a' } 'CC_VERSION_EXISTS'
+$equivalent=New-McpCcDeploymentCandidate $cc 'fixture-a' -ReuseEquivalent
+Check ($equivalent.reused -eq $true) 'same source and compiler inputs reuse immutable candidate'
+$sourceTray=Join-Path $cc 'scripts\tray.ps1'
+$sourceTrayBytes=[IO.File]::ReadAllBytes($sourceTray)
+try {
+    [IO.File]::AppendAllText($sourceTray,"`n# different candidate bytes")
+    Reject {New-McpCcDeploymentCandidate $cc 'fixture-a' -ReuseEquivalent} 'CC_VERSION_CONTENT_CHANGED_USE_NEW_ID'
+} finally {[IO.File]::WriteAllBytes($sourceTray,$sourceTrayBytes)}
 Reject { New-McpCcDeploymentCandidate $cc '..\escape' } 'CC_VERSION_INVALID'
 $lock = & $deployment { param($r) Open-CcUpdateLock $r } $root
 try { Reject { New-McpCcDeploymentCandidate $cc 'locked' } 'being used' }

@@ -12,7 +12,7 @@ try {
     $release=Join-Path $fixture 'codex_bridge/Runtime/versions/v1'
     $bridge=Join-Path $release 'codex_bridge'
     Put (Join-Path $release 'daily-mode.json') '{"contract":"mcpcc-daily-user-v1","trayOwner":"independent-cc"}'
-    foreach($name in @('codex-bridge-runtime.psm1','cooperative-layout.ps1','cooperative-shutdown-host.ps1','process-identity.ps1','OwnedProcess.Native.cs')){
+    foreach($name in @('codex-bridge-runtime.psm1','cooperative-layout.ps1','daily-lifecycle.ps1','cooperative-shutdown-host.ps1','process-identity.ps1','OwnedProcess.Native.cs')){
         Put (Join-Path $bridge ('scripts/'+$name)) ([IO.File]::ReadAllText((Join-Path $repo ('codex_bridge/scripts/'+$name))))
     }
     foreach($name in @('NormalOperator.Native.cs','RemoteSelfReload.Native.cs')){

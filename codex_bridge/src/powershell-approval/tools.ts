@@ -21,7 +21,7 @@ export function registerPowerShellApprovalTools(server: McpServer, readSnapshot?
       : "Job preview unavailable; evidence UNVERIFIED." }], structuredContent: preview };
   });
   server.registerTool("codex_powershell_status", {
-    title: "PowerShell Host 與來源宣告狀態（唯讀）", description: "Read source declarations, loaded installed binding, cached native preflight and durable Store metadata separately. A configured NORMAL entry accepts authenticated DIRECT requests without local confirmation; it is not proof of current Host readiness. ADMIN remains OFF. No helper launch or owner verification.",
+    title: "PowerShell Host 與來源宣告狀態（唯讀）", description: "Read source declarations, loaded installed binding or daily Host context, cached native preflight and durable Store metadata separately. A configured NORMAL entry accepts authenticated DIRECT requests without local confirmation; it is not proof of current Host readiness. ADMIN remains OFF. No helper launch or owner verification.",
     annotations, inputSchema: z.object({}).strict(),
   }, async () => {
     let reviewStore: ReviewStoreDiagnostics | { availability: "UNAVAILABLE" } = { availability: "UNAVAILABLE" };
@@ -38,7 +38,7 @@ export function registerPowerShellApprovalTools(server: McpServer, readSnapshot?
   });
   server.registerTool("codex_powershell_host_preflight", {
     title: "固定 Host preflight 診斷（需明確指示）",
-    description: "Only on explicit user instruction, invoke the existing fixed installed NativeHostTransport.preflight(). Starts a bounded helper; effectful, not a status getter. No review candidate, script, args, Grant, Run, Host transition or authorization. No automatic retry. A blocker is not readiness or OS execution proof.",
+    description: "Only on explicit user instruction, invoke the existing fixed installed/daily NativeHostTransport.preflight(). Starts a bounded helper; effectful, not a status getter. No review candidate, script, args, Grant, Run, Host transition or authorization. No automatic retry. A blocker is not readiness or OS execution proof.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     inputSchema: z.object({ userIntent: z.literal("EXPLICIT_USER_DIAGNOSTIC") }).strict(),
   }, async () => {

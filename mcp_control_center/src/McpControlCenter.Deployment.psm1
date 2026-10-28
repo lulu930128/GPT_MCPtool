@@ -17,6 +17,10 @@ $script:CodeFiles = @(
     'scripts/start-runtime-tray.ps1', 'scripts/start-runtime-tray.vbs',
     'scripts/runtime-update.ps1', 'config/registry.json'
 )
+$script:LegacyCodeFiles=@($script:CodeFiles)
+$script:CodeFiles+=@('src/McpControlCenter.NormalDaily.psm1','src/McpControlCenter.WorkspaceUpdate.psm1',
+    'src/McpControlCenter.DailyCode.psm1','scripts/runtime-bootstrap.ps1','control-center/update.json')
+$script:GeneratedCodeFiles=@('src/NormalOperator.Host.dll')
 
 function Assert-CcDeploymentPath([string]$Path) {
     if ($Path -notmatch '^[A-Za-z]:[\\/]' -or $Path -match '["\r\n]|(^|[\\/])\.\.([\\/]|$)') { throw 'CC_PATH_INVALID' }
@@ -105,17 +109,42 @@ function Resolve-McpCcDeploymentComponentRoot($Layout, [string]$Id, [string]$Roo
     return $path
 }
 
-function Get-CcCodeInventory([string]$Root) {
+function Get-CcCodeInventory([string]$Root,[string[]]$Files=$script:CodeFiles) {
     # Preflight every allowlisted path before reading bytes. Unlisted files are never read.
-    foreach ($relative in $script:CodeFiles) {
+    foreach ($relative in $Files) {
         $path = Join-Path $Root $relative
         Assert-CcDeploymentPath $path
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw ('CC_CODE_MISSING: '+$relative) }
     }
-    foreach ($relative in $script:CodeFiles | Sort-Object) {
+    foreach ($relative in $Files | Sort-Object) {
         $path = Join-Path $Root $relative
         [pscustomobject]@{ path=$relative; sha256=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash }
     }
+}
+
+function Build-CcNormalHost([string]$Root) {
+    $framework='C:\Windows\Microsoft.NET\Framework64\v4.0.30319'
+    $output=Join-Path $Root 'src\NormalOperator.Host.dll'
+    Assert-CcDeploymentPath $output
+    if(Test-Path -LiteralPath $output){throw 'CC_PREBUILT_HOST_REJECTED'}
+    $sources=@('Native','Pipe','Security','Execution','Host') | ForEach-Object {Join-Path $Root ('src\NormalOperator.'+$_+'.cs')}
+    $references=@('mscorlib','System','System.Core','System.Security','System.Web.Extensions','System.Windows.Forms','System.Drawing') |
+        ForEach-Object {'/r:'+(Join-Path $framework ($_+'.dll'))}
+    & (Join-Path $framework 'csc.exe') /nologo /noconfig /nostdlib+ /target:library ('/out:'+$output) $references $sources | Out-Null
+    if($LASTEXITCODE -ne 0 -or -not(Test-Path -LiteralPath $output -PathType Leaf)){throw 'CC_NORMAL_HOST_COMPILE_FAILED'}
+}
+
+function Get-CcNormalHostBuildInputs([string]$Root) {
+    $framework='C:\Windows\Microsoft.NET\Framework64\v4.0.30319'
+    $compiler=Join-Path $framework 'csc.exe'
+    Assert-CcDeploymentPath $compiler
+    $sources=@('Native','Pipe','Security','Execution','Host') | ForEach-Object {'src/NormalOperator.'+$_+'.cs'}
+    $references=@(foreach($name in @('mscorlib','System','System.Core','System.Security','System.Web.Extensions','System.Windows.Forms','System.Drawing')){
+        $path=Join-Path $framework ($name+'.dll');Assert-CcDeploymentPath $path
+        [ordered]@{name=($name+'.dll');sha256=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash}
+    })
+    return [ordered]@{contract='mcpcc-normal-host-build-v1';compilerSha256=(Get-FileHash -LiteralPath $compiler -Algorithm SHA256).Hash;
+        options=@('/noconfig','/nostdlib+','/target:library');references=$references;sources=@(Get-CcCodeInventory $Root $sources)}
 }
 
 function Write-CcNewJson([string]$Path, $Value) {
@@ -141,10 +170,15 @@ function Test-McpCcDeploymentVersion([string]$Root, [string]$Version) {
     if ($null -eq $layout) { throw 'CC_LAYOUT_INVALID' }
     $receipt = Read-CcDeploymentJson (Join-Path $path 'code-inventory.json')
     if ($receipt.contract -cne 'mcpcc-code-inventory-v1' -or $receipt.version -cne $Version) { throw 'CC_INVENTORY_INVALID' }
-    $actual = @(Get-CcCodeInventory $path)
+    # Historical v1 rollback remains immutable and valid under its original
+    # exact inventory. Every newly staged v2 requires the native Host binary.
+    $modern=$null -ne $receipt.PSObject.Properties['inventoryVersion']
+    if($modern -and $receipt.inventoryVersion -ne 2){throw 'CC_INVENTORY_INVALID'}
+    $files=if(-not $modern){@($script:LegacyCodeFiles)}else{@($script:CodeFiles)+@($script:GeneratedCodeFiles)}
+    $actual = @(Get-CcCodeInventory $path $files)
     if (($actual | ConvertTo-Json -Compress) -cne (@($receipt.files) | ConvertTo-Json -Compress)) { throw 'CC_COPY_INTEGRITY_FAILED' }
     # Version trees contain exactly the inventory plus two generated code metadata files.
-    $expected = @($script:CodeFiles) + @('cc-runtime.json','code-inventory.json')
+    $expected = @($files) + @('cc-runtime.json','code-inventory.json')
     $queue = New-Object 'Collections.Generic.Stack[string]'
     $queue.Push($path)
     $count = 0
@@ -163,7 +197,7 @@ function Test-McpCcDeploymentVersion([string]$Root, [string]$Version) {
     return $layout
 }
 
-function New-McpCcDeploymentCandidate([string]$SourceRoot, [string]$Version) {
+function New-McpCcDeploymentCandidate([string]$SourceRoot, [string]$Version,[switch]$ReuseEquivalent) {
     Assert-CcVersion $Version
     $SourceRoot = [IO.Path]::GetFullPath($SourceRoot).TrimEnd('\')
     if ((Split-Path -Leaf $SourceRoot) -ine 'mcp_control_center') { throw 'CC_SOURCE_ROOT_INVALID' }
@@ -174,7 +208,22 @@ function New-McpCcDeploymentCandidate([string]$SourceRoot, [string]$Version) {
     try {
         $target = Join-Path $root ('versions\'+$Version)
         Assert-CcDeploymentPath $target
-        if (Test-Path -LiteralPath $target) { throw 'CC_VERSION_EXISTS' }
+        if (Test-Path -LiteralPath $target) {
+            if(-not $ReuseEquivalent){throw 'CC_VERSION_EXISTS'}
+            $null=Test-McpCcDeploymentVersion $root $Version
+            $receipt=Read-CcDeploymentJson (Join-Path $target 'code-inventory.json')
+            $current=@(Get-CcCodeInventory $SourceRoot)
+            $saved=@($receipt.files | Where-Object {$_.path -cnotin $script:GeneratedCodeFiles})
+            if(($current|ConvertTo-Json -Compress) -cne ($saved|ConvertTo-Json -Compress) -or
+                $null -eq $receipt.PSObject.Properties['nativeBuild'] -or
+                ((Get-CcNormalHostBuildInputs $SourceRoot)|ConvertTo-Json -Depth 8 -Compress) -cne ($receipt.nativeBuild.inputs|ConvertTo-Json -Depth 8 -Compress)){
+                throw 'CC_VERSION_CONTENT_CHANGED_USE_NEW_ID'
+            }
+            $nativeRow=@($receipt.files|Where-Object path -ceq 'src/NormalOperator.Host.dll')
+            if($nativeRow.Count -ne 1 -or $receipt.nativeBuild.outputSha256 -cne $nativeRow[0].sha256){throw 'CC_INVENTORY_INVALID'}
+            return [pscustomobject]@{phase='STAGED';version=$Version;codeRoot=$target;fileCount=$receipt.files.Count;
+                reused=$true;selected=$false;live='UNVERIFIED';startupChanged=$false;stateMoved=$false}
+        }
         $before = @(Get-CcCodeInventory $SourceRoot)
         $registry = Read-CcDeploymentJson (Join-Path $SourceRoot 'config\registry.json')
         if ($registry.schemaVersion -ne 3 -or @($registry.components).Count -ne 8) { throw 'CC_REGISTRY_V3_EIGHT_REQUIRED' }
@@ -193,12 +242,17 @@ function New-McpCcDeploymentCandidate([string]$SourceRoot, [string]$Version) {
         $after = @(Get-CcCodeInventory $SourceRoot)
         $json = $before | ConvertTo-Json -Compress
         if ($json -cne ($copied | ConvertTo-Json -Compress) -or $json -cne ($after | ConvertTo-Json -Compress)) { throw 'CC_SOURCE_CHANGED_OR_COPY_FAILED' }
+        $nativeInputs=Get-CcNormalHostBuildInputs $pending
+        Build-CcNormalHost $pending
+        if(($nativeInputs|ConvertTo-Json -Depth 8 -Compress) -cne ((Get-CcNormalHostBuildInputs $pending)|ConvertTo-Json -Depth 8 -Compress)){throw 'CC_NATIVE_BUILD_INPUT_CHANGED'}
+        $packaged=@(Get-CcCodeInventory $pending (@($script:CodeFiles)+@($script:GeneratedCodeFiles)))
         Write-CcNewJson (Join-Path $pending 'cc-runtime.json') @{ contract='mcpcc-runtime-v1'; version=$Version }
-        Write-CcNewJson (Join-Path $pending 'code-inventory.json') @{ contract='mcpcc-code-inventory-v1'; version=$Version; files=$before }
+        Write-CcNewJson (Join-Path $pending 'code-inventory.json') @{ contract='mcpcc-code-inventory-v1'; inventoryVersion=2; version=$Version; files=$packaged;
+            nativeBuild=@{inputs=$nativeInputs;outputSha256=(Get-FileHash -LiteralPath (Join-Path $pending 'src\NormalOperator.Host.dll') -Algorithm SHA256).Hash} }
         [void][IO.Directory]::CreateDirectory((Join-Path $root 'versions'))
         [IO.Directory]::Move($pending,$target)
         $null = Test-McpCcDeploymentVersion $root $Version
-        return [pscustomobject]@{ phase='STAGED'; version=$Version; codeRoot=$target; fileCount=$before.Count;
+        return [pscustomobject]@{ phase='STAGED'; version=$Version; codeRoot=$target; fileCount=$packaged.Count;
             selected=$false; live='UNVERIFIED'; startupChanged=$false; stateMoved=$false }
     } finally { $lock.Dispose() }
 }

@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "componentId": "mcp_control_center",
+  "owner": "independent_bootstrap",
+  "entrypoint": "scripts/runtime-bootstrap.ps1",
+  "sourcePaths": ["src", "scripts", "config/registry.json", "control-center/update.json"]
+}

@@ -124,13 +124,15 @@ test("MCP schemas advertise exactly the closed allowlists and reject invalid cal
   await server.connect(st); await client.connect(ct);
   try {
     const { tools } = await client.listTools();
-    assert.deepEqual(tools.map((tool) => tool.name), ["mcp_component_status", "mcp_component_preview", "mcp_component_receipt", "mcp_component_restart"]);
+    assert.deepEqual(tools.map((tool) => tool.name), ["mcp_component_status", "mcp_component_preview", "mcp_component_receipt", "mcp_component_restart",
+      "mcp_component_update_status", "mcp_component_update_preview", "mcp_component_update", "mcp_component_update_receipt"]);
     for (const tool of tools) {
-      assert.equal(tool.annotations?.readOnlyHint, tool.name !== "mcp_component_restart");
-      assert.equal(tool.annotations?.destructiveHint, tool.name === "mcp_component_restart");
+      const mutation = ["mcp_component_restart", "mcp_component_update"].includes(tool.name);
+      assert.equal(tool.annotations?.readOnlyHint, !mutation);
+      assert.equal(tool.annotations?.destructiveHint, mutation);
       assert.equal(tool.annotations?.openWorldHint, tool.name === "mcp_component_status");
       assert.equal(tool.inputSchema.additionalProperties, false);
-      if (!["mcp_component_receipt", "mcp_component_restart"].includes(tool.name)) {
+      if (["mcp_component_status", "mcp_component_preview"].includes(tool.name)) {
         assert.deepEqual((tool.inputSchema.properties?.componentId as { enum: string[] }).enum, ids);
       }
     }
@@ -163,8 +165,8 @@ test("canonical Workspace server discovers recovery tools in default read-only m
   await server.connect(st); await client.connect(ct);
   try {
     const { tools } = await client.listTools();
-    assert.equal(tools.length, 37);
-    assert.equal(tools.filter((tool) => tool.name.startsWith("mcp_component_")).length, 5);
-    assert.equal(tools.filter((tool) => tool.annotations?.readOnlyHint !== true).length, 1);
+    assert.equal(tools.length, 41);
+    assert.equal(tools.filter((tool) => tool.name.startsWith("mcp_component_")).length, 9);
+    assert.equal(tools.filter((tool) => tool.annotations?.readOnlyHint !== true).length, 2);
   } finally { await client.close(); await server.close(); }
 });

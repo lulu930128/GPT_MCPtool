@@ -1,7 +1,7 @@
 {
   "name": "gpt-project-workspace-mcp",
   "version": "1.7.0",
-  "toolContractVersion": "2026-10-14.2",
+  "toolContractVersion": "2026-10-28.1",
   "description": "Multi-root workspace MCP with read-only defaults and policy-controlled text operations.",
   "type": "module",
   "bin": {

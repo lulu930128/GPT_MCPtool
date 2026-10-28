@@ -1,4 +1,4 @@
-Set-StrictMode -Version 3.0
+﻿Set-StrictMode -Version 3.0
 $ErrorActionPreference = "Stop"
 if(Test-Path -LiteralPath (Join-Path $PSScriptRoot 'McpControlCenter.Deployment.psm1')){
     Import-Module (Join-Path $PSScriptRoot 'McpControlCenter.Deployment.psm1')
@@ -3566,6 +3566,7 @@ function Invoke-McpCcComponentAction {
         $Manifest=Read-McpCcManifest -Path (Join-Path $PSScriptRoot '..\config\registry.json')
         if ($RuntimeRoot -ine (Get-McpCcInstalledStateRoot $Manifest.installedRelease)) { throw 'INSTALLED_CALLER_OVERRIDE_REJECTED' }
     }
+    $resolveAction = {
     $component = Get-McpCcComponent -Manifest $Manifest -Id $ComponentId
     $binding = Get-McpCcComponentActionBinding -Component $component -Action $Action
     if ($Manifest.schemaVersion -eq 4 -and $ComponentId -ceq 'codex_bridge' -and $binding.semanticAction -ceq 'show_diagnostic_tray') {
@@ -3576,7 +3577,9 @@ function Invoke-McpCcComponentAction {
     if (-not (Test-Path -LiteralPath $actionPath -PathType Leaf)) {
         throw "Action entrypoint is missing for '$ComponentId': $actionPath"
     }
+    }
     if ($PlanOnly) {
+        . $resolveAction
         return [pscustomobject]@{
             component = $ComponentId
             action = $binding.semanticAction
@@ -3595,6 +3598,8 @@ function Invoke-McpCcComponentAction {
         if (-not $mutexAcquired) {
             throw "Another manager action is already active for component '$ComponentId'."
         }
+        # Resolve the current selector only after the component action mutex.
+        . $resolveAction
         $started = [Diagnostics.Stopwatch]::StartNew()
         $controllerProcessId = $null
         $exitCode = $null

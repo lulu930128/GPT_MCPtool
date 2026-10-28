@@ -2,6 +2,7 @@ Set-StrictMode -Version 3.0
 $ErrorActionPreference = "Stop"
 $script:Utf8NoBom = New-Object Text.UTF8Encoding($false)
 . (Join-Path $PSScriptRoot 'cooperative-layout.ps1')
+. (Join-Path $PSScriptRoot 'daily-lifecycle.ps1')
 
 function Test-CbPathEqual {
   param([string]$Left, [string]$Right)
@@ -194,6 +195,8 @@ function Invoke-CbBuildIdHelper {
       $config=@{CODEX_BRIDGE_PROJECT_ROOT=$Context.projectRoot;CODEX_BRIDGE_PROJECTS_FILE=$Context.projectsFile;
         CODEX_BRIDGE_DATA_DIR=$Context.dataDir;CODEX_BRIDGE_HTTP_HOST=$Context.hostName;CODEX_BRIDGE_HTTP_PORT=[string]$Context.port;
         CODEX_BRIDGE_CODEX_COMMAND=$Context.codexCommand;CODEX_BRIDGE_CODEX_ARGS=$Context.codexArgs}
+      $config.CODEX_BRIDGE_CONFIG_ROOT=if($Context.PSObject.Properties['configRoot']){$Context.configRoot}else{$Context.projectRoot}
+      $config.CODEX_BRIDGE_SECRET_PATH=if($Context.PSObject.Properties['secretPath']){$Context.secretPath}else{$null}
     }
     foreach($entry in $config.GetEnumerator()){if(-not[string]::IsNullOrWhiteSpace([string]$entry.Value)){$childEnvironment[$entry.Key]=[string]$entry.Value}}
   }
@@ -454,6 +457,9 @@ function Wait-CbCondition {param([scriptblock]$Condition,[int]$TimeoutSeconds,[i
 function Start-CbChildProcess {
   param($StartInfo,[hashtable]$Environment)
   $overrides=@{}
+  # These are short-lived updater leases, never runtime configuration. A server,
+  # tunnel or later Codex shell must not inherit an expired delegation.
+  foreach($name in @('CB_DAILY_PARENT_PID','CB_DAILY_PARENT_TICKS','CB_DAILY_LOCK_HANDLE')){$overrides[$name]=$null}
   foreach($name in @('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy')){$overrides[$name]=$null}
   $overrides['NO_PROXY']='127.0.0.1,localhost';$overrides['no_proxy']='127.0.0.1,localhost'
   foreach($entry in $Environment.GetEnumerator()){$overrides[[string]$entry.Key]=$entry.Value};$previous=@{}
@@ -633,7 +639,11 @@ function Start-CbServer {
     $environment=Get-CbInstalledChildEnvironment $Context.installedBinding
     $environment.CODEX_BRIDGE_HTTP_TOKEN=$Context.token
     try{$process=Start-CbInstalledChildProcess $startInfo $environment $Context}finally{$environment.Clear();$startInfo.EnvironmentVariables.Clear()}
-  } else {$process=Start-CbChildProcess -StartInfo $startInfo -Environment $environment}
+  } else {
+    $environment.CODEX_BRIDGE_CONFIG_ROOT=if($Context.PSObject.Properties['configRoot']){$Context.configRoot}else{$Context.projectRoot}
+    $environment.CODEX_BRIDGE_SECRET_PATH=if($Context.PSObject.Properties['secretPath']){$Context.secretPath}else{$null}
+    $process=Start-CbChildProcess -StartInfo $startInfo -Environment $environment
+  }
   if($null-eq$process){throw 'SERVER_START_FAILED: Node process did not start.'};Write-CbAtomicText -Path $Context.serverPidFile -Value([string]$process.Id);$started=Get-CbProcess -ProcessId $process.Id;if($null-eq$started){throw 'SERVER_START_FAILED: Started server is unavailable.'};Write-CbOwnerMetadata -Context $Context -Role server -Process $started
   if(-not(Wait-CbCondition -TimeoutSeconds $Context.serverReadyTimeoutSeconds -Condition{Test-CbServerHealth -Context $Context})){$current=Get-CbProcess -ProcessId $process.Id;if($null-ne$current){Stop-CbOwnedRole -Context $Context -Role server};throw 'SERVER_NOT_READY: Bridge did not reach the expected build.'};$ready=Resolve-CbRoleOwnership -Context $Context -Role server;if(-not$ready.canMutate-or$ready.pid-ne$process.Id){throw 'OWNERSHIP_MISMATCH: Started server does not own the listener.'}
 }
@@ -689,6 +699,10 @@ function Invoke-CodexBridgeLifecycleAction {
       Repair-CbConnectivity $Context
     }
     'ShutdownRuntime'{
+      if(Test-Path -LiteralPath (Join-Path $Context.projectRoot '..\daily-mode.json')){
+        Stop-CbRuntimeForDailyUpdate $Context
+        return
+      }
       Assert-CbShutdownPreflight $Context
       Assert-CbCooperativeShutdownAvailable $Context
       $closedCore=$null
@@ -726,10 +740,12 @@ function Stop-CbRuntimeForDailyUpdate {
     try {$waitResult=$instance.WaitForExit(5000)}catch{throw 'DAILY_STOP_UNKNOWN'}
     if(($waitResult -is [bool] -and -not $waitResult) -or -not $instance.HasExited -or
       $instance.ProcessId -ne $retainedPid -or $instance.StartTimeUtc -cne $retainedStart){throw 'DAILY_STOP_UNKNOWN'}
-    if(Test-Path -LiteralPath (Join-Path $Context.dataDir 'powershell-approval\approval.lock')){throw 'DAILY_STATE_LOCK_PRESENT'}
     Remove-CbRuntimeFile -Path $Context.serverPidFile -ExpectedPid $instance.ProcessId
     Remove-CbRuntimeFile -Path $Context.serverOwnerFile
     Stop-CbOwnedRole -Context $Context -Role tunnel -StoppedCoreHandle $instance
+    # A leftover store marker must not strand an owned tunnel after core exit.
+    # The source transaction performs identity-safe retirement after both exit.
+    if(Test-Path -LiteralPath (Join-Path $Context.dataDir 'powershell-approval\approval.lock')){throw 'DAILY_STATE_LOCK_PRESENT'}
   } finally {$instance.Dispose()}
 }
 

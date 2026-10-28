@@ -1,5 +1,7 @@
 # CC 獨立 Runtime
 
+2026-10-28 可靠更新修補已 Stage，尚未替換正式 tray，見 [本機操作交接](../../codex_bridge/docs/agent-runs/reliable-daily-update-20261028/Handoff.md)。Reconcile／Workspace action 與 updater 共用 Bridge action mutex，既有 selector helper 現在於取得 mutex 後執行；Status timer 維持唯讀。正式 Workspace MCP restart 必須另外保留其 request／terminal receipt，本機 controller fixture 或直接呼叫不能代替。
+
 CC 自己部署程式，Bridge 繼續擁有 Bridge 的 lifecycle 與資料。此流程不使用 Program Files 的 ACL、manifest、cutover 或歷史 attestation。
 
 **2026-10-25 目前狀態：`cc-20261025-d` 已啟動，實際 tray PID 44892、唯一 mutex 與版本路徑核對通過，八元件均 Ready。** 使用者後續要求啟用新版開機自動啟動，唯一 Startup 捷徑現為 `wscript.exe "C:\GPT_MCPtool\mcp_control_center\scripts\start-runtime-tray.vbs" --boot`；登入後由既有 Reconcile 安全啟動元件。17 個 Program Files 舊 release 已刪除、舊程序為 0，原根目錄只保留 maintenance 修補備份；現行資料、ACL 與程序未變。下方首次交接敘述保留作流程背景，不代表仍需恢復舊 owner。

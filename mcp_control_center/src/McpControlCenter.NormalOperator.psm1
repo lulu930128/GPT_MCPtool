@@ -20,6 +20,10 @@ function Open-McpCcNormalInstalledContext {
     param([string]$ManagerRoot,[int]$TrayProcessId)
     & $script:NormalInstallChecks { param($path) Assert-McpCcInstalledAbsolutePath $path } $ManagerRoot
     if ([IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot)) -ine $ManagerRoot) { throw 'SOURCE_ROOT_MISMATCH' }
+    if(Test-Path -LiteralPath (Join-Path $ManagerRoot 'cc-runtime.json') -PathType Leaf){
+        Import-Module (Join-Path $PSScriptRoot 'McpControlCenter.NormalDaily.psm1')
+        return Open-McpCcNormalDailyContext $ManagerRoot $TrayProcessId
+    }
     Assert-McpCcProtectedCodePath $ManagerRoot
     $release=Read-McpCcInstalledRelease $ManagerRoot
     if ($release.schemaVersion -lt 3) { throw 'INSTALLED_LIFECYCLE_BINDINGS_REQUIRED' }
@@ -51,17 +55,19 @@ function Open-McpCcNormalInstalledContext {
         if ($null -eq $cim -or $cim.CommandLine -inotmatch $pattern) { throw 'EXACT_TRAY_OWNER_REQUIRED' }
         [McpCcNormalSecurity]::AssertUnchanged($process,$token)
         $peer=[McpCcNormalPipe+Peer]::Retain($proof.pid,$proof.sid,$proof.image,$proof.session,$proof.startedUtcTicks,$true)
-        return [pscustomobject]@{ release=$release; peer=$peer; channel=[McpCcNormalPipe]::OwnerChannel($proof);
+        return [pscustomobject]@{ mode='installed'; operatorSid=$release.state.operatorSid; release=$release; peer=$peer; channel=[McpCcNormalPipe]::OwnerChannel($proof);
             pin=$manifestPin; proof=$proof; sessionCheckedAt=$null }
     } finally { $process.Dispose() }
 }
 function Assert-McpCcNormalBinding($Context) {
+    if($Context.mode -ceq 'daily'){Assert-McpCcNormalDailyBinding $Context;return}
     Assert-McpCcProtectedCodePath $Context.release.sourcePath
     if ((Get-FileHash -LiteralPath $Context.release.sourcePath -Algorithm SHA256).Hash -cne $Context.pin) { throw 'INSTALLED_CLOSURE_CHANGED' }
     $Context.peer.Check()
 }
 function Assert-McpCcNormalClosure($Context) {
     $Context.sessionCheckedAt=$null
+    if($Context.mode -ceq 'daily'){Assert-McpCcNormalDailyClosure $Context;return}
     Assert-McpCcNormalBinding $Context
     Assert-McpCcInstalledClosure $Context.release
     Assert-McpCcNormalBinding $Context
@@ -80,7 +86,9 @@ function Open-McpCcNormalBridgePeer($Context,[int]$ClientId) {
     # ClientId is GetNamedPipeClientProcessId, not an IPC field. Its parent must be
     # the installed Node entrypoint; retain BOTH handles for the session lifetime.
     Assert-McpCcNormalClosure $Context
-    $release=$Context.release
+    $daily=$Context.mode -ceq 'daily'
+    $bridgeRoot=if($daily){$Context.bridge.root}else{Join-Path $Context.release.root 'codex_bridge'}
+    $nodePath=if($daily){$Context.bridge.nodePath}else{$Context.release.dependencies.node.path}
     $client=Get-Process -Id $ClientId -ErrorAction Stop
     $parent=$null;$peer=$null;$parentPeer=$null
     try {
@@ -88,15 +96,14 @@ function Open-McpCcNormalBridgePeer($Context,[int]$ClientId) {
         $cim=Get-CimInstance Win32_Process -Filter "ProcessId=$ClientId" -ErrorAction Stop
         $coreId=[int]$cim.ParentProcessId
         $image='C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
-        $script=Join-Path $release.root 'codex_bridge\scripts\powershell-host-transport.ps1'
+        $script=Join-Path $bridgeRoot 'scripts\powershell-host-transport.ps1'
         $helperPattern='(?i)^"?'+[regex]::Escape($image)+'"?\s+-NoProfile\s+-NonInteractive\s+-File\s+"?'+[regex]::Escape($script)+'"?\s+-CoreId\s+'+$coreId+'\s*$'
         if ($identity.image -ine $image -or $cim.CommandLine -inotmatch $helperPattern -or
-            $identity.sid -cne $release.state.operatorSid -or $identity.session -ne $Context.proof.session) { throw 'BRIDGE_HELPER_REJECTED' }
+            $identity.sid -cne $Context.operatorSid -or $identity.session -ne $Context.proof.session) { throw 'BRIDGE_HELPER_REJECTED' }
         $parent=Get-Process -Id $coreId -ErrorAction Stop
         $node=[McpCcNormalNative]::Inspect($parent)
         $command=Get-CimInstance Win32_Process -Filter "ProcessId=$coreId" -ErrorAction Stop
-        $entry=Join-Path $release.root 'codex_bridge\dist\src\http-main.js'
-        $nodePath=$release.dependencies.node.path
+        $entry=Join-Path $bridgeRoot 'dist\src\http-main.js'
         $nodePattern='(?i)^"?'+[regex]::Escape($nodePath)+'"?\s+"?'+[regex]::Escape($entry)+'"?\s*$'
         if ($node.image -ine $nodePath -or $command.CommandLine -inotmatch $nodePattern -or
             $node.sid -cne $identity.sid -or $node.session -ne $identity.session -or $node.startedUtcTicks -gt $identity.startedUtcTicks) { throw 'BRIDGE_PARENT_REJECTED' }
@@ -149,7 +156,7 @@ function Invoke-McpCcNormalOperatorOwner {
         while (-not $Cancellation.IsCancellationRequested) {
             # A new connection gets a fresh full closure in its resolver. Only
             # the duplicate walk in that same session's handler is reused.
-            $listener=New-Object McpCcNormalPipe+Listener($context.channel,[string]$context.release.state.operatorSid)
+            $listener=New-Object McpCcNormalPipe+Listener($context.channel,[string]$context.operatorSid)
             try { $listener.Serve($resolver,$handler,$Cancellation) }
             catch {
                 if ($Cancellation.IsCancellationRequested) { break }

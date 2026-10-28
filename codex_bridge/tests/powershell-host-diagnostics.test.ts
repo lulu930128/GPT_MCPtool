@@ -30,7 +30,7 @@ const forbiddenPort = new Proxy({} as PowerShellHostPort, { get() { assert.fail(
 test("one explicit effectful diagnostic rejects all candidate/authority inputs before invocation", async t => {
   let calls = 0;
   const transport = { preflight: async (...args: unknown[]) => { assert.deepEqual(args, []); calls++; return { code: "BLOCKED_PLATFORM_CAPABILITY" }; },
-    status: () => ({ code: "NOT_DEPLOYED", active: false, closed: false, authorization: "BLOCKED_PLATFORM_CAPABILITY",
+    status: () => ({ code: "NOT_DEPLOYED", active: false, closed: false, deploymentMode: "unverified" as const, authorization: "BLOCKED_PLATFORM_CAPABILITY",
       preflight: { code: "NOT_CHECKED", observedAt: null } }) };
   const f = await connect(t, { transport });
   const listed = (await f.client.listTools()).tools, tool = listed.find(tool => tool.name === name)!;
@@ -70,7 +70,7 @@ test("unavailable, missing installed binding and closed transport never reach Ho
 test("cached preflight success never projects a verified current owner or empty blockers", async t => {
   const f = await connect(t, { transport: {
     preflight: async () => { assert.fail("passive status must not probe"); },
-    status: () => ({ code: "HOST_READY", active: false, closed: false, authorization: "AUTHENTICATED_DIRECT_REQUEST",
+    status: () => ({ code: "HOST_READY", active: false, closed: false, deploymentMode: "unverified" as const, authorization: "AUTHENTICATED_DIRECT_REQUEST",
       preflight: { code: "HOST_READY", observedAt: "2026-10-23T00:00:00.000Z" } }),
   } });
   const status = (await f.call("codex_powershell_status", {})).structuredContent as any;
@@ -86,7 +86,7 @@ test("status is passive and separates source, cached observation, binding, owner
   const observation = { code: "BLOCKED_PLATFORM_CAPABILITY", observedAt: "2026-10-16T00:00:00.000Z" };
   const context: HostDiagnostics = { installedBinding: { activationReady: true, secretPath: "PRIVATE-PATH" } as HostDiagnostics["installedBinding"],
     transport: { preflight: async () => { preflights++; throw new Error("must not invoke"); },
-      status: () => ({ code: "RECEIPT_RECORDED", active: false, closed: false, authorization: "BLOCKED_PLATFORM_CAPABILITY", preflight: observation }) } };
+      status: () => ({ code: "RECEIPT_RECORDED", active: false, closed: false, deploymentMode: "unverified" as const, authorization: "BLOCKED_PLATFORM_CAPABILITY", preflight: observation }) } };
   const store: ReviewStoreDiagnostics = { startup: { status: "OPEN", errorCode: null, source: "CACHE_ON_STARTUP" },
     current: { observation: "LIVE_METADATA_ONLY", observedAt: observation.observedAt, lifecycle: "OPEN", presence: "PRESENT",
       owner: "THIS_INSTANCE", recovery: "CLOSE_OWNER_NORMALLY" }, automaticRecovery: false, recoveryAuthorization: "VERIFY_STALE_THEN_SEPARATE_AUTHORIZATION" };

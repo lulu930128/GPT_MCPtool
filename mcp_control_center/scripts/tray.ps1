@@ -132,6 +132,8 @@ $script:ControllerWarningShown = $false
 $script:ComponentUi = @{}
 $script:WorkspaceLocalOwner = $null
 $script:WorkspaceLocalWorker = $null
+$script:UpdateSourceAge = 60
+$script:UpdateDispatchAge = 5
 $script:WorkspaceLocalStartupReason = 'WORKSPACE_LOCAL_REGISTRY_UNSUPPORTED'
 # The existing tray mutex is already acquired. No second manager or poller.
 # Installed v4 has already passed activation above; retain the same singleton.
@@ -161,6 +163,8 @@ function Get-TrayWorkspaceLocalStatusText {
 $script:SelfReloadWorker = $null
 $script:SelfReloadShutdown = $null
 $script:NormalOperatorWorker = $null
+$script:NormalRecoveryAttempts=0
+$script:NormalRecoveryAllowed=$true
 # The installed owner continuously accepts independently authenticated requests.
 function Start-NormalOperatorHost {
     if ($script:Closing -or $script:ExitRequested -or $null -ne $script:NormalOperatorWorker) { return }
@@ -178,7 +182,7 @@ function Start-NormalOperatorHost {
 }
 # Only the existing installed singleton owns this bounded startup channel. No
 # read-only tool starts a child, and this startup is not a human approval ceremony.
-if (Test-Path -LiteralPath (Join-Path $projectRoot 'config\installed-release.json') -PathType Leaf) {
+if ((Test-Path -LiteralPath (Join-Path $projectRoot 'config\installed-release.json') -PathType Leaf) -or $null -ne $manifest.PSObject.Properties['codeDeployment']) {
     # Discovery alone does not open a pipe. Worker verifies the existing canonical
     # InstalledRelease v3 binding/selection/closure before listener construction.
     Start-NormalOperatorHost
@@ -738,22 +742,27 @@ $timer.Interval = 1000
 $timer.add_Tick({
     if ($script:Closing) { return }
     $workspaceLocalItem.Text = Get-TrayWorkspaceLocalStatusText
-    if($null -ne $script:UpgradeExitSignal -and $script:UpgradeExitSignal.WaitOne(0)){
-        Request-TrayExit -NonInteractive
-        return # Consume once; let the next ordinary tick continue active work.
-    }
     if ($null -ne $script:WorkspaceLocalWorker -and $script:WorkspaceLocalWorker.pending.IsCompleted) {
         try { $null=$script:WorkspaceLocalWorker.shell.EndInvoke($script:WorkspaceLocalWorker.pending) }
         catch { Write-Warning 'Workspace maintenance result unknown; inspect its request receipt.' }
         finally {
-            if ($script:WorkspaceLocalOwner.HasActiveRequest) {
-                try { $script:WorkspaceLocalOwner.Complete($script:WorkspaceLocalWorker.requestId,'UNKNOWN') }
+            if ($script:WorkspaceLocalOwner.HasActiveRequest -and $script:WorkspaceLocalWorker.requestId) {
+                try {
+                    if($script:WorkspaceLocalWorker.kind -eq 'update'){$script:WorkspaceLocalOwner.CompleteUpdate($script:WorkspaceLocalWorker.requestId,'RECOVERY_REQUIRED','UPDATE_WORKER_RESULT_UNCERTAIN',$null,$null,$null,$null,$null)}
+                    else{$script:WorkspaceLocalOwner.Complete($script:WorkspaceLocalWorker.requestId,'UNKNOWN')}
+                }
                 catch { Write-Warning 'Workspace receipt update unavailable; durable UNKNOWN remains.' }
             }
             $script:WorkspaceLocalWorker.shell.Dispose(); $script:WorkspaceLocalWorker=$null
         }
         # Existing periodic Status refresh will publish new observations.
         $script:SecondsSinceRefresh=[int]$manifest.settings.refreshIntervalSeconds
+    }
+    # Settle a completed self-update worker before consuming its cooperative
+    # Exit event. A stale worker pointer must not lose the one exit request.
+    if($null -eq $script:WorkspaceLocalWorker -and $null -ne $script:UpgradeExitSignal -and $script:UpgradeExitSignal.WaitOne(0)){
+        Request-TrayExit -NonInteractive
+        return
     }
     if ($null -ne $script:WorkspaceLocalOwner -and $null -eq $script:WorkspaceLocalWorker -and $null -eq $script:ControllerProcess) {
         $request=$script:WorkspaceLocalOwner.TakePending()
@@ -762,8 +771,27 @@ $timer.add_Tick({
             $maintenance=[PowerShell]::Create()
             [void]$maintenance.AddScript('param($core,$module,$owner,$request,$manifest,$runtime) Import-Module $core; Import-Module $module; Invoke-McpCcWorkspaceLocalRestart -Owner $owner -Request $request -Manifest $manifest -RuntimeRoot $runtime')
             [void]$maintenance.AddArgument($modulePath).AddArgument((Join-Path $projectRoot 'src\McpControlCenter.WorkspaceLocal.psm1')).AddArgument($script:WorkspaceLocalOwner).AddArgument($request).AddArgument($manifest).AddArgument($RuntimeRoot)
-            try { $script:WorkspaceLocalWorker=@{shell=$maintenance;pending=$maintenance.BeginInvoke();requestId=$request.requestId} }
+            try { $script:WorkspaceLocalWorker=@{shell=$maintenance;pending=$maintenance.BeginInvoke();requestId=$request.requestId;kind='reload'} }
             catch { $maintenance.Dispose();$script:WorkspaceLocalOwner.Complete($request.requestId,'UNKNOWN') }
+        }
+    }
+    $script:UpdateSourceAge++;$script:UpdateDispatchAge++
+    if(-not $script:Closing -and -not $script:ExitRequested -and $null -ne $script:WorkspaceLocalOwner -and $null -eq $script:WorkspaceLocalWorker -and $null -eq $script:ControllerProcess){
+        $update=$null
+        if($script:UpdateDispatchAge -ge 5){$update=$script:WorkspaceLocalOwner.TakePendingUpdate();$script:UpdateDispatchAge=0}
+        if($null -ne $update -or $script:UpdateSourceAge -ge 60){
+            $worker=[PowerShell]::Create()
+            if($null -ne $update){
+                [void]$worker.AddScript('param($module,$owner,$request,$manifest,$runtime) Import-Module $module; Invoke-McpCcWorkspaceUpdate -Owner $owner -Request $request -Manifest $manifest -RuntimeRoot $runtime')
+                [void]$worker.AddArgument((Join-Path $projectRoot 'src/McpControlCenter.WorkspaceUpdate.psm1')).AddArgument($script:WorkspaceLocalOwner).AddArgument($update).AddArgument($manifest).AddArgument($RuntimeRoot)
+                $kind='update';$requestId=$update.requestId
+            }else{
+                [void]$worker.AddScript('param($module,$owner,$manifest) Import-Module $module; Publish-McpCcUpdateSources -Owner $owner -Manifest $manifest')
+                [void]$worker.AddArgument((Join-Path $projectRoot 'src/McpControlCenter.WorkspaceUpdate.psm1')).AddArgument($script:WorkspaceLocalOwner).AddArgument($manifest)
+                $kind='sources';$requestId=$null;$script:UpdateSourceAge=0
+            }
+            try{$script:WorkspaceLocalWorker=@{shell=$worker;pending=$worker.BeginInvoke();requestId=$requestId;kind=$kind}}
+            catch{$worker.Dispose();if($requestId){$script:WorkspaceLocalOwner.CompleteUpdate($requestId,'RECOVERY_REQUIRED','UPDATE_WORKER_START_FAILED',$null,$null,$null,$null,$null)}}
         }
     }
     if ($null -ne $script:NormalOperatorWorker -and $script:NormalOperatorWorker.pending.IsCompleted) {
@@ -772,16 +800,22 @@ $timer.add_Tick({
             $gateCode='HOST_PREFLIGHT_FAILED'
             if ($gateResults.Count -eq 1 -and $gateResults[0].status -ceq 'BLOCKED' -and
                 $gateResults[0].failure.code -cmatch '^[A-Z][A-Z0-9_]{2,95}$') { $gateCode=$gateResults[0].failure.code }
+            $script:NormalRecoveryAllowed=$gateCode -cin @('NORMAL_HOST_LISTENER_NOT_RUNNING','HOST_LISTENER_STOPPED','NORMAL_HOST_CONNECTION_FAILED')
             $normalOperatorItem.Text='NORMAL Operator: BLOCKED / '+$gateCode
             if($gateResults.Count -eq 1 -and $gateResults[0].status -ceq 'STOPPED') {
                 $normalOperatorItem.Text='NORMAL Operator: stopped'
             }
-        } catch { $normalOperatorItem.Text='NORMAL Operator: BLOCKED / HOST_PREFLIGHT_FAILED' }
+        } catch { $script:NormalRecoveryAllowed=$false;$normalOperatorItem.Text='NORMAL Operator: BLOCKED / HOST_PREFLIGHT_FAILED' }
         finally {
             $script:NormalOperatorWorker.shell.Dispose()
             $script:NormalOperatorWorker.runspace.Dispose()
             $script:NormalOperatorWorker.cancellation.Dispose()
             $script:NormalOperatorWorker=$null
+        }
+    }
+    if($null -ne $script:WorkspaceLocalOwner -and $script:WorkspaceLocalOwner.TakeNormalRecovery()){
+        if($null -eq $script:NormalOperatorWorker -and $script:NormalRecoveryAllowed -and $script:NormalRecoveryAttempts -lt 1){
+            $script:NormalRecoveryAttempts++;Start-NormalOperatorHost
         }
     }
     $hadController = $null -ne $script:ControllerProcess

@@ -64,14 +64,16 @@ if($Action-eq'SelfTest'){
   exit 0
 }
 
-$mutex=$null;$acquired=$false;$clock=[Diagnostics.Stopwatch]::StartNew();$before=$null;$after=$null
+$mutex=$null;$acquired=$false;$dailyLease=$null;$clock=[Diagnostics.Stopwatch]::StartNew();$before=$null;$after=$null
 try{
   if($Action-eq'Status'){
     if($AdoptLegacyExactListeners){throw 'READONLY_ADOPTION_REJECTED: Status cannot adopt ownership.'}
   }else{
+    $dailyLease=& $installedModule {param($c) Open-CbDailyMutation $c} $context
     $mutex=New-Object Threading.Mutex($false,'Local\CodexBridgeMcpRuntimeControl')
     try{$acquired=$mutex.WaitOne(0,$false)}catch [Threading.AbandonedMutexException]{$acquired=$true}
     if(-not$acquired){throw 'ACTION_BUSY: Another Codex Bridge lifecycle action is running.'}
+    & $installedModule {param($c) Assert-CbDailySelected $c} $context
   }
   $before=Get-CodexBridgeRuntimeStatus -Context $context -AdoptLegacyExactListeners:$AdoptLegacyExactListeners
   if($Action-ne'Status'){Invoke-CodexBridgeLifecycleAction -Context $context -Action $Action}
@@ -82,4 +84,4 @@ try{
 catch{
   $clock.Stop();$raw=([string]$_.Exception.Message-replace'[\r\n]+',' ').Trim();if($raw-match'^([A-Z][A-Z0-9_]+):\s*(.*)$'){$errorCode=$matches[1];$message=$matches[2]}else{$errorCode='ACTION_FAILED';$message='Lifecycle action failed; inspect the component runtime log.'};try{$after=Get-CodexBridgeRuntimeStatus -Context $context}catch{$after=$null};$owned=if($null-eq$after){@()}else{@($after.ownedPids)};try{if($Action -ne 'Status'){Write-CodexBridgeLifecycleEvent -Context $context -Action $Action -Ok $false -BeforeStatus $(if($null-eq$before){$null}else{$before.status}) -AfterStatus $(if($null-eq$after){$null}else{$after.status}) -OwnedPids $owned -ElapsedMs([int]$clock.ElapsedMilliseconds)-ErrorCode $errorCode -Message $message}}catch{};[pscustomobject]@{ok=$false;action=$Action;before=$before;after=$after;ownedPids=$owned;elapsedMs=[int]$clock.ElapsedMilliseconds;errorCode=$errorCode;message=$message}|ConvertTo-Json -Depth 9;exit 1
 }
-finally{if($acquired){$mutex.ReleaseMutex()};if($null-ne$mutex){$mutex.Dispose()}}
+finally{if($acquired){$mutex.ReleaseMutex()};if($null-ne$mutex){$mutex.Dispose()};if($null-ne$dailyLease){$dailyLease.Dispose()}}

@@ -63,7 +63,7 @@ export async function createBridgeRuntime(config: BridgeConfig): Promise<BridgeR
   const review = await initializePowerShellReview(config.dataDir);
   const hostPort = review.approvalStore ? createPowerShellHostPort({ store: review.approvalStore,
     projects: config.projects, readJob: id => store.snapshot(id) }) : undefined;
-  const hostTransport = hostPort ? createNativeHostTransport(hostPort, config.installedBinding) : undefined;
+  const hostTransport = hostPort ? createNativeHostTransport(hostPort, config.installedBinding, config.projectRoot) : undefined;
   const powershellHost = hostPort;
   // Preflight is an explicit diagnostic action. Startup and pure getters never
   // launch the native helper; missing owner/platform leaves NORMAL/ADMIN closed.

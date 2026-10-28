@@ -122,7 +122,7 @@ test("v2 binding pins private deployment snapshots and preserves the canonical s
     const profile = launch.args.find((arg) => arg.startsWith(`permissions.codex-bridge-${name}=`))!;
     // All snapshot descendants inherit the owner/runtime deny; the legacy
     // credential directory retains its separate existing deny as well.
-    for (const path of [fixture.ownerRoot, fixture.runtimeRoot, fixture.dataDir, fixture.projectsFile]) {
+    for (const path of [fixture.ownerRoot, fixture.runtimeRoot, fixture.dataDir, fixture.projectsFile, win32.dirname(fixture.secretPath)]) {
       assert.ok(profile.includes(`${JSON.stringify(path)} = "deny"`), path);
     }
   }

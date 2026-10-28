@@ -36,6 +36,9 @@ function New-CbDailyContext([string]$CodeRoot,[switch]$RequireBearer) {
         NodePath=$s.nodePath;TunnelClientPath=$s.tunnelClientPath;TunnelProfileDir=$s.tunnelProfileDir;
         KeyStorePath=$s.keyStorePath;SecretPath=$s.secretPath;Token=$null}
     $context=New-CodexBridgeRuntimeContext @args
+    # Read-CbDailySettings already pins the daily layout. Configuration/handoffs
+    # belong to the stable component, never Runtime/versions/<version>/code.
+    $context | Add-Member -NotePropertyName configRoot -NotePropertyValue 'C:\GPT_MCPtool\codex_bridge'
     # PID/owner metadata and logs are persistent operational state, never code files.
     $context.runtimeDir=$s.bridgeRuntimeDir
     foreach($pair in @(@('serverPidFile','codex-bridge-http-server.pid'),@('serverOwnerFile','codex-bridge-http-server.owner.json'),

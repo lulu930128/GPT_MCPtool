@@ -1,5 +1,32 @@
 # Workspace → 現有 Control Center 本機維護
 
+## 2026-10-28 Phase 2：source update v2
+
+目前 source tool contract 為 `2026-10-28.1`。四個新增工具與舊 v1 七目標 status／preview／receipt／restart 並存；舊 contract 的 schema、七列狀態及 `reload_runtime` 意義不變。`reload_runtime` 只重載既有 runtime 產物，不代表已 Build source。下方 2026-10-25 及更早紀錄均保留為當時證據，不能套用為本輪部署限制；本輪使用者已授權直接換版與必要短暫中斷。實際採用與驗收以 [canonical Phase 2 工作包](../../codex_bridge/docs/agent-runs/reliable-daily-update-20261028/Plan.md) 的 receipts 為準。
+
+| 工具 | 行為 |
+| --- | --- |
+| `mcp_component_update_status` | 唯讀查詢獨立 v2 九目標的 owner 更新能力；可指定單一 componentId。無更新入口回 `NOT_SUPPORTED`，不把 restart 當更新。 |
+| `mcp_component_update_preview` | 提交固定 componentId、`action=update_from_source`、versionId、`idlePolicy=wait_for_idle`；讀 CC 預先準備的 sourceDigest。尚未觀察到 source 時回 `SOURCE_NOT_OBSERVED`，不建立 request、不執行 Build。 |
+| `mcp_component_update` | 相同 preview 參數加上必填 expectedSourceDigest、UUID requestId、`confirmation=interrupt_current_requests`。CC 在 dispatch 前持久化參數 digest 與 canonical operationId，並委派元件原有更新 owner。 |
+| `mcp_component_update_receipt` | 以原 UUID 唯讀查詢 `QUEUED`、`RUNNING`、`ACCEPTED`、`REJECTED` 或 `RECOVERY_REQUIRED`，連同版本、loaded build 與 Ready 證據。 |
+
+v2 九個固定目標為原七個 MCP 加 `project_reading`、`mcp_control_center`。這不擴大舊 v1 restart allowlist，也不改舊 component descriptor。versionId 為 `^[a-z0-9][a-z0-9_-]{0,47}$` 的 immutable label，expectedSourceDigest 為 64 位小寫 SHA-256。工具不接受 caller 指定 command、path、candidate root、cwd、env、timeout、force 或 ADMIN。
+
+Bridge 使用 canonical DailyCode；Workspace 由 CC durable 接管後 Build 與 ReloadRuntime；CC 自身由既有獨立 bootstrap owner 接續。所有 owner 仍必須核對 exact process、原 manifest／selection、active work 及元件政策。`wait_for_idle` 不取消任何 active job；Bridge 更新必須等承載該請求的 job terminal。CC 更新能力是否已採用，必須查新 CC 實際回應，不由工具存在推定。
+
+相同 requestId／參數只返回原結果，參數衝突回 `REQUEST_CONFLICT`。parameterDigest 為 UTF-8 六行 `componentId`、`update_from_source`、`versionId`、`expectedSourceDigest`、`wait_for_idle`、`interrupt_current_requests` 的 SHA-256，行分隔使用 LF，末尾無換行。Workspace 校驗回傳 receipt 的 digest 與原 request 各欄；`ACCEPTED` 還要求 selectedVersion 與請求相同、preparedBuildId 與 observedBuildId 相同且非空、observedVersion 非空及 Ready=true。Bridge／CC 的 observedVersion 必須等於請求 versionId，其他 source 元件則回報實際 application version。這些是 CC owner 提供的證據，`ownerVerified=false`／`chatgptE2e=UNVERIFIED` 不變。
+
+`terminal`／`finished`／`completed` 在 `ACCEPTED` 或 `REJECTED` 為 true；`succeeded` 分別為 true 或 false。`QUEUED`／`RUNNING` 未結案，`succeeded=null`；`RECOVERY_REQUIRED` 另有 `requiresRecovery=true`，不是普通等待。找不到可信 receipt 時各完成欄位為 null，不從錯誤或 timeout 推測完成。
+
+v2 重用 `mcpcc-workspace-local-v1` 的 challenge、nonce、1800ms deadline、16 KiB 回應上限及每程序兩個併發上限，wire 的 `v="2"` 與四個 update operation 區分版本；沒有第二個 pipe、runner 或部署 daemon。只有 authenticated HTTP maintenance 可提交 update；STDIO／未驗證 HTTP 在 IPC 前回 `AUTHENTICATED_TRANSPORT_REQUIRED`。preview/status/receipt 保持唯讀。
+
+若更新提交斷線或逾時，Workspace 回 `DELIVERY_UNKNOWN`，不可換 UUID 重送。查 `mcp_component_update_receipt` 的原 requestId，再依原 canonical operation 接續；`RECEIPT_NOT_FOUND`／不可用不證明從未 dispatch。`QUEUED`／`RUNNING` 不是更新完成，`RECOVERY_REQUIRED` 不是授權重跑。
+
+新增工具後，檔案 read-only mode 共 41 tools，operate mode 共 47；只有 restart 與 update 兩個維護工具標示 destructive，兩者使用同一既有 authenticated-maintenance gate。本節描述 source 契約；live 採用 evidence 分別保存，不能以測試或 build 取代。
+
+## 2026-10-25 與更早驗證紀錄
+
 目前 source contract 為 `2026-10-14.2`，新增唯讀工具見 [runtime 診斷](RuntimeDiagnostics.md)。
 2026-10-25 live Workspace 已是此 contract、build `68edcbe8df019eeeb148`，人工維護已啟用。
 本次確認 selected installed CC 的 v4 Tray 仍只初始化 v3 receiver，且缺少 native DLL，

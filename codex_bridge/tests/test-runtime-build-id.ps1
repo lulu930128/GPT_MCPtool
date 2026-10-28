@@ -36,7 +36,7 @@ try{
   Remove-Module $module
 
   foreach($dir in @('scripts','dist\src','web','web\nested')){New-Item -ItemType Directory -Path(Join-Path $testRoot $dir)-Force|Out-Null}
-  foreach($name in @('codex-bridge-runtime.psm1','runtime-build-id.mjs')){Copy-Item -LiteralPath(Join-Path $projectRoot "scripts\$name")-Destination(Join-Path $testRoot "scripts\$name")}
+  foreach($name in @('codex-bridge-runtime.psm1','cooperative-layout.ps1','daily-lifecycle.ps1','runtime-build-id.mjs')){Copy-Item -LiteralPath(Join-Path $projectRoot "scripts\$name")-Destination(Join-Path $testRoot "scripts\$name")}
   Copy-Item -LiteralPath(Join-Path $projectRoot 'dist\src\config.js')-Destination(Join-Path $testRoot 'dist\src\config.js')
   Copy-Item -LiteralPath(Join-Path $projectRoot 'dist\src\installed-runtime.js')-Destination(Join-Path $testRoot 'dist\src\installed-runtime.js')
   [IO.File]::WriteAllText((Join-Path $testRoot 'package.json'),'{"type":"module"}',$utf8)

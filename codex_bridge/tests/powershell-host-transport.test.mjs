@@ -9,7 +9,7 @@ import { syncBuiltinESMExports } from "node:module";
 
 let activate = async () => {};
 mock.module(new URL("../.tmp/host-diagnostics-check/src/installed-runtime.js", import.meta.url).href,
-  { namedExports: { assertInstalledRuntimeActivation: () => activate() } });
+  { namedExports: { resolvePowerShellHostContext: async (installed, root) => { await activate(); return { mode: installed ? "installed" : "daily", codeRoot: installed?.codeRoot ?? root }; } } });
 const { createNativeHostTransport, HOST_PREFLIGHT_TIMEOUT_MS } = await import("../.tmp/host-diagnostics-check/src/powershell-approval/host-transport.js");
 const { HOST_FRAME_BYTES } = await import("../.tmp/host-diagnostics-check/src/powershell-approval/host-receiver.js");
 const port = new Proxy({}, { get() { assert.fail("No candidate/HostPort dispatch allowed"); } });
@@ -135,4 +135,20 @@ test("deadline also covers activation; late activation cannot launch a child", a
   resolveActivation(); await flush();
   assert.equal(f.spawn.mock.callCount(), 0);
   assert.equal(f.transport.status().closed, true);
+});
+
+for (const code of ["NORMAL_HOST_BINARY_MISSING", "NORMAL_HOST_LISTENER_NOT_RUNNING", "NORMAL_HOST_ACCESS_DENIED", "NORMAL_HOST_OWNER_REJECTED", "NORMAL_HOST_CONNECTION_FAILED"]) {
+  test(`pre-dispatch ${code} remains classified without issuing HostPort request`, async t => {
+    const f=fixture(t), pending=f.transport.preflight(); await flush();
+    f.child.stderr.write(code+"\n"); await flush(); f.exit();
+    assert.equal((await pending).code, code);
+    assert.equal(f.spawn.mock.callCount(), 1);
+  });
+}
+test("failure after authenticated channel is uncertain and never classified as safe startup", async t => {
+  const f=fixture(t), pending=f.transport.preflight(); await flush();
+  f.send({kind:"channel",session:f.frames[0].session,binding:"a".repeat(64)}); await flush();
+  f.child.stderr.write("NORMAL_HOST_LISTENER_NOT_RUNNING\n"); await flush(); f.exit();
+  assert.equal((await pending).code,"HOST_TRANSPORT_UNKNOWN");
+  assert.equal(f.spawn.mock.callCount(),1);
 });

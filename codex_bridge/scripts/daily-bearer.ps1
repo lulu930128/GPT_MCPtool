@@ -48,9 +48,9 @@ function Set-CbDailyContextBearer($Context,$Settings) {
     }
 }
 
-function Assert-CbDailyMcpAuthentication($Context) {
+function Assert-CbDailyMcpAuthentication($Context,[switch]$RequireReviewStore) {
     if([string]::IsNullOrWhiteSpace($Context.token)){throw 'DAILY_BEARER_REQUIRED'}
-    $client=$null;$handler=$null;$response=$null
+    $client=$null;$handler=$null;$response=$null;$session=$null;$closeAttempted=$false
     try {
         Add-Type -AssemblyName System.Net.Http
         $handler=New-Object Net.Http.HttpClientHandler;$handler.UseProxy=$false;$handler.AllowAutoRedirect=$false
@@ -70,15 +70,51 @@ function Assert-CbDailyMcpAuthentication($Context) {
         if($text -match '(?m)^data: (.+)$'){$text=$Matches[1]}
         $reply=$text|ConvertFrom-Json
         if($reply.id -ne 1 -or -not $reply.result.serverInfo.name){throw 'DAILY_MCP_INITIALIZE_FAILED'}
+        $protocol=[string]$reply.result.protocolVersion
+        if($protocol -cnotmatch '^20[0-9]{2}-[0-9]{2}-[0-9]{2}$'){throw 'DAILY_MCP_INITIALIZE_FAILED'}
+        $client.DefaultRequestHeaders.TryAddWithoutValidation('MCP-Protocol-Version',$protocol)|Out-Null
+        $session=$null;$store=$null
         if($response.Headers.Contains('mcp-session-id')) {
             $session=@($response.Headers.GetValues('mcp-session-id'))[0]
             $client.DefaultRequestHeaders.TryAddWithoutValidation('mcp-session-id',$session)|Out-Null
+        }
+        if($RequireReviewStore){
             $response.Dispose();$response=$null
+            $content=New-Object Net.Http.StringContent('{"jsonrpc":"2.0","method":"notifications/initialized"}',[Text.Encoding]::UTF8,'application/json')
+            try {$response=$client.PostAsync($url,$content).GetAwaiter().GetResult()}finally{$content.Dispose()}
+            if([int]$response.StatusCode -notin @(200,202,204)){throw 'DAILY_MCP_INITIALIZE_FAILED'}
+            $response.Dispose();$response=$null
+            $body='{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"codex_powershell_status","arguments":{}}}'
+            $content=New-Object Net.Http.StringContent($body,[Text.Encoding]::UTF8,'application/json')
+            try {$response=$client.PostAsync($url,$content).GetAwaiter().GetResult()}finally{$content.Dispose()}
+            if([int]$response.StatusCode -ne 200){throw 'DAILY_STORE_DIAGNOSTICS_UNAVAILABLE'}
+            $text=$response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+            if($text.Length -gt 65536){throw 'DAILY_MCP_RESPONSE_LIMIT'}
+            if($text -match '(?m)^data: (.+)$'){$text=$Matches[1]}
+            $reply=$text|ConvertFrom-Json
+            if($reply.id -ne 2 -or $reply.PSObject.Properties['error']){throw 'DAILY_STORE_DIAGNOSTICS_UNAVAILABLE'}
+            $payload=$reply.result.structuredContent
+            $store=$payload.reviewStore
+            if($store.startup.status -cne 'OPEN' -or $store.current.lifecycle -cne 'OPEN' -or
+                $store.current.presence -cne 'PRESENT' -or $store.current.owner -cne 'THIS_INSTANCE'){throw 'DAILY_REVIEW_STORE_NOT_READY'}
+        }
+        if($session){
+            $response.Dispose();$response=$null
+            $closeAttempted=$true
             $response=$client.DeleteAsync($url).GetAwaiter().GetResult()
             if([int]$response.StatusCode -notin @(200,204)){throw 'DAILY_MCP_SESSION_CLOSE_FAILED'}
         }
+        if($RequireReviewStore){return $store}
     } catch {
         $code=[string]$_.Exception.Message
         if($code -cmatch '^DAILY_[A-Z_]+$'){throw $code};throw 'DAILY_MCP_CHECK_FAILED'
-    } finally {if($response){$response.Dispose()};if($client){$client.Dispose()}elseif($handler){$handler.Dispose()}}
+    } finally {
+        if($response){$response.Dispose()}
+        # A failed store verification still closes the session created by this
+        # probe. Preserve the original failure; never retry a failed close.
+        if($client -and $session -and -not $closeAttempted){
+            try {$cleanup=$client.DeleteAsync($url).GetAwaiter().GetResult();$cleanup.Dispose()}catch{}
+        }
+        if($client){$client.Dispose()}elseif($handler){$handler.Dispose()}
+    }
 }

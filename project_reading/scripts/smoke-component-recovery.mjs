@@ -17,10 +17,11 @@ try {
   }));
   const { tools } = await client.listTools();
   const info = await client.callTool({ name: "workspace_info", arguments: {} });
-  assert.equal(info.structuredContent.toolContractVersion, "2026-10-14.1");
-  assert.equal(tools.length, 35);
+  assert.equal(info.structuredContent.toolContractVersion, "2026-10-28.1");
+  assert.equal(tools.length, 41);
   assert.deepEqual(tools.filter((tool) => tool.name.startsWith("mcp_component_")).map((tool) => tool.name),
-    ["mcp_component_status", "mcp_component_preview", "mcp_component_receipt", "mcp_component_restart"]);
+    ["mcp_component_status", "mcp_component_preview", "mcp_component_receipt", "mcp_component_restart",
+      "mcp_component_update_status", "mcp_component_update_preview", "mcp_component_update", "mcp_component_update_receipt", "mcp_component_diagnostics"]);
   const status = await client.callTool({ name: "mcp_component_status", arguments: {} });
   assert.equal(status.isError, false);
   assert.ok(["CONNECTED", "NOT_CONNECTED"].includes(status.structuredContent.authority.connection));

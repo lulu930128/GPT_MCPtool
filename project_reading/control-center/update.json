@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "componentId": "project_reading",
+  "owner": "component_controller",
+  "entrypoint": "scripts/update-from-source.ps1",
+  "sourcePaths": ["src", "scripts", "tests", "control-center", "package.json", "package-lock.json", "tsconfig.json"]
+}

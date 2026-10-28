@@ -36,22 +36,33 @@ function New-Case([string]$Name,[switch]$StageOnly) {
         Write-DailyNew (Join-Path $r 'adoption.json') @{settingsSha256=(Get-DailyDigest (Join-Path $r 'settings.json'))}
         Set-DailySelector $r v1
         $script:Calls=New-Object 'Collections.Generic.List[string]'
-        $script:Scenario='normal'
+        $script:Scenario='normal';$script:Running='v1'
         function script:Read-DailySettingsForVersion {param($Root,$Version) return @{fixture=$true}}
         function script:Invoke-DailyOwner {
             param($Root,$Version,$Action)
             $script:Calls.Add($Version+':'+$Action)
+            if($Action -eq 'Observe'){
+                $state=if(-not $script:Running){'Stopped'}elseif($script:Scenario -eq 'foreign'){'OwnershipMismatch'}else{'OwnedReady'}
+                return @{version=$Version;coreReady=($script:Running -ceq $Version -and $script:Scenario -notin @('unhealthy','foreign','unknown'));roles=@{server=@{state=$state;canMutate=($state -ne 'OwnershipMismatch')}}}
+            }
             if($script:Scenario -eq 'foreign' -and $Action -eq 'Stop'){throw 'OWNERSHIP_MISMATCH'}
             if($script:Scenario -eq 'active' -and $Action -eq 'Stop'){throw 'ACTIVE_WORK_PRESENT'}
             if($script:Scenario -eq 'lock' -and $Action -eq 'Stopped'){throw 'DAILY_STATE_LOCK_PRESENT'}
             if($script:Scenario -eq 'unknown' -and $Action -eq 'Stop'){throw 'COOPERATIVE_SHUTDOWN_UNKNOWN'}
-            if($script:Scenario -eq 'fail' -and $Version -eq 'v2' -and $Action -eq 'Ready'){throw 'DAILY_READINESS_FAILED'}
+            if($script:Scenario -eq 'fail' -and $Version -eq 'v2' -and $Action -eq 'Verify'){throw 'DAILY_READINESS_FAILED'}
+            if($Action -eq 'Stop'){$script:Running=''}
+            if($Action -eq 'Start'){$script:Running=$Version}
+            if($Action -eq 'RecoverStopped'){return @{phase='STOPPED'}}
+            if($Action -eq 'Verify'){return @{version=$Version;buildId=$Version}}
         }
     } $runtime
     return @{root=$runtime;source=$source}
 }
 try {
     $stageCase=New-Case stage -StageOnly
+    Put (Join-Path $stageCase.source 'codex_bridge/control-center/update.json') '{"schemaVersion":1,"owner":"daily_code"}'
+    $null=New-McpDailyCandidate -Root $stageCase.root -Source $stageCase.source -Version source-sidecar
+    Check (-not(Test-Path -LiteralPath (Join-Path $stageCase.root 'versions/source-sidecar/codex_bridge/control-center/update.json'))) 'source admission sidecar never alters packaged runtime descriptor contract'
     $manifest=& $module {param($r) Test-DailyVersion $r v1} $stageCase.root
     $inbox=Join-Path $stageCase.root 'versions/v1/codex_bridge/.tmp/codex-inbox'
     [void][IO.Directory]::CreateDirectory($inbox)
@@ -70,7 +81,7 @@ try {
     [IO.File]::WriteAllBytes($codeFile,$codeBefore)
     $expected=@(Get-ChildItem -LiteralPath $stageCase.source -File -Recurse -Force |
         ForEach-Object {$_.FullName.Substring($stageCase.source.Length+1).Replace('\','/')} |
-        Where-Object {$_ -like 'codex_bridge/*' -and $_ -notmatch '^codex_bridge/(\.env|\.local)(/|$)'} | Sort-Object)
+        Where-Object {$_ -like 'codex_bridge/*' -and $_ -notmatch '^codex_bridge/(\.env|\.local)(/|$)' -and $_ -cne 'codex_bridge/control-center/update.json'} | Sort-Object)
     $expected=@($expected)+@('codex_bridge/scripts/shared-native/NormalOperator.Native.cs','codex_bridge/scripts/shared-native/RemoteSelfReload.Native.cs')
     Check ((@($expected | Sort-Object) -join "`n") -ceq (@($manifest.files.path) -join "`n")) 'Stage retains Bridge and explicit native dependencies without another Control Center'
     foreach($name in @('NormalOperator.Native.cs','RemoteSelfReload.Native.cs')){
@@ -129,7 +140,7 @@ try {
         (Get-FileHash -LiteralPath (Join-Path $case.source 'codex_bridge\daily-code-contract.json')).Hash) 'contract copied byte-for-byte by real Stage'
     Denied {New-McpDailyCandidate -Root $case.root -Source $case.source -Version v1} 'VERSION_EXISTS'
     $result=Invoke-McpDailyUpdate -Root $case.root -Version v2 -CodeOnly
-    Check ($result.phase -eq 'ACCEPTED') 'normal deployment'
+    Check ($result.phase -eq 'ACCEPTED') ('normal deployment: '+($result|ConvertTo-Json -Compress -Depth 5))
     Check ((Get-McpDailyStatus $case.root).version -eq 'v2') 'selector changed'
     Check (Test-Path -LiteralPath (Join-Path $case.root 'versions\v1\daily-release.json')) 'old version retained'
     Check ((Invoke-McpDailyUpdate -Root $case.root -Version v2 -CodeOnly).phase -eq 'ALREADY_SELECTED') 'idempotent selected'
@@ -147,29 +158,30 @@ try {
         $case=New-Case $scenario
         & $module {param($s) $script:Scenario=$s} $scenario
         $pattern=@{foreign='OWNERSHIP_MISMATCH';active='ACTIVE_WORK_PRESENT';unknown='UNKNOWN';lock='DAILY_STATE_LOCK_PRESENT'}[$scenario]
-        Denied {Invoke-McpDailyUpdate -Root $case.root -Version v2 -CodeOnly} $pattern
+        $failed=Invoke-McpDailyUpdate -Root $case.root -Version v2 -CodeOnly
+        Check ($failed.phase -in @('REJECTED','RECOVERY_REQUIRED') -and $failed.code -match $pattern) ($scenario+' structured failure')
         Check ((Get-McpDailyStatus $case.root).version -eq 'v1') ($scenario+' selector preserved')
         $calls=@(& $module {$script:Calls.ToArray()})
         Check ($calls -notcontains 'v2:Start') ($scenario+' no new start')
         if($scenario -in @('unknown','lock')) {
-            $count=$calls.Count
-            Denied {Invoke-McpDailyUpdate -Root $case.root -Version v2 -CodeOnly} 'INTERRUPTED_UNKNOWN'
-            Check ((@(& $module {$script:Calls.ToArray()})).Count -eq $count) 'unknown not replayed'
+            $again=Invoke-McpDailyUpdate -Root $case.root -Version v2 -CodeOnly
+            Check ($again.operationId -ceq $failed.operationId -and $again.phase -eq 'RECOVERY_REQUIRED') 'uncertain operation reobserved under same identity'
+            Check ((@(& $module {$script:Calls.ToArray()})) -notcontains 'v2:Start') 'unresolved ownership or lock never starts target'
         }
     }
     $case=New-Case rollback
     & $module {$script:Scenario='fail'}
-    Denied {Invoke-McpDailyUpdate -Root $case.root -Version v2 -CodeOnly} 'FAILED_ROLLED_BACK'
+    Check ((Invoke-McpDailyUpdate -Root $case.root -Version v2 -CodeOnly).phase -eq 'ROLLED_BACK') 'failed target rolls back with a terminal result'
     Check ((Get-McpDailyStatus $case.root).version -eq 'v1') 'rollback restores selector'
     $calls=@(& $module {$script:Calls.ToArray()})
-    Check (($calls -contains 'v2:Stop') -and ($calls -contains 'v1:Start') -and ($calls -contains 'v1:Ready')) 'rollback stops new and verifies old'
+    Check (($calls -contains 'v2:Stop') -and ($calls -contains 'v1:Start') -and ($calls -contains 'v1:Verify')) 'rollback stops new and verifies old'
     Check (@($calls|Where-Object {$_ -match 'Tray'}).Count -eq 0) 'Bridge rollback leaves CC untouched'
     $terminal=Get-ChildItem -LiteralPath (Join-Path $case.root 'operations') -Filter terminal.json -Recurse | Get-Content -Raw | ConvertFrom-Json
     Check ($terminal.phase -eq 'ROLLED_BACK' -and $terminal.code -eq 'DAILY_READINESS_FAILED') 'original error retained'
 
     $case=New-Case interrupted
     [void][IO.Directory]::CreateDirectory((Join-Path $case.root 'operations\interrupted'))
-    Denied {Invoke-McpDailyUpdate -Root $case.root -Version v2 -CodeOnly} 'INTERRUPTED_UNKNOWN'
+    Denied {Invoke-McpDailyUpdate -Root $case.root -Version v2 -CodeOnly} 'DAILY_OPERATION_INVALID'
     Check ((@(& $module {$script:Calls.ToArray()})).Count -eq 0) 'interruption has no lifecycle calls'
 
     $case=New-Case config
@@ -244,22 +256,21 @@ try {
         param($body)
         $script:order=New-Object 'Collections.Generic.List[string]'
         function New-McpDailyCandidate {param($Root,$Source,$Version) $script:order.Add('Stage');return @{phase='STAGED'}}
-        function Invoke-McpDailyUpdate {param($Root,$Version,[switch]$CodeOnly) $script:order.Add('Update');return @{phase='ACCEPTED'}}
-        $root='fixture';$CandidateRoot='source';$Version='v1';$CodeOnly=$true
+        function Invoke-McpDailyUpdate {param($Root,$Version,[switch]$CodeOnly,$CandidateRoot,$OperationId,$SourceDigest) if($OperationId -cne ('1'*32) -or $SourceDigest -cne ('2'*64)){throw 'CLI_CORRELATION_LOST'};$script:order.Add('Update:'+ $CandidateRoot);return @{phase='ACCEPTED'}}
+        $root='fixture';$CandidateRoot='source';$Version='v1';$CodeOnly=$true;$OperationId='1'*32;$SourceDigest='2'*64
         & $body | Out-Null
         return ($script:order -join ',')
     } $update
-    Check ($cli -ceq 'Stage,Update') 'actual CLI one-command Stage then Update'
+    Check ($cli -ceq 'Update:source') 'actual CLI delegates CandidateRoot to one serialized Build/Stage/Update transaction'
     $cli=& {
         param($body)
         $script:updated=$false
         function New-McpDailyCandidate {param($Root,$Source,$Version) throw 'DAILY_VERSION_EXISTS'}
-        function Invoke-McpDailyUpdate {param($Root,$Version,[switch]$CodeOnly) $script:updated=$true}
-        $root='fixture';$CandidateRoot='source';$Version='v1';$CodeOnly=$true
-        try {& $body|Out-Null}catch{}
-        return $script:updated
+        function Invoke-McpDailyUpdate {param($Root,$Version,[switch]$CodeOnly,$CandidateRoot,$OperationId,$SourceDigest) throw 'DAILY_BUILD_FAILED'}
+        $root='fixture';$CandidateRoot='source';$Version='v1';$CodeOnly=$true;$OperationId='1'*32;$SourceDigest='2'*64
+        try {& $body|Out-Null}catch{return $_.Exception.Message}
     } $update
-    Check (-not $cli) 'Stage rejection cannot reach Update'
+    Check ($cli -ceq 'DAILY_BUILD_FAILED') 'Build failure from transaction propagates through CLI'
     [pscustomobject]@{ok=$true;passed=$passed;live=$false;processesChanged=$false;startupChanged=$false;aclChanged=$false}|ConvertTo-Json
 } finally {
     $resolved=[IO.Path]::GetFullPath($fixture)

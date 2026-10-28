@@ -258,7 +258,7 @@ public static class McpCcNormalHost {
                     WriteLine(output,message);
                     var response=Decode(ReadLine(input));channel.Send(Encode(response));
                 }
-            },bridge);
+            },bridge,true);
         }
     }
 }

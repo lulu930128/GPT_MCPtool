@@ -34,6 +34,7 @@ namespace McpCc.WorkspaceLocal {
                 !Regex.IsMatch(json,@"\A\s*\{\s*""[A-Za-z]+""\s*:\s*""[a-zA-Z0-9_-]*""(?:\s*,\s*""[A-Za-z]+""\s*:\s*""[a-zA-Z0-9_-]*"")*\s*\}\s*\z")) throw new InvalidOperationException("INVALID_REQUEST");
             var result=new Dictionary<string,string>(StringComparer.Ordinal);
             foreach(Match m in Regex.Matches(json,@"""([A-Za-z]+)""\s*:\s*""([a-zA-Z0-9_-]*)""")) result.Add(m.Groups[1].Value,m.Groups[2].Value);
+            if(result.ContainsKey("v") && result["v"]=="2") return UpdateContract.Request(result,challenge);
             string[] keys={"v","nonce","challenge","operation","componentId","action","requestId","confirmation"};
             if(result.Count!=keys.Length) throw new InvalidOperationException("INVALID_REQUEST");
             foreach(string key in keys) if(!result.ContainsKey(key)) throw new InvalidOperationException("INVALID_REQUEST");
@@ -150,6 +151,7 @@ namespace McpCc.WorkspaceLocal {
         [StructLayout(LayoutKind.Sequential)] internal struct SecurityAttributes { public int length; public IntPtr descriptor; [MarshalAs(UnmanagedType.Bool)] public bool inherit; }
         [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] internal static extern SafePipeHandle CreateNamedPipe(string name,uint mode,uint pipeMode,uint instances,uint output,uint input,uint timeout,ref SecurityAttributes security);
         [DllImport("kernel32.dll",SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)] internal static extern bool CancelIoEx(SafePipeHandle pipe,IntPtr overlapped);
+        [DllImport("kernel32.dll",SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)] internal static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe,out uint processId);
     }
 
     internal static class Frame {
@@ -199,6 +201,26 @@ namespace McpCc.WorkspaceLocal {
         public string outcome {get;set;}
         public string createdAt {get;set;}
         public string updatedAt {get;set;}
+    }
+    public static class OwnerProbe {
+        // Read-only local handshake bound to the exact selected tray instance.
+        // An Exit event alone does not prove that its Workspace listener opened.
+        public static bool Status(int expectedPid,long expectedTicks) {
+            using(var owner=Process.GetProcessById(expectedPid))
+            using(var client=new NamedPipeClientStream(".",Contract.PipeName,PipeDirection.InOut,PipeOptions.Asynchronous)) {
+                IntPtr retained=owner.Handle;
+                if(owner.HasExited || owner.StartTime.ToUniversalTime().Ticks!=expectedTicks) return false;
+                client.Connect(Contract.DeadlineMs);uint actual;
+                if(!Native.GetNamedPipeServerProcessId(client.SafePipeHandle,out actual) || actual!=(uint)expectedPid) return false;
+                var clock=Stopwatch.StartNew();string challenge=Frame.Read(client,clock),nonce=Contract.Nonce();
+                var request=new Dictionary<string,string>{{"v","1"},{"nonce",nonce},{"challenge",challenge},{"operation","status"},{"componentId",""},{"action",""},{"requestId",""},{"confirmation",""}};
+                Contract.Request(Contract.Json().Serialize(request),challenge);
+                Frame.Write(client,Contract.Json().Serialize(request),clock);
+                var result=Contract.Json().Deserialize<Dictionary<string,object>>(Frame.Read(client,clock));
+                if(!Native.GetNamedPipeServerProcessId(client.SafePipeHandle,out actual) || actual!=(uint)expectedPid || owner.HasExited) return false;
+                return result!=null && Convert.ToString(result["v"])=="1" && Convert.ToString(result["nonce"])==nonce && Convert.ToString(result["operation"])=="status" && Convert.ToString(result["code"])=="OWNER_OBSERVATION";
+            }
+        }
     }
     // Private CC evidence, deliberately separate from the frozen IPC Receipt DTO.
     public sealed class RefusalDiagnostic {
@@ -273,6 +295,148 @@ namespace McpCc.WorkspaceLocal {
         }
     }
 
+    public static class UpdateContract {
+        public static readonly string[] Ids={"codex_bridge","omi_search","japanese_study","memory_core","personal_asset_os","english_study","listening_audio","project_reading","mcp_control_center"};
+        public static bool Supported(string id) { return Contract.Has(Ids,id); }
+        public static bool Digest(string value) { return value!=null && Regex.IsMatch(value,"\\A[0-9a-f]{64}\\z"); }
+        public static Dictionary<string,string> Request(Dictionary<string,string> r,string challenge) {
+            string[] keys={"v","nonce","challenge","operation","componentId","action","requestId","confirmation","versionId","expectedSourceDigest","idlePolicy"};
+            if(r.Count!=keys.Length) throw new InvalidOperationException("INVALID_REQUEST");
+            foreach(string key in keys) if(!r.ContainsKey(key)) throw new InvalidOperationException("INVALID_REQUEST");
+            if(!Digest(r["nonce"]) || r["challenge"]!=challenge || !Digest(challenge)) throw new InvalidOperationException("REPLAY_OR_VERSION_REJECTED");
+            string op=r["operation"],id=r["componentId"];
+            if(op=="update" || op=="update_preview") {
+                if(!Contract.Has(Ids,id) || r["action"]!="update_from_source" || !Regex.IsMatch(r["versionId"],"\\A[a-z0-9][a-z0-9_-]{0,47}\\z") || r["idlePolicy"]!="wait_for_idle") throw new InvalidOperationException("INVALID_REQUEST");
+                if(op=="update" ? (!Digest(r["expectedSourceDigest"]) || !Contract.IsRequestId(r["requestId"]) || r["confirmation"]!="interrupt_current_requests") : (r["requestId"]!="" || r["confirmation"]!="" || (r["expectedSourceDigest"]!="" && !Digest(r["expectedSourceDigest"])))) throw new InvalidOperationException("INVALID_REQUEST");
+            } else {
+                if(r["action"]!="" || r["confirmation"]!="" || r["versionId"]!="" || r["expectedSourceDigest"]!="" || r["idlePolicy"]!="") throw new InvalidOperationException("INVALID_REQUEST");
+                if(op=="update_receipt") { if(id!="" || !Contract.IsRequestId(r["requestId"])) throw new InvalidOperationException("INVALID_REQUEST"); }
+                else if(op=="update_status") { if((id!="" && !Contract.Has(Ids,id)) || r["requestId"]!="") throw new InvalidOperationException("INVALID_REQUEST"); }
+                else if(op=="ensure_normal_host") { if(id!="codex_bridge" || r["requestId"]!="") throw new InvalidOperationException("INVALID_REQUEST"); }
+                else throw new InvalidOperationException("INVALID_REQUEST");
+            }
+            return r;
+        }
+        public static string ParameterDigest(string component,string version,string source) {
+            string text=String.Join("\n",new[]{component,"update_from_source",version,source,"wait_for_idle","interrupt_current_requests"});
+            using(var hash=SHA256.Create()) return BitConverter.ToString(hash.ComputeHash(Encoding.UTF8.GetBytes(text))).Replace("-","").ToLowerInvariant();
+        }
+    }
+    public sealed class UpdateTarget {
+        public string componentId {get;set;}
+        public bool supported {get;set;}
+        public string owner {get;set;}
+        public string reason {get;set;}
+    }
+    public sealed class UpdateReceipt {
+        public string requestId {get;set;}
+        public string componentId {get;set;}
+        public string action {get;set;}
+        public string versionId {get;set;}
+        public string expectedSourceDigest {get;set;}
+        public string idlePolicy {get;set;}
+        public string parameterDigest {get;set;}
+        public string operationId {get;set;}
+        public string phase {get;set;}
+        public string code {get;set;}
+        public string createdAt {get;set;}
+        public string updatedAt {get;set;}
+        public string selectedVersion {get;set;}
+        public string observedVersion {get;set;}
+        public string observedBuildId {get;set;}
+        public string preparedBuildId {get;set;}
+        public string blockedByOperationId {get;set;}
+        public bool? ready {get;set;}
+    }
+    // Admission/correlation metadata only. Component owners keep their own
+    // canonical operation journal; this store never claims execution authority.
+    public sealed class UpdateStore {
+        readonly string root;
+        public UpdateStore(string runtimeRoot) { root=Path.Combine(Path.GetFullPath(runtimeRoot),"workspace-update-requests"); }
+        sealed class Lease : IDisposable {
+            readonly Mutex mutex;
+            public Lease(string key) {
+                mutex=new Mutex(false,key);bool held=false;
+                try { try { held=mutex.WaitOne(3000); } catch(AbandonedMutexException) { held=true; }
+                    if(!held) throw new InvalidOperationException("RECEIPT_BUSY");
+                } catch { mutex.Dispose();throw; }
+            }
+            public void Dispose(){mutex.ReleaseMutex();mutex.Dispose();}
+        }
+        IDisposable Lock(string id) {
+            string key=PathFor(id).ToUpperInvariant();
+            using(var hash=SHA256.Create()) key=BitConverter.ToString(hash.ComputeHash(Encoding.UTF8.GetBytes(key))).Replace("-","");
+            return new Lease(@"Local\McpCc.UpdateReceipt."+key);
+        }
+        string PathFor(string id) {
+            if(!Contract.IsRequestId(id)) throw new InvalidOperationException("INVALID_REQUEST");
+            for(string p=root;!String.IsNullOrEmpty(p);p=Path.GetDirectoryName(p)) if(Directory.Exists(p) && (File.GetAttributes(p)&FileAttributes.ReparsePoint)!=0) throw new InvalidOperationException("RECEIPT_UNAVAILABLE");
+            return Path.Combine(root,id.ToLowerInvariant()+".json");
+        }
+        public UpdateReceipt Read(string id) {
+            string path=PathFor(id);if(!File.Exists(path)) return null;
+            if((File.GetAttributes(path)&FileAttributes.ReparsePoint)!=0) throw new InvalidOperationException("RECEIPT_UNAVAILABLE");
+            UpdateReceipt r;
+            using(var file=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.Read|FileShare.Delete)) {
+                if(file.Length>8192) throw new InvalidOperationException("RECEIPT_UNAVAILABLE");
+                using(var reader=new StreamReader(file,new UTF8Encoding(false,true))) r=Contract.Json().Deserialize<UpdateReceipt>(reader.ReadToEnd());
+            }
+            if(r==null || r.requestId!=id.ToLowerInvariant() || !Contract.Has(UpdateContract.Ids,r.componentId) || r.action!="update_from_source" || r.idlePolicy!="wait_for_idle" ||
+                !UpdateContract.Digest(r.expectedSourceDigest) || r.parameterDigest!=UpdateContract.ParameterDigest(r.componentId,r.versionId,r.expectedSourceDigest) || r.operationId!=r.requestId.Replace("-","") ||
+                !Contract.Has(new[]{"QUEUED","RUNNING","ACCEPTED","REJECTED","RECOVERY_REQUIRED"},r.phase)) throw new InvalidOperationException("RECEIPT_UNAVAILABLE");
+            return r;
+        }
+        public UpdateReceipt[] Pending() {
+            var rows=new List<UpdateReceipt>();if(!Directory.Exists(root)) return rows.ToArray();
+            PathFor(Guid.Empty.ToString());int count=0;
+            foreach(string path in Directory.GetFiles(root,"*.json")) {
+                if(++count>256) throw new InvalidOperationException("RECEIPT_CAPACITY");
+                var r=Read(Path.GetFileNameWithoutExtension(path));if(r.phase=="QUEUED" || r.phase=="RUNNING") rows.Add(r);
+            }
+            return rows.ToArray();
+        }
+        public UpdateReceipt Reserve(Dictionary<string,string> request) {
+            string id=request["requestId"].ToLowerInvariant(),path=PathFor(id);Directory.CreateDirectory(root);
+            if(Directory.GetFiles(root,"*.json").Length>=256) throw new InvalidOperationException("RECEIPT_CAPACITY");
+            string now=DateTimeOffset.UtcNow.ToString("o");
+            var r=new UpdateReceipt{requestId=id,componentId=request["componentId"],action="update_from_source",versionId=request["versionId"],expectedSourceDigest=request["expectedSourceDigest"],idlePolicy="wait_for_idle",
+                parameterDigest=UpdateContract.ParameterDigest(request["componentId"],request["versionId"],request["expectedSourceDigest"]),operationId=id.Replace("-",""),phase="QUEUED",code="UPDATE_QUEUED",createdAt=now,updatedAt=now};
+            Save(r,true);return r;
+        }
+        void Save(UpdateReceipt r,bool create) {
+            string path=PathFor(r.requestId);Directory.CreateDirectory(root);
+            string tmp=Path.Combine(root,".pending-"+Guid.NewGuid().ToString("N"));
+            byte[] bytes=Encoding.UTF8.GetBytes(Contract.Json().Serialize(r));
+            using(var stream=new FileStream(tmp,FileMode.CreateNew,FileAccess.Write,FileShare.None)){stream.Write(bytes,0,bytes.Length);stream.Flush(true);}
+            if(create) File.Move(tmp,path);
+            else {
+                // Retain each prior receipt as immutable admission evidence.
+                string history=Path.Combine(root,"history");Directory.CreateDirectory(history);
+                if((File.GetAttributes(history)&FileAttributes.ReparsePoint)!=0) throw new InvalidOperationException("RECEIPT_UNAVAILABLE");
+                File.Replace(tmp,path,Path.Combine(history,r.requestId+"-"+Guid.NewGuid().ToString("N")+".json"));
+            }
+        }
+        public void Complete(string id,string phase,string code,string selected,string observed,string build,bool? ready,string prepared) {
+            using(Lock(id)) {
+            // PowerShell binds $null to String.Empty for this string argument.
+            if(String.IsNullOrEmpty(prepared)) prepared=null;
+            if(String.IsNullOrEmpty(selected)) selected=null;
+            if(String.IsNullOrEmpty(observed)) observed=null;
+            if(String.IsNullOrEmpty(build)) build=null;
+            var r=Read(id);if(r==null || !Contract.Has(new[]{"QUEUED","RUNNING","ACCEPTED","REJECTED","RECOVERY_REQUIRED"},phase) || !Regex.IsMatch(code,"\\A[A-Z][A-Z0-9_]{0,95}\\z")) throw new InvalidOperationException("INVALID_OUTCOME");
+            // Independent bootstrap and the tray can settle the same request.
+            // A late worker can never regress or replace a terminal receipt.
+            if(r.phase=="ACCEPTED" || r.phase=="REJECTED") return;
+            if(prepared!=null && r.preparedBuildId!=null && prepared!=r.preparedBuildId) throw new InvalidOperationException("PREPARED_IDENTITY_CONFLICT");
+            r.phase=phase;r.code=code;r.selectedVersion=selected;r.observedVersion=observed;r.observedBuildId=build;if(prepared!=null) r.preparedBuildId=prepared;if(phase=="ACCEPTED") r.blockedByOperationId=null;r.ready=ready;r.updatedAt=DateTimeOffset.UtcNow.ToString("o");Save(r,false);
+            }
+        }
+        public void BlockedBy(string id,string operation) {
+            if(!Regex.IsMatch(operation,"\\A[0-9a-f]{32}\\z")) throw new InvalidOperationException("INVALID_OPERATION");
+            using(Lock(id)) {var r=Read(id);if(r.phase=="ACCEPTED" || r.phase=="REJECTED") return;r.blockedByOperationId=operation;Save(r,false);}
+        }
+    }
+
     // No installed release, human identity ceremony or lifecycle implementation.
     // Only the existing tray composition opens the production name, after its mutex.
     public sealed class Owner : IDisposable {
@@ -283,12 +447,22 @@ namespace McpCc.WorkspaceLocal {
         volatile bool stopped;
         bool closing;
         readonly ReceiptStore receipts;
+        readonly UpdateStore updates;
+        readonly Queue<string> updateQueue=new Queue<string>();
+        readonly Dictionary<string,string> sourceDigests=new Dictionary<string,string>();
+        string activeUpdate;
+        bool normalRecovery;
         RestartRequest pending;
         string activeRequest;
         long acceptedTicks;
         public static Owner Open(string runtimeRoot) { return new Owner(Contract.PipeName, runtimeRoot); }
         internal Owner(string name, string runtimeRoot) {
             receipts=new ReceiptStore(runtimeRoot);
+            updates=new UpdateStore(runtimeRoot);
+            foreach(var r in updates.Pending()) {
+                if(r.phase=="QUEUED") updateQueue.Enqueue(r.requestId);
+                else updates.Complete(r.requestId,"RECOVERY_REQUIRED","OWNER_RESTARTED",r.selectedVersion,r.observedVersion,r.observedBuildId,null,r.preparedBuildId);
+            }
             using(var identity=WindowsIdentity.GetCurrent()) {
                 var security=new RawSecurityDescriptor("O:"+identity.User.Value+"D:P(A;;0x0012019f;;;"+identity.User.Value+")");
                 byte[] bytes=new byte[security.BinaryLength];security.GetBinaryForm(bytes,0);
@@ -308,9 +482,8 @@ namespace McpCc.WorkspaceLocal {
         public RestartRequest TakePending() { return TakePending(Stopwatch.GetTimestamp()); }
         internal RestartRequest TakePending(long now) {
             lock(sync) {
-                if(pending!=null && (now-acceptedTicks)/(double)Stopwatch.Frequency>30) {
-                    pending=null;activeRequest=null;return null;
-                }
+                // A busy status worker is not permission to discard accepted work.
+                // The durable v1 UNKNOWN remains recoverable after owner restart.
                 var value=pending;pending=null;return value;
             }
         }
@@ -324,10 +497,35 @@ namespace McpCc.WorkspaceLocal {
                 finally { activeRequest=null; }
             }
         }
-        public bool HasActiveRequest { get { lock(sync) return activeRequest!=null; } }
+        public bool HasActiveRequest { get { lock(sync) return activeRequest!=null || activeUpdate!=null; } }
+        public void PublishSourceDigest(string id,string digest) { lock(sync) {if(!UpdateContract.Supported(id) || (digest!=null && !UpdateContract.Digest(digest))) throw new InvalidOperationException("INVALID_SOURCE_DIGEST");sourceDigests[id]=digest;} }
+        public bool TakeNormalRecovery() { lock(sync) {bool value=normalRecovery;normalRecovery=false;return value;} }
+        public UpdateReceipt TakePendingUpdate() {
+            lock(sync) {
+                if(closing || activeRequest!=null || activeUpdate!=null || updateQueue.Count==0) return null;
+                UpdateReceipt r=null;string id=null;
+                while(updateQueue.Count>0){
+                    id=updateQueue.Dequeue();r=updates.Read(id);
+                    if(r!=null && (r.phase=="QUEUED" || r.phase=="RECOVERY_REQUIRED" || (r.phase=="RUNNING" && r.componentId=="mcp_control_center" && r.preparedBuildId!=null))) break;
+                    r=null;
+                }
+                if(r==null) return null;
+                activeUpdate=id;
+                // QUEUED is durable and never expires. RUNNING is written before
+                // dispatch. Recovery retains its original uncertain boundary.
+                if(r.phase=="QUEUED") updates.Complete(id,"RUNNING","DISPATCHING",null,null,null,null,null);
+                return r;
+            }
+        }
+        public void CompleteUpdate(string id,string phase,string code,string selected,string observed,string build,bool? ready,string prepared) {
+            lock(sync) {try{updates.Complete(id,phase,code,selected,observed,build,ready,prepared);}finally{activeUpdate=null;} if(phase=="QUEUED" && !updateQueue.Contains(id)) updateQueue.Enqueue(id);}
+        }
+        public void ReleaseUpdate(string id) { lock(sync) {if(activeUpdate!=id) throw new InvalidOperationException("ACTIVE_REQUEST_REQUIRED");activeUpdate=null;} }
+        public UpdateReceipt ReadUpdate(string id) {lock(sync) return updates.Read(id);}
+        public void SetUpdateBlocker(string id,string operation) {lock(sync) updates.BlockedBy(id,operation);}
         public bool TryBeginShutdown() {
             lock(sync) {
-                closing=true;return activeRequest==null;
+                closing=true;return activeRequest==null && activeUpdate==null;
             }
         }
         internal string Dispatch(Dictionary<string,string> request) {
@@ -342,7 +540,7 @@ namespace McpCc.WorkspaceLocal {
                         if(code=="REQUEST_CONFLICT") receipt=null;
                     }
                     else if(closing) { code="OWNER_CLOSING"; }
-                    else if(activeRequest!=null) { code="ACTION_BUSY"; }
+                    else if(activeRequest!=null || activeUpdate!=null) { code="ACTION_BUSY"; }
                     else {
                         // Persist UNKNOWN before making work visible to the tray. Crash or
                         // timeout never authorizes re-enqueue with the same requestId.
@@ -367,6 +565,40 @@ namespace McpCc.WorkspaceLocal {
                     components=new Row[0],supported=(object)null,mutationEnabled=true,allowed=false,executable=false,found=(object)null,completed=(object)null,receipt=(object)null});
             }
         }
+        internal string DispatchUpdate(Dictionary<string,string> r) {
+            lock(sync) {
+                string op=r["operation"],id=r["componentId"],code="OWNER_OBSERVATION",digest=null;
+                UpdateReceipt receipt=null;var targets=new List<UpdateTarget>();
+                if(op=="ensure_normal_host") {if(!closing) normalRecovery=true;code=closing ? "OWNER_CLOSING" : "NORMAL_HOST_RECOVERY_QUEUED";}
+                else if(op=="update_status" || op=="update_preview") {
+                    foreach(string target in UpdateContract.Ids) if(id=="" || id==target) {
+                        string pin;bool available=sourceDigests.TryGetValue(target,out pin) && pin!=null;
+                        targets.Add(new UpdateTarget{componentId=target,supported=available,owner=available ? (target=="codex_bridge" ? "daily_code" : target=="mcp_control_center" ? "independent_bootstrap" : "component_controller") : null,reason=available ? null : "SOURCE_NOT_OBSERVED"});
+                    }
+                    if(op=="update_preview") { sourceDigests.TryGetValue(id,out digest);code=digest==null ? "SOURCE_NOT_OBSERVED" : "SOURCE_OBSERVED"; }
+                } else {
+                    receipt=updates.Read(r["requestId"]);
+                    if(op=="update_receipt") code=receipt==null ? "RECEIPT_NOT_FOUND" : "RECEIPT_OBSERVED";
+                    else if(receipt!=null) {
+                        code=receipt.parameterDigest==UpdateContract.ParameterDigest(id,r["versionId"],r["expectedSourceDigest"]) ? "REQUEST_REPLAY" : "REQUEST_CONFLICT";
+                        if(code=="REQUEST_CONFLICT") receipt=null;
+                        else if((receipt.phase=="RECOVERY_REQUIRED" || (receipt.phase=="RUNNING" && id=="mcp_control_center" && receipt.preparedBuildId!=null)) && !closing && activeUpdate!=receipt.requestId && !updateQueue.Contains(receipt.requestId)) updateQueue.Enqueue(receipt.requestId);
+                    } else if(closing) code="OWNER_CLOSING";
+                    else {
+                        // Reserve correlation before dispatch, including requests
+                        // that later fail source/owner admission. No lost timeout.
+                        receipt=updates.Reserve(r);updateQueue.Enqueue(receipt.requestId);code="UPDATE_QUEUED";
+                    }
+                }
+                return Contract.Json().Serialize(new{v="2",nonce=r["nonce"],operation=op,componentId=id,action=r["action"],requestId=r["requestId"],code=code,targets=targets.ToArray(),sourceDigest=digest,receipt=receipt,mutationEnabled=op=="update" || op=="update_receipt" || op=="ensure_normal_host"});
+            }
+        }
+        string SafeUpdateDispatch(Dictionary<string,string> request) {
+            try{return DispatchUpdate(request);}catch(Exception e){
+                string code=e.Message=="RECEIPT_CAPACITY" ? "RECEIPT_CAPACITY" : "RECEIPT_UNAVAILABLE";
+                return Contract.Json().Serialize(new{v="2",nonce=request["nonce"],operation=request["operation"],componentId=request["componentId"],action=request["action"],requestId=request["requestId"],code=code,targets=new UpdateTarget[0],sourceDigest=(string)null,receipt=(UpdateReceipt)null,mutationEnabled=true});
+            }
+        }
         void Loop() {
             try {
                 while(!stopped) {
@@ -376,7 +608,7 @@ namespace McpCc.WorkspaceLocal {
                         string challenge=Contract.Nonce();Frame.Write(pipe,challenge,clock);
                         var request=Contract.Request(Frame.Read(pipe,clock),challenge);
                         Snapshot sample;lock(sync) sample=snapshot;
-                        string reply=(request["operation"]=="restart" || request["operation"]=="receipt") ? SafeDispatch(request) : sample==null && request["operation"]=="diagnostics" ? Snapshot.DiagnosticsReply(request,null,"SNAPSHOT_UNAVAILABLE",null) : sample==null ? Contract.Json().Serialize(new {
+                        string reply=request["v"]=="2" ? SafeUpdateDispatch(request) : (request["operation"]=="restart" || request["operation"]=="receipt") ? SafeDispatch(request) : sample==null && request["operation"]=="diagnostics" ? Snapshot.DiagnosticsReply(request,null,"SNAPSHOT_UNAVAILABLE",null) : sample==null ? Contract.Json().Serialize(new {
                             v="1",nonce=request["nonce"],operation=request["operation"],componentId=request["componentId"],action=request["action"],requestId=request["requestId"],
                             code="SNAPSHOT_UNAVAILABLE",components=new Row[0],supported=(object)null,mutationEnabled=false,allowed=false,executable=false,found=(object)null,completed=(object)null,receipt=(object)null
                         }) : sample.Reply(request);

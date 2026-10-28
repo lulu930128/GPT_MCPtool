@@ -67,7 +67,7 @@ const listedTools = await rpc("tools/list", {});
 const tools = listedTools.tools;
 const registeredWrites = tools.filter((tool) => tool.annotations?.readOnlyHint === false && tool.name !== "mcp_component_restart");
 assert.ok([0, 5].includes(registeredWrites.length));
-assert.equal(tools.length, registeredWrites.length ? 43 : 37);
+assert.equal(tools.length, registeredWrites.length ? 47 : 41);
 const projectMapTool = tools.find((tool) => tool.name === "project_map");
 assert.ok(projectMapTool, "project_map is missing from tools/list");
 assert.match(projectMapTool.inputSchema.properties.maxFiles.description, /Defaults to 30/);

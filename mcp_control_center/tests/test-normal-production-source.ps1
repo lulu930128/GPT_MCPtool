@@ -83,7 +83,7 @@ $script:ownerAttempts=0;$script:listenerDisposals=0
 $script:ownerCancellation=New-Object Threading.CancellationTokenSource
 function Open-McpCcNormalInstalledContext {
     $peer=[pscustomobject]@{};$peer | Add-Member ScriptMethod Dispose { }
-    [pscustomobject]@{peer=$peer;sessionCheckedAt=$null;channel=[guid]::NewGuid();release=[pscustomobject]@{state=[pscustomobject]@{operatorSid='inert-test'}}}
+    [pscustomobject]@{mode='installed';operatorSid='inert-test';peer=$peer;sessionCheckedAt=$null;channel=[guid]::NewGuid();release=[pscustomobject]@{state=[pscustomobject]@{operatorSid='inert-test'}}}
 }
 function Assert-McpCcNormalClosure { }
 function Get-NormalOperatorFailure { throw 'UNEXPECTED_OWNER_LOOP_FAILURE' }
@@ -117,7 +117,7 @@ function Assert-McpCcProtectedCodePath { $script:aclChecks++;if($script:rejectAc
 function Get-FileHash { [pscustomobject]@{Hash=$script:fakeHash} }
 $peer=[pscustomobject]@{checks=0;dead=$false}
 $peer | Add-Member ScriptMethod Check { if($this.dead){throw 'PEER_EXITED'};$this.checks++ }
-$context=[pscustomobject]@{release=[pscustomobject]@{sourcePath='inert'};pin='pinned';peer=$peer;sessionCheckedAt=$null}
+$context=[pscustomobject]@{mode='installed';release=[pscustomobject]@{sourcePath='inert'};pin='pinned';peer=$peer;sessionCheckedAt=$null}
 Assert-McpCcNormalClosure $context
 $context.sessionCheckedAt=[Diagnostics.Stopwatch]::GetTimestamp()
 Assert-McpCcNormalSession $context

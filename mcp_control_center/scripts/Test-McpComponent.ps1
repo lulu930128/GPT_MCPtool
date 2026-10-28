@@ -32,7 +32,7 @@ foreach ($file in @($fileChecks | Where-Object exists)) {
     $extension = [IO.Path]::GetExtension([string]$file.path)
     if ($extension -in @(".json", ".ps1", ".psm1", ".vbs", ".md")) {
         $text = [IO.File]::ReadAllText([string]$file.path, [Text.Encoding]::UTF8)
-        if ($text -match '__[A-Z0-9_]+__') { $unresolvedTokens += [string]$file.path }
+        if ($text -cmatch '__[A-Z0-9_]+__') { $unresolvedTokens += [string]$file.path }
     }
 }
 $contract = Test-McpCcComponentContract -Component $component

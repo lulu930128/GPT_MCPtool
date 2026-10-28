@@ -12,6 +12,44 @@ const runFile = promisify(execFile);
 // An alternate Windows installation needs its own operator binding; never use PATH/SystemRoot input.
 const powershell = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
 
+export interface PowerShellHostContext {
+  mode: "installed" | "daily";
+  codeRoot: string;
+}
+
+/** Transport location only. Native Host independently verifies both selectors,
+ * manifests and retained OS peers; this is never an InstalledBridgeBinding. */
+export async function resolvePowerShellHostContext(installed?: InstalledBridgeBinding,
+  root?: string): Promise<PowerShellHostContext | undefined> {
+  if (installed) {
+    await assertInstalledRuntimeActivation(installed);
+    return { mode: "installed", codeRoot: installed.codeRoot };
+  }
+  if (!root) return undefined;
+  const codeRoot = resolve(root), release = dirname(codeRoot), versions = dirname(release), runtime = dirname(versions);
+  if (win32.basename(codeRoot) !== "codex_bridge" || win32.basename(versions) !== "versions"
+    || win32.basename(runtime) !== "Runtime" || win32.basename(dirname(runtime)) !== "codex_bridge") return undefined;
+  const read = async (path: string) => {
+    try {
+      const info = await lstat(path);
+      if (!info.isFile() || info.isSymbolicLink() || info.size > 131072) throw new Error("NORMAL_DEPLOYMENT_INVALID");
+      return JSON.parse((await readFile(path, "utf8")).replace(/^\uFEFF/, ""));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") throw new Error("NORMAL_DEPLOYMENT_MISSING");
+      if (code === "EACCES" || code === "EPERM") throw new Error("NORMAL_HOST_ACCESS_DENIED");
+      if (error instanceof SyntaxError) throw new Error("NORMAL_DEPLOYMENT_INVALID");
+      throw error;
+    }
+  };
+  const mode = await read(join(release, "daily-mode.json"));
+  const selected = await read(join(runtime, "current.json"));
+  if (mode.contract !== "mcpcc-daily-user-v1" || mode.trayOwner !== "independent-cc"
+    || selected.contract !== "mcpcc-daily-current-v1" || selected.version !== win32.basename(release))
+    throw new Error("NORMAL_DEPLOYMENT_SELECTION_CHANGED");
+  return { mode: "daily", codeRoot };
+}
+
 export interface InstalledBridgeBinding {
   contract: "codex-bridge-installed-binding-v1" | "codex-bridge-installed-binding-v2" | "codex-bridge-installed-binding-v3" | "codex-bridge-installed-binding-v4";
   releaseId: string;

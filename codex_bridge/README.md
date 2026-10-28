@@ -1,5 +1,7 @@
 # Codex Handoff Bridge
 
+日常 `Update -CandidateRoot` 在同一 transaction 內完成 Build／Stage，再停機、選版與 Verify。一般中斷使用同 boot 的 `Recover -OperationId`；只在確認原 owner 已退出且 lock identity 未變時保留原 bytes 並退休殘留鎖，從不改 journal。Source Verify 同時核對 core、MCP 與 reviewStore。2026-10-28 修補的 Stage／正式驗收狀態及本機命令見 [可靠更新交接](docs/agent-runs/reliable-daily-update-20261028/Handoff.md)。
+
 安全停止 transport 的兩個 native helper 以 CC 的 `src/NormalOperator.Native.cs`、`src/RemoteSelfReload.Native.cs` 為 canonical source；daily Stage 複製到版本內的 `scripts/shared-native` 並驗 hash。CC caller 依獨立 CC selector 與 wrapper inventory 驗證，不需要內附 CC owner。
 
 日常 code-only 換版入口：[daily-code-update.ps1](scripts/daily-code-update.ps1)。部署根固定為本目錄的 `Runtime`，package 只含 Bridge；CC 獨立選版並持有 tray／Startup 責任，Bridge Start／Update／rollback 不操作托盤。2026-10-25 已啟動 `pathfix-20261025-06`，Bridge/Tunnel 均 OwnedReady，MCP 認證及 ApprovalStore OPEN 已驗證。使用者後續要求啟用新版 Startup，現已指向 CC 穩定入口並帶 `--boot`，登入後安全啟動八個元件；protected NORMAL／ADMIN Host 尚未部署。Source、版本、既有資料與首次交接見 [日常換版](docs/DailyCodeUpdate.md)。

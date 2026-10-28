@@ -210,7 +210,7 @@ Assert-Equal (@($registryOmi.traits) -join ",") "tunnel,external-dependency,diag
 $registryOmiCore = @($registryOmi.probes | Where-Object { $_.id -eq "mcp" })[0]
 Assert-True ($registryOmiCore.resolvedOwnerManagedPidFile.EndsWith("OMI_search\.tmp\omi-search-http-server.pid", [StringComparison]::OrdinalIgnoreCase)) "OMI controller core uses its component-owned managed PID file"
 $registryCodex = @($registryManifest.components | Where-Object { $_.id -eq "codex_bridge" })[0]
-Assert-True ("controller" -notin @($registryCodex.probes.summaryFields)) "Codex Bridge descriptor does not expose controller metadata in public summaries"
+Assert-Equal (@($registryCodex.probes.summaryFields) -join ',') 'service,version,buildId,jobs.active,jobs.awaitingApproval,jobs.scope,controller' "Codex Bridge exposes only the bounded readiness and idle-gating summary, never controller configuration or job payload"
 Assert-Equal $registryCodex.runtimeMode "component-controller" "Codex Bridge descriptor activates the v3 controller"
 Assert-Equal (@($registryCodex.capabilities) -join ",") "ensure_running,repair_connectivity,restart_core,reload_runtime,shutdown_runtime,show_diagnostic_tray" "Codex Bridge declares the complete controller capability set"
 Assert-Equal $registryCodex.connectivityEvidence.remoteEvidencePath ".tmp\remote-registration-evidence.json" "Codex Bridge declares component-owned remote evidence"
@@ -1417,7 +1417,11 @@ foreach ($relativeSourcePath in $networkPolicySources) {
         Assert-True ($sourceText.Contains($proxyName)) "$relativeSourcePath declares $proxyName child-process handling"
     }
     Assert-True ($sourceText.Contains("127.0.0.1,localhost")) "$relativeSourcePath declares the loopback bypass"
-    Assert-True ($sourceText -match '(?s)finally\s*\{.*SetEnvironmentVariable') "$relativeSourcePath restores parent environment in finally"
+    if($relativeSourcePath -ceq 'OMI_search\scripts\omi-search-runtime.psm1') {
+        Assert-True ($sourceText.Contains('$StartInfo.EnvironmentVariables') -and $sourceText -notmatch '\[Environment\]::SetEnvironmentVariable') "$relativeSourcePath confines environment changes to its child StartInfo without touching the parent"
+    } else {
+        Assert-True ($sourceText -match '(?s)finally\s*\{.*SetEnvironmentVariable') "$relativeSourcePath restores parent environment in finally"
+    }
 }
 
 $cleanupRaceScript = Join-Path $projectRoot "tests\test-ownership-cleanup-race.ps1"

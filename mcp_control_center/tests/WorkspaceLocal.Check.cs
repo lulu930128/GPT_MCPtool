@@ -194,8 +194,9 @@ namespace McpCc.WorkspaceLocal {
                 Check(owner.Dispatch(restart).Contains("REQUEST_REPLAY"));Check(owner.TakePending()==null);
                 Check(owner.Dispatch(Request("receipt","","",requestId,"")).Contains("UNKNOWN"));
                 var expiring=Request("restart","personal_asset_os","reload_runtime",System.Guid.NewGuid().ToString("D"),"interrupt_current_requests");
-                Check(owner.Dispatch(expiring).Contains("ACTION_ACCEPTED"));Check(owner.TakePending(long.MaxValue)==null);
-                Check(!owner.HasActiveRequest);Check(owner.Dispatch(expiring).Contains("REQUEST_REPLAY"));Check(owner.TakePending()==null);
+                Check(owner.Dispatch(expiring).Contains("ACTION_ACCEPTED"));Check(owner.TakePending(long.MaxValue).requestId==expiring["requestId"]);
+                Check(owner.HasActiveRequest);Check(owner.Dispatch(expiring).Contains("REQUEST_REPLAY"));Check(owner.TakePending()==null);
+                owner.Complete(expiring["requestId"],"COMPLETED");
             }
             // Every target persists its exact identity, survives reopening, and blocks
             // cross-target reuse before and after completion without any second dispatch.

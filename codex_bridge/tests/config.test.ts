@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, matchesGlob, parse } from "node:path";
 import test from "node:test";
@@ -67,6 +67,41 @@ test("environment deny globs exclude only the example and preserve synthetic sec
   for (const name of [".env.example", ".env.EXAMPLE", "AGENTS.md", "package.json"]) {
     assert.equal(denied(name), false, name);
   }
+});
+
+test("daily installed code uses the stable config root and configured credential directory", async (t) => {
+  const f = await fixture(t);
+  const release = join(f.component, "Runtime", "versions", "fixture-v2");
+  const codeRoot = join(release, "codex_bridge");
+  const credentialDir = join(dirname(f.component), "custom-credentials");
+  await mkdir(codeRoot, { recursive: true });
+  const config = await loadBridgeConfig({ ...f.env, CODEX_BRIDGE_PROJECT_ROOT: codeRoot,
+    CODEX_BRIDGE_CONFIG_ROOT: f.component, CODEX_BRIDGE_SECRET_PATH: join(credentialDir, "fixture.dpapi") });
+  assert.equal(config.projectRoot, codeRoot);
+  assert.equal(config.widgetPath, join(codeRoot, "web", "codex-console.html"));
+  assert.equal(config.handoffDir, join(f.component, ".tmp", "codex-inbox"));
+  for (const name of ["read-only", "workspace"]) {
+    const profile = config.codexArgs.find((arg) => arg.startsWith(`permissions.codex-bridge-${name}=`))!;
+    for (const path of [credentialDir, join(f.component, ".local"), join(dirname(f.component), "project_reading", ".secrets")]) {
+      assert.ok(profile.includes(`${JSON.stringify(path)} = "deny"`), path);
+    }
+    assert.ok(profile.includes(`${JSON.stringify(codeRoot)} = "read"`));
+    assert.ok(!profile.includes(JSON.stringify(join(release, "project_reading", ".secrets"))));
+    assert.ok(!profile.includes(JSON.stringify(join(codeRoot, ".local"))));
+  }
+  // Real JobStore initialization must also leave the immutable release empty.
+  await new JobStore(config.jobsDir, config.handoffDir).initialize();
+  assert.deepEqual(await readdir(release), ["codex_bridge"]);
+  assert.deepEqual(await readdir(codeRoot), []);
+});
+
+test("configured policy paths reject relative input and credential parents of readable roots", async (t) => {
+  const f = await fixture(t);
+  for (const name of ["CODEX_BRIDGE_CONFIG_ROOT", "CODEX_BRIDGE_SECRET_PATH"]) {
+    await assert.rejects(loadBridgeConfig({ ...f.env, [name]: "relative/path" }), /BRIDGE_CONFIG_PATH_INVALID/);
+  }
+  await assert.rejects(loadBridgeConfig({ ...f.env, CODEX_BRIDGE_SECRET_PATH: join(f.project, "fixture.dpapi") }),
+    /PERMISSION_PROFILE_DENIED_PARENT/);
 });
 
 test("handoff cannot be reopened beneath a denied data parent", async (t) => {

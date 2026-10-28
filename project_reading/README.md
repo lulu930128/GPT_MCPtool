@@ -1,6 +1,6 @@
 # GPT Project Workspace MCP
 
-目前 application release 為 `1.7.0`，source tool contract 為 `2026-10-14.2`（本次新增診斷尚未 live adoption）。Workspace root、asset scope 與 tool contract 仍依各自的安全契約演進。
+目前 application release 為 `1.7.0`，source tool contract 為 `2026-10-28.1`。新增 source update v2 入口；實際採用仍須核對 runtime buildId 與更新 receipt，不能由 source 版本推定。Workspace root、asset scope 與 tool contract 仍依各自的安全契約演進。
 
 圖片、Office 與 PDF 檔案的公開讀取設計、限制與設定方式請見
 [docs/Asset-Readers.md](docs/Asset-Readers.md)。
@@ -32,6 +32,8 @@ Workspace 檔案工具接受可選的 `root`；省略時使用 `projects`。路�
 本服務提供 workspace browsing、文字搜尋、靜態 code intelligence、Git review、受限 asset 讀取，以及明確啟用的通用文字寫入。它不提供刪檔、搬移、任意 shell、commit、push 或 database mutation；不預設授權任何既有專案的寫入範圍。
 
 ## 工具
+
+- `mcp_component_update_status`、`mcp_component_update_preview`、`mcp_component_update`、`mcp_component_update_receipt`：透過既有 CC owner 執行固定元件的 source Build/Stage/Update；與只重載既有 dist 的 `reload_runtime` 分開。update 使用原 UUID、preview 的 source digest、不可覆寫的 version label 與 `wait_for_idle`，Workspace 自身及 CC 納入獨立 v2 目標集合；沒有更新入口的元件回 `NOT_SUPPORTED`。詳見[更新契約與驗收](docs/LocalComponentManagement.md#2026-10-28-phase-2source-update-v2)。
 
 Git 工具仍僅提供 read-only status／diff inspection；Git mutation 交由 Codex 在使用者明確授權的
 任務範圍使用本機 Git、add、commit、branch、push，依根目錄 Git 與公開安全規則執行。

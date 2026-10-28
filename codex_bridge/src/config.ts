@@ -37,7 +37,7 @@ const COMPONENT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", ".
 export async function loadBridgeConfig(env: NodeJS.ProcessEnv = process.env): Promise<BridgeConfig> {
   const installedBinding = await loadInstalledBinding(env);
   const projectRoot = installedBinding?.codeRoot ?? resolve(env.CODEX_BRIDGE_PROJECT_ROOT?.trim() || COMPONENT_ROOT);
-  const configRoot = installedBinding?.configRoot ?? projectRoot;
+  const configRoot = installedBinding?.configRoot ?? configuredAbsolutePath(env.CODEX_BRIDGE_CONFIG_ROOT) ?? projectRoot;
   const projectsFile = resolve(
     installedBinding?.projectsFile || env.CODEX_BRIDGE_PROJECTS_FILE?.trim() || join(configRoot, ".local", "projects.json"),
   );
@@ -59,7 +59,7 @@ export async function loadBridgeConfig(env: NodeJS.ProcessEnv = process.env): Pr
   const { projects, sharedWorkspaceRoots } = await loadProjectPolicy(projectsFile);
   const projectPaths = [...projects.values()].map((project) => project.path);
   const codexLaunch = installedBinding ? resolveInstalledCodexLaunch(installedBinding, sharedWorkspaceRoots, projectPaths) :
-    await resolveCodexLaunch(projectRoot, handoffDir, projectsFile, dataDir, sharedWorkspaceRoots, env, projectPaths);
+    await resolveCodexLaunch(projectRoot, configRoot, handoffDir, projectsFile, dataDir, sharedWorkspaceRoots, env, projectPaths);
 
   return {
     projectRoot,
@@ -215,6 +215,7 @@ function parseCommandArgs(raw: string | undefined): string[] | undefined {
 
 async function resolveCodexLaunch(
   projectRoot: string,
+  configRoot: string,
   handoffDir: string,
   projectsFile: string,
   dataDir: string,
@@ -225,7 +226,9 @@ async function resolveCodexLaunch(
   const configuredCommand = env.CODEX_BRIDGE_CODEX_COMMAND?.trim();
   const configuredArgs = parseCommandArgs(env.CODEX_BRIDGE_CODEX_ARGS);
   const args = withHandoffPermissionProfiles(configuredArgs ?? ["app-server"], {
-    projectRoot, handoffDir, projectsFile, dataDir, sharedWorkspaceRoots, projectPaths,
+    projectRoot: configRoot, handoffDir, projectsFile, dataDir, sharedWorkspaceRoots, projectPaths,
+    readOnlyPaths: configRoot === projectRoot ? [] : [projectRoot],
+    secretPath: configuredAbsolutePath(env.CODEX_BRIDGE_SECRET_PATH),
   });
   if (configuredCommand) {
     return { command: configuredCommand, args };
@@ -247,7 +250,7 @@ export function resolveInstalledCodexLaunch(binding: InstalledBridgeBinding, sha
   return { command: binding.nodePath, args: [binding.codexLauncher, ...withHandoffPermissionProfiles(["app-server"], {
     projectRoot: binding.configRoot, handoffDir: binding.handoffDir, projectsFile: binding.projectsFile,
     dataDir: binding.dataDir, sharedWorkspaceRoots, authorityPaths: [binding.ownerRoot, binding.runtimeRoot],
-    readOnlyPaths: [binding.releaseRoot], projectPaths,
+    readOnlyPaths: [binding.releaseRoot], projectPaths, secretPath: binding.secretPath,
   })] };
 }
 
@@ -260,6 +263,7 @@ function withHandoffPermissionProfiles(args: string[], policy: {
   authorityPaths?: string[];
   readOnlyPaths?: string[];
   projectPaths?: string[];
+  secretPath?: string;
 }): string[] {
   if (!args.includes("app-server")) {
     throw new Error("CODEX_BRIDGE_CODEX_ARGS must launch the Codex app-server subcommand.");
@@ -278,6 +282,9 @@ function withHandoffPermissionProfiles(args: string[], policy: {
     dataDir,
     // The Bridge's tunnel uses the shared Project Reading credential store.
     join(dirname(projectRoot), "project_reading", ".secrets"),
+    // The controller owns the actual configured credential location. Keep the
+    // legacy shared-store deny too, but never derive it from immutable codeRoot.
+    ...(policy.secretPath ? [dirname(policy.secretPath)] : []),
   ];
   // Never try to reopen a child beneath a deny. In particular an installed
   // release contains Node/Codex themselves: protect its writes, not its reads.
@@ -319,6 +326,12 @@ function withHandoffPermissionProfiles(args: string[], policy: {
     // does not sandbox Full Access and does not change the user's global config.
     ...(process.platform === "win32" ? ["-c", 'windows.sandbox="elevated"'] : []),
   ];
+}
+
+function configuredAbsolutePath(value: string | undefined): string | undefined {
+  if (!value?.trim()) return undefined;
+  if (!isAbsolute(value.trim())) throw new Error("BRIDGE_CONFIG_PATH_INVALID");
+  return resolve(value.trim());
 }
 
 function isWithinPath(parent: string, child: string): boolean {

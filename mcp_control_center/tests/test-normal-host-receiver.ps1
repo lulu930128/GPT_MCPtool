@@ -30,6 +30,7 @@ function Update-TrayControllerLifecycle { }
 function Stop-TrayApplication { $script:testExited=$true }
 function Show-TrayControllerWarning { throw 'UNEXPECTED_DRAIN_TIMEOUT' }
 $script:Closing=$false;$script:ExitRequested=$false;$script:WorkspaceLocalWorker=$null;$script:WorkspaceLocalOwner=$null
+$script:PendingRestartMcp=$null
 $script:SelfReloadWorker=$null;$script:SelfReloadShutdown=$null;$script:testExited=$false
 $completion=New-Object 'Threading.Tasks.TaskCompletionSource[bool]'
 $cancel=New-Object Threading.CancellationTokenSource
