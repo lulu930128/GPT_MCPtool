@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import readline from "node:readline";
-import { Readable } from "node:stream";
 import { readUtf8Snapshot } from "./text-snapshot.js";
 import { WorkspaceAccessError } from "./path-guard.js";
 
@@ -58,6 +57,18 @@ export async function assertTextSource(
   }
 }
 
+function* snapshotLines(text: string): Generator<string> {
+  // Match readline's CR/LF framing without a stream lifecycle. A single snapshot
+  // chunk can close readline while its async iterator still has buffered lines.
+  const endings = /\r\n|[\r\n]/g;
+  let start = 0;
+  for (let match = endings.exec(text); match; match = endings.exec(text)) {
+    yield text.slice(start, match.index);
+    start = endings.lastIndex;
+  }
+  if (start < text.length) yield text.slice(start);
+}
+
 export async function readTextWindow(
   absolute: string,
   sourceBytes: number,
@@ -80,10 +91,11 @@ export async function readTextWindow(
   let partialLine = false;
   let requiredBytesForNextLine: number | undefined;
 
-  const input = snapshot ? Readable.from([snapshot.text]) : fs.createReadStream(absolute, { encoding: "utf8" });
-  const reader = readline.createInterface({ input, crlfDelay: Infinity });
+  const input = snapshot ? undefined : fs.createReadStream(absolute, { encoding: "utf8" });
+  const reader = input ? readline.createInterface({ input, crlfDelay: Infinity }) : undefined;
+  const sourceLines = snapshot ? snapshotLines(snapshot.text) : reader!;
   try {
-    for await (const line of reader) {
+    for await (const line of sourceLines) {
       totalLines += 1;
       if (totalLines < startLine || lines.length >= maxLines || outputTruncated) {
         continue;
@@ -108,8 +120,8 @@ export async function readTextWindow(
       returnedBytes += separatorBytes + lineBytes;
     }
   } finally {
-    reader.close();
-    input.destroy();
+    reader?.close();
+    input?.destroy();
   }
 
   const completedLines = lines.length - (partialLine ? 1 : 0);
