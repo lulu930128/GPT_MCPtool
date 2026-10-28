@@ -8,6 +8,20 @@
 
 ## 啟動
 
+Source 更新入口是 `scripts/update-from-source.ps1`；新版 Control Center 讀取
+`control-center/update.json` sidecar，舊版 lifecycle descriptor 保持相容。
+先以 `-Action Preview` 取得 `sourceDigest`，再用固定 `-RequestId <uuid>`、新
+`-VersionId <new-id>` 與 `-ExpectedSourceDigest <digest>` 執行 `-Action Update`。
+流程在隔離目錄編譯 MCP 與下載 UI、保存舊 `dist`，交給既有
+`runtime-control.ps1 ReloadRuntime` 採用，再比對 prepared／loaded build、版本、
+contract、tool count 與 owner Ready。共用機械 helper 位於 `project_reading/scripts`；
+不更新 Trainer／Voice 的 source、依賴或資料。回覆遺失沿用同一 request；
+`-Action Recover` 在尚未 dispatch reload 時，先證明原 updater 與 tracked build
+scope 均已停止，才以完整 artifact pin 還原舊內容並記錄 `UPDATE_NOT_APPLIED`。
+已可能 dispatch reload 時只查原已發布候選與 loaded identity，不重送 reload；
+後續 source 編輯不會阻擋原 receipt 補驗。
+候選、receipt 與回退內容保留在 `.local/source-updates/`。
+
 需要 Node.js 20+、已安裝 listening API 擴充的 JLPT Listening Trainer，以及原有
 Voice Runtime。套件版本固定為 workspace 已使用的版本；請使用 lockfile 安裝。
 

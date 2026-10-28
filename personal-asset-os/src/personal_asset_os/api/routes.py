@@ -32,7 +32,6 @@ from personal_asset_os.api.schemas import (
     TransactionReportingAnnotationUpsert,
     TransferRequest,
 )
-from personal_asset_os.build import source_build_id
 from personal_asset_os.database import Database
 from personal_asset_os.domain.enums import (
     ApprovalSource,
@@ -191,6 +190,7 @@ def mobile_device_payload(device: MobileDevice) -> dict[str, object]:
 
 @router.get("/health")
 def health(
+    request: Request,
     database: Database = Depends(get_database),
     settings: Settings = Depends(get_settings),
     mobile_usb_bridge: MobileUsbBridge = Depends(get_mobile_usb_bridge),
@@ -210,7 +210,8 @@ def health(
         "ok": database_ok,
         "service": "personal-asset-os",
         "version": __version__,
-        "buildId": source_build_id(settings.project_root),
+        "buildId": request.app.state.startup_build_id,
+        "buildIdentity": "startup-v1",
         "database": "ready" if database_ok else "unavailable",
         "schemaRevision": schema_revision,
         "hostPolicy": "loopback-only",
@@ -220,6 +221,7 @@ def health(
 
 @router.get("/readyz")
 def readiness(
+    request: Request,
     database: Database = Depends(get_database), settings: Settings = Depends(get_settings)
 ) -> dict[str, object]:
     database_ready = False
@@ -241,7 +243,8 @@ def readiness(
         "databaseReady": database_ready,
         "frontendReady": frontend_ready,
         "systemAccountCount": system_account_count,
-        "buildId": source_build_id(settings.project_root),
+        "buildId": request.app.state.startup_build_id,
+        "buildIdentity": "startup-v1",
     }
 
 
@@ -724,10 +727,11 @@ def create_backup(
 
 
 @router.get("/system/info")
-def system_info(settings: Settings = Depends(get_settings)) -> dict[str, object]:
+def system_info(request: Request, settings: Settings = Depends(get_settings)) -> dict[str, object]:
     return {
         "version": __version__,
-        "buildId": source_build_id(settings.project_root),
+        "buildId": request.app.state.startup_build_id,
+        "buildIdentity": "startup-v1",
         "baseCurrency": settings.base_currency,
         "hostPolicy": "loopback-only",
         "dataDirectory": str(settings.data_dir),

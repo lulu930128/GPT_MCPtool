@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "componentId": "personal_asset_os",
+  "owner": "component_controller",
+  "entrypoint": "scripts/update-from-source.ps1",
+  "sourcePaths": ["src", "migrations", "scripts", "control-center", "pyproject.toml", "uv.lock", "alembic.ini", "frontend/src", "frontend/package.json", "frontend/package-lock.json", "frontend/index.html", "frontend/vite.config.ts", "frontend/tsconfig.json", "frontend/tsconfig.app.json", "frontend/tsconfig.node.json"]
+}

@@ -8,6 +8,22 @@ contract without reading source files or legacy progress data directly.
 
 ## Documentation
 
+Source updates use the component-owned `scripts/update-from-source.ps1` and the
+optional `control-center/update.json` sidecar. `-Action Preview` returns the exact
+`sourceDigest`; `-Action Update -RequestId <uuid> -VersionId <new-id>
+-ExpectedSourceDigest <digest>` compiles into an isolated stage, preserves the old
+`dist`, then delegates adoption to the existing `runtime-control.ps1 ReloadRuntime`.
+Acceptance compares the prepared and loaded build/version/contract/tool count and
+the owner's Ready state. The shared mechanical helper lives under
+`project_reading/scripts`; Hub source, dependencies and domain data are not updated.
+Reuse the same request id after a lost reply. Before any reload dispatch,
+`-Action Recover` can restore the pinned prior artifact and record `UPDATE_NOT_APPLIED`
+only after the original updater and tracked build scopes are proven stopped.
+After reload may have been dispatched, recovery only verifies the original
+published candidate and loaded owner; later source edits do not invalidate that
+receipt. It never repeats an uncertain reload. Local receipts, candidates and
+rollback artifacts remain under `.local/source-updates/`.
+
 - [Architecture](docs/Architecture.md): adapter/Hub ownership, runtime identity, network and data
   boundaries.
 - [Tool contract](docs/ToolContract.md): all public tools, annotations, retry rules and errors.

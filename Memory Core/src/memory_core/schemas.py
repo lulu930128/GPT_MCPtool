@@ -861,6 +861,7 @@ class HealthResponse(ApiModel):
     database: Literal["ok", "error"]
     version: str
     environment: str
+    build_id: str
 
 
 class VersionResponse(ApiModel):

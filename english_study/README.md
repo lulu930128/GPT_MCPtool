@@ -39,6 +39,23 @@ search, and exact reference detail against the live managed component.
 
 ## Setup
 
+The component-owned source update entry is `scripts/update-from-source.ps1`.
+Its optional `control-center/update.json` sidecar leaves the lifecycle descriptor
+compatible with older Control Center versions. `-Action Preview` returns a source
+digest. Submit `-Action Update -RequestId <uuid> -VersionId <new-id>
+-ExpectedSourceDigest <digest>` to build an isolated candidate, preserve the prior
+`dist`, and adopt through the existing `runtime-control.ps1 ReloadRuntime` owner.
+The loaded build/version/contract/tool count and owner Ready state must match the
+prepared identity. This updates only the adapter; Hub source and data stay owned
+by the Hub. Mechanical capture/staging helpers are shared from
+`project_reading/scripts`. Reuse the same request id after a timeout.
+Before reload dispatch, `-Action Recover` may restore the pinned prior artifact
+and record `UPDATE_NOT_APPLIED` after proving the original updater and tracked
+build scopes have stopped. After reload may have been dispatched, it verifies
+the original published candidate and loaded identity without repeating reload;
+later source edits do not invalidate that receipt. Candidate, receipt and
+rollback artifacts stay in `.local/source-updates/`.
+
 Start the Hub first:
 
 ```powershell

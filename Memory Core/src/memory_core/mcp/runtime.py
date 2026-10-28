@@ -11,6 +11,8 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 
+from memory_core import __version__
+from memory_core.build import STARTUP_BUILD_ID
 from memory_core.mcp.client import MemoryCoreApiClient
 from memory_core.mcp.settings import McpSettings
 from memory_core.mcp.tools import register_tools
@@ -103,6 +105,8 @@ def create_http_app(runtime: MemoryCoreMcpRuntime) -> Starlette:
             {
                 "status": "ok" if backend_ok else "degraded",
                 "service": "memory-core-mcp",
+                "version": __version__,
+                "build_id": STARTUP_BUILD_ID,
                 "backend": "ok" if backend_ok else "unavailable",
                 "mcp_endpoint": "/mcp",
                 "review_tools": "enabled" if runtime.review_api_client is not None else "disabled",

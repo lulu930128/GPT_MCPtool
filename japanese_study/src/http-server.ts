@@ -105,7 +105,7 @@ export async function startJapaneseStudyHttpServer(
   };
 }
 
-function computeBuildId(): string {
+export function computeBuildId(): string {
   try {
     const artifactHashes = [
       "./api-client.js",

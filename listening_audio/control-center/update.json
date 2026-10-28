@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "componentId": "listening_audio",
+  "owner": "component_controller",
+  "entrypoint": "scripts/update-from-source.ps1",
+  "sourcePaths": [
+    "src",
+    "scripts",
+    "tests",
+    "package.json",
+    "package-lock.json",
+    "tsconfig.json",
+    "control-center/update.json",
+    "ui"
+  ]
+}

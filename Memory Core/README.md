@@ -543,6 +543,27 @@ uv run pytest
 
 Migration round-trip 與 FTS5 由 `tests/test_migrations.py` 驗證；API、scope、candidate、revision、search、export 與 backup 都有 regression test。
 
+## 由 Control Center 更新 source
+
+`control-center/update.json` 宣告元件 owned 的 `scripts/update-from-source.ps1`。
+Workspace 的 `update_from_source` 經 CC durable request 接管後，才呼叫此固定入口；
+既有 `ReloadRuntime` 仍只重新載入 runtime。
+
+```powershell
+powershell -NoProfile -File scripts\update-from-source.ps1 -Action Preview
+```
+
+更新先以 `uv sync --locked --check --offline` 驗證現有環境，再做 Python syntax 檢查，
+經既有 runtime-control exact owner 執行 reload。缺依賴回 `DEPENDENCY_PREPARATION_REQUIRED`，
+不安裝依賴、不操作 `data/`、不執行 migration。Backend 與 MCP `/health` 的 `build_id`
+各自固定為該 process 啟動時的 source 指紋；只有兩端 version/build 一致且 owner Ready 才接受。
+舊 runtime 沒有此欄位時回 `UPDATE_LOADED_IDENTITY_UNVERIFIED`，不宣稱已更新。
+
+機械性的 source digest、有限子行程與 immutable request receipt 共用
+`../project_reading/scripts/component-update-common.ps1` 與 `node-source-update.ps1`；
+domain、資料與 lifecycle owner 留在 Memory Core。紀錄位於 `.local/source-updates/<requestId>`，
+逾時以相同 requestId／versionId／digest 的 `Recover` 查原結果，不重跑不確定的 reload。
+
 ## 尚未實作
 
 - Kuro adapter。

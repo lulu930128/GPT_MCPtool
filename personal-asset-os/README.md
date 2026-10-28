@@ -293,6 +293,30 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\validate.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\validate.ps1 -RuntimeSmoke
 ```
 
+## 由 Control Center 更新 source
+
+`control-center/update.json` 宣告元件 owned 的 `scripts/update-from-source.ps1`。
+Workspace 的 `update_from_source` 由 CC durable request 接管；`ReloadRuntime` 保留原本的
+runtime reload 語意。可先唯讀查看 source digest：
+
+```powershell
+powershell -NoProfile -File scripts\update-from-source.ps1 -Action Preview
+```
+
+更新驗證現有 Python locked environment 與 frontend lock 對應的 installed package versions，
+缺件或 drift 回 `DEPENDENCY_PREPARATION_REQUIRED`。Frontend 編譯到 request 的隔離 stage，
+通過 exact runtime owner preflight 才保留舊 dist 並採用新 dist。此入口不安裝依賴、不 bootstrap、
+不執行 migration；因 app startup 原本會呼叫 migrations，preflight 必須先確認正在運行的
+health schemaRevision 已等於 source Alembic head，否則回 `MIGRATION_REQUIRED` 或
+`UPDATE_SCHEMA_STATE_UNVERIFIED`。正式帳務資料始終由既有 app owner 管理。
+
+Health、readyz 與 system-info 的 buildId 固定為 app 啟動時的 source 指紋，並以
+`buildIdentity: startup-v1` 區分舊版逐次計算的 source hash；缺此標記不能通過更新驗收。
+機械性的 digest、有限子行程與 immutable receipt 共用
+`../project_reading/scripts/component-update-common.ps1` 與 `node-source-update.ps1`；
+紀錄與 rollback dist 位於 `.local/source-updates/<requestId>`。逾時以原 requestId、versionId
+及 digest 呼叫 `Recover`，不重送不確定已執行的 reload。
+
 ## 帳務符號慣例
 
 postings 採 debit-positive：

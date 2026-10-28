@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from personal_asset_os import __version__
 from personal_asset_os.api.routes import router
+from personal_asset_os.build import source_build_id
 from personal_asset_os.database import Database
 from personal_asset_os.errors import PersonalAssetError
 from personal_asset_os.mcp_server import create_mcp_server
@@ -37,6 +38,7 @@ def create_app(
     mobile_usb_bridge: MobileUsbBridge | None = None,
 ) -> FastAPI:
     resolved = settings or Settings()
+    startup_build_id = source_build_id(resolved.project_root)
     resolved.ensure_directories()
     run_migrations(resolved.database_path, resolved.project_root)
     database = Database(resolved.database_path)
@@ -99,6 +101,7 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.settings = resolved
+    app.state.startup_build_id = startup_build_id
     app.state.database = database
     app.state.mcp_server = mcp_server
     app.state.broker_reader = resolved_broker_reader

@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "componentId": "memory_core",
+  "owner": "component_controller",
+  "entrypoint": "scripts/update-from-source.ps1",
+  "sourcePaths": ["src", "migrations", "scripts", "control-center", "pyproject.toml", "uv.lock", "alembic.ini"]
+}

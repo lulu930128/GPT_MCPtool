@@ -5,6 +5,7 @@ from sqlalchemy import text
 
 from memory_core import __version__
 from memory_core.api.deps import SessionDep
+from memory_core.build import STARTUP_BUILD_ID
 from memory_core.schemas import HealthResponse, VersionResponse
 
 router = APIRouter(tags=["system"])
@@ -19,6 +20,7 @@ def health(request: Request, session: SessionDep) -> HealthResponse:
             database="ok",
             version=__version__,
             environment=request.app.state.settings.environment,
+            build_id=STARTUP_BUILD_ID,
         )
     except Exception:  # pragma: no cover - failure path depends on environment
         return HealthResponse(
@@ -26,6 +28,7 @@ def health(request: Request, session: SessionDep) -> HealthResponse:
             database="error",
             version=__version__,
             environment=request.app.state.settings.environment,
+            build_id=STARTUP_BUILD_ID,
         )
 
 

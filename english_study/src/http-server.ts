@@ -89,7 +89,7 @@ function isAuthorized(req: IncomingMessage, token: string | undefined): boolean 
 function getSingleHeader(req: IncomingMessage, name: string): string | undefined { const value = req.headers[name.toLowerCase()]; return Array.isArray(value) ? value[0] : value; }
 function sendJsonRpcError(res: ServerResponse, status: number, code: number, message: string): void { sendJson(res, status, { jsonrpc: "2.0", error: { code, message }, id: null }); }
 function sendJson(res: ServerResponse, status: number, body: unknown): void { res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" }); res.end(JSON.stringify(body)); }
-function computeBuildId(): string {
+export function computeBuildId(): string {
   try {
     const hashes = ["./api-client.js", "./assessment-schema.js", "./listening-result-schema.js", "./config.js", "./http-server.js", "./server.js"].map((artifact) => createHash("sha256").update(readFileSync(new URL(artifact, import.meta.url))).digest("hex"));
     return createHash("sha256").update(hashes.join(""), "utf8").digest("hex").slice(0, 16);

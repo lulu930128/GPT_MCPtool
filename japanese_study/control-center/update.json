@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "componentId": "japanese_study",
+  "owner": "component_controller",
+  "entrypoint": "scripts/update-from-source.ps1",
+  "sourcePaths": [
+    "src",
+    "scripts",
+    "tests",
+    "package.json",
+    "package-lock.json",
+    "tsconfig.json",
+    "control-center/update.json"
+  ]
+}
