@@ -43,7 +43,7 @@ def main():
     assert len(resources) == 2
     assert {item["uri"] for item in resources} == {URI, "ui://omi/tw-market-dashboard/v2.html"}
     tools = request("tools/list")["tools"]
-    assert len(tools) == 20
+    assert len(tools) == 35
     expected = {"omi_ask", "omi_read_refresh_status", "omi_read_market_overview", "omi_read_stock_context",
                 "omi_read_data_freshness", "omi_read_source_health", "omi_read_capability_status",
                 "omi_read_tw_market_dashboard", "omi_open_tw_market_dashboard", "omi_search_tw_symbols",

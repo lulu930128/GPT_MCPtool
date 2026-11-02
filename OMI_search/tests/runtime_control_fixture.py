@@ -1,7 +1,10 @@
 """Execute actual adapter source with only SDK imports omitted; no SDK/host claim."""
 import ast
+import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 def runtime_status_body(owner_id):
@@ -67,5 +70,8 @@ def load_source():
         )
     )]
     namespace = {"__file__": str(path), "__name__": "runtime_control_source_fixture"}
-    exec(compile(tree, str(path), "exec"), namespace)
+    with patch.object(sys, "path", [str(path.parent), *sys.path]), \
+            patch.dict(os.environ, {"OMI_SEARCH_AI_TRUST_TOKEN": "", "OMI_MCP_AI_TRUST_TOKEN": "",
+                                 "OMI_AI_TRUST_TOKEN": ""}):
+        exec(compile(tree, str(path), "exec"), namespace)
     return SimpleNamespace(**namespace)

@@ -1,67 +1,251 @@
-# OMI runtime controller 的窄轉送契約
+# OMI Launcher 固定遠端命令契約
 
-目前維持既有三個 ChatGPT-facing runtime tools，公開 surface 共 20 tools／2 UI resources。
-2026-10-15 已對照本機 OMI backend／launcher source：既有 relay 可以原樣交付新版
-status／receipt，不需要新增 Stop／Restart 工具或修改轉送邏輯。此次僅補測試、工具說明與交接。
-**狀態／收據讀取已在 source 與離線 SDK 接通；正式安全退出仍為 BLOCKED。**
-OwnedShutdown 的 source／disposable fixture 不代表 production active，也不授予 adapter lifecycle authority。
+2026-10-26：在既有 direct named-pipe transport 上新增三個 source-only MCP tools。
+公開 surface 為 **23 tools／2 UI resources**；原 17 個市場工具與 `omi.decision.v4` 不變。
+本輪只改 OMI_search Source／Docs／Tests，不部署、不讀 credential、不呼叫正式 pipe 或 DB。
 
-| Tool | 固定轉送 | MCP arguments |
+## 固定映射
+
+| MCP tool | Launcher action | MCP literal confirmation | Wire 欄位數 |
+| --- | --- | --- | --- |
+| `omi_read_runtime_status` | `Status` | 無 | 4 |
+| `omi_read_runtime_operation` | `ReadOperation` | 無 | 4 |
+| `omi_restart_backend` | `RestartBackend` | `restart_backend` | 4（既有相容 wire） |
+| `omi_start_backend` | `StartBackend` | `start_backend` | 5 |
+| `omi_recover_failed_start` | `RecoverFailedStart` | `recover_failed_start` | 5 |
+| `omi_upgrade_db_schema` | `SchemaUpgrade` | `upgrade_schema` | 5 |
+
+四個 mutation 的公開 arguments 恰好為 `request_id`、`expected_owner_id`、`confirmation`。
+兩個 ID 必須為 hyphenated UUID；大小寫機械正規化，不能換 UUID 重試。先讀 Status 的
+owner_id，再依使用者當次明確 chat 意圖提交一次固定操作。不得從市場查詢、離線狀態或
+歷史失敗推斷操作授權。四個工具均為 `readOnlyHint=false`、`destructiveHint=true`，
+`idempotentHint=true` 表示 Controller UUID 去重，不授權 caller retry。
+
+Wire 為單行 UTF-8 JSON。基本四欄都是 string：`action`、`request_id`、`expected_owner_id`、
+`token`。Status 的後三欄皆空；ReadOperation 只帶 request UUID，其餘未用欄位為空。
+Restart 的 literal 在 MCP 邊界驗證，保持舊四欄 wire；後三個新 action 必須帶第五欄
+`confirmation`，值與上表完全相同。每個 action 有精確 allowlist／key set，拒絕任意
+actor、approval flag、Backend preflight、DB／schema-lock path、PID、pipe、URL 或 shell。
+沒有 `UpgradeDBSchema`／`ApplyRelease`／generic Stop action。
+
+## 遠端授權與 Backend 缺席
+
+**無本機 Windows human approval。** 授權是明確遠端使用者指令＋專用 token＋OS-pinned
+同 Windows 使用者 Launcher。沒有 MessageBox／OpenFileDialog 或假 local actor 替代層。
+主 Controller 的 receipt actor 是由真 pipe caller 產生的 `authenticated_pipe_client`，
+不是 caller 可以傳入的欄位。Controller 先保存 durable receipt，再入列並 consume 一次。
+
+- `Status`／`ReadOperation` 不讀 token，不依賴 Backend HTTP，Backend 完全不存在仍可讀。
+- 三個新 action 可以在 Backend 缺席時接受一次 remote intent；是否可 Start／Recover
+  仍需 Launcher 自己證明 stopped／failed-start exact-exit generation。
+- SchemaUpgrade 只使用 Launcher configured DB target／schema.lock；選取失敗、writer lease、
+  backup、migration transaction、rollback 或 unknown receipt gates 均不能由 adapter 略過。
+- Restart 可由獨立 adapter caller 提交；Backend 本身缺席時的阻塞由 Controller 回覆。
+  尚存 Backend 的 source／schema compatibility、graceful writer drain、exact stop／start
+  仍屬主 Launcher lifecycle，不在本 adapter fixture 驗收。
+
+## 身分與 transport
+
+沿用固定 repo `C:\project\Open Market Intelligence` 小寫 UTF-8 SHA256 前 24 字元導出的 pipe。
+每次連線在寫入 token 前驗證真實 server PID、creation FILETIME、retained process handle、
+OS image、完整 Launcher `-File` argv 與同使用者 SID；回覆前重驗 pin。只接受 hidden launcher
+既有完整 grammar，不接受 caller/environment 覆寫身分。OS 拒絕就停止，沒有提權或其他入口。
+這是 OS process identity，不是 loaded source/release attestation。
+
+Mutation credential 僅取 adapter Process 環境 `OMI_SEARCH_RUNTIME_CONTROL_TOKEN`，嚴格限
+64 個小寫 hex；不讀 .env、registry、credential file 或 Backend hash，不 fallback 到 AI token。
+Reader 不取 token。測試只使用 synthetic token；本輪不讀真實 token／密碼／secret hash。
+
+兩秒 bounded IO、16 KiB frame、一個 connection／write；沒有 reconnect、HTTP fallback、retry
+或自動 poll。保留原 response envelope：
+
+```json
+{"transport_status":"pipe_response","response":{"schema":"omi.runtime-control.v1"}}
+```
+
+安全的 Controller object 原樣保留，包括 null、缺欄、opaque future fields。Credential echo、
+private path／SID／secret key、malformed／duplicate JSON、錯 request UUID 整包拒絕。
+`accepted`／舊 HTTP 202 只是接受，不是完成。blocked／unknown 是 business result，
+MCP `isError=false`；validation／transport error 才是 `isError=true`。
+送出後 timeout／owner change／不可信 response 帶 `outcome=unknown` 及原 UUID；只允許
+ReadOperation 查原 UUID。NOT_FOUND、STORE_UNAVAILABLE、unknown 或 cross-action UUID collision
+都不授權重送或換 UUID。Adapter 不建立第二份 durable receipt ledger。
+
+## Source 與驗證邊界
+
+已核對主 job `b3b8be47-f5cb-49ae-bce3-d8f7bc8b9604` 的實際狀態及磁碟 C#/PowerShell source。
+精確 job 最終狀態、fixture source hashes、命令與結果見
+[本輪證據](agent-runs/remote-launcher-alignment/Progress.md)。主端持續變更時不能把先前 hash
+視為最終同步；本輪收尾重新比對。
+
+隔離 Windows fixture 使用臨時 repo pin、不同 pipe、synthetic token、臨時 receipt store。
+編譯 `OmiRuntimeControl.cs`／`OmiOwnedShutdown.cs` 的 byte copies；不修改主 source，
+不 dot-source 主 Launcher，不啟動 Backend／HTTP listener，不接 DB，不執行 stop/start/migration。
+真 Controller 接受三個 offline action 後，由 fixture 呼叫一次 TakePending／BeginRemoteOperation，
+第二次 consume 必須 false；最後刻意以未執行 lifecycle 的 `unknown / LIFECYCLE_FAILED` 結束。
+這證明 transport、admission、一次性 intent 與 receipt，**不證明 owner lifecycle 成功**。
+Restart admission 的 owned binding 是 fixture 身分；不冒充正式 Backend 驗收。
+負面 replay 只在 disposable fixture 刻意送出，驗證 durable unknown／cross-action collision
+不建立新 intent；production adapter 沒有 retry。
+PID reuse 測試使用真 retained handles 加 injected PID／creation 變更，未讓 OS 實際回收 PID。
+
+官方 MCP SDK legacy `2025-06-18` 與 current `2026-07-28` 都驗證 catalog／call／annotations；
+ASGI/in-memory 測試封鎖外連、正式 pipe 與 process creation，Win32 stdio 未納入驗收。
+HTTP build ID 與 tray hash 清單已包含 `server.py`／`launcher_transport.py`，本輪無需修改 HTTP
+或 tray implementation；source hash 改變不代表 loaded runtime 已採用。
+
+- Source／隔離 fixture：見本輪結果。
+- 正式 Launcher／adapter Loaded Runtime：UNVERIFIED，本輪未部署或重新載入。
+- 正式 identity／release adoption、Remote MCP E2E：UNVERIFIED；沒有正式 attestation，整體仍 partial。
+- 後續須另行授權 adoption，再驗證 loaded identity、catalog、唯讀 status／receipt；正式 mutation
+  仍需使用者明確指定，不由本次 source 任務外推。
+
+## 前一輪 direct-pipe 紀錄（歷史，非現行主端限制）
+
+以下保留前一輪當時觀測及更早 HTTP 事故；其中三工具數量、Backend-only caller／local dialog
+阻塞與當時 source hashes 已由本輪上方契約更新，不能當作目前 readiness。
+
+# OMI Launcher 的 Backend-independent 窄轉送契約
+
+2026-10-26：三個既有 tools 改為直連唯一 Launcher named pipe。名稱、input schema、
+annotations 與 20 tools／2 resources 不變；17 個市場／render tools、`omi_ask` v4 與 generated
+snapshots 不改。**目前交付 Source／Fixture；Loaded Runtime 與 Remote MCP E2E 為 UNVERIFIED。**
+
+| Tool | Launcher action | MCP arguments |
 | --- | --- | --- |
-| `omi_read_runtime_status` | `GET /api/system/runtime-control/status` | `{}` |
-| `omi_restart_backend` | `POST /api/system/runtime-control/restart-backend` | `request_id` UUID、`expected_owner_id` UUID、`confirmation` 固定 `restart_backend` |
-| `omi_read_runtime_operation` | `GET /api/system/runtime-control/operations/{request_id}` | `request_id` UUID |
+| `omi_read_runtime_status` | `Status` | `{}` |
+| `omi_read_runtime_operation` | `ReadOperation` | `request_id` UUID |
+| `omi_restart_backend` | `RestartBackend` | `request_id` UUID、`expected_owner_id` UUID、literal `confirmation=restart_backend` |
 
-UUID 採標準連字號格式；拒絕缺少／額外參數、path injection、非 UUID 或錯誤 confirmation。
-Restart 必須來自使用者明確要求，先讀 status 的 launcher instance UUID 作為 expected owner。
-參數不是身分驗證；授權由 backend 專用 credential 檢查及 owner／writer-drain gates 決定。
-Restart 帶 `readOnlyHint=false`、`destructiveHint=true` 與 `omi/runtime-control/disruptive=true`。
-`idempotentHint=true` 依 backend 的同 UUID durable 去重契約，不表示可以自動 retry。
+UUID 必須為連字號格式，大小寫只正規化為同一 UUID 的小寫表示。拒絕缺／多參數、token、
+URL、pipe、PID、command、DB path、approval、backend_preflight 等 caller 控制值。
+不新增 recovery／schema／release tools，因為現有 Controller 尚無符合遠端授權要求的協定。
 
-Adapter 使用既有 launcher-selected `OMI_SEARCH_API_BASE_URL`（預設 loopback 8400），
-管理路徑只接受無 userinfo／path／query／fragment 的 loopback HTTP(S) base。
-管理請求不繼承 proxy，也不跟隨 redirect。它不建立 launcher、pipe 或 process manager；
-same-user ACL Windows pipe、drain、安全檢查、durable queue 與實際程序管理均由主 OMI backend controller／launcher 擁有。
+## Caller、Owner 與固定 wire
 
-## Credential 邊界
+正常授權模型為明確使用者指令、authenticated caller、expected owner UUID 及 durable receipt。
+Adapter 不新增本機 Windows 確認框。既有 MCP host／tunnel 認證與專用 runtime credential
+分屬不同邊界；tool annotations 不是認證。Restart 維持 `readOnlyHint=false`、
+`destructiveHint=true`、`idempotentHint=true`、`openWorldHint=false` 與 disruptive `_meta`。
+Idempotent hint 描述 Controller 的 UUID 去重，不授權自動重送。
 
-專用 token 僅由 runtime 的本機環境 `OMI_SEARCH_RUNTIME_CONTROL_TOKEN` 提供；
-只在 restart POST 放入 `X-OMI-Runtime-Control-Token` header。
-Token 必須恰好 64 個小寫十六進位字元（`[0-9a-f]{64}`）；adapter 不 trim、不轉大小寫，
-長度不足／過長、大寫、非 hex、空白或 newline 都在 IO 前拒絕。
-Backend 的 `OMI_RUNTIME_CONTROL_TOKEN_SHA256` 必須設為同一 token 字串 UTF-8 bytes 的
-SHA256 小寫 hex digest（不是先將 token hex decode 成 bytes 再 hash）。
-這對設定必須由本機 operator 安全配置；格式合法不代表與 backend hash 配對，仍可能 403。
-Adapter 不讀 backend 設定或 secret 檔，
-不保存 credential，不 fallback 到 `X-OMI-AI-Trust-Token`，兩個 GET 不傳 token。
-缺少或不符合此格式的 token 在 IO 前拒絕。不要把 token 寫入 MCP arguments、
-tracked 檔案、命令列範例或 log。Backend response 若回顯 credential，adapter fail closed，
-不交付該內容；原始 exception／HTML error body 不會回傳。
+`launcher_transport.py` 只開啟本機 `\\.\pipe\omi-runtime-<suffix>`；suffix 是固定 repo
+`C:\project\Open Market Intelligence` 小寫 UTF-8 SHA256 的前 24 hex 字元，與 main source 相同。
+Public input 與環境變數都不能更改 repo／pipe／executable pin；`OMI_SEARCH_API_BASE_URL`
+僅供原市場 HTTP，不影響 runtime tools。無 HTTP fallback、WMI discovery、shell、process launch
+或第二個 controller。Main Launcher 仍是唯一業務生命週期 owner；Control Center 的
+`restart_core` 只管理 OMI Search MCP，本輪不更動它或 component descriptor。
 
-## 回覆與結果未知
+寫入前依序驗證：
 
-有效 backend JSON object 放入 `response` 原樣交付，外層僅附
-`transport_status="http_response"` 與 `http_status`，MCP `isError=false`。
-不另造 runtime schema，不修改 `omi.runtime-control.v1` status、selected endpoints、
-backend／frontend／launcher／MCP dependency、attested／unknown identity 或 launcher UUID。
+1. 用 Win32 `GetNamedPipeServerProcessId` 取真實 server PID，開啟 query＋synchronize process handle。
+2. 保留該 handle，讀 creation FILETIME、`QueryFullProcessImageNameW` 的 OS executable。
+3. Executable 必須是 OS system directory 下 Windows PowerShell；command line 必須完整符合
+   `start-omi-launcher-hidden.vbs` 的 `-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden
+   -File <固定 repo>\scripts\omi-launcher.ps1`，不接受額外／縮寫／encoded／Command 參數。
+4. 同 handle 的 TokenUser 必須等於 adapter Process 的 TokenUser，只在記憶體比較，從不輸出 SID。
+5. 寫入前與回覆前重驗 server PID、creation 及 retained process 的未退出狀態。
 
-| HTTP / failure | Caller 必須保留的意義 |
-| --- | --- |
-| 202 | durable queue accepted；不是 restart 完成 |
-| 403 | unauthorized，保留 backend reason |
-| 409 | blocked／owner mismatch；writer drain false 是合法阻擋 |
-| 503 | controller 結果 unknown／unavailable，原樣保留 backend state 與 reason；不得推論未入列或重送 |
-| timeout／network failure | transport error；POST 結果 unknown，不能推論未入列 |
-| malformed／credential echo response | fail closed；POST 結果仍為 unknown |
+Client handle 使用 `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`，不讓連線中的假 pipe
+取得 adapter impersonation 權限。任何 ACL／OS query／身分拒絕直接失敗，沒有提權、修 ACL、
+重試或換入口。Native command-line query 僅讀 command line，不讀 PEB／process environment。
+`NtQueryInformationProcess` class 60 是 OS-specific 依賴；本機 fixture 已執行，未支援或拒絕時
+fail closed。這不代表其他 Windows 版本均支援，亦不構成 hostile same-user process injection
+或 loaded source 的硬隔離。OS handle identity 不能取代 release adoption 證據。
 
-Adapter 錯誤回覆為 `isError=true`、`transport_status="error"` 與固定安全 `error` code；
-例如 `RUNTIME_TIMEOUT`、`RUNTIME_UNAVAILABLE`、`INVALID_RUNTIME_UUID`、
-`INVALID_RUNTIME_CONFIRMATION`、`RUNTIME_CONTROL_TOKEN_MISSING_OR_INVALID`。
-POST 傳送後不確定結果附 `outcome="unknown"`、原 `request_id` 與
-`next_action="read_runtime_operation_same_request_id"`。
-所有呼叫只送一次；無自動 retry、poll、repair 或新的 UUID。
-原 request UUID 的 durable receipt 可以是 accepted／running／succeeded／failed／blocked／unknown，
-一律保留 backend 內容。重複要求先查同 UUID，unknown 不代表可再次提交。
+API 依據：[pipe server PID](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getnamedpipeserverprocessid)、
+[CreateFileW SQOS](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)、
+[native query 相容性限制](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntqueryinformationprocess)。
+
+Wire 為單行 UTF-8 JSON，恰好四個 string 欄位：`action`、`request_id`、`expected_owner_id`、
+`token`。Reader 的未用欄位為空字串；Restart 的 confirmation 只在 MCP 邊界驗證，因為
+Controller wire 沒有 confirmation 欄位。不得加上 `actor=launcher_local_operator` 或偽造
+`backend_preflight`。兩秒 bounded nonblocking IO、16 KiB frame、單次 connection／write；
+pipe busy／unavailable 直接回錯，不 WaitNamedPipe/reconnect。沒有 automatic poll。
+
+## Credential 與回覆
+
+只有 mutation 讀取 adapter Process 環境的 `OMI_SEARCH_RUNTIME_CONTROL_TOKEN`；必須精確為
+64 個小寫 hex 字元。空值／大寫／非 hex／多餘空白在任何 pipe IO 前拒絕。
+Reader 不讀 credential。Token 只在 owner 驗證後放進 pipe wire 的 `token` 欄位；
+不讀 `.env`、User registry、Backend hash、secret file，不 fallback 到 AI trust token。
+既有 runtime 的 credential 注入方式不變，本輪沒有讀取、修改或部署 credential。
+
+安全的 Launcher JSON object 原樣放進 `response`，外層是：
+
+```json
+{"transport_status":"pipe_response","response":{"schema":"omi.runtime-control.v1"}}
+```
+
+這是 transport envelope 的刻意變更：不再回傳 `http_status`／`http_response`，也不偽造 202。
+原 tool input 相容，沒有 outputSchema 鎖定 HTTP wrapper；consumer 應使用 Controller `state`／
+`reason`／`owner_id`。安全 opaque fields、null 與缺欄原樣保留；private path／SID／credential
+欄位、token echo、duplicate JSON keys、NaN、非 object、錯誤 schema、超限或錯 UUID receipt
+整包拒絕，不產生投影後的成功結果。Response safety guard 不改市場 v4 envelope。
+
+accepted（包括舊 relay HTTP 202）只表示入列，不是完成。Controller 的 forbidden／blocked／
+unknown 是 authoritative business response，MCP `isError=false`；transport／validation
+failure 才是 `isError=true`，只回固定安全 error code，不回傳原始 OS exception。
+
+寫入可能已發生後，timeout／partial write／失聯／owner change／不可信 response 一律附
+`outcome=unknown`、原 `request_id`、`next_action=read_runtime_operation_same_request_id`。
+未送出前的 credential／owner 拒絕沒有偽造 accepted 或 receipt。
+所有情況都不 fallback、retry、改 UUID。Unknown／NOT_FOUND 不是重送權限；只允許 caller
+以原 UUID 查 durable receipt。Adapter 不持久保存第二份 receipt ledger。
+
+## Main Controller 的實測缺口
+
+已只讀 `scripts/OmiRuntimeControl.cs`、`scripts/omi-runtime-control.ps1`、`scripts/omi-launcher.ps1`
+與既有 Backend relay；主 repo job `4716b6db-c257-4297-9c65-00cdf43e6cf5` 仍可能更新 source。
+本輪不覆寫 main source，不執行其 launcher script。
+
+- `Status`／`ReadOperation` 不依賴 Backend；真實 Controller source 的 disposable pipe 測試已通。
+- `RestartBackend` 在 `Dispatch` 仍要求 `SameIdentity(pipeClient, backend)`。
+  專用 token 與 owner UUID 正確的獨立 adapter，仍得到 durable
+  `state=blocked, reason=BACKEND_PREFLIGHT_NOT_ATTESTED`。這是實際 Controller fixture 結果。
+- `StartBackend`／`RecoverFailedStart`／`SchemaUpgrade` 屬 `LocalAction`，要求
+  `actor=launcher_local_operator`；`Invoke-OmiLocalControlOperation` 仍顯示 `MessageBox`。
+  它們已存在但不符合本次「authenticated remote intent、不另跳本機確認」的要求。
+- 尚無此遠端 wire 的 `ApplyRelease`／`UpgradeDBSchema` action，不能依名稱猜測加入。
+- 合成 fixture 的 accepted 回覆只測 adapter 的保留／不重送語意，**不是實際 Controller
+  接受獨立 adapter mutation，更不是正式 restart／recovery／migration 驗收**。
+
+後續 main owner 必須先完成獨立 remote caller 的固定 action 協定與 durable provenance，
+保留自身 stop／writer／start／schema／release gates；adapter 才同步已落地 actions、固定
+confirmation、負面測試與 disruptive annotations。不冒用 Backend／local actor，不加假 approval。
+
+## 驗證與最小 adoption
+
+完整命令、source hashes 與結果見 [本輪紀錄](agent-runs/launcher-direct-adapter/Progress.md)。
+Windows fixtures 只使用臨時 repo identity／隨機化 pipe、synthetic token 與臨時 receipt store；
+Controller fixture 編譯 main C# 的位元組副本，不 dot-source 主 Launcher、不啟動 Backend，
+也不呼叫 TakePending 或 lifecycle。PID recycle 以真實 retained handles 加上 injected
+PID／creation 變更測試；未刻意讓 OS 回收某個 PID。ACL denial 為 native boundary fault injection，
+未改正式 ACL。所有 fixture 子程序隱藏啟動、合作退出，不 force-kill。
+
+- Source／Fixture：見本輪定點結果，與正式環境分開。
+- Loaded Runtime：UNVERIFIED，未 reload／restart／deploy。
+- Remote MCP E2E：UNVERIFIED，未連正式 MCP、Tunnel、Backend 或 Launcher pipe。
+
+本輪修改 `OMI_search/AGENTS.md`（此檔被既有 Git ignore 規則忽略，未 force-add）；
+根 `C:\GPT_MCPtool\AGENTS.md` 因使用者明確限制修改範圍而不改。
+`launcher_transport.py` 已加入 HTTP build ID 與既有 tray source hash 清單，僅 source 變更，
+沒有改 Control Center lifecycle 或 installed Runtime。
+
+後續最小步驟（本輪未執行）：
+
+1. 先由 main job 完成／驗證遠端命令；若只採用 reader，可先保留明確的 mutation blocker。
+2. 另行授權 adoption 時，以原 owner 正常載入 main Controller 與 adapter source，既有安全設定
+   注入 credential；不要把目前磁碟檔案或先前 HTTP 200 當作 loaded proof。
+3. 先唯讀驗證 Launcher PID／creation／argv 與 status、同 UUID receipt；重新驗證 MCP
+   modern／legacy catalog，並記錄來源／載入身分及 ChatGPT action cache 採用。
+4. 只有使用者明確要求一次固定 mutation 時才提交；取得 accepted／unknown 後只查同 UUID
+   receipt，不重送、不替換 UUID。正式 Backend-offline／遠端 E2E 驗收仍須單獨安排。
+
+## 歷史紀錄（2026-10-15 及以前）
+
+以下保留原 HTTP relay 的事故與驗收紀錄，不是現行 transport 規格，也不能用其中舊
+safe-stop blocker／runtime PID／測試計數宣稱目前 readiness。現行契約以上方為準。
 
 ## 新版安全退出通道的交接與驗收（2026-10-15）
 

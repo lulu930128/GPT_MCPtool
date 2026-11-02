@@ -97,7 +97,7 @@ test("rendered sidebar has one hierarchy owner after search and holdings", () =>
   try {
     const bridge = { getPresentationDiagnostic: () => ({ actualDisplayMode: "inline" }) } as unknown as McpAppsBridge;
     const html = renderToStaticMarkup(createElement(WorkspaceApp, { bridge }));
-    assert.doesNotMatch(html, /當前自選群組股票|workspace-stock-scroll/);
+    assert.equal((html.match(/class="workspace-stock-scroll"/g) ?? []).length, 1);
     const positions = ["搜尋台股", "OMI 已記錄台股持股", "自選族群與個股"].map((name) => html.indexOf(`aria-label="${name}"`));
     assert.ok(positions.every((position, index) => position >= 0 && (index === 0 || position > positions[index - 1])));
   } finally {
@@ -141,7 +141,7 @@ const watchlistData = { groups, selection: { group_id: 45 }, items: stockItems }
 const readyPane = { data: watchlistData, key: "45", dataKey: "45", loading: false, error: null, retry() {} };
 const stockSelection = { selectedStock: "2330", selectStock() {} };
 
-test("selected group 45 opens its ancestor path and owns all four stocks before its sibling", () => {
+test("selected group 45 opens its ancestor path with four guarded stocks in a separate viewport", () => {
   assert.deepEqual(findWatchlistGroupPath(buildWatchlistTree(groups), 45), [1, 45]);
   const html = renderToStaticMarkup(createElement(GroupNavigation, { pane: readyPane, selected: 45, select() {}, ...stockSelection }));
   assert.match(html, /aria-expanded="true" aria-controls="workspace-group-children-1"/);
@@ -155,11 +155,11 @@ test("selected group 45 opens its ancestor path and owns all four stocks before 
   const sibling = html.indexOf('data-group-node="46"');
   for (const item of stockItems) {
     const at = html.indexOf(`${item.stock_id} ${item.stock_name}`);
-    assert.ok(at > selected && at < sibling);
+    assert.ok(at > selected && at > sibling, "members follow the tree, not a tree node");
   }
   assert.equal((html.match(/class="workspace-group-items"/g) ?? []).length, 1);
   assert.equal((html.match(/class="workspace-group-scroll"/g) ?? []).length, 1);
-  assert.doesNotMatch(html, /workspace-stock-scroll/);
+  assert.equal((html.match(/class="workspace-stock-scroll"/g) ?? []).length, 1);
   assert.doesNotMatch(html, /official_close|current|ready/);
   let symbol = "";
   const rows = SelectedGroupItems({ pane: readyPane, selected: 45, selectStock(value) { symbol = value; } }).props.children[4];
@@ -221,7 +221,7 @@ test("77 groups share one bounded viewport, sticky heading and accessible contro
   assert.equal((html.match(/class="workspace-group-scroll"/g) ?? []).length, 1);
   assert.match(html, /tabindex="0"/);
   const styles = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
-  assert.match(styles, /\.workspace-group-scroll \{[^}]*height: 400px;[^}]*overflow-y: auto/);
+  assert.match(styles, /\.workspace-group-scroll \{[^}]*max-height: 320px;[^}]*overflow-y: auto/);
   assert.match(styles, /\.workspace-group-heading \{[^}]*position: sticky/);
   assert.match(styles, /data-more-below="true"[^}]*opacity: 1/);
   assert.match(styles, /:focus-visible \{ outline: 2px/);

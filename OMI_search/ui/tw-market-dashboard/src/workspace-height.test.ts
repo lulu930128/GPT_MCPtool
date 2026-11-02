@@ -22,8 +22,8 @@ test("every workspace display mode has no iframe viewport-height dependency or h
   assert.doesNotMatch(workspace, /\b\d*\.?\d+(?:[dsl]?vh|vb|vmin|vmax)\b/i);
   assert.doesNotMatch(workspace, /@media[^{}]*(?:height|aspect-ratio)/i);
   assert.doesNotMatch(workspace, /(?:innerHeight|maxHeight)\s*[:=]/);
-  assert.match(css, /html\[data-omi-workspace="true"\] body \{ overflow: visible; \}/);
-  assert.match(css, /html\[data-omi-workspace="true"\] \{ scrollbar-gutter: stable; \}/);
+  assert.match(css, /html\[data-omi-workspace="true"\] body \{[^}]*\boverflow: visible;/);
+  assert.match(css, /html\[data-omi-workspace="true"\] \{[^}]*\bscrollbar-gutter: stable;/);
   assert.doesNotMatch(workspace, /\.(?:tw-workspace|workspace-columns|workspace-watchlist)\s*\{[^}]*overflow[^:]*:\s*(?:hidden|clip)/);
   assert.doesNotMatch(workspace, /overscroll-behavior[^:]*:\s*(?:contain|none)/);
   assert.doesNotMatch(workspace, /\.workspace-watchlist\s*\{[^}]*position:\s*(?:sticky|fixed)/);
@@ -35,8 +35,8 @@ test("every workspace display mode has no iframe viewport-height dependency or h
 // Deliberately a MOCK host geometry model, not a browser CSS engine. The CSS
 // contract above excludes other viewport-dependent inputs. Read the actual
 // pixel bounds below so changes cannot silently leave this model's bounds stale.
-const sidebar = Number(workspace.match(/\.workspace-watchlist \{ height: (\d+)px;/)![1]);
-const tree = Number(workspace.match(/\.workspace-group-scroll \{ height: (\d+)px;/)![1]);
+const tree = Number(workspace.match(/\.workspace-group-scroll \{ max-height: (\d+)px;/)![1]);
+const members = Number(workspace.match(/\.workspace-stock-scroll \{ max-height: (\d+)px;/)![1]);
 function rounds(layout: (height: number) => number, initial: number) {
   const heights = [initial];
   for (let round = 0; round < 20; round++) heights.push(layout(heights.at(-1)!));
@@ -51,15 +51,15 @@ test("mock host negative control reproduces the old sticky height positive feedb
   assert.ok(old.at(-1)! > 1700);
 });
 
-for (const width of [1440, 1150, 650, 390]) {
+for (const width of [1440, 1280, 1150, 900, 650, 390]) {
   test(`mock auto-resizing host converges across modes/content and short hosts at ${width}px`, () => {
     // Synthetic intrinsic content changes represent initialization, search,
     // selection, expansion and polling. They may resize once, never recurse.
     for (const mode of ["unknown", "inline", "pip", "fullscreen", "inline"]) {
       for (const content of [0, 280, 760, 4000, 760]) {
-        const sidebarHeight = width > 650 ? sidebar : tree + Math.min(content, 240) + 200;
+        const sidebarHeight = Math.min(content, tree) + Math.min(content, members) + Math.min(content, 220) + 200;
         const rightHeight = content > 0 ? 900 : 620;
-        const documentHeight = 128 + (width > 650 ? Math.max(sidebarHeight, rightHeight) : sidebarHeight + rightHeight);
+        const documentHeight = 128 + Math.max(sidebarHeight, rightHeight);
         for (const initial of [180, 699, 700, 1100, 12000]) {
           const history = rounds(() => documentHeight, initial);
           assert.equal(new Set(history.slice(1)).size, 1, `${mode}, content ${content}, initial ${initial}`);
@@ -68,6 +68,6 @@ for (const width of [1440, 1150, 650, 390]) {
         }
       }
     }
-    assert.ok(sidebar <= 900 && tree >= 300 && tree <= 500);
+    assert.ok(members >= 250 && members <= 400 && tree >= 300 && tree <= 500);
   });
 }

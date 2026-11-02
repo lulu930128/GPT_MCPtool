@@ -41,10 +41,10 @@ assert next(item for item in variants if item["version"].endswith("workspace.v1"
 server_ast = ast.parse((ROOT / "server.py").read_text(encoding="utf-8"))
 functions = {node.name: node for node in server_ast.body if isinstance(node, ast.FunctionDef)}
 resources = next(node.value for node in ast.walk(functions["_tw_dashboard_resources_for_client"]) if isinstance(node, ast.Return))
-assert isinstance(resources, ast.List) and len(resources.elts) == 2
+assert isinstance(resources, ast.List) and len(resources.elts) == 4
 legacy = next(node.value for node in ast.walk(functions["_build_tw_dashboard_tools"]) if isinstance(node, ast.Return) and isinstance(node.value, ast.List) and node.value.elts)
 assert len(legacy.elts) == 4
 public = next(node.value for node in ast.walk(functions["_build_public_tools"]) if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "tools" for target in node.targets))
-assert len(public.elts) + len(legacy.elts) + len(expected) + 1 == 17
-assert len(load_source().PUBLIC_TOOLS) == 20
-print(f"AST OK; generated workspace contracts OK; static tool/resource counts 20/2 (17 original + 3 runtime); digest {digest}; byte parity OK")
+assert len(public.elts) + len(legacy.elts) + len(expected) + 3 == 19
+assert len(load_source().PUBLIC_TOOLS) == 48
+print(f"AST OK; generated workspace contracts OK; static tool/resource counts 48/4 (17 original + 2 workspace v2/v3 + 6 runtime + 23 Candidate/Desk); digest {digest}; byte parity OK")

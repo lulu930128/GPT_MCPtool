@@ -23,18 +23,21 @@ export function MarketCards({ pane }: { pane: PaneState & { retry: () => void } 
   const indices = Array.isArray(pane.data?.resolved_indices) ? pane.data.resolved_indices.filter(isRecord) : [];
   const session = record(pane.data?.session);
   return <div className="workspace-market-cards" aria-label="市場摘要">
+    <div className="workspace-market-toolbar"><span>{sessionLabel(session)}</span><StatusBadge data={pane.data}/><button type="button" onClick={pane.retry} disabled={pane.loading}>{pane.error ? "重試市場資料" : "更新大盤"}</button></div>
     {markets.map(([indexId, market, name]) => {
       const index = indices.find((item) => item.index_id === indexId);
       const breadth = record(record(pane.data?.resolved_breadth)[market]);
       return <section key={indexId} className="workspace-pane workspace-market-card" aria-label={`${indexId} ${name}`} aria-busy={pane.loading}>
-        <div className="workspace-pane-heading"><h2>{indexId} <span>{name}</span></h2><button type="button" onClick={pane.retry} disabled={pane.loading}>{pane.error ? "重試" : "重新讀取"}</button></div>
+        <div className="workspace-pane-heading"><h2>{indexId} <span>{name}</span></h2></div>
         {pane.loading && <p role="status" className="workspace-loading">讀取中…{pane.data ? " 保留上次結果" : ""}</p>}
         {pane.error && <p role="alert" className="workspace-error">讀取失敗{pane.data ? " · 保留上次結果" : ""}</p>}
-        <div className="workspace-market-quote"><p className="workspace-session">{sessionLabel(session)}</p><div className="workspace-index-value"><strong>{numeric(index?.value)}</strong><span className={changeTone(index?.change)}>漲跌 {numeric(index?.change)} / {numeric(index?.change_pct)}{numeric(index?.change_pct) !== "—" ? "%" : ""}</span></div></div>
+        <div className="workspace-market-quote"><div className="workspace-index-value"><strong>{numeric(index?.value)}</strong><span className={changeTone(index?.change)}>漲跌 {numeric(index?.change)} / {numeric(index?.change_pct)}{numeric(index?.change_pct) !== "—" ? "%" : ""}</span></div></div>
+        <details className="workspace-market-breadth-details"><summary>廣度 · 漲 {numeric(breadth.advance)} / 跌 {numeric(breadth.decline)}</summary>
         <dl className="workspace-market-breadth" aria-label={`${market} 市場廣度`}>
           {[["漲", breadth.advance], ["跌", breadth.decline], ["平", breadth.unchanged], ["未知", breadth.unknown]].map(([name, value]) => <div key={String(name)}><dt>{String(name)}</dt><dd>{numeric(value)}</dd></div>)}
         </dl>
         <p className="workspace-market-quality">廣度覆蓋 {numeric(breadth.coverage)} / {numeric(breadth.universe)}</p>
+        </details>
         <div className="workspace-market-notices">
           {index?.authority === "derived_proxy" && <small className="workspace-proxy">代理指數</small>}
           <StatusBadge data={index ?? null} prefix="指數：" />

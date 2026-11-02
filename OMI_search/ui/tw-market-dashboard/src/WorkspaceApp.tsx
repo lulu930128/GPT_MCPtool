@@ -78,6 +78,8 @@ export function HoldingsList({ data, selected, select }: { data: UnknownRecord; 
 export function WorkspaceApp({ bridge }: { bridge: McpAppsBridge }) {
   const [selection, setSelection] = useState(() => initialSelection(window.openai?.toolOutput ?? window.openai?.toolInput));
   const userSelected = useRef(false);
+  const [workspaceView, setWorkspaceView] = useState("chart");
+  const [selectionView, setSelectionView] = useState("groups");
   const [presentation, setPresentation] = useState(bridge.getPresentationDiagnostic());
   useEffect(() => {
     const unsubscribe = bridge.subscribe((value) => {
@@ -120,21 +122,26 @@ export function WorkspaceApp({ bridge }: { bridge: McpAppsBridge }) {
   const summary = technicalSummary(chart, research);
   const presentationEvidence = displayed ? technicalPresentation(summary) : undefined;
 
-  return <main className="tw-workspace" data-display-mode={presentation.actualDisplayMode}>
-    <header className="workspace-title"><div><span className="brand-mark">OMI</span><h1>台股研究工作台</h1></div><button onClick={() => void bridge.requestFullscreen("manual")}>全螢幕</button></header>
+  return <main className="tw-workspace" data-display-mode={presentation.actualDisplayMode} data-workspace-view={workspaceView}>
+    <header className="workspace-title"><div><span className="brand-mark">OMI</span><h1>台股研究工作台</h1></div><div className="workspace-compact-nav" role="group" aria-label="工作區">{[["stocks", "選股"], ["chart", "看圖"], ["trade", "交易"]].map(([key, name]) => <button type="button" key={key} aria-pressed={workspaceView === key} aria-controls={`workspace-${key}-area`} onClick={() => setWorkspaceView(key)}>{name}</button>)}</div><button type="button" onClick={() => void bridge.requestFullscreen("manual")}>全螢幕</button></header>
     {presentation.requestStatus === "error" && <p role="status">全螢幕未開啟：{presentation.requestError}</p>}
     <div className="workspace-columns">
-      <aside className="workspace-watchlist">
+      <aside id="workspace-stocks-area" className="workspace-watchlist" aria-label="選股工作區">
         <Pane title="搜尋台股" pane={search}>
           <form onSubmit={(event) => { event.preventDefault(); const query = keyword.trim(); if (query === searchQuery) search.retry(); else setSearchQuery(query || null); }}><label htmlFor="workspace-search">代碼或名稱</label><div className="workspace-search-row"><input id="workspace-search" value={keyword} onChange={(event) => setKeyword(event.target.value)} maxLength={80} placeholder="2330 / 台積電"/><button>搜尋</button></div></form>
           {records(search.data?.items).map((item) => <button className="workspace-stock" key={label(item.stock_id)} onClick={() => choose({ stock_id: label(item.stock_id) })}>{label(item.stock_id)} {label(item.stock_name)}</button>)}
           {search.data && !records(search.data.items).length && <p>沒有符合的標的</p>}
         </Pane>
-        <Pane title="OMI 已記錄台股持股" pane={holdings}>
+        <div className="workspace-selection-tabs" role="group" aria-label="選股分類">{[["groups", "自選群組"], ["hot", "熱門"], ["holdings", "OMI 持股"]].map(([key, name]) => <button type="button" key={key} aria-pressed={selectionView === key} aria-controls={`workspace-selection-${key}`} onClick={() => setSelectionView(key)}>{name}</button>)}</div>
+        <div id="workspace-selection-holdings" hidden={selectionView !== "holdings"}><Pane title="OMI 已記錄台股持股" pane={holdings}>
           <p><small>OMI 已記錄持股 ≠ 即時券商庫存</small></p>
           {holdings.data && <HoldingsList data={holdings.data} selected={selection.stock_id} select={(symbol) => choose({ stock_id: symbol })} />}
-        </Pane>
-        <GroupNavigation pane={watchlist} selected={selection.watchlist_group_id ?? (record(watchlist.data?.selection).group_id as number)} select={(id) => choose({ watchlist_group_id: id })} selectedStock={selection.stock_id} selectStock={(symbol) => choose({ stock_id: symbol })}/>
+        </Pane></div>
+        <div id="workspace-selection-hot" hidden={selectionView !== "hot"}><Pane title="熱門族群" pane={hot}>
+          {records(hot.data?.hot_groups).map((item) => <div className="workspace-hot-row" key={label(item.group_id)}><strong>{label(item.label)}</strong><span className={changeTone(item.median_change_pct)}>{numeric(item.median_change_pct)}{numeric(item.median_change_pct) !== "—" ? "%" : ""}</span><StatusBadge data={item} /></div>)}
+          {hot.data && !records(hot.data.hot_groups).length && <p>本次回傳沒有熱門族群</p>}
+        </Pane></div>
+        <div id="workspace-selection-groups" hidden={selectionView !== "groups"}><GroupNavigation pane={watchlist} selected={selection.watchlist_group_id ?? (record(watchlist.data?.selection).group_id as number)} select={(id) => choose({ watchlist_group_id: id })} selectedStock={selection.stock_id} selectStock={(symbol) => choose({ stock_id: symbol })}/></div>
         <WorkspaceStatusPanel sources={[
           { id: "header", name: "市場 header", pane: header },
           { id: "watchlist", name: "自選 watchlist", pane: watchlist },
@@ -145,22 +152,21 @@ export function WorkspaceApp({ bridge }: { bridge: McpAppsBridge }) {
           { id: "research", name: "研究 research", pane: research },
         ]} />
       </aside>
+      <div id="workspace-chart-area" className="workspace-center">
       <MarketCards pane={header} />
       <Pane title="個股圖表" pane={{ ...chart, retry: () => { chart.retry(); research.retry(); } }} className="workspace-chart-pane">
         <div className="workspace-target"><strong>{displayed ? `${label(displayed.stock_id)} ${label(displayed.stock_name, "")} · ${frames.find(([key]) => key === displayedFrame)?.[1] ?? displayedFrame}` : selection.stock_id ?? "請從自選或搜尋選擇標的"}</strong><div role="group" aria-label="圖表週期">{frames.map(([key, name]) => <button key={key} aria-pressed={timeframe === key} onClick={() => choose({ timeframe: key })}>{name}</button>)}</div></div>
         {selection.stock_id && chart.dataKey !== chart.key && <p className="workspace-pending" role="status">待載入 {selection.stock_id} / {timeframe}。{displayed ? `目前保留 ${label(displayed.stock_id)} / ${label(displayed.timeframe)} 圖表。` : ""}</p>}
-        {displayed ? <><TechnicalSummary view={summary}/><InteractiveMarketChart stockId={label(displayed.stock_id)} timeframe={displayedFrame} points={points} averages={averages}/></> : <div className="workspace-chart-placeholder">選擇標的後顯示 K 線與均線</div>}
+        {displayed ? <InteractiveMarketChart stockId={label(displayed.stock_id)} timeframe={displayedFrame} points={points} averages={averages}/> : <div className="workspace-chart-placeholder">選擇標的後顯示 K 線與均線</div>}
       </Pane>
-      <WorkspaceContext symbol={selection.stock_id}>
-        <Pane title="技術研究" pane={research}>
+        <Pane title="技術分析" pane={research} className="workspace-technical-pane">
+          {displayed && <TechnicalSummary view={summary}/>}
           {research.data && <><p>{label(research.data.stock_id)} / {label(research.data.timeframe)}{!researchCurrent ? " · 上次結果，等待所選標的" : ""}</p><strong>{label(technical.title)}</strong><p>{label(technical.summary)}</p><p>{label(technical.phase)} · {label(technical.confidence)}</p>{records(technical.rows).map((row) => <details key={label(row.key)}><summary>{label(row.label)} · {label(row.display_value)}</summary><p>{label(row.description)}</p><small>{label(row.basis)} · {label(row.source)}</small></details>)}</>}
           {!research.data && <p>{selection.stock_id ? "研究資料獨立載入" : "選擇標的查看研究"}</p>}
         </Pane>
-        <Pane title="熱門族群" pane={hot}>
-          {records(hot.data?.hot_groups).map((item) => <div className="workspace-hot-row" key={label(item.group_id)}><strong>{label(item.label)}</strong><span className={changeTone(item.median_change_pct)}>{numeric(item.median_change_pct)}{numeric(item.median_change_pct) !== "—" ? "%" : ""}</span><StatusBadge data={item} /></div>)}
-        </Pane>
-      </WorkspaceContext>
+      </div>
+      <WorkspaceContext symbol={selection.stock_id} bridge={bridge}/>
     </div>
-    <footer className="workspace-footer">不同區塊非原子快照；委託為 SYNTHETIC，非券商連線。</footer>
+    <footer className="workspace-footer">各區塊依各自資料時間更新。</footer>
   </main>;
 }

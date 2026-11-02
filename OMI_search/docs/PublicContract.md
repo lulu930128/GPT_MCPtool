@@ -2,7 +2,7 @@
 
 ## Responsibility
 
-`OMI_search` is a thin MCP adapter with read-only market tools and a narrow protected runtime-control exception. It owns MCP protocol handling, the public tool
+`OMI_search` is a thin MCP adapter with read-only market tools, a narrow protected runtime-control exception, and Backend-owned research Candidate/Pending management. It owns MCP protocol handling, the public tool
 surface, safe schema projection, compatibility aliases, HTTP transport, and forwarding to the OMI
 backend.
 
@@ -21,7 +21,7 @@ budget enforcement, and response shaping. The adapter must not duplicate or rein
 
 ## Public tools
 
-`tools/list` exposes twenty tools: the existing seventeen remain compatible and exactly three adapter-owned runtime tools are additive, both online and in offline fallback.
+`tools/list` exposes 47 tools: the original seventeen market/render tools, one additive workspace v2 opener, six runtime tools and 23 Candidate/Pending/Desk tools, both online and in offline fallback.
 
 | Tool | Mechanical mapping |
 | --- | --- |
@@ -42,13 +42,34 @@ budget enforcement, and response shaping. The adapter must not duplicate or rein
 | `omi_read_tw_stock_chart` | Generated cache-only stock chart GET route |
 | `omi_read_tw_stock_research` | Generated cache-only stock research GET route |
 | `omi_open_tw_workspace` | Render-only shell with empty or optional initial selection; no backend IO |
-| `omi_read_runtime_status` | Fixed `GET /api/system/runtime-control/status`; no arguments |
-| `omi_restart_backend` | Fixed protected `POST /api/system/runtime-control/restart-backend`; exactly two UUIDs and literal confirmation |
-| `omi_read_runtime_operation` | Fixed `GET /api/system/runtime-control/operations/{request_id}`; UUID only |
+| `omi_open_tw_workspace_v2` | Independent workspace v2 URI; same selection-only behavior, no backend IO |
+| `omi_read_runtime_status` | Fixed direct Launcher `Status`; no arguments |
+| `omi_restart_backend` | Fixed direct Launcher `RestartBackend`; exactly two UUIDs and literal `restart_backend` |
+| `omi_read_runtime_operation` | Fixed direct Launcher `ReadOperation`; UUID only |
+| `omi_start_backend` | Fixed direct Launcher `StartBackend`; two UUIDs and literal `start_backend` |
+| `omi_recover_failed_start` | Fixed direct Launcher `RecoverFailedStart`; two UUIDs and literal `recover_failed_start` |
+| `omi_upgrade_db_schema` | Fixed direct Launcher `SchemaUpgrade`; two UUIDs and literal `upgrade_schema` |
+| `omi_list_candidates` | `GET /api/research/conditional-candidates` with optional `after`, `limit` |
+| `omi_read_candidate` | `GET /api/research/conditional-candidates/{id}` |
+| `omi_read_candidate_revisions` | `GET /api/research/conditional-candidates/{id}/revisions` |
+| `omi_read_candidate_pending` | `GET /api/research/conditional-candidates/{id}/pending` |
+| `omi_read_candidate_monitor_status` | `GET /api/research/conditional-candidates/monitor-status` |
+| `omi_create_candidate` | `POST /api/research/conditional-candidates` body `{owner_id,raw}` |
+| `omi_revise_candidate` | `POST /api/research/conditional-candidates/{id}/revisions` body `{expected_revision,raw}` |
+| `omi_pause_candidate` | `POST /api/research/conditional-candidates/{id}/pause` body `{expected_revision}` |
+| `omi_resume_candidate` | `POST /api/research/conditional-candidates/{id}/resume` body `{expected_revision}` |
+| `omi_cancel_candidate` | `POST /api/research/conditional-candidates/{id}/cancel` body `{expected_revision}` |
+| `omi_revise_candidate_pending` | `POST /api/research/conditional-candidates/pending/{id}/revise` body `{expected_revision,price,quantity}` |
+| `omi_cancel_candidate_pending` | `POST /api/research/conditional-candidates/pending/{id}/cancel` body `{expected_revision}` |
 
-The runtime exception is specified in [RuntimeControl.md](RuntimeControl.md). Only an explicit user restart request
-may invoke the disruptive tool. Management credentials are local environment only, never MCP inputs or outputs.
-The adapter forwards to the existing backend controller and performs no OS/process control, DB access or provider calls.
+The runtime exception is specified in [RuntimeControl.md](RuntimeControl.md). Only explicit chat user intent for the selected operation
+may invoke a disruptive tool. No local Windows human approval is required: authorization uses that
+remote instruction, the dedicated token and an OS-pinned same-user Launcher. Accepted/202 does not
+mean completed; unknown requires same-UUID receipt lookup, never resubmission. Management credentials are local environment only, never MCP inputs or outputs.
+The adapter forwards to the existing Launcher Controller without Backend HTTP. It verifies OS process
+identity but never owns process lifecycle, DB access or provider calls. New offline actions use exactly
+five string keys (action/request_id/expected_owner_id/token/confirmation); Restart retains four wire keys.
+No caller paths, actor, approval flags or shell. All lifecycle and migration safety gates stay with Launcher.
 
 `omi.search` remains callable only as a legacy compatibility alias and is omitted from
 `tools/list`. Only that alias may translate `query`, `stock_id`, or `symbol` into canonical
@@ -139,10 +160,11 @@ validate backend-owned parameters.
 
 ## Response and error semantics
 
-The following v4 rules apply to market tools. Runtime tools instead return the unchanged backend object inside
-`response`, alongside `http_status` and `transport_status`; no runtime output schema is invented or added to
-backend-generated market snapshots. HTTP 202 is queue acceptance only. Valid JSON HTTP rejections (including
-403, 409, 503) remain inspectable responses; adapter/transport errors use `isError=true` and fixed safe codes.
+The following v4 rules apply to market tools. Runtime tools return the unchanged safe Launcher object inside
+`response`, with `transport_status=pipe_response` and no fabricated `http_status`. No runtime output schema
+is added to backend-generated market snapshots. Accepted (including historical HTTP 202) is queue acceptance
+only. Controller forbidden/blocked/unknown remain inspectable business responses; adapter/transport errors
+use `isError=true` and fixed safe codes.
 
 - A valid backend response must be an object with `contract_version=omi.decision.v4`.
 - The response is returned in MCP `structuredContent` and as a text JSON fallback.
@@ -179,8 +201,10 @@ survive both tested versions. See [the offline reproduction](RuntimeControl.md#t
 
 - URI: `ui://omi/tw-market-dashboard/v2.html`
 - MIME: `text/html;profile=mcp-app`
-- additional URI: `ui://omi/tw-workspace/v1.html`;
-- only `omi_open_tw_market_dashboard` and `omi_open_tw_workspace` declare `_meta.ui.resourceUri`, each binding its corresponding URI;
+- workspace URIs: retained `ui://omi/tw-workspace/v1.html` and additive `ui://omi/tw-workspace/v2.html`;
+- only `omi_open_tw_market_dashboard`, `omi_open_tw_workspace` and `omi_open_tw_workspace_v2` declare `_meta.ui.resourceUri` and `openai/outputTemplate`, each binding its corresponding URI;
+- all three resources read the same latest `ui/tw-market-dashboard/dist/index.html`; both workspace versions inject `data-omi-workspace="true"`, while the dashboard is unchanged;
+- the v2 identity avoids reuse of the v1 resource/embedded instance; source/isolated SDK verification does not prove deployment, Host adoption or the Host cache root cause;
 - data/search/detail tools remain independently useful without UI;
 - the resource has no direct network allowlist and calls backend-owned tools through the MCP Apps bridge;
 - `tw_market_dashboard_contract_snapshot.json` is generated from OMI backend Pydantic models and supplies exact tool `outputSchema` values.
@@ -206,7 +230,19 @@ may differ and must never be presented as an atomic snapshot.
 Chart creation/removal depends only on symbol/timeframe identity or mount/unmount. Points and
 backend MA changes use series refs/setData, preserving visible range. Latest/All are explicit
 range controls. Host fullscreen support and the legacy 20-second bridge timeout are retained.
-No execution/trading UI or tool is introduced by the workspace.
+Workspace additionally offers the research candidate surface below. SYNTHETIC order rehearsal remains client-only and unchanged.
+
+## Research Candidate/Pending V1
+
+The fixed routes mechanically forward commands to the existing Backend owner. New MCP candidates use USER_SPACE / MANUAL and creation owner_id is injected as MCP; existing AGENT records retain their provenance. Backend alone owns CandidateSpec validation, conditions, qualification, lifecycle and persistence. Desk draft stores a local manual_stage Candidate; staged list/detail remain local reads and staged confirm enters Native only after the existing single modal confirmation. The eleven additive Pending/Desk tools, exact bodies, immutable selections and real broker readback contracts are specified in [MCP user trading contract](McpUserTradingContract.md). The public catalog contains 47 tools; generated market snapshots are unchanged.
+
+GET arrays use the existing MCP `structuredContent={"result":[...]}` envelope and text JSON fallback; objects are returned unchanged. HTTP validation/revision/database errors retain Backend detail inside an MCP `isError=true` error, while saved research objects with `validation_reasons` remain `isError=false`. No invented fallback rows or fill receipts. Failed reads retain the previous data with an explicit stale/error label.
+
+Workspace uses the existing resource URI, empty network CSP and bridge `tools/call`, without LLM or direct Backend access. Candidate drafts pin their editable revision; background reads only update persisted views while dirty. Pending editors likewise pin their own revision until the operator explicitly loads the newer version. No automatic mutation retry. On timeout the UI reads records/list/history back and retains UNKNOWN. A successful list cannot establish whether an unidentified create succeeded: `adopt()` cannot unlock that create. The operator explicitly selects an existing record to view or abandons the original draft and starts a blank one; no idempotency store or new approval flow is introduced.
+
+The editable 2330 example is Odd 1 share, long Buy/CASH with `last_trade < 2180 AND completed 1d RSI14 <= 1 AND MACD(12,26,9) histogram >= 9999`. It never auto-creates. The 3481 short Sell/SHORT_SELLING Common 1000-share draft has no market price or trigger conditions; `upper` is only a reference note and borrow remains UNKNOWN. Neither example supplies real market prices or implies order readiness.
+
+Pending prepare/approve and Desk draft/confirm mechanically delegate to the existing ExecutionApplication/ExecutionRuntime owner. Draft/preview and prepare do not send. Only the Orders page's single modal confirmation sends one exact version/digest call; cancel sends none. Stable client_intent_id binds creation/readback across timeout; UNKNOWN never automatically resends. Broker orders include EXTERNAL/MANAGED, fills retain known history/completeness, and inventory retains PARTIAL/UNKNOWN rather than research holdings. No SDK import, parallel journal, broker cancellation UI, fabricated fill, runtime start/restart/publish, migration or production DB operation is added here. Source/isolated HTTP/UI tests do not establish loaded or live adoption.
 
 `/health` identifies the adapter build. `/upstream-health` performs a bounded check of the selected
 OMI backend without exposing credentials or full upstream errors.

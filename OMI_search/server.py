@@ -4,14 +4,16 @@ from copy import deepcopy
 from hashlib import sha256
 import json
 import os
-from http.client import HTTPException
+import re
 from pathlib import Path
 import sys
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode, urlsplit
-from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener, urlopen
+from urllib.parse import quote, urlencode
+from urllib.request import Request, urlopen
 from uuid import UUID
+
+import launcher_transport
 
 import anyio
 import mcp.types as mcp_types
@@ -67,9 +69,18 @@ SERVER_INSTRUCTIONS = (
     "dashboard, call omi.read_tw_market_dashboard before "
     "omi.open_tw_market_dashboard. Alternatively, omi_open_tw_workspace opens "
     "an immediate shell with optional initial selection and independent cache-only panes. "
+    "Its trading workspace creates USER_SPACE/MANUAL records owned by MCP, and preserves legacy AGENT records through "
+    "the fixed candidate tools. This is separate from market allow_write=false and SYNTHETIC rehearsal. "
+    "Only the Orders page's explicit single confirmation may call exact-version/digest confirm or approve. "
+    "Draft/preview and prepare do not send orders. Broker desk routes may be unavailable until Backend adoption. "
+    "Candidate writes are never automatically retried; unidentified create timeout remains unknown "
+    "even after a successful list read. "
     "Runtime management is a separate protected exception: read status first; only "
-    "call omi_restart_backend on an explicit user restart request with the observed "
-    "launcher owner UUID and confirmation. HTTP 202 is acceptance, not completion. "
+    "call omi_restart_backend, omi_start_backend, omi_recover_failed_start or omi_upgrade_db_schema "
+    "on explicit chat user intent for that operation, with the observed launcher owner UUID, "
+    "a new request UUID and its fixed literal confirmation. No local Windows human approval: "
+    "authorization is the remote user instruction plus a dedicated token and OS-pinned same-user Launcher. "
+    "Launcher lifecycle, writer and schema safety gates still apply. Accepted/HTTP 202 is not completion. "
     "After an unknown outcome, read omi_read_runtime_operation with the same request "
     "UUID; never automatically resubmit or generate a replacement UUID."
 )
@@ -87,6 +98,8 @@ AI_TRUST_TOKEN = (
 AI_TRUST_TOKEN_HEADER = "X-OMI-AI-Trust-Token"
 TW_DASHBOARD_RESOURCE_URI = "ui://omi/tw-market-dashboard/v2.html"
 TW_WORKSPACE_RESOURCE_URI = "ui://omi/tw-workspace/v1.html"
+TW_WORKSPACE_V2_RESOURCE_URI = "ui://omi/tw-workspace/v2.html"
+TW_WORKSPACE_V3_RESOURCE_URI = "ui://omi/tw-workspace/v3.html"
 TW_DASHBOARD_RESOURCE_MIME_TYPE = "text/html;profile=mcp-app"
 TW_DASHBOARD_SNAPSHOT_PATH = Path(__file__).with_name(
     "tw_market_dashboard_contract_snapshot.json"
@@ -546,6 +559,24 @@ def _build_tw_workspace_tools() -> list[dict[str, Any]]:
             "openai/outputTemplate": TW_WORKSPACE_RESOURCE_URI,
         },
     })
+    tools.append({
+        **deepcopy(tools[-1]),
+        "name": "omi_open_tw_workspace_v2",
+        "title": "Open OMI Taiwan Workspace v2",
+        "_meta": {
+            "ui": {"resourceUri": TW_WORKSPACE_V2_RESOURCE_URI},
+            "openai/outputTemplate": TW_WORKSPACE_V2_RESOURCE_URI,
+        },
+    })
+    tools.append({
+        **deepcopy(tools[-1]),
+        "name": "omi_open_tw_workspace_v3",
+        "title": "Open OMI Taiwan Workspace v3",
+        "_meta": {
+            "ui": {"resourceUri": TW_WORKSPACE_V3_RESOURCE_URI},
+            "openai/outputTemplate": TW_WORKSPACE_V3_RESOURCE_URI,
+        },
+    })
     return tools
 
 
@@ -607,19 +638,28 @@ def _read_tw_workspace(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     return response
 
 
+RUNTIME_MUTATIONS = {
+    "omi_restart_backend": ("RestartBackend", "restart_backend"),
+    "omi_start_backend": ("StartBackend", "start_backend"),
+    "omi_recover_failed_start": ("RecoverFailedStart", "recover_failed_start"),
+    "omi_upgrade_db_schema": ("SchemaUpgrade", "upgrade_schema"),
+}
+
+
 def _build_runtime_tools() -> list[dict[str, Any]]:
     uuid_schema = {"type": "string", "format": "uuid", "pattern": (
         "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
         "[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
     )}
-    return [
+    tools = [
         {
             "name": "omi_read_runtime_status",
             "title": "Read OMI Runtime Status",
             "description": (
                 "Read authoritative omi.runtime-control.v1 status and launcher owner_id UUID. "
                 "Preserve serving_backend.writer_preflight, restart.blockers, ownership, readiness "
-                "and source loaded identity verbatim. HTTP OK does not mean restart ready. No side effects."
+                "and source loaded identity verbatim. Direct verified Launcher pipe; works without Backend HTTP. "
+                "A response does not mean restart ready. No side effects."
             ),
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
             "annotations": _read_only_annotations(),
@@ -631,12 +671,12 @@ def _build_runtime_tools() -> list[dict[str, Any]]:
                 "Disruptive protected operation. Only on an explicit user request to restart "
                 "the OMI backend. Read runtime status first and supply its launcher instance "
                 "UUID as expected_owner_id, a request UUID and literal confirmation. "
-                "HTTP 202 means queued, not completed. Writer drain or owner mismatch may "
+                "A Launcher accepted receipt means queued, not completed. Writer drain or owner mismatch may "
                 "block restart. Never auto retry: look up the same request UUID after "
                 "timeout/unknown or duplicate requests; do not generate a replacement UUID. "
-                "OwnedShutdown transport has source/disposable-fixture evidence only; production "
-                "writer admission/drain, launcher approval and startup adoption remain unavailable. "
-                "The current backend records receipts/evaluates preflight; safe stop is not enabled."
+                "Direct verified Launcher pipe, no Backend HTTP fallback. No local Windows human approval: "
+                "explicit chat user intent, dedicated token and OS-pinned same-user Launcher are required. "
+                "Launcher owns source compatibility, writer drain and exact stop/start safety gates."
             ),
             "inputSchema": {
                 "type": "object",
@@ -658,7 +698,8 @@ def _build_runtime_tools() -> list[dict[str, Any]]:
             "name": "omi_read_runtime_operation",
             "title": "Read OMI Runtime Operation",
             "description": (
-                "Read the authoritative durable receipt for an existing request UUID. "
+                "Read the authoritative durable receipt directly from the verified Launcher pipe, "
+                "without Backend HTTP, for an existing request UUID. "
                 "Preserve accepted/running/succeeded/failed/blocked/unknown. "
                 "Preserve optional backend_preflight, backend_preflight_identity, blockers, null "
                 "and opaque extension fields verbatim. Unknown is not permission to resubmit."
@@ -670,6 +711,145 @@ def _build_runtime_tools() -> list[dict[str, Any]]:
             "annotations": _read_only_annotations(),
         },
     ]
+    for name, title, semantics in (
+        ("omi_start_backend", "Start OMI Backend", "Start only an owner-confirmed stopped generation."),
+        ("omi_recover_failed_start", "Recover OMI Backend Failed Start",
+         "Recover only an owner-confirmed failed-start generation with exact exit proof."),
+        ("omi_upgrade_db_schema", "Upgrade OMI DB Schema",
+         "Use only the Launcher's configured DB/schema target. Backup, writer lease, migration transaction "
+         "and unknown-receipt gates remain owned by Launcher. Caller cannot select paths."),
+    ):
+        tool = deepcopy(tools[1])
+        tool.update(name=name, title=title + " (disruptive)", description=(
+            "Disruptive protected operation. Only on explicit chat user intent for this action. "
+            "Read runtime status first; supply its expected_owner_id UUID, a new request_id UUID "
+            "and the exact literal confirmation. Direct verified Launcher pipe works with Backend absent. "
+            "No local Windows human approval: remote user instruction plus dedicated token and "
+            "OS-pinned same-user Launcher. " + semantics + " Accepted/HTTP 202 is not completion. "
+            "After accepted or unknown, use omi_read_runtime_operation with the same UUID; "
+            "never resubmit or generate a replacement UUID. No shell, actor or approval flags."
+        ))
+        tool["inputSchema"]["properties"]["confirmation"]["const"] = RUNTIME_MUTATIONS[name][1]
+        tools.append(tool)
+    return tools
+
+
+CANDIDATE_BASE_PATH = "/api/research/conditional-candidates"
+# Fixed routes only. Backend/Native own validation, journal and broker facts.
+CANDIDATE_ROUTES = {
+    "omi_list_candidates": ("GET", "", ("after", "limit")),
+    "omi_read_candidate": ("GET", "/{id}", ()),
+    "omi_read_candidate_revisions": ("GET", "/{id}/revisions", ()),
+    "omi_read_candidate_pending": ("GET", "/{id}/pending", ()),
+    "omi_read_candidate_monitor_status": ("GET", "/monitor-status", ()),
+    "omi_create_candidate": ("POST", "", ("owner_id", "raw")),
+    "omi_revise_candidate": ("POST", "/{id}/revisions", ("expected_revision", "raw")),
+    "omi_pause_candidate": ("POST", "/{id}/pause", ("expected_revision",)),
+    "omi_resume_candidate": ("POST", "/{id}/resume", ("expected_revision",)),
+    "omi_cancel_candidate": ("POST", "/{id}/cancel", ("expected_revision",)),
+    "omi_revise_candidate_pending": ("POST", "/pending/{id}/revise", ("expected_revision", "price", "quantity")),
+    "omi_cancel_candidate_pending": ("POST", "/pending/{id}/cancel", ("expected_revision",)),
+    "omi_prepare_candidate_pending": ("POST", "/pending/{id}/prepare", ()),
+    "omi_approve_candidate_pending": ("POST", "/pending/{id}/approve", ("expected_revision", "expected_digest")),
+    "omi_create_desk_draft": ("POST", "/desk/draft", ("client_intent_id", "symbol", "action", "condition", "lot", "quantity_shares", "price")),
+    "omi_read_desk_staged": ("GET", "/desk/staged", ("after", "limit")),
+    "omi_read_desk_stage": ("GET", "/desk/staged/{id}", ()),
+    "omi_confirm_desk_staged": ("POST", "/desk/staged/{id}/confirm", ("expected_revision", "expected_digest")),
+    "omi_read_desk_orders": ("GET", "/desk/order-reports", ()),
+    "omi_read_desk_fills": ("GET", "/desk/fills", ()),
+    "omi_read_desk_inventory": ("GET", "/desk/inventory", ()),
+    "omi_read_desk_status": ("GET", "/desk/status", ()),
+    "omi_confirm_desk_review": ("POST", "/desk/reviews/{id}/confirm", ("expected_revision", "expected_digest")),
+}
+
+
+def _build_candidate_tools() -> list[dict[str, Any]]:
+    fields = {
+        "id": {"type": "string", "minLength": 1},
+        "after": {"type": "string"},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+        "owner_id": {"type": "string", "const": "MCP", "description": "Provenance only, fixed MCP for creation; not authentication."},
+        "raw": {"type": "object", "description": "New MCP intent is USER_SPACE / MANUAL. Existing AGENT records keep their provenance. Backend owns validation."},
+        "expected_revision": {"type": "integer", "minimum": 1},
+        "expected_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "symbol": {"type": "string", "minLength": 1},
+        "action": {"type": "string", "enum": ["Buy", "Sell"]},
+        "condition": {"type": "string", "enum": ["CASH", "CASH_SELLING", "MARGIN", "SHORT_SELLING"]},
+        "lot": {"type": "string", "enum": ["Common", "Odd"]},
+        "quantity_shares": {"type": "integer", "minimum": 1, "maximum": 1_000_000_000},
+        "client_intent_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_:.-]+$", "description": "Stable local manual_stage identity; UI creates a UUID once and retains it after timeout. Native submission identity is Backend-owned."},
+        "price": {"anyOf": [{"type": "number", "exclusiveMinimum": 0}, {"type": "string", "minLength": 1}]},
+        "quantity": {"type": "integer", "minimum": 1},
+    }
+    tools = []
+    for name, (method, suffix, body_fields) in CANDIDATE_ROUTES.items():
+        names = (["id"] if "{id}" in suffix else []) + list(body_fields)
+        tools.append({
+            "name": name,
+            "description": (
+                f"Mechanically forward {method} {CANDIDATE_BASE_PATH}{suffix}. "
+                "Backend/Native is the only order/journal owner. New MCP records use USER_SPACE/MANUAL/owner MCP. "
+                "desk/draft stores a local manual_stage Candidate without Native IO. Staged GETs read local Candidates. "
+                "prepare and desk/draft never send; approve, staged confirm and review confirm may send and require explicit user confirmation. "
+                "Never retry mutations or infer success from a missing route; UNKNOWN requires readback, not resend. "
+                "Research/stage cancellation is not broker cancellation. Broker Desk GETs return Native/Broker evidence only."
+            ),
+            "inputSchema": {
+                "type": "object", "properties": {key: deepcopy(fields[key]) for key in names},
+                "required": [key for key in names if key != "owner_id"] if method == "POST" or "{id}" in suffix else [],
+                "additionalProperties": False,
+            },
+            "annotations": {
+                "readOnlyHint": method == "GET", "destructiveHint": suffix.endswith(("/cancel", "/approve", "/confirm")),
+                "idempotentHint": method == "GET", "openWorldHint": False,
+            },
+        })
+    return tools
+
+
+def _call_candidate_tool(name: str, arguments: dict[str, Any]) -> Any:
+    method, suffix, fields = CANDIDATE_ROUTES[name]
+    schema = next(t["inputSchema"] for t in _build_candidate_tools() if t["name"] == name)
+    if arguments.keys() - schema["properties"].keys() or set(schema["required"]) - arguments.keys():
+        raise ValueError("Unexpected or missing Candidate arguments")
+    for key, value in arguments.items():
+        if key in {"id", "owner_id", "after"} and not isinstance(value, str):
+            raise ValueError(f"{key} must be a string")
+        if key in {"id", "owner_id"} and not value:
+            raise ValueError(f"{key} must not be empty")
+        if key in {"expected_revision", "quantity", "quantity_shares", "limit"} and (type(value) is not int or value <= 0):
+            raise ValueError(f"{key} must be a positive integer")
+        if key == "limit" and value > 100:
+            raise ValueError("limit must be at most 100")
+        if key == "owner_id" and len(value) > 128:
+            raise ValueError("owner_id must be at most 128 characters")
+        if key == "owner_id" and value != "MCP":
+            raise ValueError("MCP creation owner_id is fixed to MCP")
+        if key == "expected_digest" and (not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value)):
+            raise ValueError("expected_digest must be a lowercase SHA256 digest")
+        if key == "client_intent_id":
+            if not isinstance(value, str) or not 1 <= len(value) <= 128 or not re.fullmatch(r"[A-Za-z0-9_:.-]+", value):
+                raise ValueError("client_intent_id must be a stable Native identifier")
+        if key == "quantity_shares" and value > 1_000_000_000:
+            raise ValueError("quantity_shares exceeds the Backend input bound")
+        if key in {"symbol", "action", "condition", "lot"} and (not isinstance(value, str) or not value):
+            raise ValueError(f"{key} must be a nonempty string")
+        if key in {"action", "condition", "lot"} and value not in schema["properties"][key]["enum"]:
+            raise ValueError(f"Unexpected {key}")
+        if key == "raw" and not isinstance(value, dict):
+            raise ValueError("raw must be an object")
+        if key == "price" and (type(value) not in {str, int, float} or value == ""):
+            raise ValueError("price must be a number or decimal string")
+    path = CANDIDATE_BASE_PATH + suffix.replace("{id}", quote(arguments.get("id", ""), safe=""))
+    body = {key: arguments[key] for key in fields if key in arguments}
+    if name == "omi_create_candidate":
+        body["owner_id"] = "MCP"
+    if method == "GET":
+        if body:
+            path += "?" + urlencode(body)
+        return _api_request("GET", path)
+    # One write, no retry/fallback. Return Backend objects and validation reasons unchanged.
+    return _api_request("POST", path, **({"payload": body} if body else {}))
 
 
 def _build_public_tools(
@@ -814,7 +994,7 @@ def _build_public_tools(
             ),
         },
     ]
-    return [*tools, *deepcopy(TW_DASHBOARD_TOOLS), *_build_tw_workspace_tools(), *_build_runtime_tools()]
+    return [*tools, *deepcopy(TW_DASHBOARD_TOOLS), *_build_tw_workspace_tools(), *_build_runtime_tools(), *_build_candidate_tools()]
 
 
 PUBLIC_TOOLS = _build_public_tools(
@@ -974,12 +1154,24 @@ def _tw_dashboard_resources_for_client() -> list[dict[str, Any]]:
             "name": "omi-tw-workspace",
             "title": "OMI Taiwan Workspace",
             "mimeType": TW_DASHBOARD_RESOURCE_MIME_TYPE,
-        }
+        },
+        {
+            "uri": TW_WORKSPACE_V2_RESOURCE_URI,
+            "name": "omi-tw-workspace-v2",
+            "title": "OMI Taiwan Workspace v2",
+            "mimeType": TW_DASHBOARD_RESOURCE_MIME_TYPE,
+        },
+        {
+            "uri": TW_WORKSPACE_V3_RESOURCE_URI,
+            "name": "omi-tw-workspace-v3",
+            "title": "OMI Taiwan Workspace v3",
+            "mimeType": TW_DASHBOARD_RESOURCE_MIME_TYPE,
+        },
     ]
 
 
 def _read_tw_dashboard_resource(uri: str) -> dict[str, Any]:
-    if uri not in {TW_DASHBOARD_RESOURCE_URI, TW_WORKSPACE_RESOURCE_URI}:
+    if uri not in {TW_DASHBOARD_RESOURCE_URI, TW_WORKSPACE_RESOURCE_URI, TW_WORKSPACE_V2_RESOURCE_URI, TW_WORKSPACE_V3_RESOURCE_URI}:
         raise KeyError(f"Unknown resource: {uri}")
     try:
         widget_html = TW_DASHBOARD_WIDGET_PATH.read_text(encoding="utf-8")
@@ -987,7 +1179,7 @@ def _read_tw_dashboard_resource(uri: str) -> dict[str, Any]:
         raise RuntimeError(
             "Taiwan dashboard widget bundle is unavailable. Run its production build."
         ) from exc
-    if uri == TW_WORKSPACE_RESOURCE_URI:
+    if uri in {TW_WORKSPACE_RESOURCE_URI, TW_WORKSPACE_V2_RESOURCE_URI, TW_WORKSPACE_V3_RESOURCE_URI}:
         widget_html = widget_html.replace('<html ', '<html data-omi-workspace="true" ', 1)
     return {
         "contents": [
@@ -1397,12 +1589,6 @@ class RuntimeControlError(RuntimeError):
             self.payload.update(outcome="unknown", next_action="read_runtime_operation_same_request_id")
 
 
-class _RuntimeNoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        # A management credential must never follow a redirect (including 307/308).
-        return None
-
-
 def _runtime_uuid(arguments: dict[str, Any], key: str) -> str:
     value = arguments.get(key)
     try:
@@ -1410,7 +1596,7 @@ def _runtime_uuid(arguments: dict[str, Any], key: str) -> str:
             raise ValueError
     except (ValueError, AttributeError):
         raise RuntimeControlError("INVALID_RUNTIME_UUID") from None
-    return value
+    return value.lower()
 
 
 def _runtime_contains_secret(value: Any, secret: str) -> bool:
@@ -1425,80 +1611,60 @@ def _runtime_contains_secret(value: Any, secret: str) -> bool:
     return False
 
 
-def _runtime_request(method: str, path: str, *, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Single fixed-route request; no AI trust, proxies, redirects, retries or raw errors."""
-    request_id = payload["request_id"] if payload else None
-    is_restart = method == "POST"
-    secret = os.environ.get("OMI_SEARCH_RUNTIME_CONTROL_TOKEN", "")
-    if is_restart and (len(secret) != 64 or any(char not in "0123456789abcdef" for char in secret)):
+def _runtime_request(action: str, *, request_id: str = "", expected_owner_id: str = "") -> dict[str, Any]:
+    """Fixed Launcher wire grammar; no Backend HTTP, actor or preflight claims."""
+    is_mutation = action in launcher_transport.ACTION_CONFIRMATIONS
+    secret = os.environ.get("OMI_SEARCH_RUNTIME_CONTROL_TOKEN", "") if is_mutation else ""
+    if is_mutation and (len(secret) != 64 or any(char not in "0123456789abcdef" for char in secret)):
         raise RuntimeControlError("RUNTIME_CONTROL_TOKEN_MISSING_OR_INVALID", request_id=request_id)
-    headers = {"Accept": "application/json", "User-Agent": f"{SERVER_NAME}/{SERVER_VERSION}"}
-    if is_restart:
-        headers["X-OMI-Runtime-Control-Token"] = secret
-        headers["Content-Type"] = "application/json"
+    message = {"action": action, "request_id": request_id, "expected_owner_id": expected_owner_id, "token": secret}
+    if is_mutation and action != "RestartBackend":
+        message["confirmation"] = launcher_transport.ACTION_CONFIRMATIONS[action]
     try:
-        base = urlsplit(API_BASE_URL)
-        if (base.scheme not in {"http", "https"} or base.hostname not in {"127.0.0.1", "localhost", "::1"}
-                or base.username is not None or base.password is not None
-                or base.path or base.query or base.fragment):
-            raise ValueError
-        request = Request(f"{API_BASE_URL}{path}", method=method, headers=headers,
-                          data=json.dumps(payload).encode("utf-8") if payload else None)
-    except (ValueError, TypeError):
-        raise RuntimeControlError("INVALID_RUNTIME_BACKEND_URL", request_id=request_id) from None
-    try:
-        opener = build_opener(ProxyHandler({}), _RuntimeNoRedirect())
-        try:
-            response = opener.open(request, timeout=API_TIMEOUT_SECONDS)
-        except HTTPError as exc:
-            response = exc
-        with response:
-            status = response.code
-            raw = response.read()
-    except (TimeoutError, URLError, OSError, HTTPException) as exc:
-        timed_out = isinstance(exc, TimeoutError) or isinstance(getattr(exc, "reason", None), TimeoutError)
-        raise RuntimeControlError("RUNTIME_TIMEOUT" if timed_out else "RUNTIME_UNAVAILABLE",
-                                  request_id=request_id, unknown=is_restart) from None
+        body = launcher_transport.request(message)
+    except launcher_transport.PipeError as exc:
+        raise RuntimeControlError(exc.code, request_id=request_id or None,
+                                  unknown=is_mutation and exc.sent) from None
     except Exception:
-        raise RuntimeControlError("RUNTIME_TRANSPORT_ERROR", request_id=request_id, unknown=is_restart) from None
-    try:
-        body = json.loads(raw.decode("utf-8"))
-        if not isinstance(body, dict):
-            raise ValueError
-        # Validate serializability here so the shared MCP handler cannot echo a secret.
-        json.dumps(body, allow_nan=False)
-    except (UnicodeError, ValueError, TypeError):
-        raise RuntimeControlError("INVALID_RUNTIME_RESPONSE", request_id=request_id, unknown=is_restart) from None
+        raise RuntimeControlError("RUNTIME_TRANSPORT_ERROR", request_id=request_id or None,
+                                  unknown=is_mutation) from None
     if _runtime_contains_secret(body, secret):
-        raise RuntimeControlError("RUNTIME_RESPONSE_REDACTED", request_id=request_id, unknown=is_restart)
-    return {"transport_status": "http_response", "http_status": status, "response": body}
+        raise RuntimeControlError("RUNTIME_RESPONSE_REDACTED", request_id=request_id or None, unknown=is_mutation)
+    # Dispatch's fail-closed store exception has no request_id on the wire.
+    # Preserve that authoritative unknown; it never permits resubmission.
+    store_unknown = ("request_id" not in body and body.get("state") == "unknown"
+                     and body.get("reason") == "STORE_UNAVAILABLE")
+    if request_id and "error" not in body and not store_unknown and body.get("request_id") != request_id:
+        raise RuntimeControlError("INVALID_RUNTIME_RESPONSE", request_id=request_id, unknown=is_mutation)
+    return {"transport_status": "pipe_response", "response": body}
 
 
 def _call_runtime_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     if name == "omi_read_runtime_status":
         if arguments:
             raise RuntimeControlError("UNEXPECTED_RUNTIME_ARGUMENTS")
-        return _runtime_request("GET", "/api/system/runtime-control/status")
-    keys = {"request_id", "expected_owner_id", "confirmation"} if name == "omi_restart_backend" else {"request_id"}
+        return _runtime_request("Status")
+    keys = {"request_id", "expected_owner_id", "confirmation"} if name in RUNTIME_MUTATIONS else {"request_id"}
     if arguments.keys() != keys:
         raise RuntimeControlError("INVALID_RUNTIME_ARGUMENTS")
     request_id = _runtime_uuid(arguments, "request_id")
     if name == "omi_read_runtime_operation":
-        return _runtime_request("GET", f"/api/system/runtime-control/operations/{request_id}")
+        return _runtime_request("ReadOperation", request_id=request_id)
     owner_id = _runtime_uuid(arguments, "expected_owner_id")
-    if arguments["confirmation"] != "restart_backend":
+    action, confirmation = RUNTIME_MUTATIONS[name]
+    if arguments["confirmation"] != confirmation:
         raise RuntimeControlError("INVALID_RUNTIME_CONFIRMATION", request_id=request_id)
-    return _runtime_request("POST", "/api/system/runtime-control/restart-backend", payload={
-        "request_id": request_id, "expected_owner_id": owner_id, "confirmation": "restart_backend",
-    })
+    return _runtime_request(action, request_id=request_id, expected_owner_id=owner_id)
 
 
 def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
-    if name in {"omi_read_runtime_status", "omi_restart_backend", "omi_read_runtime_operation"}:
+    if name in CANDIDATE_ROUTES:
+        return _call_candidate_tool(name, arguments)
+    if name in {"omi_read_runtime_status", "omi_read_runtime_operation", *RUNTIME_MUTATIONS}:
         return _call_runtime_tool(name, arguments)
     if name in TW_WORKSPACE_ROUTES:
         return _read_tw_workspace(name, arguments)
-    if name == "omi_open_tw_workspace":
+    if name in {"omi_open_tw_workspace", "omi_open_tw_workspace_v2", "omi_open_tw_workspace_v3"}:
         if arguments.keys() - TW_WORKSPACE_SELECTION_SCHEMA["properties"].keys():
             raise ValueError("Only initial workspace selection is accepted")
         return deepcopy(arguments)

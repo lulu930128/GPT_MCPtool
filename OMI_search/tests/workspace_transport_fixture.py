@@ -29,7 +29,7 @@ def load_core():
     assert {node.name for node in functions} == names
     namespace = dict(globals())
     # Constants are evaluated from source, never copied into a replacement adapter.
-    wanted = {"SERVER_NAME", "SERVER_VERSION", "TW_WORKSPACE_RESOURCE_URI"}
+    wanted = {"SERVER_NAME", "SERVER_VERSION", "TW_WORKSPACE_RESOURCE_URI", "TW_WORKSPACE_V2_RESOURCE_URI"}
     for node in source.body:
         if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id in wanted for t in node.targets):
             for target in node.targets:

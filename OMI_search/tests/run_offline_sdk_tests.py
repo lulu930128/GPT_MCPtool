@@ -44,12 +44,16 @@ def main():
         }))
         # Do not block socketpair: Windows asyncio uses it for its wakeup pipe.
         stack.enter_context(patch.object(socket, "create_connection", blocked))
-        stack.enter_context(patch("subprocess.Popen", blocked))
         stack.enter_context(patch("anyio.connect_tcp", blocked))
         stack.enter_context(patch("urllib.request.urlopen", blocked))
         stack.enter_context(patch("urllib.request.build_opener", blocked))
+        import launcher_transport
+        stack.enter_context(patch.object(launcher_transport, "request", blocked))
         import mcp
         import mcp_types
+        # SDK Win32 classes evaluate Popen[bytes] while importing. Block actual
+        # process creation after import without replacing that typing surface.
+        stack.enter_context(patch("subprocess.Popen", blocked))
         print(f"Python: {sys.version.split()[0]}; mcp: {metadata.version('mcp')}; "
               f"mcp-types: {metadata.version('mcp-types')}; pydantic: {metadata.version('pydantic')}")
         print(f"SDK source: {mcp.__file__}; types source: {mcp_types.__file__}")

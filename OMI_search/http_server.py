@@ -31,6 +31,7 @@ UPSTREAM_HEALTH_TIMEOUT_SECONDS = 2
 SOURCE_BUILD_FILES = (
     Path(__file__).resolve(),
     Path(omi_search_stdio.__file__).resolve(),
+    Path(__file__).resolve().with_name("launcher_transport.py"),
     Path(__file__).resolve().with_name("pyproject.toml"),
     Path(__file__).resolve().with_name("uv.lock"),
     Path(__file__).resolve().with_name("public_contract_snapshot.json"),

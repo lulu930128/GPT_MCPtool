@@ -124,7 +124,7 @@ test("WorkspaceApp's real pane effects request workspace for every frame and kee
     plugins: [{ name: "controlled-workspace", setup(builder) {
       builder.onResolve({ filter: /^react(?:\/jsx-runtime)?$/ }, args => ({ path: args.path, namespace: "controlled" }));
       builder.onLoad({ filter: /.*/, namespace: "controlled" }, args => ({ contents: args.path === "react"
-        ? "export const {useState,useEffect,useRef,useMemo,useReducer,createContext}=globalThis.hooks;"
+        ? "export const {useState,useEffect,useLayoutEffect,useRef,useMemo,useReducer,createContext}=globalThis.hooks;"
         : "export const jsx=(type,props)=>({type,props}); export const jsxs=jsx; export const Fragment='fragment';" }));
     } }],
   });

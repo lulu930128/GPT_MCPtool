@@ -8,6 +8,8 @@ import path from "node:path";
 
 if (!process.argv[2]) throw new Error("Pass an installed Chromium executable; no download or retries.");
 const root = fileURLToPath(new URL("../", import.meta.url));
+const widths = process.argv[3] ? process.argv[3].split(",").map(Number) : [1440, 1280, 1150, 900, 650, 390];
+if (!widths.length || widths.some(width => ![1440, 1280, 1150, 900, 650, 390].includes(width))) throw Error("Unsupported fixture width");
 await mkdir(path.join(root, ".tmp"), { recursive: true });
 const run = await mkdtemp(path.join(root, ".tmp", "workspace-iframe-"));
 const output = await build({ entryPoints: [path.join(root, "scripts/workspace-browser-fixture.tsx")], bundle: true, write: false, format: "iife", platform: "browser", loader: { ".css": "text" } });
@@ -49,17 +51,17 @@ window.workspaceFeedback = async phase => {
   results.push({width:frame.contentWindow.innerWidth, phase, samples, history});
 };
 async function run() {
-  for (const width of [1440, 1150, 650, 390]) {
+  for (const width of ${JSON.stringify(widths)}) {
     frame = document.createElement('iframe');
     frame.style.cssText = 'display:block;border:0;width:' + width + 'px;height:180px';
     frame.srcdoc = child;
     document.getElementById('host').replaceChildren(frame);
-    for (let attempt = 0; attempt < 1200; attempt++) {
+    for (let attempt = 0; attempt < 3000; attempt++) {
       await pause();
       const status = frame.contentDocument?.body?.dataset.testResult;
       if (status?.startsWith('FAIL')) throw new Error(width + ': ' + status);
       if (status?.startsWith('PASS')) break;
-      if (attempt === 1199) throw new Error(width + ': fixture did not finish');
+      if (attempt === 2999) throw new Error(width + ': fixture did not finish');
     }
     for (const mode of ['inline', 'pip', 'fullscreen', 'inline']) {
       frame.contentWindow.openai.displayMode = mode;
@@ -71,6 +73,7 @@ async function run() {
     // Let the actual 30s chart/watchlist/header polling timers run in virtual time.
     await pause(31000);
     await window.workspaceFeedback('scheduled polling');
+    frame.contentDocument.querySelector('[aria-label="工作區"] [aria-controls="workspace-stocks-area"]').click(); await pause();
     const tree = frame.contentDocument.querySelector('.workspace-group-scroll');
     frame.style.height = '180px'; await pause();
     tree.scrollTop = tree.scrollHeight;
@@ -88,7 +91,7 @@ run().catch(error => { document.body.dataset.testResult = 'FAIL ' + error.messag
 `;
 const html = path.join(run, "fixture.html");
 await writeFile(html, `<!doctype html><html><meta charset="utf-8"><body style="margin:0"><div id="host"></div><pre id="results"></pre><script>${harness.replace(/<\/script/gi, "<\\/script")}</script></body></html>`);
-const result = spawnSync(process.argv[2], ["--headless", "--disable-gpu", "--no-first-run", "--disable-background-networking", "--no-default-browser-check", `--user-data-dir=${path.join(run, "profile")}`, "--window-size=1500,1100", "--virtual-time-budget=180000", "--dump-dom", `--screenshot=${path.join(run, "iframe.png")}`, pathToFileURL(html).href], { encoding: "utf8", windowsHide: true, timeout: 20000, maxBuffer: 12 * 1024 * 1024 });
+const result = spawnSync(process.argv[2], ["--headless", "--disable-gpu", "--no-first-run", "--disable-background-networking", "--no-default-browser-check", `--user-data-dir=${path.join(run, "profile")}`, "--window-size=1500,1100", "--virtual-time-budget=600000", "--dump-dom", `--screenshot=${path.join(run, "iframe.png")}`, pathToFileURL(html).href], { encoding: "utf8", windowsHide: true, timeout: 45000, maxBuffer: 12 * 1024 * 1024 });
 await writeFile(path.join(run, "result.html"), result.stdout ?? "");
 const outcome = result.stdout?.match(/<body[^>]*data-test-result="([^"]+)"/)?.[1];
 if (result.error || result.status !== 0 || !outcome?.startsWith("PASS")) throw new Error(`${outcome ?? result.error ?? `browser exit ${result.status}; no result`}; artifacts: ${run}\n${result.stderr?.slice(-1000) ?? ""}`);

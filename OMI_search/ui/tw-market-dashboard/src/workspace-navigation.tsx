@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { buildWatchlistTree, findWatchlistGroupPath, isRecord, type UnknownRecord, type WatchlistGroupNode } from "./state";
 import type { PaneState } from "./workspace-state";
 import { StatusBadge } from "./workspace-evidence";
@@ -28,6 +28,7 @@ type StockSelection = { selectedStock?: string; selectStock: (symbol: string) =>
 const record = (value: unknown): UnknownRecord => isRecord(value) ? value : {};
 const label = (value: unknown) => typeof value === "string" && value ? value : "—";
 const numeric = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value.toLocaleString("zh-TW", { maximumFractionDigits: 2 }) : "—";
+const useNavigationLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
 export function SelectedGroupItems({ pane, selected, selectedStock, selectStock }: StockSelection & { pane: WatchlistPane; selected?: number }) {
   // Retained metadata can still navigate the tree, but retained rows must never
@@ -47,18 +48,25 @@ export function SelectedGroupItems({ pane, selected, selectedStock, selectStock 
   </div>;
 }
 
-type TreeProps = { nodes: WatchlistGroupNode[]; selected?: number; select: (id: number) => void; path: number[]; inline: ReactNode };
+type TreeProps = { nodes: WatchlistGroupNode[]; selected?: number; select: (id: number) => void; path: number[] };
 export function GroupBranch({ node, ...props }: Omit<TreeProps, "nodes"> & { node: WatchlistGroupNode }) {
   const onPath = props.path.includes(node.groupId);
   const [open, setOpen] = useState(onPath);
-  useEffect(() => { if (onPath) setOpen(true); }, [onPath, props.selected]);
+  const [seenSelection, setSeenSelection] = useState(props.selected);
+  const [seenOnPath, setSeenOnPath] = useState(onPath);
+  // Reconcile expansion before commit. A deferred effect/animation frame could
+  // otherwise reveal the previous group after the next stock click.
+  if (seenSelection !== props.selected || seenOnPath !== onPath) {
+    setSeenSelection(props.selected);
+    setSeenOnPath(onPath);
+    if (onPath && !open) setOpen(true);
+  }
   const row = <button type="button" data-group-id={node.groupId} aria-pressed={props.selected === node.groupId} onClick={() => props.select(node.groupId)}>{node.groupName}</button>;
-  const inline = props.selected === node.groupId ? props.inline : null;
   return <li data-group-node={node.groupId}>
     <div className="workspace-group-row">
       {node.children.length > 0 ? <button type="button" className="workspace-group-toggle" aria-label={`${open ? "收合" : "展開"} ${node.groupName} 子群組`} aria-expanded={open} aria-controls={`workspace-group-children-${node.groupId}`} onClick={() => setOpen((value) => !value)}><span aria-hidden="true">{open ? "▾" : "▸"}</span></button> : <span className="workspace-group-spacer" aria-hidden="true" />}
       {row}
-    </div>{inline}
+    </div>
     {node.children.length > 0 && <div id={`workspace-group-children-${node.groupId}`} hidden={!open}>
       <GroupTree {...props} nodes={node.children} />
     </div>}
@@ -89,28 +97,47 @@ export function GroupNavigation({ pane, selected, select, ...stock }: StockSelec
   const heading = useRef<HTMLDivElement>(null);
   const [more, setMore] = useState(false);
   useEffect(() => {
-    if (viewport.current && content.current) return observeGroupOverflow(viewport.current, content.current, setMore);
-  }, []);
-  useEffect(() => {
-    const frame = requestAnimationFrame(() => {
-      const row = viewport.current?.querySelector<HTMLElement>(`[data-group-id="${selected}"]`);
-      if (viewport.current && row) revealGroup(viewport.current, row, heading.current?.offsetHeight ?? 0);
+    if (!viewport.current || !content.current) return;
+    const element = viewport.current;
+    let wasVisible = false;
+    return observeGroupOverflow(element, content.current, (value) => {
+      const visible = element.clientHeight > 0;
+      if (visible && !wasVisible) {
+        const row = element.querySelector<HTMLElement>('[data-group-id][aria-pressed="true"]');
+        if (row) revealGroup(element, row, heading.current?.offsetHeight ?? 0);
+      }
+      wasVisible = visible;
+      setMore(value);
     });
-    return () => cancelAnimationFrame(frame);
+  }, []);
+  useNavigationLayoutEffect(() => {
+    const row = viewport.current?.querySelector<HTMLElement>(`[data-group-id="${selected}"]`);
+    if (viewport.current?.clientHeight && row) revealGroup(viewport.current, row, heading.current?.offsetHeight ?? 0);
   }, [selected, pathKey]);
-  const inline = <SelectedGroupItems pane={pane} selected={selected} {...stock} />;
+  const groupName = path.map((id) => {
+    const find = (branch: WatchlistGroupNode[]): WatchlistGroupNode | undefined => {
+      for (const node of branch) { if (node.groupId === id) return node; const child = find(node.children); if (child) return child; }
+    };
+    return find(nodes)?.groupName;
+  }).filter(Boolean).join(" / ");
+  const members = useRef<HTMLDivElement>(null);
+  useEffect(() => { if (members.current) members.current.scrollTop = 0; }, [selected]);
   return <section className="workspace-pane workspace-group-navigation" aria-label="自選族群與個股">
     <div className="workspace-group-scroll-shell" data-more-below={more}>
       <div ref={viewport} className="workspace-group-scroll" role="region" aria-label="自選群組導航" tabIndex={0}>
-        <div ref={heading} className="workspace-pane-heading workspace-group-heading"><h2>自選族群與個股</h2><button type="button" onClick={pane.retry} disabled={pane.loading}>{pane.error ? "重試" : "重新讀取"}</button></div>
+        <div ref={heading} className="workspace-pane-heading workspace-group-heading"><h2>群組分類</h2><button type="button" onClick={pane.retry} disabled={pane.loading}>{pane.error ? "重試" : "重新讀取"}</button></div>
         <div ref={content}>
-          <GroupTree nodes={nodes} selected={selected} select={select} path={path} inline={inline} />
+          <GroupTree nodes={nodes} selected={selected} select={select} path={path} />
           {path.length === 0 && <>{selected !== undefined && <p role="status">群組 {selected} 未出現在回傳階層中。</p>}{/* Never invent a node for unmatched stock rows. */}
             {pane.loading || !pane.data ? <p role="status">讀取群組階層中…</p> : <p role="status">請選擇群組；目前沒有可對應的群組節點。</p>}
             {pane.error ? <p role="alert" className="workspace-error">讀取失敗</p> : <StatusBadge data={pane.data} />}
           </>}
         </div>
       </div>
+    </div>
+    <div className="workspace-members-heading"><h2>群組成員</h2><span title={groupName}>{groupName || "請選擇群組"}</span></div>
+    <div ref={members} className="workspace-stock-scroll" role="region" aria-label="選中群組成員" tabIndex={0}>
+      {path.length > 0 && <SelectedGroupItems pane={pane} selected={selected} {...stock} />}
     </div>
   </section>;
 }

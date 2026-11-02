@@ -32,7 +32,7 @@ test("single parent header separates native keyboard buttons, preserves selectio
     plugins: [{ name: "controlled-navigation", setup(builder) {
       builder.onResolve({ filter: /^react(?:\/jsx-runtime)?$/ }, (args) => ({ path: args.path, namespace: "controlled" }));
       builder.onLoad({ filter: /.*/, namespace: "controlled" }, (args) => ({ contents: args.path === "react"
-        ? "export const {useState,useEffect,useRef,useMemo}=globalThis.hooks;"
+        ? "export const {useState,useEffect,useLayoutEffect,useRef,useMemo}=globalThis.hooks;"
         : "export const jsx=(type,props)=>({type,props}); export const jsxs=jsx; export const Fragment='fragment';" }));
     } }],
   });
@@ -48,7 +48,7 @@ test("single parent header separates native keyboard buttons, preserves selectio
     let iterations = 0;
     do {
       dirty = false; cursor = 0; effects = [];
-      tree = module.exports.GroupBranch({ node, selected, path, select: (id: number) => { chosen = id; }, inline: "INLINE" });
+      tree = module.exports.GroupBranch({ node, selected, path, select: (id: number) => { chosen = id; } });
       effects.forEach((effect) => effect());
       assert.ok(++iterations < 5);
     } while (dirty);
@@ -66,19 +66,62 @@ test("single parent header separates native keyboard buttons, preserves selectio
   }
   assert.equal(toggle().props["aria-expanded"], true);
   assert.equal(toggle().props["aria-controls"], "workspace-group-children-1");
-  assert.equal(tree.props.children[2].props.hidden, false);
+  assert.equal(tree.props.children[1].props.hidden, false);
   name().props.onClick();
   assert.equal(chosen, 1);
   toggle().props.onClick(); render();
   assert.equal(toggle().props["aria-expanded"], false);
-  assert.equal(tree.props.children[2].props.hidden, true);
+  assert.equal(tree.props.children[1].props.hidden, true);
   assert.equal(chosen, 1, "expansion does not select another group");
   selected = 46; path = [1, 46]; render();
   assert.equal(toggle().props["aria-expanded"], true, "changed selection opens ancestors");
+  toggle().props.onClick(); render();
+  path = []; render();
+  path = [1, 46]; render();
+  assert.equal(toggle().props["aria-expanded"], true, "newly returned ancestry opens even with the same selection");
   node = { ...leaf, children: [] }; selected = 45; path = [1, 45]; render();
   assert.equal(toggle().type, "span", "leaf has no empty expansion target");
   assert.equal(name().props["aria-pressed"], true);
-  assert.equal(tree.props.children[1], "INLINE");
+  assert.equal(tree.props.children[1], false, "leaf does not embed member rows or empty child viewport");
   name().props.onClick();
   assert.equal(chosen, 45);
+});
+
+test("selection reveal commits synchronously and a stock rerender cannot run a deferred group scroll", async () => {
+  const output = await build({
+    entryPoints: [fileURLToPath(new URL("./workspace-navigation.tsx", import.meta.url))],
+    bundle: true, write: false, format: "cjs", platform: "node", jsx: "automatic",
+    plugins: [{ name: "navigation-layout", setup(builder) {
+      builder.onResolve({ filter: /^react(?:\/jsx-runtime)?$/ }, args => ({ path: args.path, namespace: "controlled" }));
+      builder.onLoad({ filter: /.*/, namespace: "controlled" }, args => ({ contents: args.path === "react"
+        ? "export const {useState,useEffect,useLayoutEffect,useRef,useMemo}=globalThis.hooks;"
+        : "export const jsx=(type,props)=>({type,props}); export const jsxs=jsx; export const Fragment='fragment';" }));
+    } }],
+  });
+  const viewport = { clientHeight: 300, scrollTop: 2284,
+    getBoundingClientRect: () => ({ top: 100, bottom: 400 }),
+    querySelector: () => ({ getBoundingClientRect: () => ({ top: 250 - viewport.scrollTop, bottom: 284 - viewport.scrollTop }) }) };
+  const refs = [{ current: viewport }, { current: {} }, { current: { offsetHeight: 40 } }, { current: null }];
+  let refIndex = 0, effectIndex = 0;
+  const dependencies: unknown[][] = [];
+  let layouts: (() => void)[] = [];
+  const hooks = {
+    useState: (value: unknown) => [value, () => {}], useMemo: (fn: () => unknown) => fn(),
+    useRef: () => refs[refIndex++], useEffect: () => {},
+    useLayoutEffect(fn: () => void, deps: unknown[]) {
+      const index = effectIndex++;
+      if (!dependencies[index] || deps.some((value, i) => !Object.is(value, dependencies[index][i]))) layouts.push(() => { dependencies[index] = deps; fn(); });
+    },
+  };
+  const module = { exports: {} as any };
+  vm.runInNewContext(output.outputFiles[0].text, { module, exports: module.exports, hooks, window: {},
+    requestAnimationFrame() { throw Error("Selection reveal must not wait for an animation frame"); } });
+  const render = (selectedStock: string) => {
+    refIndex = 0; effectIndex = 0; layouts = [];
+    module.exports.GroupNavigation({ pane: { data: { groups: [{ group_id: 45, group_name: "測試群組" }] } }, selected: 45, select() {}, selectedStock, selectStock() {} });
+    layouts.forEach(fn => fn());
+  };
+  render("2330"); assert.ok(viewport.scrollTop < 2284, "selection is already revealed at commit");
+  viewport.scrollTop = 200;
+  render("2303"); assert.equal(viewport.scrollTop, 200, "stock rerender preserves manual scroll");
 });

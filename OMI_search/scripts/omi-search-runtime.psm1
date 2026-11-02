@@ -1006,6 +1006,7 @@ function New-OmiSearchRuntimeContext {
     sourceBuildArtifacts = @(
       (Join-Path $resolvedRoot "http_server.py")
       (Join-Path $resolvedRoot "server.py")
+      (Join-Path $resolvedRoot "launcher_transport.py")
       (Join-Path $resolvedRoot "pyproject.toml")
       (Join-Path $resolvedRoot "uv.lock")
       (Join-Path $resolvedRoot "public_contract_snapshot.json")

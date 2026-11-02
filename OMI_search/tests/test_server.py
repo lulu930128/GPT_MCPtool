@@ -359,7 +359,7 @@ class OmiSearchMappingTests(unittest.TestCase):
             "/api/ai/tools",
             timeout_seconds=self.server.SCHEMA_TIMEOUT_SECONDS,
         )
-        self.assertEqual(len(tools), 20)
+        self.assertEqual(len(tools), 48)
         ask = tools[0]
         self.assertEqual(ask["title"], "Backend Ask OMI")
         properties = ask["inputSchema"]["properties"]
@@ -440,9 +440,15 @@ class OmiSearchMappingTests(unittest.TestCase):
                 "omi_read_tw_stock_chart",
                 "omi_read_tw_stock_research",
                 "omi_open_tw_workspace",
+                "omi_open_tw_workspace_v2",
+                "omi_open_tw_workspace_v3",
                 "omi_read_runtime_status",
                 "omi_restart_backend",
                 "omi_read_runtime_operation",
+                "omi_start_backend",
+                "omi_recover_failed_start",
+                "omi_upgrade_db_schema",
+                *self.server.CANDIDATE_ROUTES,
             ],
         )
         self.assertTrue(all("." not in name for name in names))
@@ -484,7 +490,7 @@ class OmiSearchMappingTests(unittest.TestCase):
             self.server.TW_DASHBOARD_RESOURCE_URI,
         )
         for name, tool in tools.items():
-            if name not in {"omi_open_tw_market_dashboard", "omi_open_tw_workspace"}:
+            if name not in {"omi_open_tw_market_dashboard", "omi_open_tw_workspace", "omi_open_tw_workspace_v2", "omi_open_tw_workspace_v3"}:
                 self.assertNotIn("resourceUri", tool.get("_meta", {}).get("ui", {}))
 
     def test_dashboard_resource_is_versioned_inline_and_network_closed(self) -> None:
@@ -747,7 +753,7 @@ class OmiSearchMappingTests(unittest.TestCase):
             tools, resources, dashboard = anyio.run(scenario)
         except PermissionError as exc:
             self.skipTest(f"Windows sandbox denied subprocess pipes: {exc}")
-        self.assertEqual(len(tools.tools), 20)
+        self.assertEqual(len(tools.tools), 48)
         self.assertIn(
             "ui://omi/tw-market-dashboard/v2.html",
             {str(resource.uri) for resource in resources.resources},

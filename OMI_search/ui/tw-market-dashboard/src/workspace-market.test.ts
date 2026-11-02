@@ -35,10 +35,12 @@ test("independent compact market cards pair index and breadth, with right aligne
   assert.match(tpex, /覆蓋 781 \/ 887/); assert.match(tpex, /代理指數/);
   assert.doesNotMatch(taiex, /代理指數|426\.71/);
   for (const card of [taiex, tpex]) {
-    assert.match(card, /廣度：部分受限/); assert.match(card, /10\/08 前一交易日/);
+    assert.match(card, /廣度：部分受限/);
     assert.match(card, /workspace-down/);
-    assert.doesNotMatch(card, /complete|partial|previous_session|derived_proxy|official_exchange|<pre|<details/);
+    assert.doesNotMatch(card, /complete|partial|previous_session|derived_proxy|official_exchange|<pre/);
+    assert.match(card, /<details class="workspace-market-breadth-details"><summary>/);
   }
+  assert.equal((render().match(/10\/08 前一交易日/g) ?? []).length, 1);
 });
 
 test("missing values remain missing; explicit zero remains zero", () => {
@@ -97,12 +99,13 @@ test("workspace grid owns sidebar, exactly two cards, chart and synthetic contex
   try {
     const bridge = { getPresentationDiagnostic: () => ({ actualDisplayMode: "inline" }) } as unknown as McpAppsBridge;
     const html = renderToStaticMarkup(createElement(WorkspaceApp, { bridge }));
-    assert.match(html, /class="workspace-columns"><aside class="workspace-watchlist"/);
-    assert.match(html, /<\/aside><div class="workspace-market-cards"/);
+    assert.match(html, /class="workspace-columns"><aside id="workspace-stocks-area" class="workspace-watchlist"/);
+    assert.match(html, /<\/aside><div id="workspace-chart-area" class="workspace-center"><div class="workspace-market-cards"/);
     assert.equal((html.match(/class="workspace-pane workspace-market-card"/g) ?? []).length, 2);
     assert.doesNotMatch(html, /aria-label="市場概況"|class="workspace-market"/);
     assert.match(html, /workspace-chart-pane/);
-    assert.match(html, /委託 · SYNTHETIC/);
+    assert.match(html, /workspace-candidate-content/);
+    assert.doesNotMatch(html, /委託 · SYNTHETIC/);
   } finally {
     if (original) Object.defineProperty(globalThis, "window", original);
     else Reflect.deleteProperty(globalThis, "window");
@@ -111,16 +114,15 @@ test("workspace grid owns sidebar, exactly two cards, chart and synthetic contex
 
 test("CSS declares shared top edge, bounded flexible sidebar and responsive fallbacks", () => {
   const css = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
-  assert.match(css, /grid-template-areas: "sidebar market market" "sidebar chart context"/);
-  assert.match(css, /\.workspace-columns \{[^}]*grid-template-columns: clamp\(210px, 18vw, 260px\) minmax\(0, 1fr\) 360px;/);
+  assert.match(css, /grid-template-areas: "sidebar center context"/);
+  assert.match(css, /\.workspace-columns \{[^}]*grid-template-columns: 264px minmax\(0, 1fr\) 360px;/);
   assert.match(css, /\.workspace-market-cards \{[^}]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
-  assert.match(css, /@media \(min-width: 651px\)/);
-  assert.match(css, /\.workspace-watchlist \{ height: 820px;/);
-  assert.match(css, /workspace-group-navigation \{ flex: 1 1 0; min-height: 0/);
-  assert.match(css, /workspace-group-scroll \{ flex: 1; min-height: 0; max-height: none/);
-  assert.match(css, /max-width: 1150px[\s\S]*?"sidebar market" "sidebar chart" "sidebar context"/);
-  assert.match(css, /max-width: 650px[\s\S]*?"market" "sidebar" "chart" "context"/);
-  assert.match(css, /\.workspace-watchlist \{ position: static; height: auto/);
+  assert.match(css, /\.workspace-center \{[^}]*flex-direction: column/);
+  assert.match(css, /workspace-group-scroll \{ max-height: 320px; overflow-y: auto/);
+  assert.match(css, /workspace-stock-scroll \{ max-height: 300px; overflow-y: auto/);
+  assert.match(css, /max-width: 1247px[\s\S]*?grid-template-areas: "center context"/);
+  assert.match(css, /max-width: 899px[\s\S]*?grid-template-areas: "center"/);
+  assert.doesNotMatch(css, /\.workspace-watchlist \{[^}]*height: 820px/);
   assert.match(css, /\.workspace-chart-pane \.interactive-chart-shell \{ height: 420px/);
 });
 

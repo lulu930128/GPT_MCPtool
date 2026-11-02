@@ -17,7 +17,7 @@ class WorkspaceTransportCoreTests(unittest.TestCase):
 
     def test_generated_progressive_catalog_and_read_only_annotations(self):
         catalog = {t["name"]: t for t in self.core._build_tw_workspace_tools()}
-        self.assertEqual(len(catalog), 6)
+        self.assertEqual(len(catalog), 7)
         for route in SNAPSHOT["workspace_tools"]:
             tool = catalog[route["name"].replace(".", "_")]
             for key in ("inputSchema", "outputSchema", "annotations", "description"):

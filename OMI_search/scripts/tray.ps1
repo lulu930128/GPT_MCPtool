@@ -40,6 +40,7 @@ $HttpEntry = Join-Path $ProjectRoot "http_server.py"
 $SourceBuildFiles = @(
   $HttpEntry,
   (Join-Path $ProjectRoot "server.py"),
+  (Join-Path $ProjectRoot "launcher_transport.py"),
   (Join-Path $ProjectRoot "pyproject.toml"),
   (Join-Path $ProjectRoot "uv.lock"),
   (Join-Path $ProjectRoot "public_contract_snapshot.json"),

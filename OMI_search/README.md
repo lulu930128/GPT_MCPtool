@@ -4,6 +4,22 @@
 
 目前 application release 為 `1.2.0`；鎖定 `mcp==2.1.1`，並以 `uv.lock` 管理 runtime。`omi.decision.v4` 仍是獨立的 domain contract 版本。
 
+## 從 source 更新 adapter
+
+`control-center/update.json` 是 CC v2 使用的元件自有更新入口；舊 `component.json` 與舊 CC 的 schema 保持不變。`scripts/update-from-source.ps1` 提供 `Preview`、`Update`、`Recover`，只管理此 adapter 與 widget，不操作 OMI Backend、資料庫或市場來源。共用機械性 hash、immutable JSON 與有界 process capture 來自 `../project_reading/scripts/component-update-common.ps1`；OMI 自有更新政策、build identity 與既有 `runtime-control.ps1` 仍由本元件維護。
+
+`Preview` 只計算 sidecar 明列 build inputs 的 SHA-256；生成的 widget `dist` 不參與 source digest。`Update` 使用 UUID、不可覆寫的 version label 及 expectedSourceDigest，先建立 durable request，再以 `uv sync --frozen --check --offline` 確認現有 Python 環境與 lock 一致。這個 `--check` 不安裝或變更使用中的 `.venv`；依賴需要準備時回 `DEPENDENCY_PREPARATION_REQUIRED`，不冒稱完成換版。
+
+Widget 從保存的 source snapshot 建到原 request 的隔離 stage；驗證 source 未漂移後，atomic 發布單一 `index.html`，保留原 bytes 與 hash。接著只呼叫既有 owner 的 `ReloadRuntime`，核對 controller `Ready`、server／tunnel exact ownership 及 `/health.buildId` 等於 candidate 的 preparedBuildId。`observedVersion` 是實際 application version，與 request 的版本 label 分開。
+
+本機 journal 位於 ignored `.local/source-updates/<requestId>/`，包含 request、原 updater 的 PID／creation identity、source、stage、candidate、publication／dispatch 標記、rollback HTML、failure 與 terminal result；版本 label 綁定另存 `.local/source-update-versions/`。有限建置子程序的 identity／named JobObject 在 resume 前記錄，scopeEmpty／stop 證據另存 `children/`。相同 request 重入只取原結果；來源漂移或版本重用改內容均拒絕，不覆寫歷史。
+
+未結案 operation 會擋新 requestId；`Recover` 先取得原更新 mutex、證實原 updater 已退出並核對所有有限子程序已停止。尚未 publication 可結案為 `REJECTED / UPDATE_NOT_APPLIED`；已 publication 但尚未記錄 reload dispatch，則只在現況精確等於原 candidate、backup 精確等於 prior hash 時還原原 widget，保留 backup／candidate 後同樣結案。不同的現有輸出不覆寫，原 updater 或子程序仍存在也不結案。結案後可提交新版本，不因缺少 prepared／dispatch marker 永久卡死。
+
+一旦 reload 可能已 dispatch，恢復只核對原 request／candidate／dispatch pin、保存的 source snapshot 與 stage、已發布 widget，以及 boot-loaded runtime；不以之後可編輯 source 的 digest 阻擋原操作結案，也不重跑 Build 或 reload。原候選被修改仍拒絕，新的 Update 照常嚴格核對最新 source digest；回應遺失時回傳原 terminal receipt。Live timeout 是 `RECOVERY_REQUIRED`，不停止可能已啟動的正式服務。
+
+隔離更新測試：`powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/test-source-update.ps1`。Fixture 的成功不是 live adoption；部署後仍須保存 CC update receipt 與 loaded identity。
+
 ```text
 MCP client
   -> official MCP Python SDK (stdio / Streamable HTTP)
@@ -17,12 +33,12 @@ MCP client
 
 ## 文件導覽
 
-- [公開 MCP 契約](docs/PublicContract.md)：責任邊界、二十個公開 tools、schema owner、
+- [公開 MCP 契約](docs/PublicContract.md)：責任邊界、47 個公開 tools、schema owner、
   refresh 與錯誤語意。
 - [故障排除](docs/Troubleshooting.md)：adapter／backend／tunnel／ChatGPT action cache 的
   分層診斷。
 - [ChatGPT 掛載](docs/ChatGPT-Setup.md)：本機 HTTP MCP 與 Secure MCP Tunnel 設定。
-- [Runtime 管理例外](docs/RuntimeControl.md)：三個固定 controller endpoint、專用 credential、unknown 與收據語意。
+- [Runtime 管理例外](docs/RuntimeControl.md)：六個 Backend-independent Launcher pipe commands（四個固定遠端 mutation 無本機確認框）、專用 credential、unknown 與收據語意。
 
 ## 嚴格責任邊界
 
@@ -59,24 +75,40 @@ Adapter 不負責：
 - `omi_open_tw_market_dashboard`：保留舊版 render-only tool；輸入為前一工具的完整 dashboard structured content。
 - `omi_search_tw_symbols`：bounded 本機台股代碼／名稱搜尋。
 - `omi_read_tw_stock_dashboard_detail`：cache-only 個股 OHLC、backend MA5/20/60 與 technical report。
-- `omi_open_tw_workspace`：立即呈現新版 workspace shell；arguments 可為 `{}`，或指定 `stock_id`、`timeframe`、`watchlist_group_id`，不做 backend IO。
+- `omi_open_tw_workspace`：保留 workspace v1 URI；arguments 可為 `{}`，或指定 `stock_id`、`timeframe`、`watchlist_group_id`，不做 backend IO。
+- `omi_open_tw_workspace_v2`：使用獨立 `ui://omi/tw-workspace/v2.html` 開啟同一最新 workspace build；只回初始 selection，不做 backend IO。
 - `omi_read_tw_workspace_header`：cache-only session、freshness、resolved indices/breadth。
 - `omi_read_tw_workspace_watchlist`：cache-only selected watchlist 與群組 metadata。
 - `omi_read_tw_workspace_hot_groups`：cache-only 熱門族群。
 - `omi_read_tw_stock_chart`：cache-only OHLCV 與 backend MA。
 - `omi_read_tw_stock_research`：cache-only technical research，獨立於 chart。
-- `omi_read_runtime_status`：固定 GET，讀取 backend controller 的 runtime 身分、依賴與 launcher owner UUID。
-- `omi_restart_backend`：使用者明確要求下，依 UUID、owner UUID 與固定 confirmation 轉送受保護的 restart POST；屬 disruptive 操作。
-- `omi_read_runtime_operation`：依原 request UUID 讀 durable receipt；不推論完成、不重送。
+- `omi_read_runtime_status`：直接向驗證過的唯一 Launcher pipe 讀取 status 與 owner UUID，不依賴 Backend HTTP。
+- `omi_restart_backend`：依明確使用者指令、UUID、owner UUID、固定 confirmation 及專用 credential，一次轉送 `RestartBackend`；屬 disruptive 操作。
+- `omi_read_runtime_operation`：直接依原 request UUID 讀 Launcher durable receipt；不推論完成、不重送。
+- `omi_start_backend`：固定 `StartBackend`，只接受 owner 確認已停止 generation。
+- `omi_recover_failed_start`：固定 `RecoverFailedStart`，由 owner 驗證 failed-start exact exit。
+- `omi_upgrade_db_schema`：固定 `SchemaUpgrade`，僅使用 Launcher configured target 與既有 backup／transaction gates。
 
-三個 runtime 工具是市場 read-only transport 的窄例外，由 adapter additive 註冊；在線／離線 catalog 均為 20 個。
-Restart 只使用本機環境 `OMI_SEARCH_RUNTIME_CONTROL_TOKEN` 的 dedicated header，不共用 AI trust token。
-Token 必須恰好 64 個小寫十六進位字元，缺少或格式錯誤即在 IO 前拒絕；backend 的
-`OMI_RUNTIME_CONTROL_TOKEN_SHA256` 須為同一 token 的 SHA256。Adapter 不讀 backend hash 設定，
-不執行 OS command、程序啟停或任意 HTTP write。
-HTTP 202 是 accepted，不是完成；403／409／503 與 backend body 保留，writer drain false 可合法 blocked。
-Timeout 是 unknown，必須用原 UUID 查收據，不能自動 retry 或改用新 UUID。
-`omi.ask` v4 的 `allow_llm=false`／`allow_write=false` 與市場 schema 均不變。
+四個 mutation 均須明確 chat 使用者意圖、owner UUID、request UUID、固定 literal confirmation；
+專用 token 與 OS-pinned 同使用者 Launcher 驗證後不另跳本機 Windows 確認框。
+Accepted／202 不代表完成；unknown 只查原 UUID receipt，不重送。Source／fixture 通過不代表 Loaded Runtime 或遠端 E2E。
+
+六個 runtime 工具是市場 read-only 邊界的窄例外；公開 catalog 現為 47 個（原 17 個市場／render、新增 1 個 workspace v2 opener、6 個 runtime、12 個 Candidate CRUD、11 個 Pending／Desk 接線工具）。一般單加入掛單先存本地 manual_stage；只有掛單頁唯一 modal 確認後才進 Native，詳見 [手動倉契約](docs/McpUserTradingContract.md)。
+`launcher_transport.py` 驗證 Win32 pipe owner PID、creation、retained process handle、OS executable、
+固定 repo Launcher argv 與同帳號身分，再送固定命令；不接受任意 pipe／path，不走 Backend HTTP fallback。
+Mutation token 只來自 adapter Process 環境 `OMI_SEARCH_RUNTIME_CONTROL_TOKEN`，必須為 64 個小寫 hex 字元；
+reader 不讀 token。未讀 `.env` 或設定 registry，也不另建生命週期 owner。
+
+2026-10-26 主 source 已提供四個 action 的 authenticated remote intent，adapter 依實際 wire 同步。
+三個新命令在 Backend 缺席的真 Controller 副本 fixture 已接受一次 intent；這不等於
+正式啟動／recovery／migration 成功。主 job 完成狀態、source hashes 與 Loaded Runtime 尚未採用的
+限制見 [本輪證據](docs/agent-runs/remote-launcher-alignment/Progress.md)。
+正式採用、loaded identity attestation 與 Remote E2E 仍未驗證。
+
+`response` 保留 Launcher 安全原文；外層改為 `transport_status=pipe_response`，不再有 `http_status`。
+accepted 不是完成；送出後 timeout 是 unknown，必須用原 UUID 查收據，不能自動 retry 或換 UUID。
+原工具名稱／input schema／副作用 annotations、17 個市場工具與 `omi.ask` v4 均不變。
+完整 blocker、驗證與 adoption 步驟見 [RuntimeControl.md](docs/RuntimeControl.md)。
 
 `omi.search` 不出現在 `tools/list`，但仍保留為 legacy callable alias。只有這個 legacy alias 會把 `query` 映射成 `question`，並支援舊的 `stock_id` / `symbol` target alias。新 caller 必須使用 `omi_ask`、`question` 與明確 `target`。
 
@@ -223,13 +255,19 @@ uv sync --frozen
 
 ### 台股 dashboard widget
 
-React/TypeScript source 位於 `ui/tw-market-dashboard/`。UI 不直接連 backend 或 provider；所有更新、搜尋與個股詳情都走 MCP Apps bridge `tools/call`，完全不經 LLM。`omi_open_tw_market_dashboard` 保留 `ui://omi/tw-market-dashboard/v2.html`；新增 `omi_open_tw_workspace` 綁定 `ui://omi/tw-workspace/v1.html`。兩個 resource 共用 production bundle，由 resource 的 app marker 選擇入口，MIME 為 `text/html;profile=mcp-app`，CSP network allowlist 為空。
+React/TypeScript source 位於 `ui/tw-market-dashboard/`。UI 不直接連 backend 或 provider；所有更新、搜尋與個股詳情都走 MCP Apps bridge `tools/call`，完全不經 LLM。`omi_open_tw_market_dashboard` 保留 `ui://omi/tw-market-dashboard/v2.html`；`omi_open_tw_workspace` 保留 `ui://omi/tw-workspace/v1.html`，新增 `omi_open_tw_workspace_v2` 的 `ui.resourceUri` 與 `openai/outputTemplate` 都指向 `ui://omi/tw-workspace/v2.html`。三個 resource 共用同一份最新 production bundle，兩個 workspace URI 都注入 `data-omi-workspace="true"`，MIME 為 `text/html;profile=mcp-app`，CSP network allowlist 為空。獨立 v2 入口用於避開舊 resource／嵌入實例的重用；Source／隔離 SDK 驗證不代表部署或 Host 採用，也未證明 Host cache 根因。
 
-新版 shell 立即顯示上方市場概況、左側自選／搜尋、中央圖表、右側研究／熱門族群。各 pane 獨立載入、失敗與重試；header/watchlist/chart 每次完成後約 30 秒再讀，hot groups/research 約 120 秒，隱藏頁面暫停 polling。不同請求不代表 atomic snapshot，各 pane 顯示資料時間與完整狀態／限制。選股及週期切換保留舊圖並標示待載入標的，chart 與 research 分開請求，late responses 被 generation/abort 丟棄。
+新版 shell 使用頂齊三欄：左側搜尋／分類／群組樹與成員分區，中欄窄大盤摘要→K 線→技術分析，右側交易工作台。大盤僅與中欄同寬；熱門與 OMI 研究持股留在左側，不能當正式券商庫存。各 pane 獨立載入、失敗與重試；header/watchlist/chart 約 30 秒、hot groups/research 約 120 秒；保留舊圖、pending identity 與 late-response guards，不是 atomic snapshot。
 
-圖表 instance 與 series refs 在正常 points/MA refresh 時保留，setData 更新並保留使用者 visible range（rolling bars 依共同時間點調整 logical range）。僅 symbol/timeframe 切換或最新／全部按鈕重設範圍。保留 host fullscreen 支援，bridge legacy 20 秒 timeout 未調高。此輪無 execution/trading。
+圖表 instance 與 series refs 在正常 points/MA refresh 時保留，setData 更新並保留使用者 visible range（rolling bars 依共同時間點調整 logical range）。僅 symbol/timeframe 切換或最新／全部按鈕重設範圍。保留 host fullscreen 支援，bridge legacy 20 秒 timeout 未調高。
 
-Workspace M2 的右欄新增 [SYNTHETIC 手動委託演練](docs/TaiwanWorkspaceM2Synthetic.md)：純 client-side fixture 表單、預覽、人工確認與固定模擬回報，重新載入清空。不使用研究價格／持股作送單事實，也沒有 execution transport、交易 tool、券商或正式 confirmation；M1 domain 與未來 authenticated actions／M3 sandbox gates 不變。
+右欄提供交易／掛單／成交／庫存。一般交易「加入掛單」只建立既有 Native journal draft／preview；正式送單只從掛單頁的單一確認 modal 發送 exact version/digest。歷史 [SYNTHETIC 手動委託演練](docs/TaiwanWorkspaceM2Synthetic.md) 原始碼與測試保留，沒有接入正式 runtime import。
+
+MCP 新建一般／條件單固定 USER_SPACE／MANUAL／owner_id=MCP；AGENT_SPACE 是原 AI 候選檢視，不是新單目標。既有 Candidate CRUD、Pending 修改、版本、qualification、UNKNOWN 與 dirty 保護保留。條件 Pending 在同一掛單頁 prepare，再以一次 modal approve；沒有額外 AI Gate。範例不提供真實價格或送單資格，價位快捷仍 unavailable。
+
+換股後清單預設篩選目前股票，並同步新增草稿的 symbol；「全部」只切換已載入清單的顯示範圍。有候選／Pending 未保存編輯或 UNKNOWN 時，先顯示面板內切換提示，不覆蓋原內容。一般提醒收在底部「提醒 N 項」，欄位錯誤保留近場顯示。右欄使用暗色霧面與低飽和鋼藍，390px 視窗的表單改為單欄。
+
+精確路由及實際讀回形狀見 [MCP 手動倉契約](docs/McpUserTradingContract.md)。draft 必填穩定 client_intent_id，timeout 只按同一身份讀回，不重送或產生新 ID。Native reviews 與 EXTERNAL／MANAGED 券商掛單分開；成交只使用已知 SDK fills，庫存保留現股 PARTIAL／信用 UNKNOWN 與來源時間。成交／庫存提供手動更新，不新增輪詢。沒有平行 ledger、直接 SDK、部署、登入或真實送單；Source／fixture 不代表 Loaded Runtime／Live Broker E2E。
 
 首次使用或修改 widget source 後先執行：
 
@@ -238,7 +276,7 @@ cd C:\GPT_MCPtool\OMI_search\ui\tw-market-dashboard
 npm install --ignore-scripts
 npm run typecheck
 npm test
-npm run build
+npm run build -- --output-dir C:\GPT_MCPtool\OMI_search\.tmp\candidate-widget-build-dev
 ```
 
 `dist/` 與 `node_modules/` 都是 local artifacts，不進 Git。若 `dist/index.html` 不存在，`resources/read` 會 fail closed；正式 restart 前必須完成 production build。
@@ -256,7 +294,7 @@ URL、原始 response、exception、credential 或市場資料，供 Control Cen
 一般啟動使用 `scripts\Start-Tray.cmd`；它不會破壞性取代已存在的 tray。修改 adapter
 source 或 public contract snapshot 後，使用 `scripts\Restart-Tray.cmd`。Restart 會先
 確認舊的 18797 listener 已釋放，再要求 `/health` 的 `buildId` 與目前
-`http_server.py`、`server.py`、`pyproject.toml`、`uv.lock`、兩份 contract snapshots 與 dashboard `dist/index.html` 完全一致。
+`http_server.py`、`server.py`、`launcher_transport.py`、`pyproject.toml`、`uv.lock`、兩份 contract snapshots 與 dashboard `dist/index.html` 完全一致。
 
 托盤使用 `unified-always-on-v2` 契約。正式啟動會一起準備 MCP server 與 Secure MCP
 Tunnel；選單不提供 Start／Stop 或 tunnel restart。OMI backend 仍由正式 OMI launcher
@@ -276,7 +314,7 @@ path／version／SHA-256，不做 automatic upgrade。Controller 在獨立的 ch
 清除 ambient proxy、bypass `127.0.0.1`／`localhost`；不暫改 parent Process environment。
 正式 V3 Core 每次建立時，由 Controller 以自身執行帳號讀取 HKCU User store 的
 `OMI_SEARCH_RUNTIME_CONTROL_TOKEN`，嚴格驗證後只注入 Core Python。缺失、格式錯誤或
-讀取失敗時，移除繼承的舊 token，市場 MCP 照常啟動，受保護 POST 在 IO 前拒絕。
+讀取失敗時，移除繼承的舊 token，市場 MCP 照常啟動，受保護 Launcher command 在 IO 前拒絕。
 Tunnel 與 dependency probe 一律不繼承此 token。唯一新增診斷為本機
 `.tmp/runtime-control-auth.log` 的固定代碼；不含憑證或帳號，不送入 Control Center。
 Backend Launcher 的 hash 採用仍須另行處理；詳見下列 integration 文件。

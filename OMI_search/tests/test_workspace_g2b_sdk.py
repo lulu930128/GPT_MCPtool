@@ -24,11 +24,11 @@ class WorkspaceG2bSdkTests(unittest.IsolatedAsyncioTestCase):
                 async with Client(transport, mode="2026-07-28") as client:
                     self.assertEqual(client.protocol_version, "2026-07-28")
                     resources = await client.list_resources()
-                    self.assertEqual(len(resources.resources), 2)
+                    self.assertEqual(len(resources.resources), 4)
                     for resource in resources.resources:
                         await client.read_resource(resource.uri)
                     tools = await client.list_tools()
-                    self.assertEqual(len(tools.tools), 20)
+                    self.assertEqual(len(tools.tools), 48)
                     research = next(t for t in tools.tools if t.name == "omi_read_tw_stock_research")
                     self.assertEqual(research.output_schema, server.TW_WORKSPACE_ROUTES[research.name]["outputSchema"])
                     for projection in (None, "full", "workspace"):
@@ -66,11 +66,11 @@ class WorkspaceG2bSdkTests(unittest.IsolatedAsyncioTestCase):
                     return reply.json()["result"]
 
                 resources = await rpc("resources/list")
-                self.assertEqual(len(resources["resources"]), 2)
+                self.assertEqual(len(resources["resources"]), 4)
                 for resource in resources["resources"]:
                     await rpc("resources/read", {"uri": resource["uri"]})
                 tools = (await rpc("tools/list"))["tools"]
-                self.assertEqual(len(tools), 20)
+                self.assertEqual(len(tools), 48)
                 for name, route in server.TW_WORKSPACE_ROUTES.items():
                     tool = next(t for t in tools if t["name"] == name)
                     self.assertEqual(tool["inputSchema"], route["inputSchema"])

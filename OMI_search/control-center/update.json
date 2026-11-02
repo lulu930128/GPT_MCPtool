@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "componentId": "omi_search",
+  "owner": "component_controller",
+  "entrypoint": "scripts/update-from-source.ps1",
+  "sourcePaths": [
+    "http_server.py",
+    "server.py",
+    "launcher_transport.py",
+    "pyproject.toml",
+    "uv.lock",
+    "public_contract_snapshot.json",
+    "tw_market_dashboard_contract_snapshot.json",
+    "control-center/component.json",
+    "control-center/update.json",
+    "scripts/runtime-control.ps1",
+    "scripts/component-runtime.psm1",
+    "scripts/omi-search-runtime.psm1",
+    "scripts/update-from-source.ps1",
+    "ui/tw-market-dashboard/src",
+    "ui/tw-market-dashboard/package.json",
+    "ui/tw-market-dashboard/package-lock.json",
+    "ui/tw-market-dashboard/tsconfig.json",
+    "ui/tw-market-dashboard/scripts/build.mjs"
+  ]
+}

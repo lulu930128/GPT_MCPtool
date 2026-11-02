@@ -1,7 +1,7 @@
 // Offline component fixture. CSP and tripwires forbid transport and persistence.
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
-import { WorkspaceContext } from "../src/WorkspaceContext";
+import { SyntheticOrderPanel } from "../src/SyntheticOrderPanel";
 import styles from "../src/styles.css";
 
 const style = document.createElement("style"); style.textContent = styles; document.head.append(style);
@@ -15,7 +15,8 @@ function Fixture() {
   const [symbol, select] = useState("2330");
   return <main className="tw-workspace" style={{ maxWidth: 390, margin: "auto" }}>
     <button id="fixture-select" onClick={() => select(symbol === "2330" ? "0050" : "2330")}>切換 fixture 標的</button>
-    <WorkspaceContext symbol={symbol}><p>獨立研究 fixture</p></WorkspaceContext>
+    <button type="button" aria-controls="workspace-order-content">獨立 SYNTHETIC fixture</button>
+    <div id="workspace-order-content"><SyntheticOrderPanel symbol={symbol}/></div>
   </main>;
 }
 createRoot(document.getElementById("root")!).render(<Fixture/>);

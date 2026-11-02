@@ -1,3 +1,17 @@
+// Native pipe waits up to 60s and Backend up to 65s. Keep this bounded and
+// explicit: market reads and initialization retain the original 20s deadline.
+const NATIVE_DESK_TOOLS = new Set([
+  "omi_create_desk_draft",
+  "omi_read_desk_orders",
+  "omi_read_desk_status",
+  "omi_read_desk_fills",
+  "omi_read_desk_inventory",
+  "omi_confirm_desk_review",
+  "omi_confirm_desk_staged",
+  "omi_prepare_candidate_pending",
+  "omi_approve_candidate_pending",
+]);
+
 type PendingRequest = {
   resolve: (value: unknown) => void;
   reject: (reason?: unknown) => void;
@@ -211,6 +225,7 @@ export class McpAppsBridge {
         "tools/call",
         { name, arguments: arguments_ },
         signal,
+        NATIVE_DESK_TOOLS.has(name) ? 75_000 : 20_000,
       );
     } catch (error) {
       if (signal?.aborted) throw error;
@@ -290,13 +305,14 @@ export class McpAppsBridge {
     method: string,
     params: Record<string, unknown>,
     signal?: AbortSignal,
+    timeoutMs = 20_000,
   ): Promise<unknown> {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       const timeout = window.setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`${method} timed out`));
-      }, 20_000);
+      }, timeoutMs);
       this.pending.set(id, { resolve, reject, timeout });
       signal?.addEventListener(
         "abort",

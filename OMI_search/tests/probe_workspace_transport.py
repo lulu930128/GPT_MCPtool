@@ -121,7 +121,7 @@ def main():
             assert actual["mimeType"] == "text/html;profile=mcp-app"
             assert actual["_meta"]["ui"]["csp"]["connectDomains"] == []
         tools = session.call("tools/list")["tools"]
-        assert len(tools) == 20
+        assert len(tools) == 35
         for source in SNAPSHOT["workspace_tools"]:
             actual = next(t for t in tools if t["name"] == source["name"].replace(".", "_"))
             for key in ("inputSchema", "outputSchema", "annotations"):

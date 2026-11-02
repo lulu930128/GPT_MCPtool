@@ -168,10 +168,10 @@ test("rendered panel has mandatory simulation labels and manual empty inputs, wi
   for (const label of ["SYNTHETIC", "simulated", "no broker", "unavailable", "未經 M1 後端驗證", "重新載入即清空", "CASH", "DAY"]) assert.ok(html.includes(label), label);
   assert.equal((html.match(/value=""/g) ?? []).length >= 5, true);
   assert.doesNotMatch(html, /SYNTHETIC 預覽 #|SIMULATED_PENDING|type="checkbox"/);
-  const context = renderToStaticMarkup(createElement(WorkspaceContext, { symbol: "2330", children: "研究內容" }));
-  assert.match(context, /workspace-context-disclosure/);
-  assert.match(context, /id="workspace-order-content" hidden=""/);
-  assert.match(context, /研究內容/);
+  const context = renderToStaticMarkup(createElement(WorkspaceContext, { symbol: "2330" }));
+  assert.match(context, /aria-label="交易工作台"/);
+  assert.doesNotMatch(context, /workspace-order-content|SYNTHETIC/);
+  assert.match(context, /加入掛單/);
 });
 
 test("simulation import boundary has no transport, storage, broker or market inputs", () => {
@@ -183,5 +183,5 @@ test("simulation import boundary has no transport, storage, broker or market inp
   assert.deepEqual(imports, ["react", "./synthetic-ticket"]);
   assert.doesNotMatch(model + panel + context, /\b(fetch|XMLHttpRequest|WebSocket|sendBeacon|localStorage|sessionStorage|indexedDB|callTool|postMessage)\b/);
   assert.match(panel, /symbol\?: string/);
-  assert.match(context, /SyntheticOrderPanel key=\{symbol \?\? ""\} symbol=\{symbol\}/);
+  assert.doesNotMatch(context, /SyntheticOrderPanel|synthetic-ticket/);
 });

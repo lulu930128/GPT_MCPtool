@@ -1,71 +1,161 @@
-"""Mock-only source tests; no socket, service, database, provider or SDK import."""
-from contextlib import redirect_stderr, redirect_stdout
+"""Offline adapter guards and catalog parity; all Launcher IO mocked."""
 from hashlib import sha256
 import ast
-import io
 import json
 import os
 from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
-from urllib.error import HTTPError, URLError
-from urllib.request import Request
 
-from runtime_control_fixture import load_source
+import launcher_transport
+from runtime_control_fixture import load_source, runtime_status_body, runtime_receipt_body
 
 REQUEST_ID = "26f0796d-bda1-49d3-afda-a4f1fb565ac8"
 OWNER_ID = "8e7a874d-e3be-4c35-af35-3b796c606b3b"
 ARGS = {"request_id": REQUEST_ID, "expected_owner_id": OWNER_ID, "confirmation": "restart_backend"}
-# Synthetic credential only; backend fixture stores its SHA256, never the plaintext.
-TOKEN = "0123456789abcdef" * 4
-TOKEN_SHA256 = sha256(TOKEN.encode("ascii")).hexdigest()
-NAMES = {"omi_read_runtime_status", "omi_restart_backend", "omi_read_runtime_operation"}
-
-
-def response(body, code=200):
-    stream = io.BytesIO(json.dumps(body).encode())
-    stream.code = code
-    return stream
+TOKEN = "0123456789abcdef" * 4  # Synthetic fixture only.
+MUTATIONS = {
+    "omi_restart_backend": ("RestartBackend", "restart_backend"),
+    "omi_start_backend": ("StartBackend", "start_backend"),
+    "omi_recover_failed_start": ("RecoverFailedStart", "recover_failed_start"),
+    "omi_upgrade_db_schema": ("SchemaUpgrade", "upgrade_schema"),
+}
+NAMES = {"omi_read_runtime_status", "omi_read_runtime_operation", *MUTATIONS}
 
 
 class RuntimeControlTests(unittest.TestCase):
     def setUp(self):
         self.core = load_source()
         self.ns = self.core._call_tool.__globals__
-        self.opener = Mock()
-        self.factory = Mock(return_value=self.opener)
-        self.network = Mock(side_effect=AssertionError("Unexpected market network request"))
-        self.scope = patch.dict(self.ns, build_opener=self.factory, urlopen=self.network,
-                                API_BASE_URL="http://127.0.0.1:8400", AI_TRUST_TOKEN="synthetic-ai-token")
-        self.scope.start()
-        self.addCleanup(self.scope.stop)
-        self.env = patch.dict(os.environ, {"OMI_SEARCH_RUNTIME_CONTROL_TOKEN": TOKEN})
-        self.env.start()
-        self.addCleanup(self.env.stop)
+        self.pipe = Mock()
+        self.network = Mock(side_effect=AssertionError("Runtime must not use HTTP"))
+        for scope in (
+            patch.object(launcher_transport, "request", self.pipe),
+            patch.dict(self.ns, urlopen=self.network, API_BASE_URL="http://127.0.0.1:8400",
+                       AI_TRUST_TOKEN="synthetic-ai-token"),
+            patch.dict(os.environ, {"OMI_SEARCH_RUNTIME_CONTROL_TOKEN": TOKEN}),
+        ):
+            scope.start()
+            self.addCleanup(scope.stop)
 
     def call(self, name="omi_restart_backend", args=None):
         return self.core._call_tool(name, dict(ARGS) if args is None else args)
 
-    def test_online_and_offline_catalogs_add_exactly_three_tools(self):
+    def test_fixed_wire_and_readers_without_credential_or_backend(self):
+        cases = [("omi_read_runtime_status", {}, "Status", runtime_status_body(OWNER_ID)),
+                 ("omi_read_runtime_operation", {"request_id": REQUEST_ID}, "ReadOperation",
+                  runtime_receipt_body(REQUEST_ID, OWNER_ID, "unknown"))]
+        with patch.dict(os.environ, {"OMI_SEARCH_RUNTIME_CONTROL_TOKEN": ""}), \
+                patch.dict(self.ns, API_BASE_URL="http://backend-unavailable.invalid"):
+            for name, args, action, body in cases:
+                self.pipe.reset_mock()
+                self.pipe.return_value = body
+                self.assertEqual(self.call(name, args), {"transport_status": "pipe_response", "response": body})
+                self.pipe.assert_called_once_with({"action": action, "request_id": args.get("request_id", ""),
+                                                   "expected_owner_id": "", "token": ""})
+        self.network.assert_not_called()
+
+    def test_restart_fixed_grammar_and_receipt_states_no_retry(self):
+        for state in ("accepted", "running", "succeeded", "failed", "blocked", "unknown"):
+            body = {"schema": launcher_transport.SCHEMA, "request_id": REQUEST_ID, "state": state,
+                    "future": [None, False, 0], "owner_id": OWNER_ID}
+            self.pipe.reset_mock()
+            self.pipe.return_value = body
+            result = self.call()
+            self.assertEqual(result, {"transport_status": "pipe_response", "response": body})
+            self.pipe.assert_called_once_with({"action": "RestartBackend", "request_id": REQUEST_ID,
+                                               "expected_owner_id": OWNER_ID, "token": TOKEN})
+            self.assertNotIn(TOKEN, json.dumps(result))
+        self.network.assert_not_called()
+
+    def test_forbidden_response_remains_authoritative(self):
+        body = {"schema": launcher_transport.SCHEMA, "error": "RUNTIME_CONTROL_FORBIDDEN"}
+        self.pipe.return_value = body
+        self.assertEqual(self.call()["response"], body)
+        body = {"schema": launcher_transport.SCHEMA, "state": "unknown", "reason": "STORE_UNAVAILABLE"}
+        self.pipe.return_value = body
+        self.assertEqual(self.call()["response"], body)
+
+    def test_pre_send_denial_and_post_send_unknown_are_distinct(self):
+        for sent in (False, True):
+            for code in ("RUNTIME_TIMEOUT", "RUNTIME_OWNER_CHANGED", "RUNTIME_PIPE_ACCESS_DENIED"):
+                self.pipe.reset_mock()
+                self.pipe.side_effect = launcher_transport.PipeError(code, sent=sent)
+                with self.assertRaises(self.core.RuntimeControlError) as caught:
+                    self.call()
+                expected = {"error": code, "transport_status": "error", "request_id": REQUEST_ID}
+                if sent:
+                    expected.update(outcome="unknown", next_action="read_runtime_operation_same_request_id")
+                self.assertEqual(caught.exception.payload, expected)
+                self.pipe.assert_called_once()
+        self.network.assert_not_called()
+
+    def test_unknown_then_same_uuid_read_has_no_mutation_fallback(self):
+        self.pipe.side_effect = launcher_transport.PipeError("RUNTIME_TIMEOUT", sent=True)
+        with self.assertRaises(self.core.RuntimeControlError):
+            self.call()
+        self.pipe.side_effect = None
+        body = runtime_receipt_body(REQUEST_ID, OWNER_ID, "unknown")
+        self.pipe.return_value = body
+        self.assertEqual(self.call("omi_read_runtime_operation", {"request_id": REQUEST_ID})["response"], body)
+        self.assertEqual([c.args[0]["action"] for c in self.pipe.call_args_list], ["RestartBackend", "ReadOperation"])
+        self.assertTrue(all(c.args[0]["request_id"] == REQUEST_ID for c in self.pipe.call_args_list))
+
+    def test_echo_or_wrong_receipt_fails_closed(self):
+        for body, code in (({"nested": [TOKEN]}, "RUNTIME_RESPONSE_REDACTED"),
+                           ({TOKEN: "key"}, "RUNTIME_RESPONSE_REDACTED"),
+                           ({"request_id": OWNER_ID}, "INVALID_RUNTIME_RESPONSE")):
+            self.pipe.return_value = body
+            with self.assertRaises(self.core.RuntimeControlError) as caught:
+                self.call()
+            self.assertEqual(str(caught.exception), code)
+            self.assertEqual(caught.exception.payload["outcome"], "unknown")
+            self.assertNotIn(TOKEN, json.dumps(caught.exception.payload))
+
+    def test_uuid_canonicalization_does_not_change_identity(self):
+        self.pipe.return_value = runtime_receipt_body(REQUEST_ID, OWNER_ID, "unknown")
+        self.call(args={**ARGS, "request_id": REQUEST_ID.upper(), "expected_owner_id": OWNER_ID.upper()})
+        self.assertEqual(self.pipe.call_args.args[0]["request_id"], REQUEST_ID)
+        self.assertEqual(self.pipe.call_args.args[0]["expected_owner_id"], OWNER_ID)
+
+    def test_only_fixed_actions_no_http_shell_or_local_actor(self):
+        root = Path(__file__).resolve().parents[1]
+        tree = ast.parse((root / "server.py").read_text(encoding="utf-8"))
+        functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        relay = functions["_call_runtime_tool"]
+        actions = [n.args[0].value if isinstance(n.args[0], ast.Constant) else ast.unparse(n.args[0]) for n in ast.walk(relay) if isinstance(n, ast.Call)
+                   and isinstance(n.func, ast.Name) and n.func.id == "_runtime_request"]
+        self.assertEqual(actions, ["action", "Status", "ReadOperation"])
+        self.assertEqual(self.core.RUNTIME_MUTATIONS, MUTATIONS)
+        calls = {ast.unparse(n.func) for f in (relay, functions["_runtime_request"])
+                 for n in ast.walk(f) if isinstance(n, ast.Call)}
+        self.assertFalse(calls & {"urlopen", "build_opener", "_api_request", "subprocess.Popen", "os.system"})
+        source = (root / "launcher_transport.py").read_text(encoding="utf-8")
+        self.assertNotIn("launcher_local_operator", source)
+        self.assertNotIn("subprocess", source)
+        self.assertNotIn("OMI_RUNTIME_LAUNCHER_PID", source)
+        self.assertNotIn("os.environ", source)
+        self.assertNotIn(".env", source)
+    def test_online_and_offline_catalogs_add_exactly_six_tools(self):
         online = {"tools": [self.core._fallback_ask_source(), self.core._fallback_refresh_status_source()]}
         for kwargs in ({"return_value": online}, {"side_effect": RuntimeError("offline")}):
             with patch.dict(self.ns, _api_request=Mock(**kwargs)):
                 catalog = self.core._tools_for_client()
-            self.assertEqual(len(catalog), 20)
-            self.assertEqual({t["name"] for t in catalog[-3:]}, NAMES)
-            self.assertEqual(len({t["name"] for t in catalog}), 20)
+            self.assertEqual(len(catalog), 48)
+            self.assertEqual({t["name"] for t in catalog[19:25]}, NAMES)
+            self.assertEqual(len({t["name"] for t in catalog}), 48)
             self.assertNotIn("omi.search", {t["name"] for t in catalog})
 
     def test_original_seventeen_schemas_and_resources_byte_equivalent(self):
-        # Digests captured from the DIRTY pre-task source, not Git HEAD.
+        # 2026-10-26: verified against pre-task HEAD (server.py was clean).
         for value, digest in (
-            (self.core.PUBLIC_TOOLS[:17], "bd0cd2ccf046b9025586b8da6eb46b257c1cbf0d7152997f63969b2d4df8d85c"),
-            (self.core._tw_dashboard_resources_for_client(), "f6949b0fdc4af73ee2e97a139213462974a4e7e5b0dd709331c2aa3a186d6278"),
+            (self.core.PUBLIC_TOOLS[:17], "d95da68a676740190cd01926db14c7080be3fc49c295d2022f4adade7f476904"),
+            (self.core._tw_dashboard_resources_for_client()[:2], "f6949b0fdc4af73ee2e97a139213462974a4e7e5b0dd709331c2aa3a186d6278"),
         ):
             self.assertEqual(sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest(), digest)
 
     def test_narrow_schema_and_disruptive_annotations(self):
-        tools = {t["name"]: t for t in self.core.PUBLIC_TOOLS[-3:]}
+        tools = {t["name"]: t for t in self.core.PUBLIC_TOOLS if t["name"] in NAMES}
         restart = tools["omi_restart_backend"]
         self.assertEqual(set(restart["inputSchema"]["required"]), set(ARGS))
         self.assertEqual(set(restart["inputSchema"]["properties"]), set(ARGS))
@@ -77,24 +167,11 @@ class RuntimeControlTests(unittest.TestCase):
             self.assertNotIn("ui", tool.get("_meta", {}))
         self.assertNotIn(TOKEN, json.dumps(tools))
 
-    def test_status_fixed_get_preserves_identity_and_unknown_fields(self):
-        body = {"version": "omi.runtime-control.v1", "identity": "unknown", "launcher_instance_id": OWNER_ID,
-                "backend": {}, "frontend": {}, "launcher": {}, "mcp": {}, "future": [None, False, "keep"]}
-        self.opener.open.return_value = response(body)
-        actual = self.call("omi_read_runtime_status", {})
-        self.assertEqual(actual, {"transport_status": "http_response", "http_status": 200, "response": body})
-        req = self.opener.open.call_args.args[0]
-        self.assertEqual(req.full_url, "http://127.0.0.1:8400/api/system/runtime-control/status")
-        self.assertEqual(req.method, "GET")
-        self.assertIsNone(req.data)
-        self.assertFalse(any("token" in name.lower() for name in req.headers))
-        self.network.assert_not_called()
-
     def test_missing_token_fails_closed_without_ai_token_fallback(self):
         with patch.dict(os.environ, {"OMI_SEARCH_RUNTIME_CONTROL_TOKEN": ""}):
             with self.assertRaisesRegex(self.core.RuntimeControlError, "TOKEN_MISSING_OR_INVALID"):
                 self.call()
-        self.factory.assert_not_called()
+        self.pipe.assert_not_called()
 
     def test_invalid_token_is_never_logged_or_sent(self):
         for token in ("synthetic-runtime-test-credential", "a" * 63, "a" * 65,
@@ -104,27 +181,7 @@ class RuntimeControlTests(unittest.TestCase):
                     self.call()
             self.assertEqual(str(caught.exception), "RUNTIME_CONTROL_TOKEN_MISSING_OR_INVALID")
             self.assertNotIn(token, json.dumps(caught.exception.payload))
-        self.factory.assert_not_called()
-
-    def test_restart_fixture_matches_backend_sha256_configuration(self):
-        # Mock backend boundary: valid-format tokens still need the paired backend hash.
-        backend_config = {"OMI_RUNTIME_CONTROL_TOKEN_SHA256": TOKEN_SHA256}
-
-        def backend(request, *, timeout):
-            credential = request.get_header("X-omi-runtime-control-token")
-            self.assertRegex(credential, r"^[0-9a-f]{64}$")
-            authorized = sha256(credential.encode("ascii")).hexdigest() == backend_config["OMI_RUNTIME_CONTROL_TOKEN_SHA256"]
-            if not authorized:
-                raise HTTPError("http://fixture", 403, "unauthorized", {}, response({"status": "unauthorized"}))
-            return response({"request_id": REQUEST_ID, "status": "accepted"}, 202)
-
-        self.opener.open.side_effect = backend
-        self.assertEqual(self.call()["http_status"], 202)
-        with patch.dict(os.environ, {"OMI_SEARCH_RUNTIME_CONTROL_TOKEN": "f" * 64}):
-            denied = self.call()
-        self.assertEqual(denied["http_status"], 403)
-        self.assertEqual(denied["response"]["status"], "unauthorized")
-        self.assertEqual(self.opener.open.call_count, 2)
+        self.pipe.assert_not_called()
 
     def test_invalid_uuids_and_missing_or_extra_arguments_never_send(self):
         for key in ("request_id", "expected_owner_id"):
@@ -141,126 +198,71 @@ class RuntimeControlTests(unittest.TestCase):
             self.call("omi_read_runtime_status", {"refresh": True})
         with self.assertRaises(self.core.RuntimeControlError):
             self.call("omi_read_runtime_operation", {"request_id": "../../stop"})
-        self.factory.assert_not_called()
-
-    def test_runtime_source_keeps_fixed_routes_and_unprojected_body(self):
-        tree = ast.parse((Path(__file__).resolve().parents[1] / "server.py").read_text(encoding="utf-8"))
-        functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
-        relay = functions["_call_runtime_tool"]
-        requests = [node for node in ast.walk(relay) if isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Name) and node.func.id == "_runtime_request"]
-        routes = {(ast.literal_eval(node.args[0]), ast.unparse(node.args[1])) for node in requests}
-        self.assertEqual(routes, {
-            ("GET", "'/api/system/runtime-control/status'"),
-            ("GET", "f'/api/system/runtime-control/operations/{request_id}'"),
-            ("POST", "'/api/system/runtime-control/restart-backend'"),
-        })
-        self.assertEqual(len(requests), 3)
-        transport = functions["_runtime_request"]
-        returned = [node.value for node in ast.walk(transport) if isinstance(node, ast.Return)]
-        self.assertEqual(len(returned), 1)
-        self.assertEqual(ast.unparse(returned[0]),
-                         "{'transport_status': 'http_response', 'http_status': status, 'response': body}")
-        # Runtime forwarding cannot acquire process/pipe/shell or writer authority.
-        for function in (relay, transport):
-            calls = {ast.unparse(node.func) for node in ast.walk(function) if isinstance(node, ast.Call)}
-            self.assertFalse(calls & {"open", "eval", "exec", "__import__", "os.system", "os.kill",
-                                     "os.popen", "subprocess.run", "subprocess.Popen"})
-            for node in ast.walk(function):
-                if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                    self.assertNotIn(node.value, {"writer_preflight", "all_writers_drained", "owner_approval"})
+        self.pipe.assert_not_called()
 
     def test_bad_confirmation_never_sends(self):
         for value in (True, "yes", "RESTART_BACKEND", " restart_backend", None):
             with self.subTest(value=value), self.assertRaisesRegex(self.core.RuntimeControlError, "CONFIRMATION"):
                 self.call(args={**ARGS, "confirmation": value})
-        self.factory.assert_not_called()
+        self.pipe.assert_not_called()
 
-    def test_accepted_202_exact_post_body_dedicated_header_no_retry(self):
-        body = {"request_id": REQUEST_ID, "status": "accepted", "queue": "durable"}
-        self.opener.open.return_value = response(body, 202)
-        output = io.StringIO()
-        with redirect_stdout(output), redirect_stderr(output):
-            result = self.core._tool_result(self.call())
-        req = self.opener.open.call_args.args[0]
-        self.assertEqual(req.full_url, "http://127.0.0.1:8400/api/system/runtime-control/restart-backend")
-        self.assertEqual(req.method, "POST")
-        self.assertEqual(json.loads(req.data), ARGS)
-        self.assertEqual(req.get_header("X-omi-runtime-control-token"), TOKEN)
-        self.assertIsNone(req.get_header("X-omi-ai-trust-token"))
-        self.assertEqual(result["structuredContent"]["response"], body)
-        self.assertEqual(result["structuredContent"]["http_status"], 202)
-        self.assertNotIn("succeeded", json.dumps(result))
-        self.assertNotIn(TOKEN, json.dumps(result) + output.getvalue())
-        self.opener.open.assert_called_once()
+    def test_all_mutations_fixed_wire_and_terminal_states(self):
+        for name, (action, confirmation) in MUTATIONS.items():
+            for state in ('accepted', 'running', 'succeeded', 'blocked', 'failed', 'unknown'):
+                with self.subTest(tool=name, state=state):
+                    self.pipe.reset_mock()
+                    body = {'schema': launcher_transport.SCHEMA, 'request_id': REQUEST_ID, 'action': action,
+                            'state': state, 'after': None, 'opaque_future': [False, 0, None]}
+                    self.pipe.return_value = body
+                    self.assertEqual(self.call(name, {**ARGS, 'confirmation': confirmation})['response'], body)
+                    wire = {'action': action, 'request_id': REQUEST_ID, 'expected_owner_id': OWNER_ID, 'token': TOKEN}
+                    if action != 'RestartBackend':
+                        wire['confirmation'] = confirmation
+                    self.pipe.assert_called_once_with(wire)
         self.network.assert_not_called()
 
-    def test_http_denied_blocked_unavailable_preserve_authoritative_body(self):
-        for code, state in ((403, "unauthorized"), (409, "blocked"), (503, "unavailable")):
-            body = {"status": state, "reason": "writer_drain_false", "request_id": REQUEST_ID}
-            self.opener.open.side_effect = HTTPError("http://fixture", code, TOKEN, {}, response(body))
-            result = self.call()
-            self.assertEqual(result["http_status"], code)
-            self.assertEqual(result["response"], body)
-            self.assertNotIn(TOKEN, json.dumps(result))
-        self.assertEqual(self.opener.open.call_count, 3)
+    def test_all_mutations_reject_wrong_literals_paths_actor_uuid_and_missing_token(self):
+        for name, (_, confirmation) in MUTATIONS.items():
+            args = {**ARGS, 'confirmation': confirmation}
+            cases = [{**args, key: 'injected'} for key in (
+                'request_id', 'expected_owner_id', 'confirmation', 'actor', 'shell', 'database_path',
+                'schema_lock_path', 'approved', 'token', 'backend_preflight')]
+            cases += [{k: v for k, v in args.items() if k != missing} for missing in args]
+            for invalid in cases:
+                with self.subTest(tool=name, keys=list(invalid)), self.assertRaises(self.core.RuntimeControlError):
+                    self.call(name, invalid)
+            with patch.dict(os.environ, {'OMI_SEARCH_RUNTIME_CONTROL_TOKEN': ''}), \
+                    self.assertRaisesRegex(self.core.RuntimeControlError, 'TOKEN_MISSING_OR_INVALID'):
+                self.call(name, args)
+        self.pipe.assert_not_called()
 
-    def test_timeout_and_network_failure_are_distinct_unknown_not_retried(self):
-        for error, code in ((TimeoutError(TOKEN), "RUNTIME_TIMEOUT"), (URLError(TimeoutError(TOKEN)), "RUNTIME_TIMEOUT"),
-                            (URLError(TOKEN), "RUNTIME_UNAVAILABLE"), (ConnectionResetError(TOKEN), "RUNTIME_UNAVAILABLE")):
-            self.opener.open.reset_mock()
-            self.opener.open.side_effect = error
+    def test_all_mutations_timeout_unknown_then_read_only_same_uuid(self):
+        for name, (_, confirmation) in MUTATIONS.items():
+            self.pipe.reset_mock()
+            self.pipe.side_effect = launcher_transport.PipeError('RUNTIME_TIMEOUT', sent=True)
             with self.assertRaises(self.core.RuntimeControlError) as caught:
-                self.call()
-            self.assertEqual(caught.exception.payload, {"error": code, "transport_status": "error", "request_id": REQUEST_ID,
-                             "outcome": "unknown", "next_action": "read_runtime_operation_same_request_id"})
-            self.opener.open.assert_called_once()
-            self.assertNotIn(TOKEN, str(caught.exception))
+                self.call(name, {**ARGS, 'confirmation': confirmation})
+            self.assertEqual(caught.exception.payload['outcome'], 'unknown')
+            self.pipe.assert_called_once()
+            self.pipe.side_effect = None
+            body = {'schema': launcher_transport.SCHEMA, 'request_id': REQUEST_ID, 'state': 'unknown', 'reason': 'NOT_FOUND'}
+            self.pipe.return_value = body
+            self.assertEqual(self.call('omi_read_runtime_operation', {'request_id': REQUEST_ID})['response'], body)
+            self.assertEqual(len(self.pipe.call_args_list), 2)
+            self.assertEqual(self.pipe.call_args.args[0]['action'], 'ReadOperation')
+            self.assertEqual(self.pipe.call_args.args[0]['token'], '')
 
-    def test_status_transport_failure_does_not_invent_backend_state(self):
-        self.opener.open.side_effect = URLError(TOKEN)
-        with self.assertRaises(self.core.RuntimeControlError) as caught:
-            self.call("omi_read_runtime_status", {})
-        self.assertEqual(caught.exception.payload, {"error": "RUNTIME_UNAVAILABLE", "transport_status": "error"})
-
-    def test_receipt_states_are_unchanged_and_get_works_without_token(self):
-        with patch.dict(os.environ, {"OMI_SEARCH_RUNTIME_CONTROL_TOKEN": ""}):
-            for state in ("accepted", "running", "succeeded", "failed", "blocked", "unknown"):
-                body = {"request_id": REQUEST_ID, "status": state}
-                self.opener.open.return_value = response(body)
-                self.assertEqual(self.call("omi_read_runtime_operation", {"request_id": REQUEST_ID})["response"], body)
-                req = self.opener.open.call_args.args[0]
-                self.assertEqual(req.method, "GET")
-                self.assertEqual(req.full_url, f"http://127.0.0.1:8400/api/system/runtime-control/operations/{REQUEST_ID}")
-                self.assertIsNone(req.data)
-
-    def test_malformed_or_secret_echo_response_fails_closed(self):
-        for raw, code in ((b"not JSON", "INVALID_RUNTIME_RESPONSE"), (b"[]", "INVALID_RUNTIME_RESPONSE"),
-                          (b'{"value":NaN}', "INVALID_RUNTIME_RESPONSE"),
-                          (json.dumps({"nested": [TOKEN]}).encode(), "RUNTIME_RESPONSE_REDACTED"),
-                          (json.dumps({TOKEN: "key"}).encode(), "RUNTIME_RESPONSE_REDACTED")):
-            stream = io.BytesIO(raw)
-            stream.code = 202
-            self.opener.open.return_value = stream
-            with self.assertRaises(self.core.RuntimeControlError) as caught:
-                self.call()
-            self.assertEqual(str(caught.exception), code)
-            self.assertEqual(caught.exception.payload["outcome"], "unknown")
-            self.assertNotIn(TOKEN, json.dumps(caught.exception.payload))
-
-    def test_management_token_never_follows_redirect_or_proxy(self):
-        self.opener.open.return_value = response({"status": "accepted"}, 202)
-        self.call()
-        proxy, redirect = self.factory.call_args.args
-        self.assertEqual(proxy.proxies, {})
-        for code in (301, 302, 303, 307, 308):
-            self.assertIsNone(redirect.redirect_request(Request("http://localhost"), None, code, "", {}, "http://elsewhere"))
-
-    def test_nonlocal_or_credentialed_backend_base_fails_before_send(self):
-        for base in ("http://example.com", "http://user:pass@localhost", "http://localhost/api", "http://localhost?x=1", "file:///test"):
-            with patch.dict(self.ns, API_BASE_URL=base), self.assertRaisesRegex(self.core.RuntimeControlError, "BACKEND_URL"):
-                self.call()
-        self.factory.assert_not_called()
+    def test_all_mutations_annotations_and_no_local_approval_instructions(self):
+        tools = {t['name']: t for t in self.core.PUBLIC_TOOLS}
+        for name, (_, literal) in MUTATIONS.items():
+            tool = tools[name]
+            self.assertEqual(set(tool['inputSchema']['properties']), set(ARGS))
+            self.assertEqual(tool['inputSchema']['properties']['confirmation'], {'type': 'string', 'const': literal})
+            self.assertFalse(tool['annotations']['readOnlyHint'])
+            self.assertTrue(tool['annotations']['destructiveHint'])
+            self.assertIn('No local Windows human approval', tool['description'])
+            self.assertIn('explicit chat user intent', tool['description'])
+        self.assertIn('dedicated token and OS-pinned same-user Launcher', self.core.SERVER_INSTRUCTIONS)
 
     def test_ask_legacy_and_dashboard_still_use_original_transport(self):
         envelope = {"contract_version": "omi.decision.v4", "status": "TARGET_NOT_FOUND"}
@@ -278,8 +280,4 @@ class RuntimeControlTests(unittest.TestCase):
         upstream = Mock(return_value=body)
         with patch.dict(self.ns, _api_request=upstream):
             self.assertEqual(self.call("omi_read_tw_market_dashboard", {}), body)
-        self.factory.assert_not_called()
-
-
-if __name__ == "__main__":
-    unittest.main()
+        self.pipe.assert_not_called()
