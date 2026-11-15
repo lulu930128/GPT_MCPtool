@@ -68,6 +68,15 @@ function tool(name: string, args: Record<string, unknown>) {
   if (name === "omi_read_tw_workspace_hot_groups") return { ...base, hot_groups: [{ group_id: "fixture-hot", label: "測試熱門族群", median_change_pct: 1.2 }] };
   if (name === "omi_read_tw_stock_chart") return { ...base, chart: { stock_id: args.stock_id, timeframe: args.timeframe, volume_unit: "shares", trade_value_unit: "TWD",
     points: Array.from({ length: 8 }, (_, i) => ({ time: `2026-10-${String(i + 1).padStart(2, "0")}`, open: 100 + i, high: 105 + i, low: 98 + i, close: 103 + i, volume: 1000 + i, trade_value: 1000000 })) }, moving_averages: [{ time: "2026-10-08", ma5: 100, ma20: 95, ma60: 90 }] };
+  if (name === "omi_read_tw_stock_research" && args.projection === "technical") {
+    const completed = { time: "2026-10-08", close: 110, change_pct: 0, rsi: { rsi14: 61.5111 },
+      macd: { macd: 40.703, signal: 30.5897, histogram: 10.1133 }, kd: { k9: 83.5116, d9: 85.1391 },
+      atr: { atr14: 0 }, adx: { adx14: null, plus_di14: 20, minus_di14: 0 }, obv: -123456 };
+    return { ...base, version: "omi.tw_stock_research.technical.v2", projection: "technical",
+      technical_summary: { ...completed, basis: args.timeframe === "daily" ? "daily_indicator" : "indicator" },
+      technical: { stock_id: args.stock_id, status: "partial", decision_usable: false,
+        timeframes: { [String(args.timeframe)]: { completed, period: { status: "completed" }, decision_snapshot: "completed" } } } };
+  }
   if (name === "omi_read_tw_stock_research") return { ...base, technical: { title: "離線技術研究", summary: "本頁為合成資料的版面驗證，不代表即時市場或券商狀態。", status: "partial", stock_id: args.stock_id, timeframe: args.timeframe,
     generated_at: "2026-10-09T10:00:00+08:00", data: { daily_indicator: { time: "2026-10-08", close: 110, change_pct: 0, rsi: { rsi14: 61.5111 }, macd: { macd: 40.703, signal: 30.5897, histogram: 10.1133 }, kd: { k9: 83.5116, d9: 85.1391 } }, decision_snapshot: "completed" } } };
   if (name === "omi_search_tw_symbols") return { ...base, kind: "omi.tw_symbol_search", version: "omi.tw_symbol_search.v1", items: stocks };

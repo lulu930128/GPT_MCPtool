@@ -22,14 +22,14 @@ def load_core():
         "_read_tw_workspace", "_api_request", "_tool_result", "_json_default",
         "_replace_surrogates", "_sanitize_json_value", "_build_tw_workspace_tools",
         "_read_only_annotations",
-        "_workspace_response_constants",
+        "_workspace_response_constants", "BackendHTTPError",
     }
     source = ast.parse((ROOT / "server.py").read_text(encoding="utf-8"))
-    functions = [node for node in source.body if isinstance(node, ast.FunctionDef) and node.name in names]
+    functions = [node for node in source.body if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in names]
     assert {node.name for node in functions} == names
     namespace = dict(globals())
     # Constants are evaluated from source, never copied into a replacement adapter.
-    wanted = {"SERVER_NAME", "SERVER_VERSION", "TW_WORKSPACE_RESOURCE_URI", "TW_WORKSPACE_V2_RESOURCE_URI"}
+    wanted = {"SERVER_NAME", "SERVER_VERSION", "TW_WORKSPACE_RESOURCE_URI", "TW_WORKSPACE_V2_RESOURCE_URI", "TW_WORKSPACE_V3_RESOURCE_URI", "TW_WORKSPACE_V4_RESOURCE_URI"}
     for node in source.body:
         if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id in wanted for t in node.targets):
             for target in node.targets:

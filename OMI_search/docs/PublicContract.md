@@ -252,3 +252,27 @@ OMI backend without exposing credentials or full upstream errors.
 The public adapter does not provide LLM reports, streaming ask, memory mutation, save/persist,
 database access, provider calls, arbitrary HTTP, market-data reconciliation, or direct write tools.
 Those capabilities must not be added by expanding the adapter surface.
+# 按需技術資料（Backend-owned v2 projection）
+
+`omi_ask` 仍轉送唯一 `omi.decision.v4`。TW stock 可在
+`selection.parameters["technical.indicators"]` 明示 `intervals`、原 method catalog 的
+`indicators`、`view`、`page_size`、`cursor`、`expected_read_revision`。例如
+`{"intervals":["1d"],"indicators":["atr_dmi_adx","obv"],"view":"snapshot","include_partial":false}`。
+省略週期的舊 indicators caller 保留日／週／月；horizon 不代替週期。其他市場只保留原能力，
+不從 Adapter 套用 TW 語意。
+
+Snapshot 的 `projection_version=tw.technical.read.v2` 明示共用品質／audit 引用；
+`shared_evidence[shared_ref]` 在同一包內解析，完整原始 audit 透過 `detail_read.parameters`
+回同一 capability 讀取。Series／detail 的 `read_page` 回 `items`、`offset`、`total_count`、
+`returned_count`、`has_more` 與 `next_cursor`；下一頁可只帶 cursor。Cursor 是資料讀取，
+不是 refresh continuation，不觸發補值。資料／參數／basis revision 變更時由 Backend 明確回
+`TECHNICAL_VERSION_CONFLICT`；Adapter 不重算、重試、改預算或偽造舊版本。
+
+既有 `omi_read_tw_stock_research` 新增 opt-in `projection=technical`，回
+`omi.tw_stock_research.technical.v2`；full／workspace v1 保留。日／週／月 Widget 使用 bounded
+數值並可明確讀取完整研究；today 維持原路徑。成功及 business rejection 仍保留 text／
+structuredContent 鏡像；技術唯讀 HTTP error 保留 Backend error、code、stage、request_id
+與 http_status。Backend transport failure／timeout 顯示不同 code，沒有自動重送。
+
+Schema 與 outputSchema 只由原 Backend generators 同步；SDK roundtrip、installed source、
+loaded Build／Ready 與 ChatGPT Host 分開驗證。本段不宣稱已部署。

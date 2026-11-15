@@ -100,6 +100,7 @@ TW_DASHBOARD_RESOURCE_URI = "ui://omi/tw-market-dashboard/v2.html"
 TW_WORKSPACE_RESOURCE_URI = "ui://omi/tw-workspace/v1.html"
 TW_WORKSPACE_V2_RESOURCE_URI = "ui://omi/tw-workspace/v2.html"
 TW_WORKSPACE_V3_RESOURCE_URI = "ui://omi/tw-workspace/v3.html"
+TW_WORKSPACE_V4_RESOURCE_URI = "ui://omi/tw-workspace/v4.html"
 TW_DASHBOARD_RESOURCE_MIME_TYPE = "text/html;profile=mcp-app"
 TW_DASHBOARD_SNAPSHOT_PATH = Path(__file__).with_name(
     "tw_market_dashboard_contract_snapshot.json"
@@ -577,6 +578,15 @@ def _build_tw_workspace_tools() -> list[dict[str, Any]]:
             "openai/outputTemplate": TW_WORKSPACE_V3_RESOURCE_URI,
         },
     })
+    tools.append({
+        **deepcopy(tools[-1]),
+        "name": "omi_open_tw_workspace_v4",
+        "title": "Open OMI Taiwan Workspace v4",
+        "_meta": {
+            "ui": {"resourceUri": TW_WORKSPACE_V4_RESOURCE_URI},
+            "openai/outputTemplate": TW_WORKSPACE_V4_RESOURCE_URI,
+        },
+    })
     return tools
 
 
@@ -751,7 +761,7 @@ CANDIDATE_ROUTES = {
     "omi_cancel_candidate_pending": ("POST", "/pending/{id}/cancel", ("expected_revision",)),
     "omi_prepare_candidate_pending": ("POST", "/pending/{id}/prepare", ()),
     "omi_approve_candidate_pending": ("POST", "/pending/{id}/approve", ("expected_revision", "expected_digest")),
-    "omi_create_desk_draft": ("POST", "/desk/draft", ("client_intent_id", "symbol", "action", "condition", "lot", "quantity_shares", "price")),
+    "omi_create_desk_draft": ("POST", "/desk/draft", ("client_intent_id", "symbol", "action", "condition", "lot", "quantity_shares", "price", "market", "protection", "settlement_mode")),
     "omi_read_desk_staged": ("GET", "/desk/staged", ("after", "limit")),
     "omi_read_desk_stage": ("GET", "/desk/staged/{id}", ()),
     "omi_confirm_desk_staged": ("POST", "/desk/staged/{id}/confirm", ("expected_revision", "expected_digest")),
@@ -760,11 +770,17 @@ CANDIDATE_ROUTES = {
     "omi_read_desk_inventory": ("GET", "/desk/inventory", ()),
     "omi_read_desk_status": ("GET", "/desk/status", ()),
     "omi_confirm_desk_review": ("POST", "/desk/reviews/{id}/confirm", ("expected_revision", "expected_digest")),
+    "omi_read_desk_order": ("GET", "/desk/executions/{id}", ("market",)),
+    "omi_cancel_desk_order": ("POST", "/desk/executions/{id}/cancel-order", ("market",)),
+    "omi_revise_order_protection": ("POST", "/desk/executions/{id}/protection", ("market", "rules", "request_id", "expected_revision")),
 }
 
 
 def _build_candidate_tools() -> list[dict[str, Any]]:
     fields = {
+        "market": {"type": "string", "enum": ["TW", "US"]},
+        "rules": {"type": "object", "description": "Complete per-order protection rules returned by Backend; changes apply to this execution only."},
+        "request_id": {"type": "string", "minLength": 1},
         "id": {"type": "string", "minLength": 1},
         "after": {"type": "string"},
         "limit": {"type": "integer", "minimum": 1, "maximum": 100},
@@ -775,7 +791,9 @@ def _build_candidate_tools() -> list[dict[str, Any]]:
         "symbol": {"type": "string", "minLength": 1},
         "action": {"type": "string", "enum": ["Buy", "Sell"]},
         "condition": {"type": "string", "enum": ["CASH", "CASH_SELLING", "MARGIN", "SHORT_SELLING"]},
-        "lot": {"type": "string", "enum": ["Common", "Odd"]},
+        "lot": {"type": "string", "enum": ["Common", "Odd", "Shares"]},
+        "protection": {"type": "object"},
+        "settlement_mode": {"type": "string", "enum": ["TWD", "MUT"]},
         "quantity_shares": {"type": "integer", "minimum": 1, "maximum": 1_000_000_000},
         "client_intent_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_:.-]+$", "description": "Stable local manual_stage identity; UI creates a UUID once and retains it after timeout. Native submission identity is Backend-owned."},
         "price": {"anyOf": [{"type": "number", "exclusiveMinimum": 0}, {"type": "string", "minLength": 1}]},
@@ -796,15 +814,75 @@ def _build_candidate_tools() -> list[dict[str, Any]]:
             ),
             "inputSchema": {
                 "type": "object", "properties": {key: deepcopy(fields[key]) for key in names},
-                "required": [key for key in names if key != "owner_id"] if method == "POST" or "{id}" in suffix else [],
+                "required": [key for key in names if key != "owner_id" and not (name == "omi_create_desk_draft" and key in {"market", "protection", "settlement_mode"})] if method == "POST" or "{id}" in suffix else [],
                 "additionalProperties": False,
             },
             "annotations": {
                 "readOnlyHint": method == "GET", "destructiveHint": suffix.endswith(("/cancel", "/approve", "/confirm")),
                 "idempotentHint": method == "GET", "openWorldHint": False,
             },
+            **({"_meta": {"ui": {"visibility": ["app"]}}} if method != "GET" else {}),
         })
     return tools
+
+
+RESEARCH_BASE_PATH = "/api/research/trade-proposals/ai"
+RESEARCH_ROUTES = {
+    "omi_read_research_schema": ("GET", "/schema", ()),
+    "omi_list_research_proposals": ("GET", "", ("market", "origin", "direction", "limit", "offset", "view")),
+    "omi_read_research_proposal": ("GET", "/{id}", ()),
+    "omi_read_research_revisions": ("GET", "/{id}/revisions", ()),
+    "omi_create_research_proposal": ("POST", "", ("data",)),
+    "omi_nominate_research_stocks": ("POST", "/nominations", ("data",)),
+    "omi_revise_research_proposal": ("POST", "/{id}/revisions", ("data",)),
+    "omi_move_research_proposal": ("POST", "/{id}/move", ("expected_revision_id", "origin")),
+    "omi_delete_research_proposal": ("DELETE", "/{id}", ("expected_revision_id",)),
+    "omi_revise_research_order": ("POST", "/{id}/stage-revision", ("data",)),
+    "omi_stage_research_order": ("POST", "/{id}/stage", ("data",)),
+}
+
+
+def _build_research_tools():
+    fields = {
+        "view": {"type": "string", "enum": ["summary", "full"], "description": "Backend defaults to versioned list summaries. Use full for frozen evidence or read one proposal by ID. Summary is not execution evidence."},
+        "id": {"type": "string", "minLength": 1},
+        "market": {"type": "string", "enum": ["TW", "US"]},
+        "origin": {"type": "string", "enum": ["AI_NOMINATION", "OMI_SCREEN"]},
+        "direction": {"type": "string", "enum": ["long", "short"]},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+        "offset": {"type": "integer", "minimum": 0},
+        "expected_revision_id": {"type": "string", "minLength": 1},
+        "data": {"type": "object", "description": "Backend research input. Revision: expected_revision_id, strategy, costs, change_reason. Stage: expected_revision_id, client_intent_id, optional order overrides. Create: market,symbol,evidence,strategy,costs,change_reason. Nominate: market,stock_ids,direction,as_of_trade_date,requested_at,quantity. Preserve returned strategy/costs fields when editing."},
+    }
+    result = []
+    for name, (method, suffix, body_fields) in RESEARCH_ROUTES.items():
+        names = (["id"] if "{id}" in suffix else []) + list(body_fields)
+        result.append({"name": name, "description": (
+            "Manage TW/US AI_NOMINATION and OMI_SCREEN research through the Backend Journal. "
+            "Move changes workflow classification, preserving original evidence. Stage creates an unsent draft only, "
+            "and requires AI_NOMINATION. No research tool sends, cancels, amends broker orders or changes active protection. "
+            "Use returned revision IDs; mutations have no automatic retry. Outside-scope manual nominations remain user-managed."),
+            "inputSchema": {"type": "object", "properties": {k: deepcopy(fields[k]) for k in names},
+                "required": names if method != "GET" or "{id}" in suffix else [], "additionalProperties": False},
+            "annotations": {"readOnlyHint": method == "GET", "destructiveHint": method == "DELETE",
+                "idempotentHint": method == "GET", "openWorldHint": False}})
+    return result
+
+
+def _call_research_tool(name, arguments):
+    method, suffix, fields = RESEARCH_ROUTES[name]
+    schema = next(t["inputSchema"] for t in _build_research_tools() if t["name"] == name)
+    if arguments.keys() - schema["properties"].keys() or set(schema["required"]) - arguments.keys():
+        raise ValueError("Unexpected or missing Research arguments")
+    path = RESEARCH_BASE_PATH + suffix.replace("{id}", quote(arguments.get("id", ""), safe=""))
+    body = {k: arguments[k] for k in fields if k in arguments}
+    if "data" in body:
+        if not isinstance(body["data"], dict):
+            raise ValueError("Research data must be an object")
+        body = body["data"]
+    if method == "GET":
+        return _api_request(method, path + ("?" + urlencode(body) if body else ""))
+    return _api_request(method, path, payload=body)
 
 
 def _call_candidate_tool(name: str, arguments: dict[str, Any]) -> Any:
@@ -994,7 +1072,7 @@ def _build_public_tools(
             ),
         },
     ]
-    return [*tools, *deepcopy(TW_DASHBOARD_TOOLS), *_build_tw_workspace_tools(), *_build_runtime_tools(), *_build_candidate_tools()]
+    return [*tools, *deepcopy(TW_DASHBOARD_TOOLS), *_build_tw_workspace_tools(), *_build_runtime_tools(), *_build_candidate_tools(), *_build_research_tools()]
 
 
 PUBLIC_TOOLS = _build_public_tools(
@@ -1046,6 +1124,19 @@ def _tool_result(value: Any, *, is_error: bool = False) -> dict[str, Any]:
     }
 
 
+class BackendHTTPError(RuntimeError):
+    """Transport metadata only; Backend owns the unchanged JSON error envelope."""
+
+    def __init__(self, status: int, body: str, *, request_id: str | None = None):
+        super().__init__(f"OMI API HTTP {status}: {body}")
+        self.status = status
+        self.request_id = request_id
+        try:
+            self.backend_error = json.loads(body)
+        except json.JSONDecodeError:
+            self.backend_error = None
+
+
 def _api_request(
     method: str,
     path: str,
@@ -1080,7 +1171,7 @@ def _api_request(
             body = response.read().decode("utf-8", errors="replace")
     except HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"OMI API HTTP {exc.code}: {body}") from exc
+        raise BackendHTTPError(exc.code, body, request_id=exc.headers.get("x-request-id") if exc.headers else None) from exc
     except URLError as exc:
         raise RuntimeError(f"OMI API unavailable at {API_BASE_URL}: {exc}") from exc
 
@@ -1167,11 +1258,17 @@ def _tw_dashboard_resources_for_client() -> list[dict[str, Any]]:
             "title": "OMI Taiwan Workspace v3",
             "mimeType": TW_DASHBOARD_RESOURCE_MIME_TYPE,
         },
+        {
+            "uri": TW_WORKSPACE_V4_RESOURCE_URI,
+            "name": "omi-tw-workspace-v4",
+            "title": "OMI Taiwan Workspace v4",
+            "mimeType": TW_DASHBOARD_RESOURCE_MIME_TYPE,
+        },
     ]
 
 
 def _read_tw_dashboard_resource(uri: str) -> dict[str, Any]:
-    if uri not in {TW_DASHBOARD_RESOURCE_URI, TW_WORKSPACE_RESOURCE_URI, TW_WORKSPACE_V2_RESOURCE_URI, TW_WORKSPACE_V3_RESOURCE_URI}:
+    if uri not in {TW_DASHBOARD_RESOURCE_URI, TW_WORKSPACE_RESOURCE_URI, TW_WORKSPACE_V2_RESOURCE_URI, TW_WORKSPACE_V3_RESOURCE_URI, TW_WORKSPACE_V4_RESOURCE_URI}:
         raise KeyError(f"Unknown resource: {uri}")
     try:
         widget_html = TW_DASHBOARD_WIDGET_PATH.read_text(encoding="utf-8")
@@ -1179,7 +1276,7 @@ def _read_tw_dashboard_resource(uri: str) -> dict[str, Any]:
         raise RuntimeError(
             "Taiwan dashboard widget bundle is unavailable. Run its production build."
         ) from exc
-    if uri in {TW_WORKSPACE_RESOURCE_URI, TW_WORKSPACE_V2_RESOURCE_URI, TW_WORKSPACE_V3_RESOURCE_URI}:
+    if uri in {TW_WORKSPACE_RESOURCE_URI, TW_WORKSPACE_V2_RESOURCE_URI, TW_WORKSPACE_V3_RESOURCE_URI, TW_WORKSPACE_V4_RESOURCE_URI}:
         widget_html = widget_html.replace('<html ', '<html data-omi-workspace="true" ', 1)
     return {
         "contents": [
@@ -1658,13 +1755,15 @@ def _call_runtime_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
+    if name in RESEARCH_ROUTES:
+        return _call_research_tool(name, arguments)
     if name in CANDIDATE_ROUTES:
         return _call_candidate_tool(name, arguments)
     if name in {"omi_read_runtime_status", "omi_read_runtime_operation", *RUNTIME_MUTATIONS}:
         return _call_runtime_tool(name, arguments)
     if name in TW_WORKSPACE_ROUTES:
         return _read_tw_workspace(name, arguments)
-    if name in {"omi_open_tw_workspace", "omi_open_tw_workspace_v2", "omi_open_tw_workspace_v3"}:
+    if name in {"omi_open_tw_workspace", "omi_open_tw_workspace_v2", "omi_open_tw_workspace_v3", "omi_open_tw_workspace_v4"}:
         if arguments.keys() - TW_WORKSPACE_SELECTION_SCHEMA["properties"].keys():
             raise ValueError("Only initial workspace selection is accepted")
         return deepcopy(arguments)
@@ -1743,7 +1842,28 @@ async def _on_call_tool(
         return _mcp_tool_result(payload, is_error=False)
     except RuntimeControlError as exc:
         return _mcp_tool_result(exc.payload, is_error=True)
+    except BackendHTTPError as exc:
+        payload = {"error": str(exc), "tool": name}
+        if name in CANDIDATE_ROUTES or name in RESEARCH_ROUTES:
+            payload.update(http_status=exc.status, backend_error=exc.backend_error)
+        if name == "omi_ask" or name in TW_WORKSPACE_ROUTES:
+            body = exc.backend_error if isinstance(exc.backend_error, dict) else {}
+            detail = body.get("error") or body.get("detail") or {}
+            detail = detail if isinstance(detail, dict) else {"message": detail}
+            payload.update(http_status=exc.status, backend_error=exc.backend_error,
+                code=detail.get("code") or "OMI_BACKEND_HTTP_ERROR", stage="backend_http",
+                request_id=detail.get("request_id") or body.get("request_id") or exc.request_id,
+                retryable=detail.get("retryable"), suggestion=detail.get("suggestion"))
+        return _mcp_tool_result(payload, is_error=True)
     except Exception as exc:
+        if name == "omi_ask" or name in TW_WORKSPACE_ROUTES:
+            cause = exc.__cause__ or exc
+            if isinstance(cause, (URLError, TimeoutError)):
+                timed_out = isinstance(cause, TimeoutError) or isinstance(getattr(cause, "reason", None), TimeoutError)
+                return _mcp_tool_result({"error": str(exc), "tool": name,
+                    "code": "OMI_BACKEND_TIMEOUT" if timed_out else "OMI_BACKEND_TRANSPORT_FAILURE",
+                    "stage": "backend_transport", "http_status": None, "request_id": None,
+                    "retryable": True, "automatic_retry": False}, is_error=True)
         return _mcp_tool_result(
             {"error": str(exc), "tool": name},
             is_error=True,

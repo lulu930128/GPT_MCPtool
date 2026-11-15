@@ -1,0 +1,367 @@
+[
+  {
+    "request": {
+      "client_intent_id": "ux-receipt-A",
+      "symbol": "1802",
+      "market": "TW",
+      "settlement_mode": "MUT",
+      "action": "Buy",
+      "condition": "CASH",
+      "lot": "Common",
+      "quantity_shares": 1000,
+      "price": "80.00",
+      "protection": {
+        "enabled": true,
+        "stop_loss": 75,
+        "take_profit": "90.00",
+        "exit_limit_price": 74.5,
+        "direction": 1,
+        "targets": [
+          {
+            "price": 90,
+            "fraction": 1,
+            "limit_price": "89.00"
+          }
+        ]
+      }
+    },
+    "receipt": {
+      "event": "CREATED",
+      "kind": "manual_stage",
+      "manual_stage": {
+        "client_intent_id": "ux-receipt-A",
+        "original_digest": "b67aa046d3cb993c27c4cb51dd33ecd4b99f3e77dcb474be30945033217b024a",
+        "source": "MANUAL",
+        "space_id": "USER_SPACE",
+        "state": "STAGED",
+        "submission": null
+      },
+      "owner_id": "MCP",
+      "raw": {
+        "action": "Buy",
+        "client_intent_id": "ux-receipt-A",
+        "condition": "CASH",
+        "lot": "Common",
+        "price": "80",
+        "protection": {
+          "direction": 1,
+          "enabled": true,
+          "exit_limit_price": "74.5",
+          "protection_mode": "LOCAL_SYNTHETIC",
+          "stop_limit_price": null,
+          "stop_loss": "75",
+          "take_profit": "90.00",
+          "targets": [
+            {
+              "fraction": "1",
+              "limit_price": "89.00",
+              "price": "90"
+            }
+          ]
+        },
+        "quantity_shares": 1000,
+        "symbol": "1802"
+      },
+      "state": "ACTIVE",
+      "id": "e8068d38963c528acfcb524921c8ad9b6315aeee5fe8f2faecfcab6aa788e2eb",
+      "revision": 1,
+      "digest": "afbb74d519e8a456687e670f7bcd7e1b7b672616da078afbb214e4cfcd14e8af",
+      "recorded_at": "2026-10-29T02:00:00+00:00",
+      "space_id": "USER_SPACE",
+      "source": "MANUAL",
+      "lifecycle": "STAGED"
+    }
+  },
+  {
+    "request": {
+      "client_intent_id": "ux-receipt-B",
+      "symbol": "1802",
+      "market": "TW",
+      "settlement_mode": "MUT",
+      "action": "Buy",
+      "condition": "CASH",
+      "lot": "Common",
+      "quantity_shares": 1000,
+      "price": "80.00",
+      "protection": {
+        "enabled": true,
+        "stop_loss": 75,
+        "take_profit": "90.00",
+        "exit_limit_price": 74.5,
+        "direction": 1,
+        "targets": [
+          {
+            "price": 90,
+            "fraction": 1,
+            "limit_price": "89.00"
+          }
+        ]
+      }
+    },
+    "receipt": {
+      "event": "CREATED",
+      "kind": "manual_stage",
+      "manual_stage": {
+        "client_intent_id": "ux-receipt-B",
+        "original_digest": "62a141f2760f34e6e1ec1cc3ae4da89a81a85bd2b357d511a4e234545534d4d7",
+        "source": "MANUAL",
+        "space_id": "USER_SPACE",
+        "state": "STAGED",
+        "submission": null
+      },
+      "owner_id": "MCP",
+      "raw": {
+        "action": "Buy",
+        "client_intent_id": "ux-receipt-B",
+        "condition": "CASH",
+        "lot": "Common",
+        "price": "80",
+        "protection": {
+          "direction": 1,
+          "enabled": true,
+          "exit_limit_price": "74.5",
+          "protection_mode": "LOCAL_SYNTHETIC",
+          "stop_limit_price": null,
+          "stop_loss": "75",
+          "take_profit": "90.00",
+          "targets": [
+            {
+              "fraction": "1",
+              "limit_price": "89.00",
+              "price": "90"
+            }
+          ]
+        },
+        "quantity_shares": 1000,
+        "symbol": "1802"
+      },
+      "state": "ACTIVE",
+      "id": "8110f62f20d409053f8f0ad6909fc441afdd6496003572dcafe5d8243df4915e",
+      "revision": 1,
+      "digest": "1e233791402a49ffe345fc8e18db0764841e7fa9a25d923fe65545e1f68696ef",
+      "recorded_at": "2026-10-29T02:00:00+00:00",
+      "space_id": "USER_SPACE",
+      "source": "MANUAL",
+      "lifecycle": "STAGED"
+    }
+  },
+  {
+    "request": {
+      "client_intent_id": "ux-receipt-C",
+      "symbol": "1802",
+      "market": "TW",
+      "settlement_mode": "MUT",
+      "action": "Buy",
+      "condition": "CASH",
+      "lot": "Common",
+      "quantity_shares": 1000,
+      "price": "80.00",
+      "protection": {
+        "enabled": true,
+        "stop_loss": 75,
+        "take_profit": "90.00",
+        "exit_limit_price": 74.5,
+        "direction": 1,
+        "targets": [
+          {
+            "price": 90,
+            "fraction": 1,
+            "limit_price": "89.00"
+          }
+        ]
+      }
+    },
+    "receipt": {
+      "event": "CREATED",
+      "kind": "manual_stage",
+      "manual_stage": {
+        "client_intent_id": "ux-receipt-C",
+        "original_digest": "66c60c756d40aff21746443e5500316c045488df62a7ae8f0ec2a6b2a4f0cf6e",
+        "source": "MANUAL",
+        "space_id": "USER_SPACE",
+        "state": "STAGED",
+        "submission": null
+      },
+      "owner_id": "MCP",
+      "raw": {
+        "action": "Buy",
+        "client_intent_id": "ux-receipt-C",
+        "condition": "CASH",
+        "lot": "Common",
+        "price": "80",
+        "protection": {
+          "direction": 1,
+          "enabled": true,
+          "exit_limit_price": "74.5",
+          "protection_mode": "LOCAL_SYNTHETIC",
+          "stop_limit_price": null,
+          "stop_loss": "75",
+          "take_profit": "90.00",
+          "targets": [
+            {
+              "fraction": "1",
+              "limit_price": "89.00",
+              "price": "90"
+            }
+          ]
+        },
+        "quantity_shares": 1000,
+        "symbol": "1802"
+      },
+      "state": "ACTIVE",
+      "id": "d8d597678302845cfb90897ea4963a8ee82c1f8e83ff26cd28cb7cdab03765be",
+      "revision": 1,
+      "digest": "e0badd61582eb597455f61f9817f810476613047a70b4475fe8abbcb33f9fbc4",
+      "recorded_at": "2026-10-29T02:00:00+00:00",
+      "space_id": "USER_SPACE",
+      "source": "MANUAL",
+      "lifecycle": "STAGED"
+    }
+  },
+  {
+    "request": {
+      "client_intent_id": "ux-ui",
+      "symbol": "1802",
+      "market": "TW",
+      "action": "Buy",
+      "condition": "CASH",
+      "lot": "Common",
+      "quantity_shares": 1000,
+      "price": "80.00",
+      "protection": {
+        "enabled": false,
+        "stop_loss": null,
+        "take_profit": null,
+        "exit_limit_price": "80",
+        "direction": 1,
+        "targets": [],
+        "stop_limit_price": null,
+        "protection_mode": "LOCAL_SYNTHETIC"
+      }
+    },
+    "receipt": {
+      "event": "CREATED",
+      "kind": "manual_stage",
+      "manual_stage": {
+        "client_intent_id": "ux-ui",
+        "original_digest": "4fd4c8aca6dbce728b5af775533a985eeb9e5afb86888ab548101a8bcbc6bcee",
+        "source": "MANUAL",
+        "space_id": "USER_SPACE",
+        "state": "STAGED",
+        "submission": null
+      },
+      "owner_id": "MCP",
+      "raw": {
+        "action": "Buy",
+        "client_intent_id": "ux-ui",
+        "condition": "CASH",
+        "lot": "Common",
+        "price": "80",
+        "protection": {
+          "direction": 1,
+          "enabled": false,
+          "exit_limit_price": "80",
+          "protection_mode": "LOCAL_SYNTHETIC",
+          "stop_limit_price": null,
+          "stop_loss": null,
+          "take_profit": null,
+          "targets": []
+        },
+        "quantity_shares": 1000,
+        "symbol": "1802"
+      },
+      "state": "ACTIVE",
+      "id": "b35a57db2e0ac54f3e9212508937b3420c161337ff6116bf34e30a334f055b3e",
+      "revision": 1,
+      "digest": "ff8b9053796239c64bf1c253d81517af93a376973a3eddcba672742442296522",
+      "recorded_at": "2026-10-29T02:00:00+00:00",
+      "space_id": "USER_SPACE",
+      "source": "MANUAL",
+      "lifecycle": "STAGED"
+    }
+  },
+  {
+    "request": {
+      "client_intent_id": "ux-credit-MARGIN",
+      "symbol": "1802",
+      "market": "TW",
+      "action": "Sell",
+      "condition": "MARGIN",
+      "lot": "Common",
+      "quantity_shares": 1000,
+      "price": "80.00"
+    },
+    "receipt": {
+      "event": "CREATED",
+      "kind": "manual_stage",
+      "manual_stage": {
+        "client_intent_id": "ux-credit-MARGIN",
+        "original_digest": "fd457cf9ba924a092981483fb69cce9e95b779969e4c03a5b7dca6763ea559fe",
+        "source": "MANUAL",
+        "space_id": "USER_SPACE",
+        "state": "STAGED",
+        "submission": null
+      },
+      "owner_id": "MCP",
+      "raw": {
+        "action": "Sell",
+        "client_intent_id": "ux-credit-MARGIN",
+        "condition": "MARGIN",
+        "lot": "Common",
+        "price": "80",
+        "quantity_shares": 1000,
+        "symbol": "1802"
+      },
+      "state": "ACTIVE",
+      "id": "5f38b86f75fb83b97df09b502dac919d44df058298cb6aca9208b9a03bc8ef88",
+      "revision": 1,
+      "digest": "0222d503a19ee51376b0cc1fce3dbfeaeaf1a221d7e94108a407684a089b8003",
+      "recorded_at": "2026-10-29T02:00:00+00:00",
+      "space_id": "USER_SPACE",
+      "source": "MANUAL",
+      "lifecycle": "STAGED"
+    }
+  },
+  {
+    "request": {
+      "client_intent_id": "ux-credit-SHORT_SELLING",
+      "symbol": "1802",
+      "market": "TW",
+      "action": "Buy",
+      "condition": "SHORT_SELLING",
+      "lot": "Common",
+      "quantity_shares": 1000,
+      "price": "80.00"
+    },
+    "receipt": {
+      "event": "CREATED",
+      "kind": "manual_stage",
+      "manual_stage": {
+        "client_intent_id": "ux-credit-SHORT_SELLING",
+        "original_digest": "31525e9d29fc1f22b768983e95f6729e89558859581e84b8b87819c2cf02395f",
+        "source": "MANUAL",
+        "space_id": "USER_SPACE",
+        "state": "STAGED",
+        "submission": null
+      },
+      "owner_id": "MCP",
+      "raw": {
+        "action": "Buy",
+        "client_intent_id": "ux-credit-SHORT_SELLING",
+        "condition": "SHORT_SELLING",
+        "lot": "Common",
+        "price": "80",
+        "quantity_shares": 1000,
+        "symbol": "1802"
+      },
+      "state": "ACTIVE",
+      "id": "0d612f58eea5894a85d6b511f1a33aa43e857e5fa16a24621c9e891162305977",
+      "revision": 1,
+      "digest": "c854b233a297f19df69a028f4f2ef8d22a01e7d82a95c5d83b957c076688d6a1",
+      "recorded_at": "2026-10-29T02:00:00+00:00",
+      "space_id": "USER_SPACE",
+      "source": "MANUAL",
+      "lifecycle": "STAGED"
+    }
+  }
+]

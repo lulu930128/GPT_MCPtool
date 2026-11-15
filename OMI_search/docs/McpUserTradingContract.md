@@ -37,7 +37,7 @@
 - 掛單頁將本地待送單與 Native/Broker 讀回分開；券商 503 不隱藏本地清單，也不阻擋本地修改或開 modal。
   本地修改／取消使用原 Candidate revision／cancel 工具與 expected_revision；不是券商撤單。
 - 本地送單只在唯一 modal 確認後呼叫 `omi_confirm_desk_staged` 一次，綁定原 ID/revision/digest。
-  timeout／503／UNKNOWN 只讀原 ID 詳情，不能因讀回 STAGED 而自動重送。原 review 與 Pending 路徑保留。
+  timeout／一般 503／UNKNOWN 只讀原 ID 詳情，不能因讀回 STAGED 而自動重送。原 review 與 Pending 路徑保留。
   Backend 回傳的 SUBMITTING／SUBMITTED／SUBMISSION_UNKNOWN／SUBMISSION_REJECTED 或其他狀態照實顯示，不由 fulfilled 推定成交。
 - Native confirm staged 使用 75 秒 client timeout；本地 staged list/detail 為 20 秒。
   上一版八個工具的 75 秒設定保留；其他工具與初始化仍為 20 秒。Host timeout 未驗證。
@@ -66,3 +66,36 @@
 
 Source、mock/SDK protocol、browser、真 Host、Native loaded adoption、Broker E2E 是分開的證據。
 Endpoint source 存在不代表服務已載入；未接路由的 404/405 原樣呈現 API 契約待接。
+
+## 確定未嘗試與連線狀態
+
+常駐連線之業務語意唯一依據為 Backend 的
+`docs/exec-plans/active/execution-always-online-20261105/InterfaceContract.md`。
+Adapter 不實作連線維護、交易日、登入或重送。
+
+Candidate HTTP error 保留既有 `error` 訊息與 `tool`，additive 加入 `http_status` 與
+`backend_error`（原 JSON envelope，無法解析時為 null）。公開 middleware 形狀為
+`backend_error.error.{code,message,request_id,detail}`；UI 的 CallError 保留型別欄位，
+不從文字解析 NOT_ATTEMPTED。市場 API 的錯誤形狀與成功資料均維持原樣。
+
+唯一解鎖例外為本次 staged confirm await 返回 HTTP 503 的 typed terminal receipt：
+`error.detail.retry_policy=EXPLICIT_RETRY_SAME_STAGE`，submission_attempt 的 contract、
+NOT_ATTEMPTED、READINESS、native_command_started=false 與原 candidate selector 全部一致。
+同一 local attempt 物件與 generation 必須仍有效；request_id 原樣保存，MCP response ID 與
+該 await 綁定，不新增 caller request ID 或業務 receipt store。舊 modal callback 不能確認新 modal。
+
+收到證據後仍保留本次送單鎖，直到單筆讀回確認同 ID/revision/digest/raw、ACTIVE、STAGED
+且 submission=null；屆時僅恢復手動開啟 modal，不自行開 modal 或 confirm。
+讀取失敗仍可再讀；若有效回讀已看到修改、取消或 claim，消耗該次 retry 證據，
+後續舊 STAGED snapshot 不能復活它。真正 unknown、Pending、部分成交與原 Native identity join
+維持原語意。跨視窗最終並行 claim 仍由 Backend 的 exact pin／transaction 擁有。
+
+DeskStatus 每次讀取結束後間隔 15 秒純讀 `omi_read_desk_status`；頁籤隱藏暫停，顯示時恢復。
+每個 mounted 元件單飛；cleanup 清 timer／listener、abort 本地 bridge 等待並丟棄 late reply，
+不宣稱取消遠端 SDK。HTTP 200 或 session_bound 不推定 online；逐欄顯示 desired、actual、
+session generation、交易日、date_ready、ready、busy、最後 broker read 時間／age／stale 與錯誤，
+美股 execution 未支援。ONLINE／ready 不代表可送單、受理或成交。
+status 是 Backend 記憶體投影；原 broker report GET 保留同 session 即時唯讀查詢，
+不改為 snapshot。managed owner 的 60 秒 health read 與 120 秒 stale 判定由 Backend 擁有。
+
+本次 source／隔離驗證紀錄見 [工作包證據](agent-runs/execution-always-online-20261105/Progress.md)。

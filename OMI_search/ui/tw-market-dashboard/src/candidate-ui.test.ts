@@ -15,7 +15,7 @@ test("Workspace keeps one candidate panel mounted behind conditional mode and se
   assert.match(html, /id="workspace-candidate-content" hidden=""/);
   assert.equal((html.match(/class="candidate-panel"/g) ?? []).length, 1);
   for (const page of ["trade", "orders", "fills", "inventory"]) assert.ok(html.includes(`id="workspace-broker-${page}"`));
-  assert.match(html, /尚未接線/);
+  assert.match(html, /尚無可驗證的即時報價/);
   const source = readFileSync(new URL("./WorkspaceContext.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(source, /SyntheticOrderPanel|synthetic-ticket/);
 });

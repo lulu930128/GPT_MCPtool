@@ -160,7 +160,7 @@
 .candidate-owner-field { display: grid; gap: 6px; margin-top: 10px; }
 .workspace-trade-tabs, .workspace-order-modes, .workspace-price-shortcuts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; }
 .workspace-trade-mode, .workspace-order-pair, .workspace-order-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
-.workspace-trade-tabs { padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+.workspace-trade-tabs { grid-template-columns: repeat(3, minmax(0, 1fr)); padding-bottom: 12px; border-bottom: 1px solid var(--border); }
 .workspace-trade-mode { margin-bottom: 14px; }
 .tw-workspace .workspace-trade-tabs button, .tw-workspace .workspace-order-modes button { padding-inline: 4px; }
 .workspace-order-form { display: grid; gap: 14px; min-width: 0; font-size: 13px; }
@@ -170,7 +170,7 @@
 .workspace-desk-orders h3, .workspace-broker-readback h3 { margin: 0; font-size: 13px; }
 .workspace-desk-row { border-top: 1px solid var(--border); padding: 12px 0; min-width: 0; overflow-wrap: anywhere; }
 .workspace-local-orders { min-width: 0; }
-.workspace-order-card { margin-top: 12px; padding: 16px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+.workspace-order-card { margin-top: 12px; padding: 16px 0; border: 0; border-top: 1px solid var(--border); border-radius: 0; background: transparent; }
 .workspace-order-card-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
 .workspace-order-card-heading > div { display: grid; gap: 5px; min-width: 0; }
 .workspace-order-symbol { color: var(--text); font: 700 23px/1.2 var(--font-data); font-variant-numeric: tabular-nums; }
@@ -1856,4 +1856,42 @@ button:active:not(:disabled) { filter: brightness(1.08); }
   .interactive-chart-controls > span { display: none; }
   .fullscreen-footer { flex-wrap: wrap; padding: 7px 9px; }
   .fullscreen-footer span:nth-child(2) { display: none; }
+}
+
+/* Research and per-order editors share the existing trading controls. */
+.workspace-research { display: grid; gap: 12px; min-width: 0; font-size: 13px; }
+.workspace-research label, .workspace-order-inputs label { display: grid; gap: 5px; min-width: 0; }
+.workspace-research :is(input:not([type="checkbox"]), select, textarea), .workspace-order-inputs :is(input:not([type="checkbox"]), select) { width: 100%; min-width: 0; box-sizing: border-box; padding: 7px 8px; border: 1px solid var(--border-strong); border-radius: 5px; color: var(--text); background: var(--bg); }
+.workspace-research textarea { resize: vertical; }
+.workspace-research label:has(input[type="checkbox"]), .workspace-order-inputs label:has(input[type="checkbox"]) { display: flex; align-items: center; gap: 8px; }
+.workspace-research .workspace-staged-order { padding: 12px 0; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
+.workspace-research form, .workspace-order-details form { display: grid; gap: 12px; min-width: 0; }
+.workspace-research pre, .workspace-order-details pre { white-space: pre-wrap; overflow-wrap: anywhere; max-width: 100%; }
+.workspace-desk-status { display: grid; gap: 4px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+.workspace-desk-status p { margin: 0; }
+.workspace-connection-details { padding-top: 4px; }
+.workspace-desk-status .workspace-order-facts { margin-block: 12px; gap: 8px; }
+.workspace-desk-status .workspace-order-facts dd { font: 12px/1.5 var(--font-data); overflow-wrap: anywhere; }
+.workspace-context [hidden] { display: none !important; }
+.workspace-context :is(button, input, select, textarea, summary):focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+.workspace-context .candidate-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.workspace-context .candidate-heading h3 { margin: 0; font-size: 14px; }
+.workspace-operation-notice { white-space: pre-wrap; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.workspace-operation-error { border-left: 2px solid var(--yellow); padding-left: 10px; }
+.workspace-history-toggle, .workspace-research-select { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.workspace-research-select { flex-wrap: wrap; }
+.workspace-history-toggle input, .workspace-research-select input { width: auto; min-height: 18px; }
+.workspace-delete-confirm { padding: 12px; border: 1px solid var(--border-strong); background: var(--panel-2); }
+.workspace-delete-confirm button { margin: 4px 8px 0 0; }
+.workspace-research fieldset { display: grid; gap: 12px; margin: 0; padding: 0; border: 0; min-width: 0; }
+.workspace-stage-edit { padding: 16px 0; border-block: 1px solid var(--border-strong); }
+.workspace-research-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.workspace-research .workspace-order-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.workspace-research .workspace-order-actions button { min-height: 40px; }
+.workspace-research-pagination { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 12px; }
+@media (max-width: 650px) {
+  .workspace-context { padding: 12px; }
+  .workspace-context :is(button, input:not([type="checkbox"]), select, summary) { min-height: 44px; }
+  .workspace-context summary { align-content: center; }
+  .workspace-order-actions { flex-wrap: wrap; }
 }

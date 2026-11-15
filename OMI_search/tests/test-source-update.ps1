@@ -32,16 +32,24 @@ function New-Fixture([string]$Name,[string]$Mode='normal') {
 
 # Isolated external-boundary fixtures only. Production helper has no test switch.
 $script:fixtureRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\OMI_search'))
+function Get-Command {
+  param([string]$Name,[string]$CommandType,[string]$ErrorAction)
+  if($Name -notin @('uv.exe','node.exe') -or $CommandType -ne 'Application'){throw 'UNEXPECTED_COMMAND_DISCOVERY'}
+  # Multiple installations are valid; only PATH's first application may run.
+  return @([pscustomobject]@{Source=('C:\fixture first\'+$Name)},[pscustomobject]@{Source=('C:\fixture second\'+$Name)})
+}
 function Invoke-ComponentUpdateProcess {
   param([string]$Executable,[string]$Arguments,[string]$WorkingDirectory,[int]$TimeoutMs=120000,[switch]$Json,[switch]$Lifecycle,[string]$ChildJournalRoot)
   $mode=[IO.File]::ReadAllText((Join-Path $script:fixtureRoot 'fixture-mode.txt'))
   $eventPath=Join-Path $script:fixtureRoot 'calls.txt'
   if($Arguments -eq 'sync --frozen --check --offline'){
+    if($Executable -cne 'C:\fixture first\uv.exe'){throw 'AMBIGUOUS_BUILD_EXECUTABLE'}
     [IO.File]::AppendAllText($eventPath,"check`n")
     if($mode -eq 'dependencies-fail'){throw 'UPDATE_CHILD_FAILED'}
     return @{exitCode=0}
   }
   if($Arguments -match '--output-dir "([^"]+)"'){
+    if($Executable -cne 'C:\fixture first\node.exe'){throw 'AMBIGUOUS_BUILD_EXECUTABLE'}
     $out=$matches[1];[void][IO.Directory]::CreateDirectory($out)
     [IO.File]::WriteAllText((Join-Path $out 'index.html'),'new-widget',[Text.UTF8Encoding]::new($false))
     [IO.File]::AppendAllText($eventPath,"build`n")

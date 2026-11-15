@@ -41,6 +41,12 @@ def _identity_matches(executable, arguments, expected_executable, launcher):
     # -Command, encoded commands, abbreviated switches, profiles or extra args.
     expected = [expected_executable, "-NoProfile", "-ExecutionPolicy", "Bypass",
                 "-STA", "-WindowStyle", "Hidden", "-File", launcher]
+    if len(arguments) == len(expected) + 2:
+        if (arguments[-2].casefold() != "-updaterequestid"
+                or re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+                                arguments[-1]) is None):
+            return False
+        arguments = arguments[:-2]
     return (ntpath.normcase(executable) == ntpath.normcase(expected_executable)
             and [s.casefold() for s in arguments] == [s.casefold() for s in expected])
 

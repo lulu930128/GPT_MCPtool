@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { McpAppsBridge } from "./bridge";
+import { fixtureStage, fixtureSubmissionError } from "../scripts/desk-fixture";
+import { stageNotAttempted, stageSelection } from "./desk-contract";
+import { CallError, toolValue } from "./candidate-state";
 
 async function harness(run: (context: {
   bridge: McpAppsBridge;
@@ -122,6 +125,18 @@ test("successful large and business-rejected responses are returned unchanged", 
     assert.equal(await pending, result);
     assert.deepEqual(calls, ["bridge"]);
   });
+});
+
+test("staged HTTP error crosses the real Apps bridge unchanged and toolValue retains its typed receipt", async () => {
+  const row = fixtureStage(), pin = stageSelection(row), args = { id: pin.id, expected_revision: pin.revision, expected_digest: pin.digest };
+  await harness(async ({ bridge, calls, reply }) => {
+    const pending = bridge.callTool("omi_confirm_desk_staged", args);
+    await tick(); reply({ result: fixtureSubmissionError(row) });
+    let error: unknown;
+    try { toolValue(await pending); } catch (value) { error = value; }
+    assert.ok(error instanceof CallError); assert.equal(stageNotAttempted(error, pin), true);
+    assert.deepEqual(calls, ["bridge"], "typed business error never falls back or retries");
+  }, "omi_confirm_desk_staged", args, 75_000);
 });
 
 const nativeDeskTools = [

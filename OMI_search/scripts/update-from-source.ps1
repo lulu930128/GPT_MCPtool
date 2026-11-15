@@ -204,8 +204,9 @@ try {
   } else { Write-ComponentUpdateJson -Path $versionPath -Value $request }
   Write-ComponentUpdateJson -Path $requestPath -Value $request
   $ownsRequest = $true
-  $uv = Get-Command uv.exe -CommandType Application -ErrorAction SilentlyContinue
-  $node = Get-Command node.exe -CommandType Application -ErrorAction SilentlyContinue
+  # Discovery can return multiple PATH installations; FileName must be one path.
+  $uv = Get-Command uv.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+  $node = Get-Command node.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
   if (-not $uv -or -not $node) { throw 'BUILD_TOOL_NOT_FOUND' }
   # --check never syncs or mutates the running environment. Dependency changes
   # need an independently prepared compatible environment before this update.

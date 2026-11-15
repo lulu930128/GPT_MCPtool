@@ -4,7 +4,7 @@ import { build } from "esbuild";
 import vm from "node:vm";
 import { fileURLToPath } from "node:url";
 import { orderQuantityShares } from "./WorkspaceContext";
-import { fixtureReadback, fixtureReview, fixtureStage } from "../scripts/desk-fixture";
+import { fixtureReadback, fixtureReview, fixtureStage, fixtureSubmissionError } from "../scripts/desk-fixture";
 import type { CandidateBridge } from "./candidate-state";
 
 // Real handlers/effects with controlled hooks; browser geometry is checked by
@@ -20,8 +20,8 @@ const output = await build({
   } }],
 });
 
-function harness(component: "ManualOrderForm" | "WorkspaceContext" | "DeskOrders", suppliedBridge?: CandidateBridge, candidateId?: string) {
-  let cursor = 0, dirty = false, symbol = "2330", tree: any;
+function harness(component: "ManualOrderForm" | "WorkspaceContext" | "DeskOrders", suppliedBridge?: CandidateBridge, candidateId?: string, properties: Record<string, any> = {}) {
+  let cursor = 0, dirty = false, symbol = "2330", tree: any, refreshKey = 0;
   const slots: any[] = [];
   let effects: (() => void)[] = [];
   const hooks = {
@@ -34,19 +34,21 @@ function harness(component: "ManualOrderForm" | "WorkspaceContext" | "DeskOrders
     useEffect(fn: () => void, deps: unknown[]) {
       const index = cursor++;
       if (!slots[index] || deps.some((value, i) => !Object.is(value, slots[index].deps[i]))) {
-        effects.push(() => { slots[index] = { deps }; fn(); });
+        effects.push(() => { slots[index]?.cleanup?.(); slots[index] = { deps, cleanup: fn() }; });
       }
     },
   };
   const module = { exports: {} as any };
   const noIO = () => { throw Error("Unexpected broker or storage IO"); };
-  vm.runInNewContext(output.outputFiles[0].text, { module, exports: module.exports, hooks, setInterval: () => 1, clearInterval: () => {}, crypto: { randomUUID: () => "83771cec-bd72-4dd9-bb65-132ea523997b" }, fetch: noIO, localStorage: { setItem: noIO } });
+  vm.runInNewContext(output.outputFiles[0].text, { module, exports: module.exports, hooks,
+    document: { hidden: false, addEventListener() {}, removeEventListener() {} }, setTimeout: () => 1, clearTimeout() {},
+    setInterval: () => 1, clearInterval: () => {}, crypto: { randomUUID: properties.uuid ?? (() => "83771cec-bd72-4dd9-bb65-132ea523997b") }, fetch: noIO, localStorage: { setItem: noIO } });
   const bridge = suppliedBridge ?? { callTool: noIO };
   function render() {
     let rounds = 0;
     do {
       cursor = 0; dirty = false; effects = [];
-      tree = module.exports[component]({ symbol, bridge, active: true, refreshKey: 0, candidateId });
+      tree = module.exports[component]({ symbol, bridge, active: true, refreshKey, candidateId, ...properties });
       effects.forEach((fn) => fn());
       assert.ok(++rounds < 10, "effects converge");
     } while (dirty);
@@ -60,7 +62,7 @@ function harness(component: "ManualOrderForm" | "WorkspaceContext" | "DeskOrders
   const click = (name: string) => { const node = button(name); assert.ok(!node.props.disabled); node.props.onClick(); render(); };
   const change = (name: string, value: string) => { input(name).props.onChange({ target: { value } }); render(); };
   render();
-  return { button, input, click, change, find, text: (node = tree) => text(node), select(value: string) { symbol = value; render(); }, async settle() { await new Promise(resolve => setImmediate(resolve)); render(); } };
+  return { button, input, click, change, find, all: (predicate: (node: any) => boolean) => flatten(tree).filter(predicate), hasEnabledButton: (name: string) => flatten(tree).some(node => node.type === "button" && text(node) === name && !node.props.disabled), updateProps(value: Record<string, any>) { Object.assign(properties, value); render(); }, text: (node = tree) => text(node), select(value: string) { symbol = value; render(); }, invalidate() { refreshKey++; render(); }, async settle() { await new Promise(resolve => setImmediate(resolve)); render(); } };
 }
 
 test("four condition buttons normalize legal direction and every non-CASH mode excludes Odd", () => {
@@ -69,7 +71,7 @@ test("four condition buttons normalize legal direction and every non-CASH mode e
     h.click("現股"); h.click("零股"); h.click(side === "買進" ? "賣出" : "買進");
     h.click(name);
     assert.equal(h.button(side).props["aria-pressed"], true, name);
-    assert.equal(h.button(side === "買進" ? "賣出" : "買進").props.disabled, true, name);
+    assert.equal(h.button(side === "買進" ? "賣出" : "買進").props.disabled, name === "現先賣", name);
     assert.equal(h.button("整股").props["aria-pressed"], true, name);
     assert.equal(h.button("零股").props.disabled, true, name);
   }
@@ -94,9 +96,9 @@ test("clean ticket follows selection, while dirty ticket retains symbol and clea
   assert.equal(h.input("委託數量").props.value, "1");
 });
 
-test("no broker contract means empty price, disabled shortcuts and no send transport", () => {
+test("no quote contract means empty price, no misleading shortcuts and no send transport", () => {
   const h = harness("ManualOrderForm");
-  for (const label of ["跌停", "平盤", "漲停", "市價"]) assert.equal(h.button(label).props.disabled, true);
+  for (const label of ["跌停", "平盤", "漲停", "市價"]) assert.throws(() => h.button(label));
   assert.equal(h.find(node => node.type === "button" && node.props.className === "workspace-order-submit").props.type, "submit");
   assert.equal(h.input("委託價格").props.value, "");
   let prevented = false;
@@ -110,16 +112,15 @@ test("candidate stays mounted while polling is active only on trade/conditional"
   const identity = panel().type;
   assert.equal(panel().props.active, false);
   h.click("條件交易"); assert.equal(panel().props.active, true);
-  for (const page of ["掛單", "成交", "庫存"]) {
+  for (const page of ["待送單", "券商委託", "研究預選", "成交", "庫存"]) {
     h.click(page); assert.equal(panel().props.active, false); assert.equal(panel().type, identity);
-    h.click("交易"); assert.equal(panel().props.active, true);
+    h.click("新增委託"); assert.equal(panel().props.active, true);
   }
   h.click("一般"); assert.equal(panel().props.active, false);
   h.select("2303"); assert.equal(panel().props.symbol, "2303"); assert.equal(panel().type, identity);
   h.click("條件交易"); assert.equal(panel().props.active, true);
-  h.click("我的交易"); assert.equal(panel().props.active, true); assert.equal(panel().props.space, "USER_SPACE"); assert.equal(panel().type, identity);
-  assert.match(h.text(), /AI 候選供檢視與管理/);
-  h.click("AI 候選"); assert.equal(panel().props.active, true); assert.equal(panel().props.space, "AGENT_SPACE"); assert.equal(panel().type, identity);
+  assert.equal(panel().props.space, "USER_SPACE"); assert.equal(panel().type, identity);
+  h.click("研究預選"); assert.equal(panel().props.active, false); assert.equal(panel().props.space, "USER_SPACE"); assert.equal(panel().type, identity);
 });
 
 test("quantity is explicitly converted from Common lots or Odd shares without unsafe numeric coercion", () => {
@@ -153,9 +154,11 @@ test("draft timeout preserves one stable intent, reads the original local stage,
   form.props.onSubmit({ preventDefault() {} }); form.props.onSubmit({ preventDefault() {} }); await h.settle();
   assert.equal(calls.filter(call => call.name === "omi_create_desk_draft").length, 1);
   assert.equal(calls[0].args.client_intent_id, "83771cec-bd72-4dd9-bb65-132ea523997b");
-  assert.equal(calls[0].args.quantity_shares, 1000); assert.match(h.text(), /原 client_intent_id/);
+  assert.equal(calls[0].args.quantity_shares, 1000); assert.match(h.text(), /已加入待送單/);
+  assert.equal(created.manual_stage.client_intent_id, calls[0].args.client_intent_id);
   assert.ok(calls.every(call => !/confirm|approve/.test(call.name)));
-  assert.equal(h.button("已加入掛單").props.disabled, true);
+  assert.equal(h.button("加入掛單").props.disabled, false);
+  assert.equal(h.input("委託數量").props.value, "");
 });
 
 test("unresolved draft identity stays locked after empty readback, including HTTP 409 CHECK_STATUS_DO_NOT_RESEND", async () => {
@@ -206,7 +209,69 @@ test("successful local create preserves raw intent and selection changes retain 
   assert.equal(h.input("委託股票代碼").props.value, "2330");
   h.find(node => node.type === "form").props.onSubmit({ preventDefault() {} }); await h.settle();
   assert.equal(calls.length, 1); assert.equal(calls[0].args.quantity_shares, 50);
-  assert.equal(h.button("已加入掛單").props.disabled, true);
+  assert.equal(h.button("加入掛單").props.disabled, false);
+  h.change("委託數量", "20");
+  assert.doesNotMatch(h.text(), /無法加入掛單/);
+});
+
+test("UUID failure before transport exits staging and can be corrected locally", async () => {
+  const calls: string[] = [];
+  const h = harness("ManualOrderForm", { async callTool(name) { calls.push(name); throw Error("must not call"); } }, undefined,
+    { uuid: () => { throw Error("secure context unavailable"); } });
+  h.change("委託價格", "80"); h.change("委託數量", "1");
+  h.find(node => node.type === "form").props.onSubmit({ preventDefault() {} }); await h.settle();
+  assert.equal(h.button("加入掛單").props.disabled, false); assert.equal(calls.length, 0);
+});
+
+for (const lifecycle of ["SUBMITTED", "SUBMITTING", "CANCELLED"]) test(`intent read preserves ${lifecycle} and exact navigation`, async () => {
+  let saved: any; const targets: any[] = [], calls: string[] = [];
+  const h = harness("ManualOrderForm", { async callTool(name, args) {
+    calls.push(name);
+    if (name === "omi_create_desk_draft") { saved = fixtureStage(args); throw Error("timeout"); }
+    saved.lifecycle = lifecycle; if (lifecycle === "CANCELLED") saved.state = "CANCELLED";
+    return { structuredContent: { result: [saved] } };
+  } }, undefined, { onStaged: (target: any) => targets.push(target) });
+  h.change("委託價格", "80"); h.change("委託數量", "1");
+  h.find(node => node.type === "form").props.onSubmit({ preventDefault() {} }); await h.settle();
+  assert.equal(targets[0].stageId, saved.id); assert.equal(targets[0].lifecycle, lifecycle);
+  assert.doesNotMatch(h.text(), /尚未送交券商/); assert.equal(calls.filter(name => name === "omi_create_desk_draft").length, 1);
+});
+
+for (const operation of ["revise", "cancel"]) test(`late list cannot overwrite ${operation}; editor stays in the original card`, async () => {
+  const original: any = fixtureStage(), other: any = fixtureStage({ client_intent_id: "second", symbol: "1101" });
+  let resolveOld!: (value: unknown) => void, reads = 0, updated = original;
+  const h = harness("DeskOrders", { async callTool(name, args) {
+    if (name === "omi_read_desk_staged") { if (++reads === 2) return new Promise(resolve => { resolveOld = resolve; }); return { structuredContent: { result: [updated, other] } }; }
+    assert.equal(name, operation === "revise" ? "omi_revise_candidate" : "omi_cancel_candidate");
+    updated = { ...original, revision: 2, digest: "d".repeat(64), event: operation === "revise" ? "REVISE" : "CANCEL",
+      ...(operation === "revise" ? { raw: args.raw } : { lifecycle: "CANCELLED", state: "CANCELLED" }) };
+    return { structuredContent: updated };
+  } }, undefined, { view: "staged" });
+  await h.settle(); h.click("更新清單"); await h.settle();
+  h.click(operation === "revise" ? "修改" : "刪除");
+  if (operation === "revise") {
+    const card = h.find(node => node.props?.id === `stage-${original.id}`);
+    assert.match(h.text(card), /修改 2330 的本地掛單/);
+    const second = h.find(node => node.props?.id === `stage-${other.id}`);
+    assert.doesNotMatch(h.text(second), /儲存修改/);
+    h.change("修改價格", "88"); h.find(node => node.type === "form" && node.props["aria-label"] === "修改本地待送單").props.onSubmit({ preventDefault() {} });
+  }
+  await h.settle(); resolveOld({ structuredContent: { result: [original, other] } }); await h.settle();
+  if (operation === "revise") assert.match(h.text(h.find(node => node.props?.id === `stage-${original.id}`)), /88/);
+  else { assert.equal(h.all(node => node.props?.id === `stage-${original.id}`).length, 0); assert.equal(h.all(node => node.props?.id === `stage-${other.id}`).length, 1); }
+});
+
+for (const delay of [1000, 5000, 20000]) test(`local view renders independently during ${delay}ms Native read and shares that read`, async () => {
+  const original = fixtureStage(); let release!: (value: unknown) => void, brokerReads = 0, localReads = 0;
+  const h = harness("DeskOrders", { callTool(name) {
+    if (name === "omi_read_desk_staged") { localReads++; return Promise.resolve({ structuredContent: { result: [original] } }); }
+    assert.equal(name, "omi_read_desk_orders"); brokerReads++; return new Promise(resolve => { release = resolve; });
+  } }, undefined, { view: "orders" });
+  await h.settle(); h.updateProps({ view: "staged" }); await h.settle();
+  assert.equal(h.button("修改").props.disabled, false); assert.ok(localReads >= 2);
+  h.updateProps({ view: "orders" }); await h.settle(); assert.equal(brokerReads, 1);
+  // Controlled completion represents the delayed transport; Browser also runs real timed delays.
+  release({ structuredContent: fixtureReadback() }); await h.settle();
 });
 
 for (const failure of ["timeout", "503", "UNKNOWN", "mismatched-id"]) {
@@ -233,7 +298,7 @@ for (const failure of ["timeout", "503", "UNKNOWN", "mismatched-id"]) {
     assert.equal(calls.filter(call => /confirm|approve/.test(call.name)).length, 1);
     assert.ok(calls.some(call => call.name === "omi_read_desk_stage"));
     assert.match(h.text(), /操作結果待確認/);
-    assert.equal(h.button("送單").props.disabled, true);
+    assert.equal(h.hasEnabledButton("送單"), false);
     h.click("讀回"); await h.settle();
     modal.props.confirm(); await h.settle();
     assert.equal(calls.filter(call => /confirm|approve/.test(call.name)).length, 1);
@@ -247,14 +312,14 @@ test("local revision and cancellation keep ID, raw intent and exact revision wit
     if (name === "omi_read_desk_staged") return { structuredContent: { result: [row] } };
     if (name === "omi_read_desk_orders") throw Error("503 Native missing");
     assert.equal(args.id, row.id); assert.equal(args.expected_revision, row.revision);
-    if (name === "omi_revise_candidate") { assert.equal((args.raw as any).client_intent_id, row.raw.client_intent_id); row = { ...row, raw: args.raw, revision: 2, digest: "d".repeat(64) }; }
-    else { assert.equal(name, "omi_cancel_candidate"); row = { ...row, revision: 3, state: "CANCELLED", lifecycle: "CANCELLED" }; }
+    if (name === "omi_revise_candidate") { assert.equal((args.raw as any).client_intent_id, row.raw.client_intent_id); row = { ...row, raw: args.raw, revision: 2, event: "REVISE", digest: "d".repeat(64) }; }
+    else { assert.equal(name, "omi_cancel_candidate"); row = { ...row, revision: 3, event: "CANCEL", state: "CANCELLED", lifecycle: "CANCELLED" }; }
     return { structuredContent: row };
   } });
   await h.settle(); h.click("修改"); h.change("修改價格", "101.25"); h.select("3105");
   assert.equal(h.input("修改價格").props.value, "101.25");
   h.find(node => node.type === "form").props.onSubmit({ preventDefault() {} }); await h.settle();
-  h.click("刪除"); await h.settle(); assert.match(h.text(), /CANCELLED/);
+  h.click("刪除"); await h.settle(); assert.match(h.text(), /已刪除本地待送單/); assert.match(h.text(), /目前沒有待送單/);
   assert.equal(calls.filter(call => call.name === "omi_revise_candidate").length, 1);
   assert.equal(calls.filter(call => call.name === "omi_cancel_candidate").length, 1);
   assert.ok(calls.every(call => !/confirm|approve|create/.test(call.name)));
@@ -271,6 +336,29 @@ test("slow broker read never delays local stage rendering or opens a Native call
   await h.settle(); h.click("修改"); h.change("修改價格", "578.00");
   assert.equal(h.input("修改價格").props.value, "578.00");
   assert.deepEqual(calls, ["omi_read_desk_staged", "omi_read_desk_orders"]);
+});
+
+test("slow local cancel locks only that draft; another local draft can still be cancelled", async () => {
+  const first = fixtureStage({ client_intent_id: "slow-local", symbol: "3481" }), second = fixtureStage({ client_intent_id: "fast-local", symbol: "3711" });
+  let resolve!: (value: unknown) => void;
+  const calls: string[] = [];
+  const h = harness("DeskOrders", { async callTool(name, args) {
+    if (name === "omi_read_desk_staged") return { structuredContent: { result: [first, second] } };
+    if (name === "omi_read_desk_orders") throw Error("Native offline");
+    assert.equal(name, "omi_cancel_candidate"); calls.push(String(args.id));
+    if (args.id === first.id) return new Promise(done => resolve = done);
+    return { structuredContent: { ...second, revision: 2, event: "CANCEL", state: "CANCELLED", lifecycle: "CANCELLED" } };
+  } });
+  await h.settle(); h.click("刪除"); await h.settle();
+  const other = h.find(node => node.props["aria-label"] === "3711 本地掛單");
+  const actions = (other.props.children as any[]).flat(Infinity).find((node: any) => node?.props?.className === "workspace-order-actions");
+  const findDelete = (node: any): any => !node || typeof node !== "object" ? undefined : node.type === "button" && node.props.children === "刪除" ? node : [node.props?.children].flat(Infinity).map(findDelete).find(Boolean);
+  // Traverse the other row's fragment rather than invoking a hidden/global action.
+  const action = findDelete(actions); assert.ok(action); assert.equal(action.props.disabled, false);
+  action.props.onClick(); await h.settle(); assert.equal(calls.length, 2);
+  assert.match(h.text(), /處理中/);
+  resolve({ structuredContent: { ...first, revision: 2, event: "CANCEL", state: "CANCELLED", lifecycle: "CANCELLED" } });
+  await h.settle(); assert.match(h.text(), /目前沒有待送單/);
 });
 
 function returned2409(state = "PENDING", lifecycle = "SUBMISSION_PENDING") {
@@ -318,7 +406,7 @@ test("2409 reopened Pending remains returned and uncertain; exact Native readbac
   } });
   await h.settle();
   assert.match(h.text(), /券商結果待確認/); assert.match(h.text(), /送單請求已返回/);
-  assert.doesNotMatch(h.text(), /正在送出|遭拒絕|已掛單|操作結果待確認/);
+  assert.doesNotMatch(h.text(h.find(node => node.props["aria-label"] === "2409 本地掛單")), /正在送出|遭拒絕|已掛單|操作結果待確認/);
   assert.equal(h.button("讀回").props.disabled, false);
   f.review.execution = { ...f.review.execution, state: "ACCEPTED", broker_order_id: "fixture-order-2409", reconcile_required: false };
   h.click("讀回"); await h.settle();
@@ -353,7 +441,7 @@ for (const [state, lifecycle, label] of [
   h.click("讀回"); await h.settle();
   // Even a stale STAGED list cannot discard the consumed original ID latch.
   current = f.original; h.click("更新委託"); await h.settle();
-  assert.equal(h.button("送單").props.disabled, true);
+  assert.equal(h.hasEnabledButton("送單"), false);
   modal.props.confirm(); await h.settle();
   assert.equal(calls.filter(call => /confirm|approve/.test(call.name)).length, 1);
 });
@@ -388,7 +476,7 @@ test("transport unknown survives partial/mismatched/503 readback, then only exac
   assert.doesNotMatch(h.text(), /操作結果待確認/); assert.match(h.text(), /券商結果待確認/);
   assert.equal(f.row.manual_stage.submission.receipt.execution.broker_order_id, null);
   current = f.original; h.click("更新委託"); await h.settle();
-  assert.equal(h.button("送單").props.disabled, true);
+  assert.equal(h.hasEnabledButton("送單"), false);
   modal.props.confirm(); await h.settle();
   assert.equal(calls.filter(call => /confirm|approve/.test(call.name)).length, 1);
 });
@@ -477,4 +565,84 @@ test("Pending timeout retains its own ID warning when a different Native review 
   assert.match(h.text(), /結果待確認，不會自動重送/);
   modal.props.confirm(); await h.settle();
   assert.equal(calls.filter(call => /confirm|approve/.test(call.name)).length, 1);
+});
+
+test("NOT_ATTEMPTED unlocks only after exact local read; a new modal needs a new click and old callbacks cannot send", async () => {
+  const row = fixtureStage({ symbol: "3711", lot: "Odd", quantity_shares: 200, price: "592" });
+  const calls: string[] = []; let failRead = true;
+  const h = harness("DeskOrders", { async callTool(name) {
+    calls.push(name);
+    if (name === "omi_read_desk_staged") return { structuredContent: { result: [row] } };
+    if (name === "omi_read_desk_stage") { if (failRead) throw Error("synthetic local read unavailable"); return { structuredContent: row }; }
+    if (name === "omi_read_desk_orders") throw Error("synthetic Native absent");
+    assert.equal(name, "omi_confirm_desk_staged"); return fixtureSubmissionError(row);
+  } });
+  await h.settle(); h.click("送單");
+  const old = h.find(node => typeof node.type === "function" && node.type.name === "SendOrderModal");
+  old.props.confirm(); old.props.confirm(); await h.settle(); await h.settle();
+  assert.equal(calls.filter(name => name === "omi_confirm_desk_staged").length, 1);
+  assert.equal(h.hasEnabledButton("送單"), false); assert.equal(h.button("讀回").props.disabled, false);
+  assert.match(h.text(), /本次請求確定未送出/);
+  failRead = false; h.click("讀回"); await h.settle();
+  assert.equal(h.button("送單").props.disabled, false);
+  assert.equal(calls.filter(name => name === "omi_read_desk_orders").length, 1, "retry proof never depends on Native read");
+  old.props.confirm(); await h.settle(); // No modal => zero new calls.
+  h.click("送單"); old.props.confirm(); old.props.cancel(); await h.settle();
+  assert.equal(calls.filter(name => name === "omi_confirm_desk_staged").length, 1, "old callback cannot confirm/cancel a new modal");
+  const next = h.find(node => typeof node.type === "function" && node.type.name === "SendOrderModal");
+  next.props.confirm(); next.props.confirm(); await h.settle();
+  assert.equal(calls.filter(name => name === "omi_confirm_desk_staged").length, 2, "explicit new user confirmation only");
+});
+
+for (const mode of ["claim", "partial-fill", "version", "digest", "stale-receipt", "malformed", "late-generation"]) test(`NOT_ATTEMPTED recovery keeps lock on ${mode}`, async () => {
+  const original: any = fixtureStage({ symbol: "3481", action: "Sell", condition: "SHORT_SELLING", lot: "Common" });
+  let current = original, resolve!: (value: unknown) => void;
+  let count = 0;
+  const h = harness("DeskOrders", { async callTool(name) {
+    if (name === "omi_read_desk_staged") return { structuredContent: { result: [current] } };
+    if (name === "omi_read_desk_stage") return { structuredContent: current };
+    if (name === "omi_read_desk_orders") throw Error("synthetic Native offline");
+    assert.equal(name, "omi_confirm_desk_staged"); count++;
+    return new Promise(done => resolve = done);
+  } });
+  await h.settle(); h.click("送單");
+  const modal = h.find(node => typeof node.type === "function" && node.type.name === "SendOrderModal");
+  modal.props.confirm(); modal.props.confirm(); await h.settle();
+  if (mode === "claim") current = { ...original, revision: 2, lifecycle: "SUBMITTING" };
+  if (mode === "partial-fill") current = { ...original, revision: 3, lifecycle: "SUBMISSION_PENDING", manual_stage: { ...original.manual_stage, submission: { phase: "RESULT", receipt: { execution: { state: "PARTIALLY_FILLED" } } } } };
+  if (mode === "version") current = { ...original, revision: 2 };
+  if (mode === "digest") current = { ...original, digest: "d".repeat(64) };
+  const error: any = fixtureSubmissionError(original);
+  if (mode === "stale-receipt") error.structuredContent.backend_error.error.detail.submission_attempt.candidate_revision = 0;
+  if (mode === "malformed") delete error.structuredContent.backend_error.error.detail.submission_attempt;
+  if (mode === "late-generation") h.invalidate();
+  resolve(error); await h.settle(); await h.settle();
+  current = original; h.click("更新委託"); await h.settle();
+  assert.equal(h.hasEnabledButton("送單"), false, "list cannot release a failed exact read or unknown latch");
+  assert.equal(h.button("讀回").props.disabled, false);
+  modal.props.confirm(); await h.settle(); assert.equal(count, 1);
+  if (["claim", "partial-fill", "version", "digest"].includes(mode)) {
+    h.click("讀回"); await h.settle();
+    assert.equal(h.hasEnabledButton("送單"), false, "a subsequent stale STAGED detail cannot revive consumed proof");
+  }
+});
+
+test("concurrent windows: a NOT_ATTEMPTED receipt cannot unlock a stage another window claimed", async () => {
+  const original: any = fixtureStage(); let current = original, resolve!: (value: unknown) => void, sends = 0;
+  const bridge: CandidateBridge = { async callTool(name) {
+    if (name === "omi_read_desk_staged") return { structuredContent: { result: [current] } };
+    if (name === "omi_read_desk_stage") return { structuredContent: current };
+    if (name === "omi_read_desk_orders") throw Error("synthetic Native offline");
+    assert.equal(name, "omi_confirm_desk_staged"); sends++;
+    if (sends === 1) return new Promise(done => resolve = done);
+    current = { ...original, revision: 2, lifecycle: "SUBMITTING" }; throw Error("synthetic claimed timeout");
+  } };
+  const a = harness("DeskOrders", bridge), b = harness("DeskOrders", bridge);
+  await a.settle(); await b.settle();
+  a.click("送單"); a.find(node => typeof node.type === "function" && node.type.name === "SendOrderModal").props.confirm();
+  b.click("送單"); b.find(node => typeof node.type === "function" && node.type.name === "SendOrderModal").props.confirm();
+  await b.settle(); resolve(fixtureSubmissionError(original)); await a.settle(); await a.settle();
+  assert.equal(sends, 2); assert.match(a.text(), /正在送出|送單進度待確認/);
+  assert.equal(a.button("讀回").props.disabled, false);
+  assert.ok(!a.text().includes("同一掛單讀回一致"));
 });

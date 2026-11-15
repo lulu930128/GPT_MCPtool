@@ -22,15 +22,29 @@ RAW = {"symbol": "3481", "space_id": "AGENT_SPACE", "source": "AGENT_PROPOSAL",
 
 
 class CandidateToolsTests(unittest.TestCase):
+    def test_four_credit_directions_forward_unchanged_without_strategy_bypass(self):
+        for condition, action in (("MARGIN", "Buy"), ("MARGIN", "Sell"), ("SHORT_SELLING", "Sell"), ("SHORT_SELLING", "Buy")):
+            body = {"client_intent_id": "isolated-credit", "symbol": "1802", "market": "TW", "condition": condition,
+                    "action": action, "lot": "Common", "quantity_shares": 1000, "price": "80"}
+            with self.subTest(condition=condition, action=action), patch.object(server, "_api_request", return_value={}) as request:
+                server._call_tool("omi_create_desk_draft", body)
+                request.assert_called_once_with("POST", BASE + "/desk/draft", payload=body)
+            with patch.object(server, "_api_request") as request, self.assertRaises(ValueError):
+                server._call_tool("omi_create_desk_draft", {**body, "strategy_id": "not-a-bypass"})
+            request.assert_not_called()
+
     def test_exact_additive_surface_and_schemas(self):
         tools = {item["name"]: item for item in server.PUBLIC_TOOLS}
-        self.assertEqual(len(tools), 48)
-        self.assertEqual(len(server.CANDIDATE_ROUTES), 23)
+        self.assertTrue(set(server.CANDIDATE_ROUTES) <= tools.keys())
+        self.assertTrue(set(server.RESEARCH_ROUTES) <= tools.keys())
         for name, (method, _, _) in server.CANDIDATE_ROUTES.items():
             item = tools[name]
             types.Tool.model_validate(item)
             Draft202012Validator.check_schema(item["inputSchema"])
-            self.assertNotIn("_meta", item)
+            if method == "GET":
+                self.assertNotIn("_meta", item)
+            else:
+                self.assertEqual(item["_meta"]["ui"]["visibility"], ["app"])
             self.assertNotIn("outputSchema", item)
             self.assertEqual(item["annotations"]["readOnlyHint"], method == "GET")
             self.assertEqual(item["annotations"]["destructiveHint"], name in {"omi_cancel_candidate", "omi_cancel_candidate_pending", "omi_approve_candidate_pending", "omi_confirm_desk_review", "omi_confirm_desk_staged"})
@@ -152,9 +166,9 @@ class CandidateToolsTests(unittest.TestCase):
                     result = await server._on_list_tools(SimpleNamespace(protocol_version=version), None)
                     wire = result.model_dump(mode="json", by_alias=True, exclude_none=True)
                     validate_server_result("tools/list", version, wire)
-                    self.assertEqual(len(wire["tools"]), 48)
+                    self.assertEqual({t["name"] for t in wire["tools"]}, {t["name"] for t in server.PUBLIC_TOOLS})
                 async with Client(server.build_mcp_server(), mode="auto") as client:
-                    self.assertEqual(len((await client.list_tools()).tools), 48)
+                    self.assertEqual({t.name for t in (await client.list_tools()).tools}, {t["name"] for t in server.PUBLIC_TOOLS})
                     saved = {"id": "fixture", "revision": 1, "raw": RAW, "validation_reasons": ["INCOMPLETE_DATE"]}
                     with patch.object(server, "_api_request", return_value=saved) as request:
                         result = await client.call_tool("omi_create_candidate", {"owner_id": "MCP", "raw": RAW})

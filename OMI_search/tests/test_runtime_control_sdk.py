@@ -73,7 +73,7 @@ class RuntimeControlSdkTests(unittest.IsolatedAsyncioTestCase):
                     validate_server_result("tools/list", version, payload)
                     wire = serialize_server_result("tools/list", version, payload)
                     self.assertEqual([t["name"] for t in wire["tools"]], [t["name"] for t in before])
-                    self.assertEqual(len(wire["tools"]), 48)
+                    self.assertEqual(len(wire["tools"]), 63)
                     for source, projected in zip(before, wire["tools"]):
                         self.assertEqual(projected["inputSchema"], source["inputSchema"])
                         expected = deepcopy(source.get("outputSchema"))
@@ -102,8 +102,8 @@ class RuntimeControlSdkTests(unittest.IsolatedAsyncioTestCase):
                     async with Client(transport, mode="2026-07-28") as client:
                         self.assertEqual(client.protocol_version, "2026-07-28")
                         catalog = await client.list_tools()
-                        self.assertEqual(len((await client.list_resources()).resources), 4)
-            self.assertEqual(len(catalog.tools), 48)
+                        self.assertEqual(len((await client.list_resources()).resources), 5)
+            self.assertEqual(len(catalog.tools), 63)
             tools = {tool.name: tool.model_dump(mode="json", by_alias=True, exclude_none=True) for tool in catalog.tools}
             self.assertNotIn("omi.search", tools)
             for source in server._build_runtime_tools():
@@ -125,9 +125,9 @@ class RuntimeControlSdkTests(unittest.IsolatedAsyncioTestCase):
                 resources = await client.post("/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 3, "method": "resources/list"})
         self.assertEqual(reply.status_code, 200)
         self.assertNotIn("error", reply.json())
-        self.assertEqual(len(resources.json()["result"]["resources"]), 4)
+        self.assertEqual(len(resources.json()["result"]["resources"]), 5)
         tools = {tool["name"]: tool for tool in reply.json()["result"]["tools"]}
-        self.assertEqual(len(tools), 48)
+        self.assertEqual(len(tools), 63)
         for source in server._build_runtime_tools():
             self.assertEqual(tools[source["name"]]["annotations"], source["annotations"])
         self.assertEqual(tools["omi_restart_backend"]["_meta"], {"omi/runtime-control/disruptive": True})
@@ -201,7 +201,7 @@ class RuntimeControlSdkTests(unittest.IsolatedAsyncioTestCase):
                     resources = await http_client.post("/mcp", headers={**headers, "Mcp-Method": "resources/list"},
                         json={"jsonrpc": "2.0", "id": 90, "method": "resources/list", "params": meta})
                     self.assertNotIn("error", resources.json())
-                    self.assertEqual(len(resources.json()["result"]["resources"]), 4)
+                    self.assertEqual(len(resources.json()["result"]["resources"]), 5)
                     for resource in resources.json()["result"]["resources"]:
                         read = await http_client.post("/mcp", headers={**headers, "Mcp-Method": "resources/read",
                                                                        "Mcp-Name": resource["uri"]},

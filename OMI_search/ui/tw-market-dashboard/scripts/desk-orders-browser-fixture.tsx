@@ -1,10 +1,10 @@
 // Isolated in-memory UI only. Never contact Backend, Native, market or storage.
 import { createRoot } from "react-dom/client";
 import { WorkspaceContext } from "../src/WorkspaceContext";
-import { DeskOrders } from "../src/DeskOrders";
+import { DeskOrders, DeskStatus } from "../src/DeskOrders";
 import type { UnknownRecord } from "../src/state";
 import styles from "../src/styles.css";
-import { fixtureReadback, fixtureStage, fixtureReview } from "./desk-fixture";
+import { fixtureReadback, fixtureStage, fixtureReview, fixtureConnection, fixtureSubmissionError } from "./desk-fixture";
 
 const style = document.createElement("style");
 style.textContent = styles + ".desk-fixture { display:block; max-width:620px; margin:0 auto; padding:16px; } .desk-fixture .workspace-context { width:100%; min-width:0; }";
@@ -26,7 +26,8 @@ const bridge = { async callTool(name: string, args: UnknownRecord = {}) {
     if (offline) throw Error("OMI API HTTP 503: fixture Native offline");
     const readback = fixtureReadback();
     const source = (readback.broker_orders as UnknownRecord[])[0];
-    value = { ...readback, broker_orders: nativeStates.map(state => ({ ...source, execution_state: state, broker_status: state })) };
+    value = { ...readback, broker_orders: nativeStates.map(state => ({ ...source,
+      broker_key: { ...(source.broker_key as UnknownRecord), order_id: `fixture-${state}` }, execution_state: state, broker_status: state })) };
   } else if (name === "omi_read_desk_fills" || name === "omi_read_desk_inventory") value = fixtureReadback();
   else if (name === "omi_read_desk_staged") value = { result: stages };
   else if (name === "omi_read_desk_stage") value = stages.find(row => row.id === args.id);
@@ -34,7 +35,7 @@ const bridge = { async callTool(name: string, args: UnknownRecord = {}) {
     const index = stages.findIndex(row => row.id === args.id), row = stages[index];
     check(!!row && args.expected_revision === row.revision, "exact local revision pin");
     stages[index] = { ...row, revision: Number(row.revision) + 1, digest: "d".repeat(64),
-      ...(name === "omi_revise_candidate" ? { raw: args.raw } : { state: "CANCELLED", lifecycle: "CANCELLED", manual_stage: { ...(row.manual_stage as UnknownRecord), state: "CANCELLED" } }) };
+      ...(name === "omi_revise_candidate" ? { raw: args.raw, event: "REVISE" } : { event: "CANCEL", state: "CANCELLED", lifecycle: "CANCELLED" }) };
     value = stages[index];
   } else if (name === "omi_confirm_desk_staged") {
     const row = stages.find(row => row.id === args.id)!;
@@ -46,7 +47,7 @@ const bridge = { async callTool(name: string, args: UnknownRecord = {}) {
   return { structuredContent: structuredClone(value) };
 } };
 const root = createRoot(document.getElementById("root")!);
-if (document.documentElement.dataset.fixtureMode !== "submission") root.render(<main className="tw-workspace desk-fixture" data-workspace-view="trade"><WorkspaceContext symbol="2330" bridge={bridge}/></main>);
+if (!["submission", "connection"].includes(document.documentElement.dataset.fixtureMode ?? "")) root.render(<main className="tw-workspace desk-fixture" data-workspace-view="trade"><WorkspaceContext symbol="2330" bridge={bridge}/></main>);
 const pause = () => new Promise(resolve => setTimeout(resolve, 30));
 function check(value: unknown, message: string): asserts value { if (!value) throw Error(message); }
 const find = <T extends Element = HTMLElement>(selector: string) => { const node = document.querySelector<T>(selector); check(node, selector); return node; };
@@ -60,11 +61,54 @@ const change = async (label: string, value: string) => {
 const countConfirm = () => calls.filter(call => /confirm|approve/.test(call.name)).length;
 const summary = (node: HTMLElement) => node.innerText;
 
+async function runConnection() {
+  const local = [fixtureStage({ client_intent_id: "synthetic-3711", symbol: "3711", lot: "Odd", quantity_shares: 200, price: "592" }),
+    fixtureStage({ client_intent_id: "synthetic-3481", symbol: "3481", condition: "SHORT_SELLING", action: "Sell", lot: "Common", quantity_shares: 1000, price: "15" })];
+  let readFails = true;
+  const seen: string[] = [];
+  const fixtureBridge = { async callTool(name: string, args: UnknownRecord) {
+    seen.push(name);
+    if (name === "omi_read_desk_status") return { structuredContent: fixtureConnection({ actual: "ONLINE", date_ready: true, ready: false, disconnect_observed: false,
+      busy: { operation: "query", started_at: "2026-11-05T01:00:00Z" }, last_broker_read: { status: "PARTIAL", observed_at: "2026-11-05T00:55:00Z", session_generation: 1, sources: [], age_seconds: 300, stale: true } }) };
+    if (name === "omi_read_desk_staged") return { structuredContent: { result: local } };
+    if (name === "omi_read_desk_orders") throw Error("synthetic Native absent");
+    if (name === "omi_read_desk_stage") { if (readFails) throw Error("synthetic local read failed"); return { structuredContent: local.find(row => row.id === args.id) }; }
+    check(name === "omi_confirm_desk_staged", "fixture permits only one explicit mock confirmation");
+    const row = local.find(row => row.id === args.id)!;
+    check(row.revision === args.expected_revision && row.digest === args.expected_digest, "mock exact pin");
+    return fixtureSubmissionError(row);
+  } };
+  root.render(<main className="tw-workspace desk-fixture"><DeskStatus bridge={fixtureBridge}/><DeskOrders bridge={fixtureBridge} active refreshKey={0}/></main>);
+  await pause(); await pause();
+  const status = find<HTMLElement>(".workspace-desk-status");
+  check(!summary(status).includes("工作階段代數"), "technical connection fields collapsed by default");
+  find<HTMLDetailsElement>(".workspace-connection-details").open = true; await pause();
+  check(summary(status).includes("台股連線：已連線") && summary(status).includes("程序就緒") && summary(status).includes("query"), "connection and busy shown independently");
+  check(summary(status).includes("PARTIAL") && summary(status).includes("300 秒") && summary(status).includes("過期：是"), "read time/age/stale visible");
+  check(summary(status).includes("美股連線：尚無連線資料") && summary(status).includes("不代表委託可送出"), "US and readiness limits visible");
+  find<HTMLDetailsElement>(".workspace-connection-details").open = false;
+  const odd = find<HTMLElement>('[aria-label="3711 本地掛單"]'), short = find<HTMLElement>('[aria-label="3481 本地掛單"]');
+  check(summary(odd).includes("零股 200 股") && summary(short).includes("融券賣出") && summary(short).includes("整股 1 張"), "synthetic mapping presentation");
+  await click(odd, "送單");
+  const dialog = find<HTMLDialogElement>("dialog");
+  check(dialog.open && summary(dialog).includes("592") && summary(dialog).includes("200 股"), "single exact 3711 modal");
+  const confirm = button(dialog, "確認送單"); confirm.click(); confirm.click(); await pause(); await pause();
+  check(seen.filter(name => name === "omi_confirm_desk_staged").length === 1, "duplicate click creates one mock await");
+  check(button(odd, "送單").disabled && !button(odd, "讀回").disabled, "failed read retains send lock and read action");
+  readFails = false; await click(odd, "讀回");
+  check(!button(odd, "送單").disabled && !document.querySelector("dialog"), "exact read unlocks without reopening modal");
+  await click(short, "送單"); check(summary(find("dialog")).includes("融券賣出"), "3481 short modal");
+  await click(find("dialog"), "取消");
+  check(seen.filter(name => name === "omi_confirm_desk_staged").length === 1, "cancel creates zero new confirms");
+  check(seen.every(name => ["omi_read_desk_status", "omi_read_desk_staged", "omi_read_desk_stage", "omi_read_desk_orders", "omi_confirm_desk_staged"].includes(name)), "no lifecycle/login/strategy/provider tools");
+  check(document.documentElement.scrollWidth <= innerWidth, "connection layout has no horizontal overflow");
+  document.body.dataset.testResult = `PASS connection ${innerWidth}px: typed retry, read failure, exact pin, synthetic 3481/3711, status layers`;
+}
+
 async function run() {
   await pause();
-  check(button(document.body, "我的交易").getAttribute("aria-pressed") === "true", "user environment default");
-  await click(document.body, "AI 候選"); await click(document.body, "我的交易");
-  await click(document.body, "掛單");
+  check(button(document.body, "新增委託").getAttribute("aria-pressed") === "true", "manual entry default");
+  await click(document.body, "待送單");
   const local = find('[aria-label="本地待送單"]');
   const first = find<HTMLElement>('[aria-label="2330 本地掛單"]'), second = find<HTMLElement>('[aria-label="4977 本地掛單"]');
   check(first.getBoundingClientRect().height > 0 && second.getBoundingClientRect().height > 0, "both cards rendered visibly");
@@ -74,7 +118,7 @@ async function run() {
   check(!/USER_SPACE|MANUAL|MCP|stage-|revision|digest|STAGED|Native|Journal|Session|\?{3,}|\uFFFD/.test(summary(find(".workspace-context"))), `no exposed technical content or encoding damage: ${summary(find(".workspace-context"))}`);
   check([...document.querySelectorAll("details")].every(node => !node.open), "all diagnostics closed by default");
   check([...local.querySelectorAll("button")].every(node => node.textContent !== "讀回"), "healthy stages have no recovery button");
-  check(summary(find('[aria-label="券商委託"]')).includes("本地掛單仍可管理"), "broker 503 preserves local operation");
+  check(calls.filter(call => call.name === "omi_read_desk_orders").length === 0, "local tab never waits for Native orders");
   check(document.documentElement.scrollWidth <= innerWidth, "no horizontal overflow");
   for (const card of [first, second]) for (const action of ["修改", "刪除", "送單"]) {
     const box = button(card, action).getBoundingClientRect();
@@ -84,8 +128,8 @@ async function run() {
     document.body.dataset.testResult = `PASS presentation ${innerWidth}px: 2330/4977, closed diagnostics, broker 503`; return;
   }
   const details = first.querySelector("details")!;
-  details.open = true;
-  const raw = JSON.parse(details.querySelector("pre")!.textContent!);
+  details.open = true; await pause();
+  const raw = JSON.parse(details.querySelector("pre")!.textContent!).local;
   check(raw.id === stages[0].id && raw.digest === stages[0].digest && raw.raw.price === "2330", "exact raw retained");
   details.open = false;
   await click(first, "送單");
@@ -98,7 +142,7 @@ async function run() {
   const revision = calls.find(call => call.name === "omi_revise_candidate")!;
   check(revision.args.id === stages[1].id && revision.args.expected_revision === 1 && (revision.args.raw as UnknownRecord).client_intent_id === "fixture-4977", "revision preserves ID and raw identity");
   await click(second, "刪除");
-  check(summary(second).includes("已取消（本地）"), "local cancellation truthful");
+  check(!document.querySelector('[aria-label="4977 本地掛單"]'), "cancelled draft removed from active list");
   const cancelled = calls.find(call => call.name === "omi_cancel_candidate")!;
   check(cancelled.args.id === stages[1].id && cancelled.args.expected_revision === 2 && countConfirm() === 0, "delete is exact local candidate cancel only");
   await click(first, "送單");
@@ -108,9 +152,9 @@ async function run() {
   check(button(first, "送單").disabled && button(first, "修改").disabled && button(first, "刪除").disabled, "unknown remains locked");
   await click(first, "讀回"); check(countConfirm() === 1, "readback never resends");
   check(calls.filter(call => call.name === "omi_read_desk_stage").every(call => call.args.id === stages[0].id), "read original ID only");
-  offline = false; await click(document.body, "更新委託");
+  offline = false; await click(document.body, "券商委託");
   const labels = [...find('[aria-label="券商委託"]').querySelectorAll(".workspace-order-status")].map(node => node.textContent);
-  check(JSON.stringify(labels) === JSON.stringify(["券商結果待確認", "已受理", "部分成交", "已成交", "遭拒絕", "撤銷處理中", "待確認", "核對中"]), "Native broker states accurately rendered");
+  check(JSON.stringify(labels) === JSON.stringify(["待核對", "已受理", "部分成交", "待核對", "待核對", "待核對", "已成交", "遭拒絕"]), "broker active/check-needed states and terminal history accurately rendered");
   await click(document.body, "成交");
   check(!/Native|Session|UNKNOWN|fixture-/.test(summary(find('[aria-label="券商成交"]'))), "fills diagnostics closed");
   await click(document.body, "庫存");
@@ -164,8 +208,13 @@ async function runSubmission() {
   for (const [state, label] of [["ACCEPTED", "已受理"], ["REJECTED", "遭拒絕"], ["CANCELLED", "已撤銷"], ["UNKNOWN", "待確認"]]) {
     review.execution = { ...(review.execution as UnknownRecord), state };
     await click(card(), "讀回");
+    const history = document.querySelector<HTMLDetailsElement>('[aria-label="本地已結案與歷史紀錄"]');
+    if (["REJECTED", "CANCELLED"].includes(state)) {
+      check(history && history.contains(card()), "terminal local record moves to history");
+      history.open = true; await pause();
+    }
     check(summary(card()).includes(`券商階段讀回：${label}`), `exact Native ${state} stays separately labelled`);
-    check(card().querySelector(".workspace-order-status")!.textContent === "券商結果待確認", "persisted Candidate still Pending");
+    check(card().querySelector(".workspace-order-status")!.textContent === (state === "UNKNOWN" ? "待核對" : label), "primary status follows exact broker readback and uncertainty");
   }
   check(JSON.stringify(returned) === unchanged && confirms() === 0, "no Candidate/receipt mutation from Native or readback");
   review.execution = structuredClone(((returned.manual_stage as UnknownRecord).submission as UnknownRecord).receipt as UnknownRecord).execution;
@@ -191,4 +240,4 @@ async function runSubmission() {
   document.body.dataset.testResult = `PASS submission ${innerWidth}px: 2409 PARTIAL MAT0095/0000, exact Native IDs/version/date, reopened readback, confirm=1 per intent, timeout/503 recovery, no duplicate`;
   find("#fixture-receipt").textContent = JSON.stringify(nativeCalls, null, 2);
 }
-(document.documentElement.dataset.fixtureMode === "submission" ? runSubmission() : run()).catch(error => { document.body.dataset.testResult = `FAIL ${error.message}`; });
+(document.documentElement.dataset.fixtureMode === "connection" ? runConnection() : document.documentElement.dataset.fixtureMode === "submission" ? runSubmission() : run()).catch(error => { document.body.dataset.testResult = `FAIL ${error.message}`; });

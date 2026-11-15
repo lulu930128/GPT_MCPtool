@@ -173,6 +173,36 @@ class LauncherPipeTests(unittest.TestCase):
             self.assertFalse(transport._identity_matches(executable, changed, executable, launcher))
         self.assertFalse(transport._identity_matches(executable + ".evil", args, executable, launcher))
 
+    def test_update_process_argument_grammar(self):
+        executable = transport._Windows().system_executable()
+        launcher = transport.REPO_ROOT + r"\scripts\omi-launcher.ps1"
+        args = [executable, "-NoProfile", "-ExecutionPolicy", "Bypass", "-STA",
+                "-WindowStyle", "Hidden", "-File", launcher]
+        request_id = "0a00476a-73ee-42f0-a526-344229710518"
+        updated = args + ["-UpdateRequestId", request_id]
+        for value in (request_id, request_id.upper()):
+            with self.subTest(valid=value):
+                self.assertTrue(transport._identity_matches(
+                    executable, args + ["-UpdateRequestId", value], executable, launcher))
+        invalid = [args + ["-UpdateRequestId"],
+                   updated + ["-UpdateRequestId", request_id],
+                   updated + ["-NoExit"],
+                   args[:7] + ["-UpdateRequestId", request_id] + args[7:],
+                   args + [request_id, "-UpdateRequestId"],
+                   args + ["-UpdateRequest", request_id],
+                   args + ["-OtherFlag", request_id],
+                   args[:7] + ["-Command", launcher] + updated[-2:],
+                   args[:-1] + [launcher + ".evil"] + updated[-2:],
+                   [executable + ".evil"] + updated[1:]]
+        for value in ("", "not-a-uuid", request_id.replace("-", ""),
+                      "{" + request_id + "}", "urn:uuid:" + request_id,
+                      request_id + "\n", " " + request_id, request_id[:-1] + "g"):
+            invalid.append(args + ["-UpdateRequestId", value])
+        for changed in invalid:
+            with self.subTest(argv=changed):
+                self.assertFalse(transport._identity_matches(executable, changed, executable, launcher))
+        self.assertFalse(transport._identity_matches(executable + ".evil", updated, executable, launcher))
+
     def test_private_response_and_deep_payload_rejected(self):
         for value in ({"path": r"C:\Users\SYNTHETIC\private"}, {"sid": "S-1-5-21-1-2-3"},
                       {"future": {"token": "synthetic"}}, {"unc": r"\\SYNTHETIC\private"}):

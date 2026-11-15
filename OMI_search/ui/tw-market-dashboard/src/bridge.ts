@@ -1,6 +1,7 @@
 // Native pipe waits up to 60s and Backend up to 65s. Keep this bounded and
 // explicit: market reads and initialization retain the original 20s deadline.
 const NATIVE_DESK_TOOLS = new Set([
+  "omi_read_desk_order", "omi_cancel_desk_order", "omi_revise_order_protection",
   "omi_create_desk_draft",
   "omi_read_desk_orders",
   "omi_read_desk_status",

@@ -2,7 +2,7 @@ import { isRecord, type UnknownRecord } from "./state";
 
 export type Candidate = UnknownRecord & { id: string; revision: number; raw: UnknownRecord; owner_id: string };
 export type Pending = UnknownRecord & { id: string; revision: number; candidate_id: string };
-export type CandidateBridge = { callTool(name: string, args: UnknownRecord): Promise<unknown> };
+export type CandidateBridge = { callTool(name: string, args: UnknownRecord, signal?: AbortSignal): Promise<unknown> };
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 export const json = (value: unknown) => JSON.stringify(value, null, 2);
@@ -25,8 +25,9 @@ export function candidateExample(short = false): UnknownRecord {
     ] } };
 }
 
-class CallError extends Error {
-  constructor(text: string, public uncertain = true) { super(text); }
+export class CallError extends Error {
+  constructor(text: string, public uncertain = true, public httpStatus?: number,
+    public backendError?: unknown, public tool?: string) { super(text); }
 }
 
 export function toolValue(result: unknown): unknown {
@@ -41,7 +42,9 @@ export function toolValue(result: unknown): unknown {
     }
     if (result.isError === true) {
       const text = isRecord(data) && typeof data.error === "string" ? data.error : json(data);
-      throw new CallError(text, !/OMI API HTTP 4\d\d:/.test(text));
+      const status = isRecord(data) && Number.isInteger(data.http_status) ? Number(data.http_status) : undefined;
+      throw new CallError(text, status === undefined ? !/OMI API HTTP 4\d\d:/.test(text) : status < 400 || status >= 500,
+        status, isRecord(data) ? data.backend_error : undefined, isRecord(data) && typeof data.tool === "string" ? data.tool : undefined);
     }
   }
   return isRecord(data) && Object.keys(data).length === 1 && "result" in data ? data.result : data;

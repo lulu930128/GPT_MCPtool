@@ -78,6 +78,7 @@ function pair(timeframe: Frame) {
   const chart = pane({ stock_id: "2330", timeframe,
     [timeframe === "today" ? "intraday_chart" : "chart"]: {
       stock_id: "2330", timeframe, interval: "1m",
+      ...(timeframe === "today" ? { trade_date: time.slice(0, 10), session_relation: "current_session", presentation_state: "observing" } : {}),
       points: [{ time, open: 2550, high: 2575, low: 2550, close: 2550, volume: 23145193, trade_value: 59167379273 }],
       volume_unit: "shares", trade_value_unit: "TWD",
     },
@@ -121,7 +122,7 @@ test("compact metrics keep every value, units and a single clock; mismatch evide
     const view = technicalSummary(value.chart, value.research);
     const html = rendered(value);
     assert.match(html, /class="workspace-metrics-grid"/);
-    assert.equal((html.match(/class="workspace-metric"/g) ?? []).length, 16);
+    assert.equal((html.match(/class="workspace-metric"/g) ?? []).length, 21);
     assert.equal((html.match(/<time /g) ?? []).length, 1);
     assert.doesNotMatch(html, /研究資料時間|報告產生|研究快照|週期狀態|2026-10-09T13:20/);
     const entry = { id: "chart", name: "圖表／研究對應", pane: value.chart, presentation: technicalPresentation(view) };
@@ -336,7 +337,8 @@ test("monthly current partial period never borrows previous completed period or 
   const view = technicalSummary(chart, changed);
   noIndicators(view); assert.equal(view.sourceTime, "2026-09-01"); assert.equal(view.time, times.monthly);
   const html = rendered({ chart, research: changed });
-  assert.doesNotMatch(html, /current_partial|舊研究不混入目前 K 棒|2026-09-01/);
+  assert.doesNotMatch(html, /current_partial|2026-09-01/);
+  assert.match(html, /舊研究不混入目前 K 棒/);
   const expanded = details({ chart, research: changed });
   assert.match(expanded, /current_partial/); assert.match(expanded, /舊研究不混入目前 K 棒/);
   assert.match(expanded, /研究資料時間<\/dt><dd>2026-09-01/);

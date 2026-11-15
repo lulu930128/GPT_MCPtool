@@ -9,6 +9,7 @@ import { GroupNavigation } from "./workspace-navigation";
 import { holdingsArgs, parseHoldings, readHoldingsEnvelope } from "./workspace-holdings";
 import { WorkspaceContext } from "./WorkspaceContext";
 import { MarketCards, changeTone } from "./workspace-market";
+import { chartSession } from "./workspace-chart-session";
 
 const records = (value: unknown): UnknownRecord[] => Array.isArray(value) ? value.filter(isRecord) : [];
 const record = (value: unknown): UnknownRecord => isRecord(value) ? value : {};
@@ -17,17 +18,19 @@ const numeric = (value: unknown) => typeof value === "number" && Number.isFinite
 const frames: [DashboardChartTimeframe, string][] = [["today", "今日"], ["daily", "日 K"], ["weekly", "週 K"], ["monthly", "月 K"]];
 const bars = { today: 500, daily: 240, weekly: 156, monthly: 120 };
 
-function usePane(bridge: McpAppsBridge, tool: string, args: UnknownRecord | null, cadence: number | null, kind: string, decode = readToolData) {
+function usePane(bridge: McpAppsBridge, tool: string, args: UnknownRecord | null, cadence: number | null, kind: string, decode = readToolData, enabled = true) {
   const [state, setState] = useState<PaneState>({ data: null, dataKey: null, loading: false, error: null });
   const loader = useMemo(() => new PaneLoader(setState), []);
+  const flight = useRef<Promise<void> | null>(null);
   const [retry, setRetry] = useState(0);
   const key = args === null ? null : JSON.stringify(args);
   useEffect(() => {
-    if (key === null) return;
+    if (key === null || !enabled) return;
     let disposed = false;
     let timer: ReturnType<typeof setTimeout>;
     const run = async () => {
-      await loader.load(key, async (signal) => {
+      if (flight.current) { await flight.current; if (disposed || document.hidden) return; }
+      const task = loader.load(key, async (signal) => {
         const data = decode(await bridge.callTool(tool, JSON.parse(key), signal), kind);
         const request = JSON.parse(key);
         for (const field of ["stock_id", "timeframe"]) {
@@ -36,15 +39,20 @@ function usePane(bridge: McpAppsBridge, tool: string, args: UnknownRecord | null
         if (request.watchlist_group_id !== undefined && record(data.selection).group_id !== request.watchlist_group_id) throw new Error("回傳自選群組不符");
         return data;
       });
-      if (!disposed && cadence !== null) timer = setTimeout(tick, cadence);
+      flight.current = task;
+      await task;
+      if (flight.current === task) flight.current = null;
+      if (!disposed && !document.hidden && cadence !== null) timer = setTimeout(tick, cadence);
     };
     const tick = () => {
       if (document.hidden && cadence !== null) timer = setTimeout(tick, cadence);
       else void run();
     };
-    void run();
-    return () => { disposed = true; clearTimeout(timer); loader.cancel(); };
-  }, [bridge, tool, key, cadence, kind, decode, loader, retry]);
+    const visible = () => { clearTimeout(timer); if (!document.hidden && !flight.current) void run(); };
+    document.addEventListener?.("visibilitychange", visible);
+    if (!document.hidden) void run();
+    return () => { disposed = true; clearTimeout(timer); loader.cancel(); document.removeEventListener?.("visibilitychange", visible); };
+  }, [bridge, tool, key, cadence, kind, decode, loader, retry, enabled]);
   return { ...state, key, retry: () => setRetry((value) => value + 1) };
 }
 
@@ -79,7 +87,18 @@ export function WorkspaceApp({ bridge }: { bridge: McpAppsBridge }) {
   const [selection, setSelection] = useState(() => initialSelection(window.openai?.toolOutput ?? window.openai?.toolInput));
   const userSelected = useRef(false);
   const [workspaceView, setWorkspaceView] = useState("chart");
+  const [fullResearch, setFullResearch] = useState(false);
+  const [previousSession, setPreviousSession] = useState(false);
   const [selectionView, setSelectionView] = useState("groups");
+  const [width, setWidth] = useState(typeof window.innerWidth === "number" ? window.innerWidth : 1280);
+  useEffect(() => {
+    const resize = () => setWidth(window.innerWidth);
+    window.addEventListener?.("resize", resize);
+    return () => window.removeEventListener?.("resize", resize);
+  }, []);
+  const stocksVisible = width >= 1248 || workspaceView === "stocks";
+  const chartVisible = width >= 1248 || workspaceView === "chart";
+  const tradeVisible = width >= 1248 || workspaceView === "trade" || (width >= 900 && workspaceView === "chart");
   const [presentation, setPresentation] = useState(bridge.getPresentationDiagnostic());
   useEffect(() => {
     const unsubscribe = bridge.subscribe((value) => {
@@ -93,33 +112,37 @@ export function WorkspaceApp({ bridge }: { bridge: McpAppsBridge }) {
   const timeframe = selection.timeframe ?? "daily";
   const header = usePane(bridge, "omi_read_tw_workspace_header", {}, 30_000, "omi.tw_workspace_header");
   // Read on mount/manual retry only; existing market polling cadences stay unchanged.
-  const holdings = usePane(bridge, "omi_ask", holdingsArgs(), null, "omi.decision.v4", readHoldingsEnvelope);
+  const holdings = usePane(bridge, "omi_ask", holdingsArgs(), null, "omi.decision.v4", readHoldingsEnvelope, stocksVisible && selectionView === "holdings");
   const watchlist = usePane(bridge, "omi_read_tw_workspace_watchlist", {
     ...(selection.watchlist_group_id ? { watchlist_group_id: selection.watchlist_group_id } : {}),
     include_watchlist_children: false, watchlist_limit: 100,
-  }, 30_000, "omi.tw_workspace_watchlist");
-  const hot = usePane(bridge, "omi_read_tw_workspace_hot_groups", {}, 120_000, "omi.tw_workspace_hot_groups");
+  }, 30_000, "omi.tw_workspace_watchlist", readToolData, stocksVisible && selectionView === "groups");
+  const hot = usePane(bridge, "omi_read_tw_workspace_hot_groups", {}, 120_000, "omi.tw_workspace_hot_groups", readToolData, stocksVisible && selectionView === "hot");
   const chart = usePane(bridge, "omi_read_tw_stock_chart", selection.stock_id ? {
     stock_id: selection.stock_id, timeframe, bars: bars[timeframe],
-  } : null, 30_000, "omi.tw_stock_chart");
+  } : null, 30_000, "omi.tw_stock_chart", readToolData, chartVisible);
   const research = usePane(bridge, "omi_read_tw_stock_research", selection.stock_id ? {
-    stock_id: selection.stock_id, timeframe, projection: "workspace",
-  } : null, 120_000, "omi.tw_stock_research");
+    stock_id: selection.stock_id, timeframe, projection: fullResearch || timeframe === "today" ? "workspace" : "technical",
+  } : null, 120_000, "omi.tw_stock_research", readToolData, chartVisible);
   const [keyword, setKeyword] = useState("");
   const [searchQuery, setSearchQuery] = useState<string | null>(null);
-  const search = usePane(bridge, "omi_search_tw_symbols", searchQuery ? { keyword: searchQuery, limit: 20 } : null, 300_000, "omi.tw_symbol_search");
+  const search = usePane(bridge, "omi_search_tw_symbols", searchQuery ? { keyword: searchQuery, limit: 20 } : null, null, "omi.tw_symbol_search", readToolData, stocksVisible);
   const choose = (patch: Partial<typeof selection>) => {
     userSelected.current = true;
     setSelection((previous) => ({ ...previous, ...patch }));
+    setFullResearch(false);
+    setPreviousSession(false);
   };
   const displayed = chart.data;
   const displayedFrame = (displayed?.timeframe ?? timeframe) as DashboardChartTimeframe;
   const activeChart = record(displayedFrame === "today" ? displayed?.intraday_chart : displayed?.chart);
-  const points = useMemo(() => records(activeChart.points), [activeChart.points]);
-  const averages = useMemo(() => records(displayed?.moving_averages), [displayed?.moving_averages]);
+  const sessionChart = chartSession(displayed ?? {}, previousSession);
+  const points = displayedFrame === "today" ? sessionChart.points : records(activeChart.points);
+  const averages = displayedFrame === "today" && (previousSession || !sessionChart.points.length) ? [] : records(displayed?.moving_averages);
+  const overlay = record(activeChart.intraday_overlay);
   const technical = record(research.data?.technical);
   const researchCurrent = research.dataKey === research.key;
-  const summary = technicalSummary(chart, research);
+  const summary = technicalSummary(chart, research, previousSession);
   const presentationEvidence = displayed ? technicalPresentation(summary) : undefined;
 
   return <main className="tw-workspace" data-display-mode={presentation.actualDisplayMode} data-workspace-view={workspaceView}>
@@ -157,15 +180,18 @@ export function WorkspaceApp({ bridge }: { bridge: McpAppsBridge }) {
       <Pane title="個股圖表" pane={{ ...chart, retry: () => { chart.retry(); research.retry(); } }} className="workspace-chart-pane">
         <div className="workspace-target"><strong>{displayed ? `${label(displayed.stock_id)} ${label(displayed.stock_name, "")} · ${frames.find(([key]) => key === displayedFrame)?.[1] ?? displayedFrame}` : selection.stock_id ?? "請從自選或搜尋選擇標的"}</strong><div role="group" aria-label="圖表週期">{frames.map(([key, name]) => <button key={key} aria-pressed={timeframe === key} onClick={() => choose({ timeframe: key })}>{name}</button>)}</div></div>
         {selection.stock_id && chart.dataKey !== chart.key && <p className="workspace-pending" role="status">待載入 {selection.stock_id} / {timeframe}。{displayed ? `目前保留 ${label(displayed.stock_id)} / ${label(displayed.timeframe)} 圖表。` : ""}</p>}
-        {displayed ? <InteractiveMarketChart stockId={label(displayed.stock_id)} timeframe={displayedFrame} points={points} averages={averages}/> : <div className="workspace-chart-placeholder">選擇標的後顯示 K 線與均線</div>}
+        {displayedFrame === "today" && displayed && <div className="workspace-chart-session" role="status"><p>{sessionChart.label} · {sessionChart.status} {sessionChart.coverage}{sessionChart.asOf ? ` · 最後 K ${sessionChart.asOf}` : " · 尚無合格 1m，暫不提供盤中分析"}</p>{sessionChart.previousDate && <button type="button" onClick={() => setPreviousSession(value => !value)}>{previousSession ? "返回今日" : `查看上一交易日 ${sessionChart.previousDate}`}</button>}</div>}
+        {displayedFrame === "daily" && displayed && <p role="status">已完成至 {String(activeChart.latest_finalized_data_date ?? "未提供")}{overlay.provisional === true ? `；${overlay.trade_date} 盤中暫定，截至 ${overlay.latest_time}${overlay.delayed ? "（延遲）" : ""}，不納入完成日 K 均線` : activeChart.release_status === "regular_research" ? "；最新一根為暫定日 K，官方完成待確認" : "；今日暫定日 K 尚無合格證據"}</p>}
+        {displayed ? <InteractiveMarketChart stockId={label(displayed.stock_id) + (previousSession ? ":previous" : "")} timeframe={displayedFrame} points={points} averages={averages}/> : <div className="workspace-chart-placeholder">選擇標的後顯示 K 線與均線</div>}
       </Pane>
         <Pane title="技術分析" pane={research} className="workspace-technical-pane">
           {displayed && <TechnicalSummary view={summary}/>}
-          {research.data && <><p>{label(research.data.stock_id)} / {label(research.data.timeframe)}{!researchCurrent ? " · 上次結果，等待所選標的" : ""}</p><strong>{label(technical.title)}</strong><p>{label(technical.summary)}</p><p>{label(technical.phase)} · {label(technical.confidence)}</p>{records(technical.rows).map((row) => <details key={label(row.key)}><summary>{label(row.label)} · {label(row.display_value)}</summary><p>{label(row.description)}</p><small>{label(row.basis)} · {label(row.source)}</small></details>)}</>}
+          {timeframe !== "today" && <button type="button" onClick={() => setFullResearch((value) => !value)}>{fullResearch ? "返回技術數值" : "讀取完整研究"}</button>}
+          {research.data && <><p>{label(research.data.stock_id)} / {label(research.data.timeframe)}{!researchCurrent ? " · 上次結果，等待所選標的" : ""}</p>{displayedFrame === "today" ? <p>日線背景獨立載入；不是本圖盤中結論。研究時間 {label(summary.sourceTime ?? technical.generated_at)}。{previousSession ? "上一交易日檢視不套用當日研究。" : ""}</p> : research.data.projection === "technical" ? <p>已完成 K 棒技術數值 · 品質與限制見資料狀態</p> : researchCurrent && <><strong>{label(technical.title)}</strong><p>{label(technical.summary)}</p><p>{label(technical.phase)} · {label(technical.confidence)}</p>{records(technical.rows).map((row) => <details key={label(row.key)}><summary>{label(row.label)} · {label(row.display_value)}</summary><p>{label(row.description)}</p><small>{label(row.basis)} · {label(row.source)}</small></details>)}</>}</>}
           {!research.data && <p>{selection.stock_id ? "研究資料獨立載入" : "選擇標的查看研究"}</p>}
         </Pane>
       </div>
-      <WorkspaceContext symbol={selection.stock_id} bridge={bridge}/>
+      <WorkspaceContext symbol={selection.stock_id} bridge={bridge} active={tradeVisible} onNavigateToStaged={() => setWorkspaceView("trade")}/>
     </div>
     <footer className="workspace-footer">各區塊依各自資料時間更新。</footer>
   </main>;

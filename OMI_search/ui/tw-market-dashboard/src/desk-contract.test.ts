@@ -54,6 +54,22 @@ test("immutable review pins exact revision/digest and uses the desk confirm rout
   assert.throws(() => reviewSelection({ ...review, execution_audit: [{ kind: "CANDIDATE_REVIEW_BOUND" }] }), /Pending/);
 });
 
+test("synthetic 3481 short-selling Common/ROD and 3711 cash Odd quantities remain exact across bridge", async () => {
+  for (const raw of [
+    { symbol: "3481", condition: "SHORT_SELLING", action: "Sell", lot: "Common", quantity_shares: 1000, price: "15" },
+    { symbol: "3711", condition: "CASH", action: "Buy", lot: "Odd", quantity_shares: 200, price: "592" },
+  ]) {
+    const review: any = fixtureReview(raw), selected = reviewSelection(review), stage = stageSelection(fixtureStage(raw));
+    assert.equal(selected.command.symbol, raw.symbol); assert.equal(selected.command.condition, raw.condition);
+    assert.equal(selected.command.action, raw.action); assert.equal(selected.command.lot, raw.lot);
+    assert.equal(selected.command.quantity, raw.quantity_shares); assert.equal(stage.command.quantity, raw.quantity_shares);
+    assert.equal(review.snapshot.order_semantics.time_in_force, "ROD");
+    const calls: unknown[] = [];
+    await confirmDeskSelection({ async callTool(name, args) { calls.push({ name, args }); return { structuredContent: review }; } }, stage);
+    assert.deepEqual(calls, [{ name: "omi_confirm_desk_staged", args: { id: stage.id, expected_revision: stage.revision, expected_digest: stage.digest } }]);
+  }
+});
+
 test("actual readback shapes retain external orders, partial cash and unknown credit inventory", () => {
   const data = fixtureReadback([fixtureReview()]);
   assert.equal(brokerReadback(data, "orders"), data); assert.equal(deskReviews(data).length, 1);

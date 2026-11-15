@@ -117,7 +117,7 @@ for (const frame of ["weekly", "monthly"] as const) {
   });
 }
 
-test("WorkspaceApp's real pane effects request workspace for every frame and keep 30/120 second cadences", async () => {
+test("WorkspaceApp requests bounded technical values except today and keeps 30/120 second cadences", async () => {
   const output = await build({
     entryPoints: [fileURLToPath(new URL("./WorkspaceApp.tsx", import.meta.url))],
     bundle: true, write: false, format: "cjs", platform: "node", jsx: "automatic",
@@ -150,10 +150,11 @@ test("WorkspaceApp's real pane effects request workspace for every frame and kee
     const cleanups = effects.map(fn => fn());
     await new Promise(resolve => setImmediate(resolve));
     assert.deepEqual(JSON.parse(JSON.stringify(calls.filter(call => call.name === "omi_read_tw_stock_research"))), [
-      { name: "omi_read_tw_stock_research", args: { stock_id: "2330", timeframe, projection: "workspace" } },
+      { name: "omi_read_tw_stock_research", args: { stock_id: "2330", timeframe, projection: timeframe === "today" ? "workspace" : "technical" } },
     ]);
     assert.equal(calls.filter(call => call.name === "omi_read_tw_stock_chart").length, 1);
-    assert.deepEqual(cadences.sort(), [30_000, 30_000, 30_000, 120_000, 120_000].sort());
+    assert.deepEqual(cadences.sort(), [30_000, 30_000, 30_000, 120_000].sort());
+    assert.equal(calls.filter(call => call.name === "omi_read_tw_workspace_hot_groups" || call.name === "omi_ask").length, 0, "inactive selection tabs do not read");
     cleanups.forEach(fn => { if (typeof fn === "function") (fn as () => void)(); });
   }
 });

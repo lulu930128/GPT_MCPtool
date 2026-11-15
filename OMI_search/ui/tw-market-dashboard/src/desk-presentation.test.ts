@@ -46,6 +46,16 @@ test("returned Pending is distinct from active phases and only Native evidence c
   assert.equal(stageStatus({ lifecycle: "SUBMISSION_REJECTED", manual_stage: { submission: { receipt: { execution: { state: "REJECTED" } } } } }).label, "遭拒絕");
 });
 
+test("local pre-effect rejection never claims a broker rejection or waiting fill", () => {
+  const result = stageStatus({ lifecycle: "SUBMISSION_REJECTED", manual_stage: { submission: {
+    receipt: { execution: { state: "REJECTED", submit_stage: "NOT_SENT", broker_attempts_max: 0 } },
+  } } });
+  assert.equal(result.label, "未送出");
+  assert.match(result.note, /未呼叫券商送單/);
+  assert.doesNotMatch(result.note, /券商拒單結果已確認/);
+  assert.equal(stageStatus({ lifecycle: "STAGED", manual_stage: { submission: null } }).label, "待送出");
+});
+
 test("read-only Native join requires exact IDs, date and version pins, never economic or unparsed similarity", () => {
   const review: any = fixtureReview(), day = review.draft.command.trade_date;
   review.state = "EXECUTION"; review.execution_id = "exec-fixture";
@@ -68,7 +78,7 @@ test("read-only Native join requires exact IDs, date and version pins, never eco
     const wrong = structuredClone(review); change(wrong);
     assert.equal(stageNativeReview(row, { ...data, reviews: [wrong] }), null);
   }
-  assert.equal(stageNativeReview(row, { ...data, trade_date: "2026-11-02" }), null);
+  assert.equal(stageNativeReview(row, { ...data, trade_date: "2026-11-11" }), review, "query date does not change the original order identity");
   assert.equal(stageNativeReview(row, { ...data, reviews: [review, review] }), null);
   assert.equal(stageNativeReview(row, { ...data, reviews: [] }), null);
   const intentOnly = structuredClone(row); delete intentOnly.manual_stage.submission.native; delete intentOnly.manual_stage.submission.receipt;
@@ -85,7 +95,7 @@ test("one existing modal shows readable order facts and keeps the exact raw pin 
   assert.match(html, /現股買進/); assert.match(html, /2,330/); assert.match(html, /零股 1 股/);
   const [visible, details] = html.split('<details');
   assert.doesNotMatch(visible, /USER_SPACE|MANUAL|MCP|stage-|digest|revision|Native/);
-  assert.match(details, /詳細資訊與技術紀錄/);
+  assert.match(details, /開發診斷/);
   assert.match(details, new RegExp(selection.id));
   assert.match(details, new RegExp(selection.digest));
   assert.doesNotMatch(details, / open[=> ]/);
@@ -96,7 +106,7 @@ test("affected UI remains valid UTF-8 with required Traditional Chinese and no r
     const bytes = readFileSync(new URL(file, import.meta.url));
     const source = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     assert.doesNotMatch(source, /\?{3,}|\uFFFD|>\s*\?\s*</);
-    for (const label of file === "DeskOrders.tsx" ? ["本地掛單", "限價", "數量", "修改", "刪除", "送單", "券商委託"] : ["我的交易", "AI 候選"]) assert.ok(source.includes(label), label);
-    assert.ok(source.includes("詳細資訊與技術紀錄"));
+    for (const label of file === "DeskOrders.tsx" ? ["本地掛單", "限價", "數量", "修改", "刪除", "送單", "券商委託"] : ["新增委託", "研究預選"]) assert.ok(source.includes(label), label);
+    assert.ok(source.includes(file === "DeskOrders.tsx" ? "開發診斷" : "詳細資訊與技術紀錄"));
   }
 });

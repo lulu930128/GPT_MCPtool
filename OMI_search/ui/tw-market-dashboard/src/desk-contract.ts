@@ -1,5 +1,5 @@
 import { isRecord, type UnknownRecord } from "./state";
-import { toolValue, type CandidateBridge } from "./candidate-state";
+import { CallError, toolValue, type CandidateBridge } from "./candidate-state";
 
 export type DeskSelection = {
   kind: "review" | "pending" | "staged"; id: string; revision: number; digest: string;
@@ -10,9 +10,31 @@ const record = (value: unknown): UnknownRecord => isRecord(value) ? value : {};
 const positive = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) > 0;
 const decimal = (value: unknown): boolean => (typeof value === "string" || typeof value === "number") && /^\d+(?:\.\d+)?$/.test(String(value)) && Number.isFinite(Number(value)) && Number(value) > 0;
 const decimalText = (value: unknown) => String(value).replace(/^0+(?=\d)/, "").replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
-export const deskCall = async (bridge: CandidateBridge, name: string, args: UnknownRecord = {}) => toolValue(await bridge.callTool(name, args));
+export const deskCall = async (bridge: CandidateBridge, name: string, args: UnknownRecord = {}, signal?: AbortSignal) =>
+  toolValue(await (signal ? bridge.callTool(name, args, signal) : bridge.callTool(name, args)));
 export const deskError = (error: unknown) => `${error instanceof Error ? error.message : String(error)}${/HTTP 404|HTTP 405|Method not found|Unknown tool|尚未接線/.test(String(error)) ? " · API 契約待接（尚未接線）" : ""}`;
 export const definitiveRejection = (error: unknown) => /OMI API HTTP (400|404|405|422):/.test(String(error));
+
+export function deskOrderRead(value: unknown, id: string, market: string): UnknownRecord {
+  const data = record(value), execution = record(data.execution);
+  if (data.market !== market || execution.execution_id !== id || typeof execution.state !== "string")
+    throw Error("券商回應與此筆委託身分或市場不符，請重新讀回。");
+  const protection = record(data.protection);
+  if (data.protection != null && (protection.entry_execution_id !== id || typeof protection.strategy_id !== "string"
+    || !Number.isSafeInteger(protection.strategy_revision) || !isRecord(protection.rules)))
+    throw Error("此單保護設定的身分／版本尚未確認。");
+  return data;
+}
+
+export function protectionRequestObserved(data: UnknownRecord, request: UnknownRecord): boolean {
+  const protection = record(data.protection);
+  return protection.strategy_id === request.strategy_id && Number(protection.strategy_revision) > Number(request.expected_revision)
+    && Array.isArray(protection.audit) && protection.audit.some(value => {
+      const event = record(value), payload = record(event.payload);
+      return event.kind === "STRATEGY_REVISED" && payload.request_id === request.request_id
+        && payload.strategy_id === request.strategy_id && payload.strategy_revision === Number(request.expected_revision) + 1;
+    });
+}
 
 export function deskReviews(value: unknown): UnknownRecord[] {
   const data = record(value);
@@ -67,6 +89,80 @@ export async function confirmDeskSelection(bridge: CandidateBridge, selection: D
     { id: selection.id, expected_revision: selection.revision, expected_digest: selection.digest });
 }
 
+// Wire receipt validation only. No inference from HTTP status, error text or a
+// STAGED snapshot. This must be called on the error from this exact await.
+export function stageNotAttempted(error: unknown, pin: DeskSelection): boolean {
+  if (pin.kind !== "staged" || !(error instanceof CallError) || error.httpStatus !== 503
+    || error.tool !== "omi_confirm_desk_staged") return false;
+  const body = record(error.backendError);
+  const envelope = record(body.error), detail = record(envelope.detail);
+  const attempt = record(detail.submission_attempt);
+  return typeof envelope.code === "string" && !!envelope.code && typeof envelope.request_id === "string" && !!envelope.request_id
+    && detail.retry_policy === "EXPLICIT_RETRY_SAME_STAGE"
+    && attempt.contract === "omi.execution.submission-attempt.v1" && attempt.outcome === "NOT_ATTEMPTED"
+    && attempt.phase === "READINESS" && attempt.native_command_started === false
+    && attempt.candidate_id === pin.id && attempt.candidate_revision === pin.revision && attempt.candidate_digest === pin.digest;
+}
+
+export function sameStagedSelection(value: unknown, pin: DeskSelection): UnknownRecord {
+  const row = stageRecord(value, record(pin.snapshot.raw));
+  const current = stageSelection(row);
+  if (row.state !== "ACTIVE" || current.id !== pin.id || current.revision !== pin.revision || current.digest !== pin.digest)
+    throw Error("未送出回執之掛單讀回已變更；保留鎖定，只讀回");
+  return row;
+}
+
+export function deskConnection(value: unknown): UnknownRecord {
+  const connection = record(record(value).connection);
+  if (connection.contract !== "omi.execution.connection.v1" || connection.market !== "TW" || connection.timezone !== "Asia/Taipei"
+    || !["ONLINE", "OFFLINE"].includes(String(connection.desired))
+    || !["STARTING", "CONNECTING", "ONLINE", "RECOVERING", "BACKOFF", "BLOCKED", "STOPPING", "OFFLINE"].includes(String(connection.actual))
+    || ["session_bound", "date_ready", "ready", "disconnect_observed", "disconnect_callback_registered"].some(key => typeof connection[key] !== "boolean")
+    || !Number.isSafeInteger(connection.session_generation) || typeof connection.trade_date !== "string"
+    || !(connection.busy === null || (isRecord(connection.busy) && typeof connection.busy.operation === "string" && typeof connection.busy.started_at === "string"))
+    || !(connection.last_error === null || typeof connection.last_error === "string")
+    || !(connection.last_broker_read === null || (isRecord(connection.last_broker_read) && typeof connection.last_broker_read.status === "string"
+      && typeof connection.last_broker_read.observed_at === "string" && Number.isSafeInteger(connection.last_broker_read.session_generation) && Array.isArray(connection.last_broker_read.sources))))
+    throw Error("連線狀態缺少 connection v1 欄位；無法確認券商連線");
+  return connection;
+}
+
+function wireEqual(a: unknown, b: unknown): boolean {
+  if (isRecord(a) && isRecord(b)) return Object.keys(b).every(key => wireEqual(a[key], b[key]));
+  if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && b.every((value, i) => wireEqual(a[i], value));
+  return a === b;
+}
+
+// ManualStageOrder's JSON codec omits TW/MUT and emits nested Decimal values
+// as strings. Compare that codec semantically, without relaxing identity or
+// using floating-point rounding. These defaults mirror the backend model;
+// generated backend receipt fixtures guard parity.
+function decimalKey(value: unknown): unknown {
+  if (typeof value !== "string" && typeof value !== "number") return value;
+  const match = /^(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(String(value));
+  if (!match) return value;
+  let digits = (match[1] + (match[2] ?? "")).replace(/^0+/, "");
+  let exponent = Number(match[3] ?? 0) - (match[2]?.length ?? 0);
+  if (!Number.isSafeInteger(exponent)) return value;
+  if (!digits) return "0e0";
+  while (digits.endsWith("0")) { digits = digits.slice(0, -1); exponent++; }
+  return `${digits}e${exponent}`;
+}
+
+export function stageIntent(value: UnknownRecord): UnknownRecord {
+  const result: UnknownRecord = { market: "TW", settlement_mode: "MUT", protection: null, research_proposal: null, ...value };
+  result.price = decimalKey(result.price);
+  if (isRecord(result.protection)) {
+    const protection: UnknownRecord = { enabled: true, stop_loss: null, take_profit: null, direction: 1,
+      targets: [], stop_limit_price: null, protection_mode: "LOCAL_SYNTHETIC", ...result.protection };
+    for (const key of ["stop_loss", "take_profit", "exit_limit_price", "stop_limit_price"]) protection[key] = decimalKey(protection[key]);
+    if (Array.isArray(protection.targets)) protection.targets = protection.targets.map(target => isRecord(target)
+      ? { ...target, price: decimalKey(target.price), fraction: decimalKey(target.fraction), limit_price: decimalKey(target.limit_price) } : target);
+    result.protection = protection;
+  }
+  return result;
+}
+
 export function stageRecord(value: unknown, expected?: UnknownRecord): UnknownRecord {
   const row = record(value), raw = record(row.raw), stage = record(row.manual_stage);
   if (row.kind !== "manual_stage" || row.owner_id !== "MCP" || typeof row.id !== "string" || !row.id
@@ -75,11 +171,10 @@ export function stageRecord(value: unknown, expected?: UnknownRecord): UnknownRe
     || typeof stage.original_digest !== "string" || !/^[a-f0-9]{64}$/.test(stage.original_digest)
     || typeof raw.client_intent_id !== "string" || stage.client_intent_id !== raw.client_intent_id
     || typeof raw.symbol !== "string" || !positive(raw.quantity_shares) || !decimal(raw.price)
-    || !["Buy", "Sell"].includes(String(raw.action)) || !["Common", "Odd"].includes(String(raw.lot))
+    || !["Buy", "Sell"].includes(String(raw.action)) || !["Common", "Odd", "Shares"].includes(String(raw.lot))
     || !["CASH", "CASH_SELLING", "MARGIN", "SHORT_SELLING"].includes(String(raw.condition))
     || typeof row.lifecycle !== "string" || !("submission" in stage)) throw Error("本地待送單身份／版本／USER_SPACE / MANUAL / MCP 契約不符；結果仍 UNKNOWN");
-  if (expected && Object.keys(expected).some(key => key === "price"
-    ? decimalText(raw[key]) !== decimalText(expected[key]) : raw[key] !== expected[key])) throw Error("本地待送單與原意圖價量／身份不符；結果仍 UNKNOWN");
+  if (expected && !wireEqual(stageIntent(raw), stageIntent(expected))) throw Error("本地待送單與原意圖價量／身份不符；結果仍 UNKNOWN");
   return row;
 }
 
@@ -88,6 +183,22 @@ export function stageSelection(value: unknown): DeskSelection {
   if (stage.state !== "STAGED" || stage.submission !== null || row.lifecycle !== "STAGED") throw Error("此筆本地待送單已鎖定或取消，不可送出");
   return { kind: "staged", id: String(row.id), revision: Number(row.revision), digest: String(row.digest), snapshot: row,
     command: { ...raw, quantity: raw.quantity_shares, space_id: stage.space_id }, owner: "MCP", source: "MANUAL" };
+}
+
+export type LocalStageChange = { before: UnknownRecord; raw?: UnknownRecord };
+
+// A local revision receipt is unrelated to a submission receipt. Only the next
+// revision of this exact draft, with the requested event/content, resolves it.
+export function localStageResult(value: unknown, change: LocalStageChange): UnknownRecord {
+  const previous = stageRecord(change.before), row = stageRecord(value, change.raw ?? record(previous.raw));
+  const stage = record(row.manual_stage), original = record(previous.manual_stage);
+  if (row.id !== previous.id || row.revision !== Number(previous.revision) + 1
+    || stage.original_digest !== original.original_digest || stage.client_intent_id !== original.client_intent_id
+    || stage.state !== "STAGED" || stage.submission !== null
+    || row.event !== (change.raw ? "REVISE" : "CANCEL")
+    || (change.raw ? row.state !== "ACTIVE" || row.lifecycle !== "STAGED" : row.state !== "CANCELLED" || row.lifecycle !== "CANCELLED"))
+    throw Error("本地操作尚未取得相符的新版本，請讀回原待送單。");
+  return row;
 }
 
 // Read-only identity join. Never use symbol/price/quantity or quarantined reports.
@@ -105,12 +216,21 @@ export function stageNativeReview(value: UnknownRecord, readback: UnknownRecord 
   const executionId = consistent([receipt.execution_id, execution.execution_id]);
   const intentId = consistent([submission.native_intent_id, command.intent_id, receiptCommand.intent_id, execution.intent_id]);
   const tradeDate = consistent([command.trade_date, receiptCommand.trade_date, execution.trade_date]);
-  if (!tradeDate || readback.trade_date !== tradeDate || !/^\d{4}-\d{2}-\d{2}$/.test(tradeDate)
+  // The envelope date is the query/session day and may include historical
+  // reviews. Join on the original order's dated identity, never the query day.
+  if (!tradeDate || !/^\d{4}-\d{2}-\d{2}$/.test(tradeDate)
     || (!reviewId && !executionId && !intentId)
     || ([native.review_id, receipt.review_id].some(value => value != null) && !reviewId)
     || ([receipt.execution_id, execution.execution_id].some(value => value != null) && !executionId)
     || ([submission.native_intent_id, command.intent_id, receiptCommand.intent_id, execution.intent_id].some(value => value != null) && !intentId)) return null;
-  const matches = deskReviews(readback).filter(review => {
+  const candidates = deskReviews(readback).filter(review => {
+    const draftCommand = record(record(review.draft).command);
+    return (reviewId && review.review_id === reviewId)
+      || (executionId && (review.execution_id === executionId || record(review.execution).execution_id === executionId))
+      || (intentId && draftCommand.intent_id === intentId && draftCommand.trade_date === tradeDate);
+  });
+  if (candidates.length !== 1) return null;
+  const matches = candidates.filter(review => {
     const draftCommand = record(record(review.draft).command), current = record(review.execution), snapshot = record(review.snapshot);
     return positive(review.review_revision) && (!reviewId || review.review_id === reviewId) && (!executionId || review.execution_id === executionId)
       && (!intentId || draftCommand.intent_id === intentId) && draftCommand.trade_date === tradeDate
@@ -120,6 +240,8 @@ export function stageNativeReview(value: UnknownRecord, readback: UnknownRecord 
       && (receiptSnapshot.digest === undefined || snapshot.digest === receiptSnapshot.digest)
       && (snapshot.review_id === undefined || snapshot.review_id === review.review_id)
       && (snapshot.review_revision === undefined || snapshot.review_revision === review.review_revision)
+      && (review.execution_id == null || (current.execution_id === review.execution_id
+        && current.intent_id === draftCommand.intent_id && current.trade_date === tradeDate))
       && (current.execution_id === undefined || current.execution_id === review.execution_id)
       && (current.intent_id === undefined || current.intent_id === draftCommand.intent_id)
       && (current.trade_date === undefined || current.trade_date === tradeDate);

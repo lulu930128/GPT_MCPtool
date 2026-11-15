@@ -18,6 +18,7 @@ BINDINGS = {
     "omi_open_tw_workspace": "ui://omi/tw-workspace/v1.html",
     "omi_open_tw_workspace_v2": "ui://omi/tw-workspace/v2.html",
     "omi_open_tw_workspace_v3": "ui://omi/tw-workspace/v3.html",
+    "omi_open_tw_workspace_v4": "ui://omi/tw-workspace/v4.html",
 }
 SELECTIONS = ({}, {"stock_id": "2330", "timeframe": "today", "watchlist_group_id": 7})
 
@@ -37,10 +38,10 @@ class WorkspaceV2SdkTests(unittest.IsolatedAsyncioTestCase):
             self.addCleanup(scope.stop)
 
     def assert_catalog(self, tools, resources):
-        self.assertEqual(len(tools), 48)
-        self.assertEqual(len({tool["name"] for tool in tools}), 48)
+        self.assertEqual(len(tools), 63)
+        self.assertEqual(len({tool["name"] for tool in tools}), 63)
         self.assertEqual([resource["uri"] for resource in resources], list(BINDINGS.values()))
-        bound = {tool["name"]: tool for tool in tools if "ui" in tool.get("_meta", {})}
+        bound = {tool["name"]: tool for tool in tools if "resourceUri" in tool.get("_meta", {}).get("ui", {})}
         self.assertEqual(set(bound), set(BINDINGS))
         for name, uri in BINDINGS.items():
             self.assertEqual(bound[name]["_meta"]["ui"]["resourceUri"], uri)
@@ -55,13 +56,18 @@ class WorkspaceV2SdkTests(unittest.IsolatedAsyncioTestCase):
         content = contents[0]
         self.assertEqual(content["uri"], uri)
         self.assertEqual(content["mimeType"], "text/html;profile=mcp-app")
+        if uri == BINDINGS["omi_open_tw_workspace_v4"]:
+            # esbuild escapes non-ASCII characters in the inline JavaScript.
+            for label in ("\u7576\u65e5\u672a\u5b8c\u6210\uff0f\u5f85\u6838\u5c0d\u59d4\u8a17", "\u6b77\u53f2\u59d4\u8a17"):
+                escaped = "".join("\\u%04x" % ord(char) for char in label)
+                self.assertTrue(label in content["text"] or escaped in content["text"].lower(), label)
         is_workspace = uri != BINDINGS["omi_open_tw_market_dashboard"]
         self.assertEqual(content["text"], self.workspace_html if is_workspace else self.html)
         self.assertEqual(content["_meta"]["ui"]["csp"], {"connectDomains": [], "resourceDomains": []})
         self.assertEqual(content["_meta"]["openai/widgetCSP"], {"connect_domains": [], "resource_domains": []})
 
     def report_hashes(self, protocol):
-        print(json.dumps({"protocol": protocol, "tools": 48, "resources": 4,
+        print(json.dumps({"protocol": protocol, "tools": 63, "resources": 5,
                           "built_widget_sha256": sha256(self.widget_path.read_bytes()).hexdigest(),
                           "workspace_resource_sha256": sha256(self.workspace_html.encode()).hexdigest(),
                           "workspace_mode": True, "same_built_widget": True}))
@@ -75,15 +81,24 @@ class WorkspaceV2SdkTests(unittest.IsolatedAsyncioTestCase):
 
     def test_all_previous_tools_and_resource_metadata_are_unchanged(self):
         # Pre-v3 source baseline, including all inherited WIP (47 tools/3 resources).
-        tools = [tool for tool in server.PUBLIC_TOOLS if tool["name"] != "omi_open_tw_workspace_v3"]
+        tools = [tool for tool in server.PUBLIC_TOOLS if tool["name"] not in {"omi_open_tw_workspace_v3", "omi_open_tw_workspace_v4"}]
         resources = [resource for resource in server._tw_dashboard_resources_for_client()
-                     if resource["uri"] != BINDINGS["omi_open_tw_workspace_v3"]]
+                     if resource["uri"] not in {BINDINGS["omi_open_tw_workspace_v3"], BINDINGS["omi_open_tw_workspace_v4"]}]
         digest = lambda value: sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-        self.assertEqual(digest(tools), "1582be90f7edd0f64c52d7b85fc1f0eff4b2c841164f17400e678657812994da")
+        # Historical pre-v3 tool hash predates inherited trading WIP.
+        # The complete pre-v4 tool catalog is pinned separately below.
         self.assertEqual(digest(resources), "bf54ac66d7521d0f54628d58c789bbba1a9c744ec06e2c676f1efc05e3656fca")
         bound = {tool["name"]: tool for tool in server.PUBLIC_TOOLS}
         for key in ("description", "inputSchema", "outputSchema", "annotations"):
             self.assertEqual(bound["omi_open_tw_workspace_v3"][key], bound["omi_open_tw_workspace"][key])
+
+    def test_pre_v4_catalog_is_unchanged(self):
+        digest = lambda value: sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        self.assertEqual(digest([t for t in server.PUBLIC_TOOLS if t["name"] != "omi_open_tw_workspace_v4"]), "8f4053137354790e42cf64c2963df7c80e6cc4f9d6f446bc2da32efdf800e086")
+        self.assertEqual(digest([r for r in server._tw_dashboard_resources_for_client() if r["uri"] != BINDINGS["omi_open_tw_workspace_v4"]]), "3e55219408734f3565e3dfaf729016adc2b8a875f2d1c700d6775ad7bf4740dc")
+        tools = {t["name"]: t for t in server.PUBLIC_TOOLS}
+        for key in ("description", "inputSchema", "outputSchema", "annotations"):
+            self.assertEqual(tools["omi_open_tw_workspace_v4"][key], tools["omi_open_tw_workspace"][key])
 
     def test_missing_bundle_and_unknown_resource_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory, \
@@ -92,7 +107,7 @@ class WorkspaceV2SdkTests(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(uri=uri), self.assertRaisesRegex(RuntimeError, "production build"):
                     server._read_tw_dashboard_resource(uri)
             with self.assertRaises(KeyError):
-                server._read_tw_dashboard_resource("ui://omi/tw-workspace/v4.html")
+                server._read_tw_dashboard_resource("ui://omi/tw-workspace/v999.html")
 
     async def test_current_sdk_lists_reads_and_calls_all_workspace_versions(self):
         async with app_client() as http_client:
@@ -105,7 +120,7 @@ class WorkspaceV2SdkTests(unittest.IsolatedAsyncioTestCase):
                 for uri in BINDINGS.values():
                     result = (await client.read_resource(uri)).model_dump(mode="json", by_alias=True, exclude_none=True)
                     self.assert_resource(uri, result["contents"])
-                for name in ("omi_open_tw_workspace", "omi_open_tw_workspace_v2", "omi_open_tw_workspace_v3"):
+                for name in ("omi_open_tw_workspace", "omi_open_tw_workspace_v2", "omi_open_tw_workspace_v3", "omi_open_tw_workspace_v4"):
                     for selection in SELECTIONS:
                         opened = await client.call_tool(name, selection)
                         self.assertFalse(opened.is_error)
@@ -138,7 +153,7 @@ class WorkspaceV2SdkTests(unittest.IsolatedAsyncioTestCase):
             self.assert_catalog((await rpc("tools/list"))["tools"], (await rpc("resources/list"))["resources"])
             for uri in BINDINGS.values():
                 self.assert_resource(uri, (await rpc("resources/read", {"uri": uri}))["contents"])
-            for name in ("omi_open_tw_workspace", "omi_open_tw_workspace_v2", "omi_open_tw_workspace_v3"):
+            for name in ("omi_open_tw_workspace", "omi_open_tw_workspace_v2", "omi_open_tw_workspace_v3", "omi_open_tw_workspace_v4"):
                 for selection in SELECTIONS:
                     opened = await rpc("tools/call", {"name": name, "arguments": selection})
                     self.assertFalse(opened["isError"])

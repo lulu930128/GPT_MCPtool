@@ -141,9 +141,9 @@ class RuntimeControlTests(unittest.TestCase):
         for kwargs in ({"return_value": online}, {"side_effect": RuntimeError("offline")}):
             with patch.dict(self.ns, _api_request=Mock(**kwargs)):
                 catalog = self.core._tools_for_client()
-            self.assertEqual(len(catalog), 48)
-            self.assertEqual({t["name"] for t in catalog[19:25]}, NAMES)
-            self.assertEqual(len({t["name"] for t in catalog}), 48)
+            self.assertEqual(len(catalog), 63)
+            self.assertEqual({t["name"] for t in catalog[20:26]}, NAMES)
+            self.assertEqual(len({t["name"] for t in catalog}), 63)
             self.assertNotIn("omi.search", {t["name"] for t in catalog})
 
     def test_original_seventeen_schemas_and_resources_byte_equivalent(self):

@@ -8,14 +8,20 @@ export type PaneState = {
 };
 
 export function readToolData(response: unknown, kind: string): UnknownRecord {
+  const structured = isRecord(response) && isRecord(response.structuredContent) ? response.structuredContent : response;
   if (isRecord(response) && response.isError === true) {
+    if (isRecord(structured) && typeof structured.code === "string") {
+      const request = typeof structured.request_id === "string" ? ` · request ${structured.request_id}` : "";
+      const stage = typeof structured.stage === "string" ? ` · ${structured.stage}` : "";
+      throw new Error(`${structured.code}${stage}${request}`);
+    }
     const content = Array.isArray(response.content) ? response.content : [];
     const message = content.find((item) => isRecord(item) && typeof item.text === "string");
     throw new Error(isRecord(message) ? String(message.text) : "工具讀取失敗");
   }
   const value = isRecord(response) && "structuredContent" in response ? response.structuredContent : response;
   const validVersion = isRecord(value) && (value.version === `${kind}.v1`
-    || (kind === "omi.tw_stock_research" && value.version === "omi.tw_stock_research.workspace.v1"));
+    || (kind === "omi.tw_stock_research" && ["omi.tw_stock_research.workspace.v1", "omi.tw_stock_research.technical.v2"].includes(String(value.version))));
   if (!isRecord(value) || value.kind !== kind || !validVersion) {
     throw new Error("資料格式不符；服務可能尚未採用 workspace contract");
   }
