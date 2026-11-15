@@ -1,9 +1,12 @@
 # GPT Project Workspace MCP
 
-目前 application release 為 `1.7.0`，source tool contract 為 `2026-10-28.1`。新增 source update v2 入口；實際採用仍須核對 runtime buildId 與更新 receipt，不能由 source 版本推定。Workspace root、asset scope 與 tool contract 仍依各自的安全契約演進。
+目前 source application 版本為 `1.9.0`，tool contract 為 `2026-11-08.2`。新增背景分段傳輸、串流 ZIP64、分頁 manifest、可重讀分段與到期清理，保留 1.8.0 小 ZIP 工具。實際採用仍須核對 runtime buildId 與更新 receipt，不能由 source 版本推定。Workspace root、asset scope 與 tool contract 仍依各自的安全契約演進。
 
 圖片、Office 與 PDF 檔案的公開讀取設計、限制與設定方式請見
 [docs/Asset-Readers.md](docs/Asset-Readers.md)。
+
+大檔 folder/file/ZIP 的 API、100 GB 工作總額度、恢復與 Windows 離線重組範例見
+[docs/Segmented-Transfer.md](docs/Segmented-Transfer.md)。100 GB 是 source 邏輯上限，不是 ChatGPT 附件容量或 production 規模保證。
 
 ## 文件導覽
 
@@ -59,6 +62,8 @@ MCP 沒有 Git mutation 工具不代表 Codex 被禁止執行 Git；不新增任
 - `find_symbol`、`find_references`、`import_graph`、`project_map`：TypeScript、JavaScript、Python 的 deterministic lexical 分析；不是 compiler／LSP 語意解析。
 - `inspect_asset`、`read_image`、`read_spreadsheet`、`read_document`、`read_presentation`：受限圖片與 Office reader。
 - `fetch_asset`：為明確開啟 original-file return 的 asset scope 建立 content-bound MCP `resource_link`；host 再以 `resources/read` 取得通過既有 path guard、deny policy、大小與 SHA-256 驗證的原始 bytes，不修改本機檔案。
+- `package_folder_zip`：以 DEFLATE level 6 壓縮允許資料夾，回傳 ZIP `resource_link`、included/skipped 清單與完整性標記；來源保留，server-owned 暫存 ZIP 在 resource read 完整緩衝後清除，未領取則逾期清除。
+- `fetch_zip`、`inspect_zip`、`list_zip_entries`、`read_zip_entry`：回傳既有 ZIP、檢查完整性、分頁列出 entries 或讀取 bounded byte window；共用既有 scope 與 deny policy。詳見 [ZIP 工具、清理保證與更新方式](docs/Asset-Readers.md#zip-壓縮傳輸與受限讀取)。
 - `inspect_pdf`、`read_pdf_text`、`read_pdf_page`：隔離 worker 內的 PDF metadata、文字與單頁 PNG reader。
 
 `workspace_info` 另回傳 application／contract／build fingerprint、runtime start time 與 active search backend，方便確認目前實際載入的 build。
@@ -95,7 +100,7 @@ Context 的 `id` 對應 `contextId`，並提供 `path`、`startLine`、`endLine`
 
 ### Runtime／connectivity diagnostics
 
-六個工具均為 readOnlyHint=true、destructiveHint=false；加上元件管理工具共 35 個，檔案 operate mode 為 41 個；只有固定七目標的 restart 工具標記 destructive。
+六個 diagnostics 工具均為 readOnlyHint=true、destructiveHint=false。目前預設共 50 tools，檔案 operate mode 為 56。restart／update 維護工具標記 destructive；`package_folder_zip` 與分段工作的 start/finish 因管理 server-owned 暫存檔標記 readOnlyHint=false、destructiveHint=false，不授予 workspace 寫入權限。
 TCP／DNS／HTTP 使用 Node API，Windows listener／PID／ping 使用固定 System32 命令與既有 bounded runner。
 不接受任意 command、flags、executable、cwd、env，也不能啟停任何目標程序或服務。
 

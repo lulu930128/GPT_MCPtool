@@ -1,4 +1,4 @@
-# 圖片、Office 與 PDF 檔案讀取
+# 圖片、Office、PDF 與 ZIP 檔案讀取
 
 目前提供八個 bounded reader tools，另提供原始檔案與音訊回傳 tools：
 
@@ -12,6 +12,99 @@
 - `inspect_pdf`：檢查 `.pdf` 頁數、metadata 與主動內容安全狀態。
 - `read_pdf_text`：擷取 bounded page window 的文字。
 - `read_pdf_page`：將單頁 bounded render 成 metadata-stripped PNG。
+
+## ZIP 壓縮傳輸與受限讀取
+
+Source 1.9.0 的大檔背景分段傳輸另外見 [Segmented-Transfer.md](Segmented-Transfer.md)。
+以下 1.8.0 小 ZIP 工具、限制、single-use URI 與 return contract 均保持不變。
+
+Source `1.8.0` / contract `2026-11-08.1` 新增下列工具，所有 input/output 都有宣告 schema：
+
+| 工具 | 輸入 | 結果 |
+| --- | --- | --- |
+| `package_folder_zip` | `scope`, `path`（既有資料夾） | DEFLATE level 6 ZIP 的 `resource_link`、檔名、size、SHA-256、resource URI、到期時間、included/skipped 與原因 |
+| `fetch_zip` | `scope`, `path`（既有 `.zip`） | 驗證所有 entries 後回傳原始 ZIP 的 `resource_link`；來源不刪除 |
+| `inspect_zip` | `scope`, `path` | 大小、SHA-256、entry 數量、展開總量、denied 數量與完整性範圍 |
+| `list_zip_entries` | `scope`, `path`, `offset?`, `limit?` | 最多 200 筆 metadata、allowed/reason、CRC 狀態及 `nextOffset` |
+| `read_zip_entry` | `scope`, `path`, `entry`, `offset?`, `maxBytes?`, `encoding?` | entry SHA-256／CRC32、bounded byte window、`eof` 與 `nextOffset`；預設 `base64`，可指定 `utf8` |
+
+例如既有 `projects` asset scope 指向 `projects:.` 且已列入 file-return scopes 時：
+
+```json
+{"scope":"projects","path":"asr"}
+```
+
+將此參數交給 `package_folder_zip` 即可壓縮 `projects/asr`；使用者不指定輸出檔案路徑。
+`fetch_zip` 的 path 則例如 `asr/export.zip`。這些工具沿用目前的
+`WORKSPACE_MCP_ROOTS`、`assetScopes`、`fileReturnScopeIds`，沒有新增授權層或修改設定。
+ZIP inspect/list/read-entry 需要 asset scope；兩種整包回傳另需既有 file-return scope。
+
+只有專用 ZIP reader 對最終 `.zip` 副檔名有窄例外；一般 `fetch_asset`、文字 reader 與
+全域 deny list 不變。來源資料夾及每一檔案均通過 shared path guard、scope containment、
+祖先檢查及讀前／讀後 identity 檢查。來源不寫入、不刪除。禁止目錄／檔名／副檔名與
+資料夾內 symlink/junction 會列入 `skipped`；目錄以 `subtree=true` 表示整個子樹排除，
+不進入該子樹計算檔數。只要有排除就回 `complete=false`，不能描述成完整備份。
+直接指定 symlink/junction、hardlink、特殊檔、無法安全命名或變動中的來源會失敗。
+
+既有 ZIP 的安全 metadata 可列出 denied entry 及原因，但不讀其 payload；整包 `fetch_zip`
+若有任何 denied entry 會拒絕。entry 套用 ZIP 所在目錄的 root-specific deny policy。
+不提供解壓、任意寫入、刪除或外部命令工具。檔案內容保持 untrusted data。
+
+| ZIP 限制 | 值 |
+| --- | --- |
+| 輸出 ZIP／既有 ZIP 檔大小 | 既有 `maxFetchFileBytes`，預設 **12 MiB**，未提高 |
+| 單一展開 entry／來源檔 | 16 MiB |
+| 展開總量／來源總量 | 48 MiB |
+| 掃描／ZIP entries | 2,048，含目錄與被排除項目 |
+| entry 路徑 | 32 層、512 UTF-8 bytes |
+| 單次 entry 回傳 | 預設 64 KiB；最高 `min(256 KiB, floor(maxReturnedBytes/4)*3)` |
+| 掃描／壓縮、ZIP 檢查期限 | 各 15 秒 |
+| 同時進行的 archive operations | 每程序 2 個 |
+| 尚未領取的 temporary ZIP | 每程序最多 8 個、10 分鐘 TTL，30 秒清理週期 |
+
+展開量與傳輸量分開限制：13 MiB 的可壓縮單檔可產生小於 12 MiB 的有效 ZIP。
+壓縮後 ZIP（包含 headers）超過既有 cap 仍失敗，不回傳部分 ZIP。
+高壓縮比本身不視為錯誤；bomb 防護依 metadata 與實際 inflation bytes、單檔／總量、
+entry count 及期限檢查。驗證 local/central headers、宣告長度與 CRC32，拒絕 traversal、
+絕對路徑、Windows ADS／device names、名稱碰撞、重疊 entries、symlinks、加密、ZIP64、
+多磁碟及不支援的 compression。支援 STORE／DEFLATE 讀取、UTF-8／CP437 名稱與 Windows
+分隔符；產生 ZIP 使用 UTF-8 與 `/`。entry 不會再遞迴解壓；nested `.zip` 仍受 deny policy。
+`utf8` byte window 必須切在有效 UTF-8 邊界，否則明確報錯，可改用 `base64`。
+
+### 暫存資源清理的精確保證
+
+沿用 SDK `resource_link → resources/read` 與 base64 blob。Temporary ZIP 使用
+`workspace-zip-temp:` URI；現存 ZIP 使用 SHA-256 綁定的 `workspace-zip:` URI。
+
+- 發出 link 時保留 ZIP；第一次 resource read 先原子 claim，再驗證當下 scope／deny policy、
+  完整 bytes、SHA-256 與 CRC，移除 server-owned 檔案後將 bytes 交給 SDK。
+- resource read／完整性／政策失敗也會清理。成功緩衝後即使 SDK 傳送失敗，暫存檔已清除。
+  重複／併發／過期／未知 URI 拒絕，需重新封裝；現存 ZIP link 可重讀，每次驗證內容未變。
+- 未領取或工具回應遺失的 ZIP 在 TTL 後由週期清理，正常運作時最多再等一個 30 秒週期。
+  OS 阻擋刪除時資源保持鎖定、stderr 報告並重試，不回傳成功或任意刪除其他檔案。
+- 暫存檔位於 OS temp 的專屬 `project-workspace-zip-v1` 目錄，採 exclusive-create 與亂數檔名。
+  程序崩潰／強制終止時無法承諾即時清除；下次封裝初始化與週期掃描只回收此專屬目錄內
+  符合 owned filename 格式的過期普通檔，不跟隨 symlink、不遞迴刪除。
+
+SDK 沒有瀏覽器下載完成 ACK。這裡保證的是 **resource callback 完整緩衝後、SDK 傳送前清理**，
+不是 ChatGPT／瀏覽器已儲存檔案；host 若先預讀一次，後續再要求讀取會得到 single-use 錯誤。
+這個 host 行為及實際 ChatGPT 下載需獨立 E2E 驗收。
+參考 [MCP resources 規格](https://modelcontextprotocol.io/specification/2025-06-18/server/resources)。
+
+### 安裝與後續採用
+
+全新 checkout 在 `project_reading` 執行 `npm ci`、`npm run build`、`npm test`。
+本次僅將既有 `jszip@3.10.1` 明確列為 runtime dependency，未升級套件；現有安裝已可完成 build。
+
+正式更新須另行確認允許中斷目前 runtime 請求，再沿
+[既有 CC source-update owner](LocalComponentManagement.md#2026-10-28-phase-2source-update-v2)：
+以 `componentId=project_reading`、`action=update_from_source`、`idlePolicy=wait_for_idle`
+及新 immutable `versionId` 呼叫 `mcp_component_update_preview`；保留 preview 的
+`expectedSourceDigest` 與同一 UUID `requestId` 提交 update，使用必要的
+`confirmation=interrupt_current_requests`，並查原 receipt。
+更新後核對 loaded `1.8.0`／contract `2026-11-08.1`、新 buildId、Ready、五個工具 schema，
+再刷新 ChatGPT connector 並驗收 ZIP 下載與 single-use 行為。
+本次工程驗證未執行更新、restart 或 ChatGPT E2E。
 
 ## Asset scope
 

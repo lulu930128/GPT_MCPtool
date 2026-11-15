@@ -2,6 +2,8 @@ import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mc
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { readAudioAsset } from "./audio.js";
+import { registerArchiveTools } from "./archive-server.js";
+import { registerSegmentedTransferTools } from "./segmented-transfer-server.js";
 import {
   inspectAsset,
   readDocumentAsset,
@@ -782,6 +784,8 @@ export function createWorkspaceMcpServer(config: ServerConfig, options: Workspac
     },
   );
 
+  registerArchiveTools(server, config);
+  registerSegmentedTransferTools(server, config);
   registerDiagnosticTools(server);
   registerComponentRecoveryTools(server, createReadOnlyRecovery(undefined, options.authenticatedMaintenance === true));
   registerRuntimeStatusTools(server, config, options);

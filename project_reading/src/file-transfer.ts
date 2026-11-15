@@ -171,7 +171,7 @@ export function parseAssetResourceUri(uri: string | URL): AssetResourceReference
   };
 }
 
-function assertFileReturnScope(config: ServerConfig, rawScope: string): void {
+export function assertFileReturnScope(config: ServerConfig, rawScope: string): void {
   const scope = rawScope.trim();
   if (!config.assetScopes.has(scope)) {
     throw new WorkspaceAccessError(
@@ -187,7 +187,7 @@ function assertFileReturnScope(config: ServerConfig, rawScope: string): void {
   }
 }
 
-async function readBoundedFile(absolute: string, maxBytes: number): Promise<Buffer> {
+export async function readBoundedFile(absolute: string, maxBytes: number): Promise<Buffer> {
   const handle = await fs.open(absolute, "r");
   try {
     const stat = await handle.stat();

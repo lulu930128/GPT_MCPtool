@@ -137,7 +137,7 @@ test("operator read-write defaults cover configured roots and new roots while pr
   assert.equal(volume.ancestors.length, 1);
 });
 
-test("operate is opt-in and malformed policy leaves all 36 read tools available", async (t) => {
+test("operate is opt-in and malformed policy preserves default workspace tools", async (t) => {
   const f = await fixture(t);
   for (const policy of [undefined, { version: 1, enabled: false, rules: [] },
     { version: 2, enabled: true, rules: [] }, { ...f.policy, unknownPermission: true },
@@ -152,8 +152,8 @@ test("operate is opt-in and malformed policy leaves all 36 read tools available"
     await server.connect(st); await client.connect(ct);
     try {
       const tools = (await client.listTools()).tools;
-      assert.equal(tools.length, 41);
-      assert.ok(tools.filter((tool) => !["mcp_component_restart", "mcp_component_update"].includes(tool.name)).every((tool) => tool.annotations?.readOnlyHint === true));
+      assert.equal(tools.length, 50);
+      assert.ok(tools.filter((tool) => !["mcp_component_restart", "mcp_component_update", "package_folder_zip", "start_segmented_transfer", "finish_segmented_transfer"].includes(tool.name)).every((tool) => tool.annotations?.readOnlyHint === true));
       assert.equal((await getWorkspaceInfo(config) as { mode: string }).mode, "read-only");
       assert.equal((await new WorkspaceWriter(config).execute("create_text_file", input("notes/no.txt", { content: "x" }))).code, "WRITE_DISABLED");
     } finally { await client.close(); await server.close(); }
@@ -466,7 +466,7 @@ test("authenticated isolated HTTP MCP advertises actual permissions and round-tr
   await client.connect(transport);
   try {
     const tools = (await client.listTools()).tools;
-    assert.equal(tools.length, 47);
+    assert.equal(tools.length, 56);
     for (const name of WRITE_TOOLS) assert.equal(tools.find((tool) => tool.name === name)?.annotations?.readOnlyHint, false);
     assert.equal(tools.find((tool) => tool.name === "get_write_operation")?.annotations?.readOnlyHint, true);
     const args = input("notes/http.txt", { content: "via HTTP MCP" });

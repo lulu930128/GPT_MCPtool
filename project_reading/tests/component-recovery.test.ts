@@ -165,8 +165,8 @@ test("canonical Workspace server discovers recovery tools in default read-only m
   await server.connect(st); await client.connect(ct);
   try {
     const { tools } = await client.listTools();
-    assert.equal(tools.length, 41);
+    assert.equal(tools.length, 50);
     assert.equal(tools.filter((tool) => tool.name.startsWith("mcp_component_")).length, 9);
-    assert.equal(tools.filter((tool) => tool.annotations?.readOnlyHint !== true).length, 2);
+    assert.equal(tools.filter((tool) => tool.annotations?.readOnlyHint !== true).length, 5);
   } finally { await client.close(); await server.close(); }
 });

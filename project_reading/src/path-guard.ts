@@ -34,7 +34,24 @@ export async function resolveWorkspacePath(
   expectedType?: ExpectedPathType,
   rootId?: string,
 ): Promise<ResolvedWorkspacePath> {
-  const candidate = resolveWorkspacePathCandidate(config, inputPath, rootId);
+  return resolvePath(config, inputPath, expectedType, rootId, false);
+}
+
+/** ZIP reader only: exempt the final .zip extension, never names, directories or roots. */
+export async function resolveWorkspaceZipPath(
+  config: ServerConfig, inputPath: string, rootId: string,
+): Promise<ResolvedWorkspacePath> {
+  if (path.extname(inputPath).toLowerCase() !== ".zip") {
+    throw new WorkspaceAccessError("Archive reader supports .zip files only.");
+  }
+  return resolvePath(config, inputPath, "file", rootId, true);
+}
+
+async function resolvePath(
+  config: ServerConfig, inputPath: string | undefined, expectedType: ExpectedPathType | undefined,
+  rootId: string | undefined, zipOnly: boolean,
+): Promise<ResolvedWorkspacePath> {
+  const candidate = resolvePathCandidate(config, inputPath, rootId, zipOnly);
   const workspaceRoot = resolveWorkspaceRoot(config, candidate.rootId);
 
   let real: string;
@@ -45,7 +62,11 @@ export async function resolveWorkspacePath(
   }
 
   assertWithinRoot(workspaceRoot.path, real, "Resolved path escapes the configured workspace root.");
-  assertNotDenied(config, workspaceRoot, real);
+  const denial = denialReason(config, workspaceRoot, real, zipOnly);
+  if (denial) throw new WorkspaceAccessError(denial);
+  if (zipOnly && path.extname(real).toLowerCase() !== ".zip") {
+    throw new WorkspaceAccessError("Archive reader requires a .zip target.");
+  }
 
   const stat = await fs.stat(real);
   if (expectedType === "file" && !stat.isFile()) {
@@ -69,11 +90,18 @@ export function resolveWorkspacePathCandidate(
   inputPath: string | undefined,
   rootId?: string,
 ): WorkspacePathCandidate {
+  return resolvePathCandidate(config, inputPath, rootId, false);
+}
+
+function resolvePathCandidate(
+  config: ServerConfig, inputPath: string | undefined, rootId: string | undefined, zipOnly: boolean,
+): WorkspacePathCandidate {
   const workspaceRoot = resolveWorkspaceRoot(config, rootId);
   const rawPath = normalizeUserPath(inputPath);
   const candidate = path.resolve(workspaceRoot.path, rawPath);
   assertWithinRoot(workspaceRoot.path, candidate, "Path is outside the configured workspace root.");
-  assertNotDenied(config, workspaceRoot, candidate);
+  const denial = denialReason(config, workspaceRoot, candidate, zipOnly);
+  if (denial) throw new WorkspaceAccessError(denial);
   return {
     rootId: workspaceRoot.id,
     rootPath: workspaceRoot.path,
@@ -127,6 +155,12 @@ export function getDenialReason(
   workspaceRoot: WorkspaceRootConfig,
   target: string,
 ): string | undefined {
+  return denialReason(config, workspaceRoot, target, false);
+}
+
+function denialReason(
+  config: ServerConfig, workspaceRoot: WorkspaceRootConfig, target: string, zipOnly: boolean,
+): string | undefined {
   const relative = path.relative(workspaceRoot.path, target);
   if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
     return undefined;
@@ -146,7 +180,7 @@ export function getDenialReason(
   }
 
   const extension = path.extname(basename).toLowerCase();
-  if (extension && config.denyExtensions.has(extension)) {
+  if (extension && config.denyExtensions.has(extension) && !(zipOnly && extension === ".zip")) {
     return `Path includes denied file extension: ${extension}`;
   }
 

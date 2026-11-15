@@ -178,9 +178,24 @@ function Invoke-NodeSourceUpdate {
             # published artifact pin and boot-loaded identity prove this receipt;
             # only a new Update needs a fresh source digest.
             $result.sourceDigest=$intent.sourceDigest
-            if (-not $PrepareOnly -and -not (Test-NodeUpdateArtifactPin (Get-NodeUpdateField $prepared 'candidateArtifact') (Get-NodeUpdateArtifactPin $artifactRoot))) { throw 'UPDATE_DIST_CHANGED' }
             $observed=& $Observe
-            if (-not (Test-NodeUpdateIdentity $prepared.expectedIdentity $observed)) { throw 'UPDATE_LOADED_IDENTITY_UNVERIFIED' }
+            if (-not (Test-NodeUpdateIdentity $prepared.expectedIdentity $observed)) {
+                $previous=Get-NodeUpdateField $prepared 'previousIdentity'
+                if ($null -eq $previous -or -not (Test-NodeUpdateIdentity $previous $observed)) { throw 'UPDATE_LOADED_IDENTITY_UNVERIFIED' }
+                # Mutable Python source has no retained backend artifact. An old
+                # process alone cannot prove rollback of later lazy imports.
+                if ($PrepareOnly -or $ComponentId -eq 'personal_asset_os') { throw 'UPDATE_OLD_LOADED_SOURCE_UNVERIFIED' }
+                if ((Get-NodeUpdateField $prepared 'previousArtifactBuildId') -cne $previous.buildId) { throw 'UPDATE_OLD_ARTIFACT_IDENTITY_UNVERIFIED' }
+                Restore-NodeUpdateUnappliedArtifact -ArtifactRoot $artifactRoot -OperationRoot $operationRoot -Prepared $prepared
+                $observed=& $Observe
+                if (-not (Test-NodeUpdateIdentity $previous $observed)) { throw 'UPDATE_LOADED_IDENTITY_UNVERIFIED' }
+                $result.phase='REJECTED'; $result.code='UPDATE_ROLLED_BACK'; $result.ready=$true
+                $result.observedIdentity=$observed; $result.observedBuildId=$observed.buildId; $result.observedVersion=$observed.version
+                $result.expectedIdentity=$prepared.expectedIdentity; $result.preparedBuildId=$prepared.expectedIdentity.buildId; $result.rollback=$prepared.rollback
+                Write-ComponentUpdateJson -Path $terminalPath -Value $result
+                return [pscustomobject]$result
+            }
+            if (-not $PrepareOnly -and -not (Test-NodeUpdateArtifactPin (Get-NodeUpdateField $prepared 'candidateArtifact') (Get-NodeUpdateArtifactPin $artifactRoot))) { throw 'UPDATE_DIST_CHANGED' }
             $result.phase='ACCEPTED'; $result.code='UPDATE_RECOVERED'; $result.ready=$true
             $result.selectedVersion=$VersionId
             $result.observedBuildId=$observed.buildId; $result.observedVersion=$observed.version
@@ -205,6 +220,8 @@ function Invoke-NodeSourceUpdate {
         Write-ComponentUpdateJson -Path $intentPath -Value @{ schemaVersion=1; requestId=$RequestId; componentId=$ComponentId; versionId=$VersionId; sourceDigest=$sourceDigest; artifactRelative=$ArtifactRelative; prepareOnly=[bool]$PrepareOnly; updater=(Get-NodeUpdateProcessIdentity); trackedBuild=$true; createdAt=[DateTime]::UtcNow.ToString('o') }
         $ownsNewOperation=$true
         Write-ComponentUpdateJson -Path $versionPath -Value @{ requestId=$RequestId; sourceDigest=$sourceDigest; versionId=$VersionId }
+        $previousIdentity=$null
+        try { $priorObserved=& $Observe; if ($priorObserved.ready) { $previousIdentity=$priorObserved } } catch { }
         $stageDist=Join-Path $operationRoot 'stage\dist'
         if (-not $PrepareOnly) { [void][IO.Directory]::CreateDirectory($stageDist) }
         & $Build $stageDist (Join-Path $operationRoot 'children') | Out-Null
@@ -229,8 +246,13 @@ function Invoke-NodeSourceUpdate {
         if (-not $PrepareOnly) {
             $prepared.previousArtifact=Get-NodeUpdateArtifactPin $dist
             $prepared.candidateArtifact=Get-NodeUpdateArtifactPin $stageDist
+            $prepared.previousArtifactBuildId=$null
+            if ($prepared.previousArtifact.exists) {
+                try { $priorArtifactIdentity=& $Identity $dist; $prepared.previousArtifactBuildId=$priorArtifactIdentity.buildId } catch { }
+            }
             if (-not (Test-NodeUpdateArtifactPin $prepared.candidateArtifact (Get-NodeUpdateArtifactPin $promote))) { throw 'UPDATE_PROMOTION_COPY_UNVERIFIED' }
         }
+        $prepared.previousIdentity=$previousIdentity
         Write-ComponentUpdateJson -Path $preparedPath -Value $prepared
         $mutating=$true
         if (-not $PrepareOnly) {

@@ -63,6 +63,43 @@ try {
     $recovered=Invoke-Fixture Recover $requestId 'v1' $preview.sourceDigest
     Assert-Update ($recovered.phase -eq 'ACCEPTED' -and $recovered.code -eq 'UPDATE_RECOVERED' -and $script:reloads -eq $beforeReloads) 'recovery accepts only original prepared and loaded identity'
 
+    foreach($mode in @('old-loaded','old-artifact-restored','third-version','wrong-old-artifact','prepare-only-old','paos-old')) {
+        $fixtureRoot=New-Fixture $mode
+        $script:loaded=[pscustomobject]@{ready=$true;version='1.0';buildId='1111111111111111'}
+        $script:failReload=$true
+        $preview=Invoke-Fixture Preview '' '' ''; $requestId=[guid]::NewGuid().ToString('D')
+        if($mode -eq 'wrong-old-artifact'){[IO.File]::WriteAllText((Join-Path $fixtureRoot 'dist/identity.json'),'{"version":"1.0","buildId":"3333333333333333"}')}
+        if($mode -in @('prepare-only-old','paos-old')){
+            $args=@{ComponentRoot=$fixtureRoot;ComponentId='fixture';SourcePaths=@('src');RequestId=$requestId;VersionId='v1';ExpectedSourceDigest=$preview.sourceDigest;PrepareOnly=$true;Build={};Identity={param($unused) [pscustomobject]@{version='1.1';buildId='2222222222222222'}};Reload=$reload;Observe=$observe;Preflight={[pscustomobject]@{allowed=$true}}}
+            if($mode -eq 'paos-old'){$args.ComponentId='personal_asset_os';$args.PrepareOnly=$false;$args.Build=$build;$args.Identity=$identity}
+            $unknown=Invoke-NodeSourceUpdate @args -Action Update
+            $recovery=Invoke-NodeSourceUpdate @args -Action Recover
+            Assert-Update ($unknown.phase -eq 'RECOVERY_REQUIRED' -and $recovery.code -eq 'UPDATE_OLD_LOADED_SOURCE_UNVERIFIED') 'PrepareOnly old loaded identity cannot prove source rollback'
+            continue
+        }
+        $unknown=Invoke-Fixture Update $requestId 'v1' $preview.sourceDigest
+        $reloadsBefore=$script:reloads
+        if($mode -eq 'third-version'){$script:loaded=[pscustomobject]@{ready=$true;version='other';buildId='3333333333333333'}}
+        if($mode -eq 'old-artifact-restored'){
+            $op=Join-Path $fixtureRoot ('.local/source-updates/'+$requestId)
+            Restore-NodeUpdateUnappliedArtifact (Join-Path $fixtureRoot 'dist') $op (Read-ComponentUpdateJson (Join-Path $op 'prepared.json'))
+        }
+        $recovery=Invoke-Fixture Recover $requestId 'v1' $preview.sourceDigest
+        Assert-Update ($script:reloads -eq $reloadsBefore) ($mode+' recovery never repeats Reload')
+        if($mode -eq 'wrong-old-artifact'){
+            Assert-Update ($recovery.phase -eq 'RECOVERY_REQUIRED' -and $recovery.code -eq 'UPDATE_OLD_ARTIFACT_IDENTITY_UNVERIFIED') 'old loaded build cannot certify a different rollback artifact'
+        }elseif($mode -eq 'third-version'){
+            Assert-Update ($recovery.phase -eq 'RECOVERY_REQUIRED' -and $recovery.code -eq 'UPDATE_LOADED_IDENTITY_UNVERIFIED') 'unexpected third build stays unknown'
+        }else{
+            Assert-Update ($recovery.phase -eq 'REJECTED' -and $recovery.code -eq 'UPDATE_ROLLED_BACK' -and $recovery.requestId -eq $requestId) ($mode+' original ID terminal')
+            Assert-Update ((Read-ComponentUpdateJson (Join-Path $fixtureRoot 'dist/identity.json')).buildId -eq '1111111111111111') 'confirmed old loaded build and artifact restored'
+            Assert-Update ((Invoke-Fixture Recover $requestId 'v1' $preview.sourceDigest).code -eq 'UPDATE_ROLLED_BACK') 'rollback replay is terminal'
+            $script:failReload=$false
+            Assert-Update ((Invoke-Fixture Update ([guid]::NewGuid().ToString('D')) 'v2' $preview.sourceDigest).phase -eq 'ACCEPTED') 'rollback permits subsequent new version'
+        }
+    }
+
+    $beforeReloads=$script:reloads
     $fixtureRoot=New-Fixture 'drift'; $script:failReload=$false; $script:drift=$true
     $preview=Invoke-Fixture Preview '' '' ''; $requestId=[guid]::NewGuid().ToString('D')
     $drift=Invoke-Fixture Update $requestId 'v1' $preview.sourceDigest
