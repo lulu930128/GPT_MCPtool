@@ -62,6 +62,19 @@ function Test-CbCooperativeControllerCommandLine([string]$CommandLine) {
     $encoded=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
     if($match.Groups['payload'].Value-ceq$encoded){return $true}
   }
+  # The automatic memory policy adds only an exact intent UUID to RestartCore.
+  # Re-encode the fixed shape so duplicate properties, extra arguments, changed
+  # casing and noncanonical JSON still cannot broaden the controller boundary.
+  try {
+    $document=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($match.Groups['payload'].Value))|ConvertFrom-Json
+    $values=@($document.arguments)
+    if($values.Count -eq 4 -and $values[0] -ceq '-Action' -and $values[1] -ceq 'RestartCore' -and
+       $values[2] -ceq '-MemoryMaintenanceIntentId' -and $values[3] -cmatch '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'){
+      $json=[pscustomobject]@{arguments=@('-Action','RestartCore','-MemoryMaintenanceIntentId',[string]$values[3])}|ConvertTo-Json -Compress
+      $encoded=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
+      return $match.Groups['payload'].Value -ceq $encoded
+    }
+  } catch {return $false}
   return $false
 }
 try {

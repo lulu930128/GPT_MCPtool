@@ -8,8 +8,11 @@ import { fileURLToPath } from "node:url";
 import { CodexAppServerClient } from "../dist/src/app-server-client.js";
 import { loadBridgeConfig } from "../dist/src/config.js";
 
-assert.equal(process.platform, "win32", "This check targets the pinned Windows 0.154.0 binary.");
+assert.equal(process.platform, "win32", "This check targets the Bridge private Windows binary.");
 const component = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const cliPackage = JSON.parse(await readFile(join(component, "node_modules", "@openai", "codex", "package.json"), "utf8"));
+const nativePackage = JSON.parse(await readFile(join(component, "node_modules", "@openai", "codex-win32-x64", "package.json"), "utf8"));
+assert.equal(nativePackage.version, `${cliPackage.version}-win32-x64`);
 const native = join(component, "node_modules", "@openai", "codex-win32-x64", "vendor", "x86_64-pc-windows-msvc", "bin", "codex.exe");
 const root = await mkdtemp(join(tmpdir(), "bridge-permission-schema-"));
 const home = join(root, "home");
@@ -34,7 +37,7 @@ const environment = { SystemRoot: "C:\\Windows", WINDIR: "C:\\Windows", USERPROF
   PATHEXT: ".COM;.EXE;.BAT;.CMD" };
 const version = spawnSync(native, ["--version"], { env: environment, encoding: "utf8", timeout: 15_000 });
 assert.equal(version.status, 0);
-assert.match(version.stdout, /\b0\.154\.0\b/);
+assert.equal(version.stdout.trim(), `codex-cli ${cliPackage.version}`);
 const schemaDir = join(root, "schema");
 const schema = spawnSync(native, ["app-server", "generate-json-schema", "--out", schemaDir, "--experimental"],
   { env: environment, encoding: "utf8", timeout: 15_000 });
@@ -68,7 +71,7 @@ try {
     const names = listed.stdout.trim().split(/\r?\n/).map((path) => path.slice(project.length + 1)).sort();
     assert.deepEqual(names, [...deniedNames].sort());
   }
-  console.log(JSON.stringify({ schema: "PASS", profileConfig: "PASS", syntheticDenyGlobScan: "PASS", version: "0.154.0",
+  console.log(JSON.stringify({ schema: "PASS", profileConfig: "PASS", syntheticDenyGlobScan: "PASS", version: cliPackage.version,
     realThreadStarted: false, realTurnStarted: false, planStartup: "UNVERIFIED",
     planHttps: "UNVERIFIED", secretIsolation: "UNVERIFIED" }, null, 2));
 } finally {

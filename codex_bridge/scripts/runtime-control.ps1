@@ -1,5 +1,6 @@
 param(
   [ValidateSet('SelfTest','InstalledBinding','Status','EnsureRunning','RepairConnectivity','RestartCore','ReloadRuntime','ShutdownRuntime')][string]$Action='Status',
+  [string]$MemoryMaintenanceIntentId,
   [string]$ProjectRoot,[string]$HostName='127.0.0.1',[int]$Port=18828,[string]$ProjectsFile,[string]$DataDir,[string]$Token=$env:CODEX_BRIDGE_HTTP_TOKEN,
   [string]$CodexCommand,[string]$CodexArgs,[string]$NodePath,[string]$TunnelClientPath,[string]$TunnelProfileDir,[string]$TunnelProfile='codex-bridge',[string]$TunnelId,[string]$TunnelHealthUrl='http://127.0.0.1:18829',
   [string]$KeyStorePath='C:\GPT_MCPtool\project_reading\scripts\key-store.ps1',[string]$SecretPath='C:\GPT_MCPtool\project_reading\.secrets\control-plane-api-key.dpapi',[string]$ExpectedBuildId,[string]$TestActiveFlag,
@@ -8,6 +9,7 @@ param(
 
 Set-StrictMode -Version 3.0
 $ErrorActionPreference='Stop'
+if($MemoryMaintenanceIntentId -and ($Action -cne 'RestartCore' -or $MemoryMaintenanceIntentId -cnotmatch '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$')){throw 'MEMORY_MAINTENANCE_SCOPE_REJECTED'}
 if (Test-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\mcp_control_center\config\installed-release.json')) {
   $env:PSModulePath='C:\Windows\System32\WindowsPowerShell\v1.0\Modules'
 }
@@ -16,7 +18,7 @@ if([string]::IsNullOrWhiteSpace($ProjectRoot)){$ProjectRoot=(Resolve-Path -Liter
 $installedModule=Import-Module (Join-Path $PSScriptRoot 'codex-bridge-runtime.psm1') -PassThru
 $isInstalled=& $installedModule {Test-CbInstalledLayout}
 if($isInstalled){
-  if(@($PSBoundParameters.Keys|Where-Object{$_ -notin @('Action','ProjectRoot')}).Count -gt 0 -or
+  if(@($PSBoundParameters.Keys|Where-Object{$_ -notin @('Action','ProjectRoot','MemoryMaintenanceIntentId')}).Count -gt 0 -or
     [IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\') -ine (Split-Path -Parent $PSScriptRoot)){throw 'INSTALLED_CALLER_OVERRIDE_REJECTED'}
   if($Action -eq 'InstalledBinding'){
     & $installedModule {$b=Get-CbInstalledBinding; if($b.activationReady){Assert-McpCcInstalledSelection $b};$b} | ConvertTo-Json -Depth 5
@@ -37,7 +39,7 @@ if($isInstalled){
 elseif($Action -eq 'InstalledBinding'){throw 'INSTALLED_RELEASE_REQUIRED'}
 if(-not $isInstalled -and (Test-Path -LiteralPath (Join-Path $ProjectRoot '..\daily-mode.json'))){
   . (Join-Path $PSScriptRoot 'daily-runtime-settings.ps1')
-  if(@($PSBoundParameters.Keys | Where-Object {$_ -notin @('Action','ProjectRoot')}).Count){throw 'DAILY_CALLER_OVERRIDE_REJECTED'}
+  if(@($PSBoundParameters.Keys | Where-Object {$_ -notin @('Action','ProjectRoot','MemoryMaintenanceIntentId')}).Count){throw 'DAILY_CALLER_OVERRIDE_REJECTED'}
   $context=New-CbDailyContext $ProjectRoot -RequireBearer:($Action -in @('EnsureRunning','RepairConnectivity','RestartCore','ReloadRuntime'))
 }
 elseif(-not $isInstalled){
@@ -76,7 +78,7 @@ try{
     & $installedModule {param($c) Assert-CbDailySelected $c} $context
   }
   $before=Get-CodexBridgeRuntimeStatus -Context $context -AdoptLegacyExactListeners:$AdoptLegacyExactListeners
-  if($Action-ne'Status'){Invoke-CodexBridgeLifecycleAction -Context $context -Action $Action}
+  if($Action-ne'Status'){Invoke-CodexBridgeLifecycleAction -Context $context -Action $Action -MemoryMaintenanceIntentId $MemoryMaintenanceIntentId}
   $after=Get-CodexBridgeRuntimeStatus -Context $context;$clock.Stop();$result=[pscustomobject]@{ok=$true;action=$Action;before=$before;after=$after;ownedPids=@($after.ownedPids);elapsedMs=[int]$clock.ElapsedMilliseconds;errorCode=$null;message=$(if($Action-eq'Status'){'Status checked.'}else{'Lifecycle action completed.'})}
   if($Action -ne 'Status'){Write-CodexBridgeLifecycleEvent -Context $context -Action $Action -Ok $true -BeforeStatus $before.status -AfterStatus $after.status -OwnedPids @($after.ownedPids) -ElapsedMs $result.elapsedMs -Message $result.message}
   $result|ConvertTo-Json -Depth 9;exit 0

@@ -675,14 +675,93 @@ function Repair-CbConnectivity {param($Context);$server=Resolve-CbRoleOwnership 
 
 function Assert-CbShutdownPreflight {param($Context);foreach($role in @('tunnel','server')){$ownership=Resolve-CbRoleOwnership -Context $Context -Role $role -ReadOnly;if(-not$ownership.canMutate){throw "OWNERSHIP_MISMATCH: Cannot mutate $role while ownership is $($ownership.state)."}}}
 
+function Write-CbMemoryIntent($Path,$Intent) {
+  # Fixed operational metadata only. No job, journal or secret contents.
+  Assert-CbCooperativeCodePath $Path
+  $temp=$Path+'.controller.tmp'
+  Assert-CbCooperativeCodePath $temp
+  $bytes=[Text.Encoding]::UTF8.GetBytes(($Intent|ConvertTo-Json -Depth 8 -Compress)+"`n")
+  $file=[IO.File]::Open($temp,'Create','Write','None')
+  try {$file.Write($bytes,0,$bytes.Length);$file.Flush($true)}finally{$file.Dispose()}
+  [IO.File]::Replace($temp,$Path,[NullString]::Value)
+}
+function Invoke-CbMemoryRestart($Context,[string]$IntentId) {
+  if($IntentId -cnotmatch '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'){throw 'MEMORY_INTENT_INVALID'}
+  $path=Join-Path $Context.dataDir 'memory-maintenance.json'
+  Assert-CbCooperativeCodePath $path
+  if((Get-Item -LiteralPath $path).Length -gt 8192){throw 'MEMORY_INTENT_INVALID'}
+  $intent=Get-Content -LiteralPath $path -Raw -Encoding UTF8|ConvertFrom-Json
+  if($intent.contract -cne 'bridge-memory-maintenance-v1' -or $intent.intentId -cne $IntentId -or $intent.phase -cne 'ready'){throw 'MEMORY_INTENT_NOT_READY'}
+  $before=Get-CbHealth $Context
+  if($null -eq $before -or $null -eq $before.PSObject.Properties['memoryMaintenance']){throw 'MEMORY_IDENTITY_UNKNOWN'}
+  $m=$before.memoryMaintenance
+  if($m.intentId -cne $IntentId -or $m.phase -cne 'ready' -or $m.admission -cne 'closed' -or
+    $m.identity.instance -cne $intent.old.instance -or $before.pid -ne $intent.old.pid -or
+    $m.identity.startedAt -cne $intent.old.startedAt -or $before.buildId -cne $intent.old.buildId -or
+    (Get-CbExpectedBuildId $Context) -cne $intent.old.buildId){throw 'MEMORY_IDENTITY_CHANGED'}
+  # Use the normal RestartCore preflight under the existing daily lease/mutex.
+  # Busy/preflight refusal must leave ready available to the next tray poll.
+  Assert-CbShutdownPreflight $Context
+  Assert-CbStartupPreflight $Context
+  Assert-CbCooperativeShutdownAvailable $Context
+  $core=Resolve-CbRoleOwnership $Context server -ReadOnly
+  $tunnel=Resolve-CbRoleOwnership $Context tunnel -ReadOnly
+  if($core.pid -ne $intent.old.pid -or $core.state -cne 'OwnedReady' -or $tunnel.state -cne 'OwnedReady' -or -not(Test-CbTunnelReady $Context)){throw 'MEMORY_OWNER_CHANGED'}
+  $oldCore=Get-CbProcess $core.pid
+  $oldTunnel=Get-CbProcess $tunnel.pid
+  # This is only an attempt marker for an uncertain Stop/Start, not a handoff ACK.
+  $intent.phase='restarting'
+  $intent|Add-Member -NotePropertyName restartRequestedAt -NotePropertyValue ([DateTime]::UtcNow.ToString('o')) -Force
+  Write-CbMemoryIntent $path $intent
+  try {
+    Stop-CbOwnedRole -Context $Context -Role server
+    Start-CbServer $Context
+    Assert-CbDailySelected $Context
+    $after=Get-CbHealth $Context
+    $newCore=Resolve-CbRoleOwnership $Context server -ReadOnly
+    $newTunnel=Resolve-CbRoleOwnership $Context tunnel -ReadOnly
+    $newProcess=Get-CbProcess $newCore.pid
+    $tunnelProcess=Get-CbProcess $newTunnel.pid
+    if($null -eq $after -or $after.ok -cne $true -or $after.buildId -cne $intent.old.buildId -or
+      $after.pid -eq $intent.old.pid -or $after.pid -ne $newCore.pid -or $newCore.state -cne 'OwnedReady' -or
+      $newProcess.StartTimeUtc -ceq $oldCore.StartTimeUtc -or
+      $newTunnel.pid -ne $tunnel.pid -or $newTunnel.state -cne 'OwnedReady' -or $tunnelProcess.StartTimeUtc -cne $oldTunnel.StartTimeUtc -or
+      -not(Test-CbTunnelReady $Context) -or $after.stores.jobs -cne 'OPEN' -or $after.stores.review -cne 'OPEN' -or
+      $after.jobs.scope -cne 'all' -or $after.jobs.active -ne 0 -or $after.jobs.awaitingApproval -ne 0 -or
+      $after.memoryMaintenance.intentId -cne $IntentId -or $after.memoryMaintenance.phase -cne 'cooldown' -or
+      $after.memoryMaintenance.admission -cne 'open' -or
+      $after.memoryMaintenance.identity.instance -ceq $intent.old.instance -or
+      $after.memoryMaintenance.identity.pid -ne $newCore.pid -or $after.memoryMaintenance.identity.buildId -cne $intent.old.buildId){throw 'MEMORY_RESTART_VERIFY_FAILED'}
+  } catch {
+    # Only an explicit cooperative refusal is safe to retry. Never overwrite a
+    # replacement's recovery with the old controller's late failure/result.
+    if($_.Exception.Message -cmatch '^ACTIVE_WORK_PRESENT:'){
+      $observed=Get-CbHealth $Context
+      if($null -ne $observed -and $observed.pid -eq $intent.old.pid -and
+        $observed.memoryMaintenance.identity.instance -ceq $intent.old.instance){
+        $intent.phase='ready';Write-CbMemoryIntent $path $intent
+      }
+    }
+    throw
+  }
+}
+
 function Invoke-CodexBridgeLifecycleAction {
-  param($Context,[ValidateSet('EnsureRunning','RepairConnectivity','RestartCore','ReloadRuntime','ShutdownRuntime')][string]$Action)
+  param($Context,[ValidateSet('EnsureRunning','RepairConnectivity','RestartCore','ReloadRuntime','ShutdownRuntime')][string]$Action,[string]$MemoryMaintenanceIntentId)
   Assert-CbInstalledMutationBlocked $Context
   [void](Get-CbExpectedBuildId -Context $Context)
   switch($Action){
     'EnsureRunning'{Assert-CbTunnelIdentityReady -Context $Context;Start-CbServer -Context $Context;Repair-CbConnectivity -Context $Context}
     'RepairConnectivity'{Assert-CbTunnelIdentityReady -Context $Context;Repair-CbConnectivity -Context $Context}
     'RestartCore'{
+      if($MemoryMaintenanceIntentId){Invoke-CbMemoryRestart $Context $MemoryMaintenanceIntentId;return}
+      # Ordinary RestartCore also handles a drained memory intent. Retain the
+      # old parameter for older CC callers, without requiring it for automation.
+      $health=Get-CbHealth $Context
+      if($null -ne $health -and $null -ne $health.PSObject.Properties['memoryMaintenance'] -and
+        $health.memoryMaintenance.phase -ceq 'ready' -and $health.memoryMaintenance.admission -ceq 'closed'){
+        Invoke-CbMemoryRestart $Context $health.memoryMaintenance.intentId;return
+      }
       Assert-CbShutdownPreflight $Context
       Assert-CbStartupPreflight $Context
       Assert-CbCooperativeShutdownAvailable $Context

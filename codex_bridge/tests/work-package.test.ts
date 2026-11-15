@@ -31,6 +31,28 @@ test("request markdown scopes Git to user authorization and preserves safety req
   assert.doesNotMatch(markdown, /Do not commit, push, publish/);
 });
 
+test("custom model IDs preserve spelling, normalize surrounding whitespace and reject explicit empty IDs", () => {
+  const input = { projectId: "omi", title: "Custom model", objective: "Offline only" };
+  const preview = previewWorkPackage({ ...input, model: "  Vendor/Exact-Model.ID  ", effort: "max" });
+  assert.equal(preview.workPackage.model, "Vendor/Exact-Model.ID");
+  assert.equal(preview.workPackage.effort, "max");
+  assert.equal(previewWorkPackage(input).workPackage.model, undefined);
+  for (const model of ["", "   ", "x".repeat(121)]) assert.throws(() => previewWorkPackage({ ...input, model }), /model/);
+});
+
+test("speed is explicit, normalized and bound to the work-package digest and request", () => {
+  const input = { projectId: "omi", title: "Speed", objective: "使用加速模式" };
+  const standard = previewWorkPackage(input);
+  const fast = previewWorkPackage({ ...input, speed: "fast" });
+  assert.equal(standard.workPackage.speed, "standard", "Prompt text must not automatically select Fast");
+  assert.equal(standard.previewDigest, previewWorkPackage({ ...input, speed: "standard" }).previewDigest);
+  assert.notEqual(fast.previewDigest, standard.previewDigest);
+  assert.match(renderRequestMarkdown(fast.workPackage, "fixture"), /Requested speed \(initial turn only\): `fast`/);
+  for (const speed of ["default", "FAST", "turbo", "", null, false, 1]) {
+    assert.throws(() => previewWorkPackage({ ...input, speed: speed as any }), /Unsupported speed/);
+  }
+});
+
 test("preview normalizes work packages and produces a stable digest", () => {
   const first = previewWorkPackage({
     projectId: "omi",

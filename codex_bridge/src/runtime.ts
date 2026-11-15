@@ -1,4 +1,6 @@
 import { readFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { MemoryMaintenance, type MaintenanceWork } from "./memory-maintenance.js";
 import { join } from "node:path";
 import { CodexAppServerClient } from "./app-server-client.js";
 import type { BridgeConfig } from "./config.js";
@@ -33,6 +35,9 @@ export interface BridgeRuntime {
   powershellHost?: PowerShellHostPort;
   // Explicit installed lifecycle/operator boundary, never called by read-only tools.
   powershellHostTransport?: ReturnType<typeof createNativeHostTransport>;
+  memoryMaintenance?: MemoryMaintenance;
+  activity?: { tools: number; http: number };
+  maintenanceWork?: () => MaintenanceWork;
   close: () => Promise<void>;
 }
 
@@ -65,12 +70,26 @@ export async function createBridgeRuntime(config: BridgeConfig): Promise<BridgeR
     projects: config.projects, readJob: id => store.snapshot(id) }) : undefined;
   const hostTransport = hostPort ? createNativeHostTransport(hostPort, config.installedBinding, config.projectRoot) : undefined;
   const powershellHost = hostPort;
+  const activity = { tools: 0, http: 0 };
+  const maintenanceWork = (): MaintenanceWork => {
+    const jobs = store.listAll();
+    return { jobs: jobs.filter(j => ["queued", "preparing", "running", "awaiting_approval"].includes(j.status)).length,
+      approvals: jobs.reduce((n, j) => n + j.pendingApprovalCount, 0), operations: store.pendingAdmissions,
+      tools: activity.tools, http: activity.http, background: controller.maintenancePending + (hostTransport?.status().active || hostTransport?.status().closed ? 1 : 0),
+      controllerReady: ["idle", "ready"].includes(controller.status) };
+  };
+  const memoryMaintenance = new MemoryMaintenance(store, config.dataDir, {
+    pid: process.pid, instance: randomUUID(), buildId: config.buildId, startedAt: new Date().toISOString(),
+  }, maintenanceWork);
+  await memoryMaintenance.initialize();
+  memoryMaintenance.start();
   // Preflight is an explicit diagnostic action. Startup and pure getters never
   // launch the native helper; missing owner/platform leaves NORMAL/ADMIN closed.
   let closing: Promise<void> | undefined;
   return { config, store, textBundles, controller, conversations, widgetHtml, privilegedBroker, selfReload, selfReloadHtml,
+    memoryMaintenance, activity, maintenanceWork,
     ...review, powershellHost, powershellHostTransport: hostTransport, close: () => closing ??= closeResources([
-      async () => { await hostTransport?.close(); }, () => selfReload.close(), () => privilegedBroker.close(),
+      () => memoryMaintenance.close(), async () => { await hostTransport?.close(); }, () => selfReload.close(), () => privilegedBroker.close(),
       () => controller.close(), async () => {
         if (!review.approvalStore) return;
         await review.approvalStore.close();

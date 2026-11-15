@@ -1,10 +1,11 @@
-# App Server 0.154.0 control-plane contract
+# App Server control-plane contract
 
 ## Protocol 與 ownership
 
-本功能以鎖定的 `@openai/codex@0.154.0` binary 執行
-`node node_modules/@openai/codex/bin/codex.js app-server generate-ts --experimental --out .tmp/control-plane-0154-protocol`
-所得的 protocol 為準。未新增 dependency，未依賴 main 分支的欄位。
+本功能以 Bridge 私有的 `@openai/codex@0.165.0` binary 執行
+`node node_modules/@openai/codex/bin/codex.js app-server generate-ts --experimental --out .tmp/control-plane-protocol`
+所得的 protocol 為準，不依賴 main 分支的欄位。CLI/native 必須同版且來自既有 release 路徑；
+版本由 package/lock 管理，installed activation 不另設版本 allowlist。
 
 `CodexBridgeController` 持有唯一 `ControlPlaneReader`，共用既有 stdio transport。
 JobStore 繼續擁有 action receipts、job/thread mapping 與 conversation journal/checkpoint；
@@ -27,7 +28,9 @@ UnifiedConversationRegistry 只合併同一 thread/turn 的 telemetry，native h
 - `{status:"unavailable", code:"UNSUPPORTED"|"AUTH_UNAVAILABLE"|"BACKEND_UNAVAILABLE"}`
 - `{status:"error", code:"INVALID_RESPONSE"}`
 
-頂層含 `fetchedAt` 與 `protocolVersion`（正規化 contract 版本，不是 active binary 的身分證明）。
+頂層含 `fetchedAt` 與 `protocolVersion`。後者取自目前 stdio App Server 的 initialize userAgent
+所報 build version，未連線或無法辨識時為 `null`；不以套件版本或固定常數代填。
+這是 server 自報值，不代替 update owner 的 loaded identity、路徑與 hash 驗證。
 一項 unsupported 不影響其餘結果。`null` 保持未知；缺少必要欄位、malformed response、
 非有限值或超過 JavaScript safe integer 的計數回 error，不偽造零或空 inventory。
 Backend error message/data 不對外回傳。未選取的 inventory 類別不發出 RPC。
@@ -42,6 +45,7 @@ Backend error message/data 不對外回傳。未選取的 inventory 類別不發
   dailyUsageBuckets 依 backend 順序最多 90 筆。不回 account ID、upsell payload 或 billing/auth metadata。
 - Runtime：只回 process memory 計量與最多 100 個 gauges；permission profile 只回 id/allowed；
   sandbox 只回 readiness；provider 只回 namespaceTools/imageGeneration/webSearch；features 回 name/stage/enabled/defaultEnabled。
+  0.165.0 不再回傳 namespaceTools，Bridge 保留此欄位為 null（未知），不推定 false；舊 boolean 回應仍相容。
 - Inventory：skills 僅 name/scope/enabled；hooks 僅 eventName/handlerType/enabled/isManaged/trustStatus；
   另回 error/warning 數量，不回內容。MCP 僅 name/runtimeStatus/authStatus/toolDiscoveryFailed。
   `authStatus` 是狀態 enum，不是 credential；`runtimeStatus=null` 保持未知。
@@ -58,7 +62,7 @@ account mutation 或 remote control 工具。
 `modelContextWindow`。Breakdown 含 totalTokens/inputTokens/cachedInputTokens/cacheWriteInputTokens/outputTokens/reasoningOutputTokens。
 不以 token 數猜測 context pressure，亦不把 cumulative total 當 current context。
 
-`model/rerouted` 保存 `fromModel`、`toModel`、`reason`（0.154.0 為 `highRiskCyberActivity`）、
+`model/rerouted` 保存 `fromModel`、`toModel`、`reason`（已驗 protocol 為 `highRiskCyberActivity`）、
 `executedModel=toModel`、Bridge 設定的 `requestedModel`（未指定時 null）、`source="model/rerouted"`。
 Job 的既有 `model` 仍表示 request/config，不保證 executed model。
 
@@ -91,7 +95,7 @@ Ambiguous response 保留 preparing job/unknown receipt，後續通知可結算�
 
 ## Fork 為何 blocked
 
-0.154.0 `thread/fork` 由 native 端產生新 thread ID，沒有 client idempotency key 或能由 Bridge 預先指定的目的 thread ID。
+已驗證的 `thread/fork` protocol 仍由 native 端產生新 thread ID，沒有 client idempotency key 或能由 Bridge 預先指定的目的 thread ID。
 即使先建立 JobStore intent，response 遺失或 native fork 成功後 Bridge 持久化失敗，仍無法可靠決定哪個新 thread 屬於該 intent。
 `forkedFromId` 只能指出共同來源，不能區分同來源的多次合法 fork。這會留下無 owner thread 或造成重複 fork。
 因此本版在 native RPC 前回 typed blocked；不新增 state store，也不以掃描猜測完成 mapping。

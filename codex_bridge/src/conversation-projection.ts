@@ -291,6 +291,13 @@ export function mergeConversationMessages(
     item.context = message.context ? bounded(message.context, MAX_MESSAGE_CHARS) : undefined;
     item.inputArtifacts = structuredClone(message.inputArtifacts ?? []);
     item.clientMessageId = message.clientMessageId;
+    item.speed = message.speed;
+    item.model = message.model;
+    item.effort = message.effort;
+    item.selectionRecorded = message.selectionRecorded;
+    item.selectionKind = message.selectionKind;
+    item.modelSource = message.modelSource;
+    item.effortSource = message.effortSource;
   }
 
   // Once App Server history has synchronized successfully, it is authoritative.
@@ -319,6 +326,13 @@ export function mergeConversationMessages(
       updatedAt: message.at,
       timestampSource: "bridge",
       clientMessageId: message.clientMessageId,
+      speed: message.speed,
+      model: message.model,
+      effort: message.effort,
+      selectionRecorded: message.selectionRecorded,
+      selectionKind: message.selectionKind,
+      modelSource: message.modelSource,
+      effortSource: message.effortSource,
       inputArtifacts: structuredClone(message.inputArtifacts ?? []),
     }, true);
   }
@@ -450,8 +464,17 @@ function mergeHydratedTurn(
     status: hydrated.status === "unknown" ? current.status : hydrated.status,
     items: hydrated.items.map((item) => {
       const previous = current.items.find((candidate) => candidate.id === item.id);
+      const selection = item.type === "userMessage" && item.clientMessageId && item.clientMessageId === previous?.clientMessageId
+        ? previous : undefined;
       const merged: ConversationItemProjection = {
         ...item,
+        speed: selection?.speed,
+        model: selection?.model,
+        effort: selection?.effort,
+        selectionRecorded: selection?.selectionRecorded,
+        selectionKind: selection?.selectionKind,
+        modelSource: selection?.modelSource,
+        effortSource: selection?.effortSource,
         context: previous?.context,
         inputArtifacts: previous?.inputArtifacts,
         approvalId: previous?.approvalId,

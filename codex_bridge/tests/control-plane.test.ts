@@ -3,9 +3,9 @@ import test from "node:test";
 import { ControlPlaneReader } from "../src/control-plane.js";
 import type { AppServerTransport } from "../src/app-server-client.js";
 
-function fixture(responses: Record<string, unknown>) {
+function fixture(responses: Record<string, unknown>, protocolVersion?: string | null) {
   const calls: Array<{ method: string; params: unknown }> = [];
-  const reader = new ControlPlaneReader({ request: async (method: string, params: unknown) => {
+  const reader = new ControlPlaneReader({ protocolVersion, request: async (method: string, params: unknown) => {
     calls.push({ method, params });
     const response = responses[method];
     if (response instanceof Error) throw response;
@@ -19,7 +19,7 @@ const rate = { limitId: "codex", limitName: "Codex", normalModelSlug: null,
   credits: { hasCredits: true, unlimited: false, balance: "5.25" }, spendControlReached: null, planType: "pro", rateLimitReachedType: null };
 const summary = { lifetimeTokens: null, peakDailyTokens: 123, longestRunningTurnSec: 60, currentStreakDays: null, longestStreakDays: 4 };
 
-test("usage selects 0.154.0 fields, retains null and bounds buckets/credits without raw account metadata", async () => {
+test("usage selects supported fields, retains null and bounds buckets/credits without raw account metadata", async () => {
   const { reader, calls } = fixture({
     "account/rateLimits/read": { ordinaryUsageAllowed: null, rateLimits: rate, rateLimitsByLimitId: { codex: rate }, accountId: "private-account", rateLimitUpsell: { token: "private-token" },
       rateLimitResetCredits: { availableCount: 80, credits: Array.from({ length: 80 }, () => ({ id: "private-credit", resetType: "primary", status: "available", grantedAt: 20, expiresAt: null })) } },
@@ -38,6 +38,15 @@ test("usage selects 0.154.0 fields, retains null and bounds buckets/credits with
   assert.equal(result.accountUsage.truncated, true);
   assert.doesNotMatch(JSON.stringify(result), /private-|secret/);
   assert.deepEqual(calls.map((call) => call.params), [{}, {}]);
+});
+
+test("control plane reports the connected server version without a package or fixed-version fallback", async () => {
+  for (const version of ["0.165.0", "1.0.0", null, undefined]) {
+    const { reader } = fixture({}, version);
+    for (const result of [await reader.usage(), await reader.runtime("fixture"), await reader.inventory("fixture")]) {
+      assert.equal(result.protocolVersion, version ?? null);
+    }
+  }
 });
 
 test("usage failures, unsupported auth and invalid/unsafe integers never become zero", async () => {
@@ -69,6 +78,20 @@ test("runtime diagnostics isolate failures, select safe capabilities and disclos
   assert.equal(result.experimentalFeatures.status, "available");
   assert.doesNotMatch(JSON.stringify(result), /private|configured-project/);
   assert.deepEqual(calls.find((call) => call.method === "permissionProfile/list")?.params, { cwd: "configured-project", limit: 100 });
+});
+
+test("provider capabilities preserve unknown after namespaceTools removal without masking malformed fields", async () => {
+  const read = async (value: unknown) => (await fixture({ "modelProvider/capabilities/read": value }).reader.runtime("fixture")).modelProvider;
+  assert.deepEqual(await read({ imageGeneration: true, webSearch: false }), {
+    status: "available", data: { namespaceTools: null, imageGeneration: true, webSearch: false }, truncated: false,
+  });
+  assert.deepEqual(await read({ namespaceTools: false, imageGeneration: true, webSearch: false }), {
+    status: "available", data: { namespaceTools: false, imageGeneration: true, webSearch: false }, truncated: false,
+  });
+  for (const value of [{ imageGeneration: true }, { imageGeneration: "true", webSearch: false },
+    { namespaceTools: "false", imageGeneration: true, webSearch: false }]) {
+    assert.deepEqual(await read(value), { status: "error", code: "INVALID_RESPONSE" });
+  }
 });
 
 test("skills/hooks/MCP inventory never returns paths, commands, schemas, raw auth or errors", async () => {

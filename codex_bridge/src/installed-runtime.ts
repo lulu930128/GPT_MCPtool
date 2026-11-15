@@ -219,5 +219,13 @@ export async function assertInstalledRuntimeActivation(expected?: InstalledBridg
   }
   const cli = JSON.parse(await readFile(win32.join(actual.codeRoot, "node_modules", "@openai", "codex", "package.json"), "utf8"));
   const native = JSON.parse(await readFile(packagePath, "utf8"));
-  if (cli.version !== "0.154.0" || native.version !== "0.154.0-win32-x64") throw new Error("INSTALLED_CODEX_VERSION_REJECTED");
+  assertInstalledCodexVersions(cli.version, native.version);
+}
+
+export function assertInstalledCodexVersions(cliVersion: unknown, nativeVersion: unknown): void {
+  // The release owns its dependency version. Keep the CLI/native pair coherent
+  // without maintaining a second version pin beside package.json/package-lock.
+  if (typeof cliVersion !== "string" || !cliVersion.trim() || nativeVersion !== `${cliVersion}-win32-x64`) {
+    throw new Error("INSTALLED_CODEX_VERSION_REJECTED");
+  }
 }

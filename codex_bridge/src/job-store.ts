@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { MemoryMaintenanceError } from "./memory-maintenance.js";
 import { appendFile, copyFile, mkdir, open, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 import type {
@@ -21,8 +23,10 @@ import type {
   JobSnapshot,
   JobStatus,
   JobSummary,
+  ModelSelectionMetadata,
   PendingApproval,
   ReasoningEffort,
+  TurnSpeed,
   MaterializedTextArtifact,
   StagedTextArtifact,
   TextArtifactSummary,
@@ -36,7 +40,7 @@ import {
   reduceConversationNotification,
   type ConversationNotification,
 } from "./conversation-projection.js";
-import { renderRequestMarkdown } from "./work-package.js";
+import { normalizeTurnSpeed, recordModelSelection, renderRequestMarkdown } from "./work-package.js";
 import { sanitizeForStorage } from "./redaction.js";
 import { CONVERSATION_DELIVERY, RecentConversationChanges, isCoalescibleConversationNotification } from "./conversation-delivery.js";
 
@@ -52,7 +56,8 @@ export interface CreateJobInput {
   inputArtifacts?: StagedTextArtifact[];
 }
 
-export interface AppendUserMessageInput {
+export interface AppendUserMessageInput extends ModelSelectionMetadata {
+  speed?: TurnSpeed;
   clientMessageId: string;
   content: string;
   context?: string;
@@ -64,7 +69,8 @@ export interface AppendUserMessageInput {
   inputArtifacts?: StagedTextArtifact[];
 }
 
-export interface PrepareTurnInput {
+export interface PrepareTurnInput extends ModelSelectionMetadata {
+  speed?: TurnSpeed;
   controlAction?: JobRecord["controlAction"];
   executionMode: ExecutionMode;
   approvalReviewer: ApprovalReviewer;
@@ -125,6 +131,23 @@ export class JobStore {
   private readonly conversationFlushFailures = new Set<string>();
   private lock: Promise<void> = Promise.resolve();
   private selfReloadLease: { requestId: string; expiresAt: string } | undefined;
+  private memoryAdmission?: () => unknown;
+  private readonly admitted = new AsyncLocalStorage<{ active: boolean }>();
+  private admittedOperations = 0;
+
+  get pendingAdmissions() { return this.admittedOperations; }
+  get memoryDraining() { return Boolean(this.memoryAdmission); }
+  async setMemoryAdmission(snapshot: () => unknown, persist?: () => Promise<void>) {
+    await this.exclusive(async () => { this.memoryAdmission = snapshot; await persist?.(); });
+  }
+  async clearMemoryAdmission() { await this.exclusive(async () => { this.memoryAdmission = undefined; }); }
+  async withAdmission<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.admitted.getStore()?.active) return operation();
+    const token = { active: true };
+    await this.exclusive(async () => { this.assertAdmissionOpen(); this.admittedOperations++; });
+    try { return await this.admitted.run(token, operation); }
+    finally { token.active = false; this.admittedOperations--; }
+  }
 
   get selfReloadDrain() { return this.selfReloadLease ? { ...this.selfReloadLease } : null; }
 
@@ -147,6 +170,7 @@ export class JobStore {
 
   private assertAdmissionOpen(): void {
     if (this.selfReloadLease) throw new Error("SELF_RELOAD_DRAINING");
+    if (this.memoryAdmission && !this.admitted.getStore()?.active) throw new MemoryMaintenanceError(this.memoryAdmission());
   }
 
   constructor(
@@ -224,6 +248,7 @@ export class JobStore {
       const id = randomUUID();
       const now = new Date().toISOString();
       const record: JobRecord = {
+        ...recordModelSelection(input.workPackage),
         schemaVersion: 1,
         dispatchSource: input.dispatchSource ?? "app",
         id,
@@ -241,6 +266,7 @@ export class JobStore {
         currentDataClassification: input.workPackage.dataClassification,
         model: input.workPackage.model,
         effort: input.workPackage.effort,
+        speed: normalizeTurnSpeed(input.workPackage.speed),
         approvals: [],
         inputArtifacts: summarizeArtifacts(input.inputArtifacts ?? []),
       };
@@ -252,6 +278,7 @@ export class JobStore {
         "utf8",
       );
       const initialMessage: ConversationMessage = {
+        ...recordModelSelection(input.workPackage),
         id: randomUUID(),
         clientMessageId: `initial:${id}`,
         role: "user",
@@ -263,6 +290,7 @@ export class JobStore {
         dataClassification: input.workPackage.dataClassification,
         model: input.workPackage.model,
         effort: input.workPackage.effort,
+        speed: normalizeTurnSpeed(input.workPackage.speed),
         inputArtifacts: record.inputArtifacts,
       };
       await writeFile(this.messagesPath(id), `${JSON.stringify(initialMessage)}\n`, "utf8");
@@ -451,6 +479,18 @@ export class JobStore {
     };
   }
 
+  async isUserMessageRetry(jobId: string, input: AppendUserMessageInput): Promise<boolean> {
+    if (!this.messageClientIds.get(jobId)?.has(input.clientMessageId)) return false;
+    const existing = (await this.readAllMessages(jobId)).find((message) => message.clientMessageId === input.clientMessageId);
+    const fingerprint = (message: AppendUserMessageInput | ConversationMessage) => JSON.stringify([
+      message.content, message.context || "", message.executionMode, message.approvalReviewer,
+      message.dataClassification, message.model, message.effort, message.speed ?? "standard",
+      (message.inputArtifacts ?? []).map(({ id, sha256 }) => [id, sha256]),
+    ]);
+    if (!existing || fingerprint(existing) !== fingerprint(input)) throw new Error("The client message id was already used for different content or settings.");
+    return true;
+  }
+
   async appendUserMessage(
     jobId: string,
     input: AppendUserMessageInput,
@@ -461,16 +501,14 @@ export class JobStore {
       const persistenceFailure = this.conversationFailures.get(jobId);
       if (persistenceFailure) throw persistenceFailure;
       const ids = this.messageClientIds.get(jobId) ?? new Set<string>();
-      if (ids.has(input.clientMessageId)) {
-        const existing = (await this.readAllMessages(jobId)).find((message) => message.clientMessageId === input.clientMessageId);
-        const fingerprint = (message: Pick<ConversationMessage, "content" | "context" | "executionMode" | "approvalReviewer" | "dataClassification" | "model" | "effort" | "inputArtifacts">) => JSON.stringify([
-          message.content, message.context || "", message.executionMode, message.approvalReviewer,
-          message.dataClassification, message.model, message.effort, (message.inputArtifacts ?? []).map(({ id, sha256 }) => [id, sha256]),
-        ]);
-        if (!existing || fingerprint(existing) !== fingerprint(input)) throw new Error("The client message id was already used for different content or settings.");
+      if (await this.isUserMessageRetry(jobId, input)) {
         return { record: structuredClone(record), created: false };
       }
       const message: ConversationMessage = {
+        selectionRecorded: true,
+        selectionKind: input.selectionKind ?? (ACTIVE_STATUSES.has(record.status) ? "steer" : "turn"),
+        modelSource: input.modelSource ?? (input.model === undefined ? "default" : "explicit"),
+        effortSource: input.effortSource ?? (input.effort === undefined ? "default" : "explicit"),
         id: randomUUID(),
         clientMessageId: input.clientMessageId,
         role: "user",
@@ -482,6 +520,7 @@ export class JobStore {
         dataClassification: input.dataClassification,
         model: input.model,
         effort: input.effort,
+        speed: input.speed,
         inputArtifacts: summarizeArtifacts(input.inputArtifacts ?? []),
       };
       await this.materializeInputArtifacts(jobId, input.inputArtifacts ?? []);
@@ -516,10 +555,17 @@ export class JobStore {
       record.currentDataClassification = input.dataClassification;
       record.model = input.model;
       record.effort = input.effort;
+      const selection = input.controlAction ? recordModelSelection({}, input) : recordModelSelection(input);
+      Object.assign(record, selection, {
+        modelSource: input.modelSource ?? selection.modelSource,
+        effortSource: input.effortSource ?? selection.effortSource,
+      });
+      record.speed = input.controlAction ? undefined : normalizeTurnSpeed(input.speed);
       return {
         type: "conversation.turn.preparing",
         message: "Preparing the next Codex turn.",
-        data: { executionMode: input.executionMode, approvalReviewer: input.approvalReviewer, model: input.model, effort: input.effort },
+        data: { executionMode: input.executionMode, approvalReviewer: input.approvalReviewer, model: input.model, effort: input.effort, speed: record.speed,
+          selectionRecorded: record.selectionRecorded, selectionKind: record.selectionKind, modelSource: record.modelSource, effortSource: record.effortSource },
       };
     });
   }
@@ -707,6 +753,10 @@ export class JobStore {
           turnId: result.turnId || record.turnId,
           model: record.model,
           effort: record.effort,
+          selectionRecorded: record.selectionRecorded,
+          selectionKind: record.selectionKind,
+          modelSource: record.modelSource,
+          effortSource: record.effortSource,
           resultStatus: result.status,
         };
         await appendFile(this.messagesPath(jobId), `${JSON.stringify(message)}\n`, "utf8");
@@ -1283,6 +1333,7 @@ export class JobStore {
         dataClassification: record.workPackage.dataClassification,
         model: record.workPackage.model,
         effort: record.workPackage.effort,
+        speed: record.workPackage.speed,
         inputArtifacts: record.inputArtifacts,
       },
     ];
@@ -1724,6 +1775,11 @@ function decodeConversationCursor(cursor: string): { createdAt: string; id: stri
 
 export function toSummary(record: JobRecord): JobSummary {
   return {
+    selectionRecorded: record.selectionRecorded,
+    selectionKind: record.selectionKind,
+    modelSource: record.modelSource,
+    effortSource: record.effortSource,
+    speed: record.speed,
     id: record.id,
     projectId: record.project.id,
     projectName: record.project.name,
@@ -1738,8 +1794,8 @@ export function toSummary(record: JobRecord): JobSummary {
     updatedAt: record.updatedAt,
     threadId: record.threadId,
     turnId: record.turnId,
-    model: record.model ?? record.workPackage.model,
-    effort: record.effort ?? record.workPackage.effort,
+    model: record.selectionRecorded ? record.model : record.model ?? record.workPackage.model,
+    effort: record.selectionRecorded ? record.effort : record.effort ?? record.workPackage.effort,
     pendingApprovalCount: record.approvals.filter((approval) => approval.state === "pending").length,
     result: record.result,
   };

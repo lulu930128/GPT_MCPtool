@@ -7,7 +7,17 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { loadBridgeConfig, resolveInstalledCodexLaunch } from "../src/config.js";
 import { createBridgeRuntime } from "../src/runtime.js";
-import { assertInstalledEnvironment, hasInstalledLayout, installedCodexEnvironment, loadInstalledBinding, parseInstalledBinding, type InstalledBridgeBinding } from "../src/installed-runtime.js";
+import { assertInstalledCodexVersions, assertInstalledEnvironment, hasInstalledLayout, installedCodexEnvironment, loadInstalledBinding, parseInstalledBinding, type InstalledBridgeBinding } from "../src/installed-runtime.js";
+
+test("installed Codex accepts matching release versions without an old-version allowlist", () => {
+  for (const version of ["0.154.0", "0.165.0", "1.0.0"]) {
+    assert.doesNotThrow(() => assertInstalledCodexVersions(version, `${version}-win32-x64`));
+  }
+  for (const [cli, native] of [["0.165.0", "0.154.0-win32-x64"], ["0.165.0", "0.165.0-win32-arm64"],
+    [undefined, undefined], [null, "null-win32-x64"], ["", "-win32-x64"], [" ", " -win32-x64"], ["0.165.0", undefined]]) {
+    assert.throws(() => assertInstalledCodexVersions(cli, native), /INSTALLED_CODEX_VERSION_REJECTED/);
+  }
+});
 
 function bindingFixture(): InstalledBridgeBinding {
   const releaseRoot = "C:\\Program Files\\McpCcReleases\\release-a";

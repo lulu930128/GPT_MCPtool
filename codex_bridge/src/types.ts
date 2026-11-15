@@ -2,9 +2,21 @@ export type ExecutionMode = "plan" | "workspace_write";
 
 export type ApprovalReviewer = "user" | "auto_review";
 
+// Requested speed for one new turn, never an assertion of actual execution tier.
+export type TurnSpeed = "standard" | "fast";
+
 export type DataClassification = "personal" | "public" | "company_approved";
 
 export type ReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+
+// Submitted settings, not provider execution attestation. Missing marker means
+// legacy provenance is unknown, even when a legacy value itself is available.
+export interface ModelSelectionMetadata {
+  selectionRecorded?: true;
+  selectionKind?: "turn" | "steer";
+  modelSource?: "explicit" | "inherited" | "default";
+  effortSource?: "explicit" | "inherited" | "default";
+}
 
 export type JobStatus =
   | "queued"
@@ -23,6 +35,7 @@ export interface BridgeProject {
 }
 
 export interface WorkPackage {
+  speed?: TurnSpeed;
   projectId: string;
   title: string;
   objective: string;
@@ -85,7 +98,8 @@ export interface CodexModelOption {
   supportedReasoningEfforts: CodexReasoningEffortOption[];
 }
 
-export interface ConversationMessage {
+export interface ConversationMessage extends ModelSelectionMetadata {
+  speed?: TurnSpeed;
   id: string;
   clientMessageId?: string;
   role: "user" | "assistant";
@@ -122,7 +136,10 @@ export interface ConversationFileChangeProjection {
   diffTruncated?: boolean;
 }
 
-export interface ConversationItemProjection {
+export interface ConversationItemProjection extends ModelSelectionMetadata {
+  model?: string;
+  effort?: ReasoningEffort;
+  speed?: TurnSpeed;
   id: string;
   turnId: string;
   type: ConversationProjectionItemType;
@@ -267,7 +284,8 @@ export interface JobResult {
   turnId?: string;
 }
 
-export interface JobRecord {
+export interface JobRecord extends ModelSelectionMetadata {
+  speed?: TurnSpeed;
   controlAction?: { kind: "compact" | "review"; priorTurnId: string };
   dispatchSource?: "app" | "model_direct";
   directRequests?: Record<string, { digest: string; state: "pending" | "completed" | "unknown"; inputVersion?: 2 }>;
@@ -294,7 +312,8 @@ export interface JobRecord {
   result?: JobResult;
 }
 
-export interface JobSummary {
+export interface JobSummary extends ModelSelectionMetadata {
+  speed?: TurnSpeed;
   id: string;
   projectId: string;
   projectName: string;
@@ -472,6 +491,7 @@ export interface UnifiedConversationDiagnostic {
 }
 
 export interface BridgeStatus {
+  maintenance?: ReturnType<import("./memory-maintenance.js").MemoryMaintenance["snapshot"]>;
   ok: boolean;
   service: string;
   version: string;
@@ -479,6 +499,7 @@ export interface BridgeStatus {
   controller: "idle" | "starting" | "ready" | "unavailable";
   projects: Array<Pick<BridgeProject, "id" | "name">>;
   models: CodexModelOption[];
+  modelPresets: Array<{ id: string; model: string; effort: ReasoningEffort; reason: string; availability: "NOT VERIFIED" | "NATIVE LISTED" | "UNAVAILABLE"; availabilityReason: string }>;
   recentJobs: JobSummary[];
   conversationNextCursor?: string;
   stateVersion: number;

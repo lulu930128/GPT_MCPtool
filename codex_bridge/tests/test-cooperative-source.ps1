@@ -89,6 +89,17 @@ foreach($tree in @($sourceTree,'C:\fixture release\versions\r10')){
   }
 }
 $scriptsRoot=Join-Path $root 'scripts'
+$memoryId=[guid]::NewGuid().ToString()
+$memoryCommand=New-ManagerCommand $sourceTree @('-Action','RestartCore','-MemoryMaintenanceIntentId',$memoryId)
+if(-not(Test-ControllerCommand $memoryCommand $scriptsRoot)){throw 'Exact memory RestartCore rejected'};$count++
+foreach($arguments in @(
+  @('-Action','ReloadRuntime','-MemoryMaintenanceIntentId',$memoryId),
+  @('-Action','RestartCore','-MemoryMaintenanceIntentId','not-a-uuid'),
+  @('-Action','RestartCore','-MemoryMaintenanceIntentId',$memoryId,'-ProjectRoot','C:\other'),
+  @('-Action','RestartCore','-MemoryMaintenanceIntentId',$memoryId,'-MemoryMaintenanceIntentId',$memoryId)
+)){
+  if(Test-ControllerCommand (New-ManagerCommand $sourceTree $arguments) $scriptsRoot){throw 'Memory shape broadened'};$count++
+}
 $valid=New-ManagerCommand $sourceTree @('-Action','ReloadRuntime')
 $wrapperPath=Join-Path $managerRoot 'scripts\invoke-component-controller.ps1'
 $controllerPath=Join-Path $scriptsRoot 'runtime-control.ps1'
@@ -175,6 +186,7 @@ $count+=4
   $script:events=New-Object 'System.Collections.Generic.List[string]'
   function script:Assert-CbInstalledMutationBlocked {param($Context)}
   function script:Get-CbExpectedBuildId {param($Context) 'fixture'}
+  function script:Get-CbHealth {param($Context) $null}
   function script:Assert-CbShutdownPreflight {param($Context) $script:events.Add('ownership')}
   function script:Assert-CbStartupPreflight {param($Context,[switch]$IncludeTunnel) $script:events.Add('startup')}
   function script:Assert-CbCooperativeShutdownAvailable {param($Context) $script:events.Add('probe')}
@@ -187,7 +199,7 @@ foreach($case in @(
   @{action='ReloadRuntime';expected='ownership,startup,probe,stop-server,start,repair'},
   @{action='ShutdownRuntime';expected='ownership,probe,stop-server,stop-tunnel'})){
   & $module {$script:events.Clear()}
-  Invoke-CodexBridgeLifecycleAction -Context ([pscustomobject]@{}) -Action $case.action
+  Invoke-CodexBridgeLifecycleAction -Context ([pscustomobject]@{projectRoot=$root}) -Action $case.action
   $actual=& $module {$script:events-join','}
   if($actual-cne$case.expected){throw "sequence: $actual"};$count++
 }
@@ -195,7 +207,7 @@ foreach($errorCode in @('ACTIVE_WORK_PRESENT','COOPERATIVE_SHUTDOWN_UNKNOWN','BL
   & $module {param($code) $script:failure=$code;function script:Stop-CbOwnedRole {param($Context,$Role) $script:events.Add('stop-'+$Role);throw $script:failure}} $errorCode
   foreach($action in @('RestartCore','ReloadRuntime','ShutdownRuntime')){
     & $module {$script:events.Clear()}
-    try{Invoke-CodexBridgeLifecycleAction -Context ([pscustomobject]@{}) -Action $action;throw 'EXPECTED_FAILURE'}catch{if($_.Exception.Message-cne$errorCode){throw}}
+    try{Invoke-CodexBridgeLifecycleAction -Context ([pscustomobject]@{projectRoot=$root}) -Action $action;throw 'EXPECTED_FAILURE'}catch{if($_.Exception.Message-cne$errorCode){throw}}
     $events=& $module {$script:events.ToArray()}
     if(@($events|Where-Object{$_-in@('stop-tunnel','start','repair')}).Count){throw 'refusal mutated tunnel or restarted'};$count++
   }

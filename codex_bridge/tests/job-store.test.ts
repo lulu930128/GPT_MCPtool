@@ -7,6 +7,42 @@ import test from "node:test";
 import { ConversationPersistenceError, JobStore } from "../src/job-store.js";
 import { previewWorkPackage } from "../src/work-package.js";
 
+test("submitted defaults and exact model provenance survive snapshot, delta, native hydration and restart", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-bridge-selection-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const { store, jobId } = await createConversationFixture(root, "selection");
+  const initial = await store.snapshot(jobId);
+  const initialMessage = initial.messages[0]!;
+  assert.deepEqual([initialMessage.selectionRecorded, initialMessage.modelSource, initialMessage.effortSource], [true, "default", "default"]);
+  const input = { clientMessageId: "selection-followup", content: "Continue", executionMode: "plan" as const,
+    approvalReviewer: "auto_review" as const, dataClassification: "personal" as const, model: "gpt-6-astra", effort: "xhigh" as const,
+    selectionKind: "turn" as const, modelSource: "explicit" as const, effortSource: "inherited" as const };
+  await store.appendUserMessage(jobId, input);
+  await store.prepareTurn(jobId, input);
+  const response = { thread: { id: "thread-selection", turns: [
+    { id: "turn-one", status: "completed", items: [{ id: "user-one", type: "userMessage", clientId: initialMessage.clientMessageId, content: [] }] },
+    { id: "turn-two", status: "completed", items: [{ id: "user-two", type: "userMessage", clientId: input.clientMessageId, content: [] }] },
+  ] } };
+  await store.hydrateConversation(jobId, response);
+  const snapshot = await store.snapshot(jobId);
+  const first = snapshot.conversation!.turns[0]!.items[0]!;
+  const second = snapshot.conversation!.turns[1]!.items[0]!;
+  assert.equal(first.model, undefined, "Later job summary must not backfill the initial default.");
+  assert.equal(first.modelSource, "default");
+  assert.deepEqual([second.model, second.effort, second.modelSource, second.effortSource], ["gpt-6-astra", "xhigh", "explicit", "inherited"]);
+  const delta = await store.snapshot(jobId, 0, 80, initial.serverConversationRevision);
+  const projected = delta.conversationChanges.flatMap((patch) => patch.turns.flatMap((turn) => turn.items)).find((item) => item.id === "user-two")!;
+  assert.equal(projected.selectionRecorded, true);
+  assert.equal(projected.effortSource, "inherited");
+  await store.hydrateConversation(jobId, response);
+  const restarted = new JobStore(root);
+  await restarted.initialize();
+  const recovered = await restarted.snapshot(jobId);
+  assert.equal(recovered.conversation!.turns[0]!.items[0]!.modelSource, "default");
+  assert.equal(recovered.conversation!.turns[1]!.items[0]!.model, "gpt-6-astra");
+  assert.equal(recovered.conversation!.turns[1]!.items[0]!.effortSource, "inherited");
+});
+
 test("timestamp lineage survives delta delivery, metadata refresh and journal-only replay", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "codex-bridge-time-lineage-"));
   context.after(() => rm(root, { recursive: true, force: true }));

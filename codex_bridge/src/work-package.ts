@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import type { ApprovalReviewer, DataClassification, ExecutionMode, ReasoningEffort, TextArtifactSummary, WorkPackage } from "./types.js";
+import type { ApprovalReviewer, DataClassification, ExecutionMode, ReasoningEffort, TextArtifactSummary, TurnSpeed, WorkPackage } from "./types.js";
 
 export interface WorkPackageInput {
+  speed?: TurnSpeed;
   projectId: string;
   title: string;
   objective: string;
@@ -33,8 +34,9 @@ export function previewWorkPackage(input: WorkPackageInput): WorkPackagePreview 
     executionMode: input.executionMode ?? "plan",
     approvalReviewer: input.approvalReviewer ?? "auto_review",
     dataClassification: input.dataClassification ?? "personal",
-    model: normalizeOptional(input.model, "model", 120) || undefined,
+    model: input.model === undefined ? undefined : normalizeRequired(input.model, "model", 120),
     effort: input.effort,
+    speed: normalizeTurnSpeed(input.speed),
     inputBundleIds: normalizeBundleIds(input.inputBundleIds),
   };
   if (!(["plan", "workspace_write"] as string[]).includes(workPackage.executionMode)) {
@@ -87,6 +89,25 @@ export function digestWorkPackage(workPackage: WorkPackage): string {
   return createHash("sha256").update(JSON.stringify(workPackage)).digest("hex");
 }
 
+export function normalizeTurnSpeed(speed: unknown): TurnSpeed {
+  if (speed === undefined) return "standard";
+  if (speed === "standard" || speed === "fast") return speed;
+  throw new Error("Unsupported speed. Use standard or fast.");
+}
+
+export function recordModelSelection(
+  input: { model?: string; effort?: ReasoningEffort },
+  inherited?: { model?: string; effort?: ReasoningEffort },
+  kind: "turn" | "steer" = "turn",
+): import("./types.js").ModelSelectionMetadata {
+  return {
+    selectionRecorded: true,
+    selectionKind: kind,
+    modelSource: input.model !== undefined ? "explicit" : inherited?.model !== undefined ? "inherited" : "default",
+    effortSource: input.effort !== undefined ? "explicit" : inherited?.effort !== undefined ? "inherited" : "default",
+  };
+}
+
 export function renderRequestMarkdown(
   workPackage: WorkPackage,
   jobId: string,
@@ -108,6 +129,7 @@ export function renderRequestMarkdown(
     `Data classification: \`${workPackage.dataClassification}\``,
     `Model: \`${workPackage.model || "Codex default"}\``,
     `Reasoning effort: \`${workPackage.effort || "model default"}\``,
+    `Requested speed (initial turn only): \`${workPackage.speed ?? "unknown (legacy)"}\``,
     "",
     "## Objective",
     "",

@@ -82,7 +82,17 @@ powershell.exe -NoProfile -File C:\GPT_MCPtool\codex_bridge\scripts\daily-code-u
 powershell.exe -NoProfile -File C:\GPT_MCPtool\codex_bridge\scripts\daily-code-update.ps1 -Action Update -Version fix-20261026-01 -CodeOnly
 ```
 
-`-CodeOnly` 聲明持久資料、設定、credential storage、owner protocol、tunnel profile 相容，不授予權限。`daily-code-contract.json`、dependency／package、schema migration 的變更走另外審閱的遷移，不以 CodeOnly 隱藏。
+`-CodeOnly` 聲明持久資料、設定、credential storage、owner protocol、tunnel profile 相容，不授予權限。
+Bridge 私有 `package.json`、`package-lock.json` 與 `node_modules` 的依賴升級屬於程式換版；
+不再僅因這些路徑有差異就判為資料遷移。CLI/native 同版與 release 來源路徑檢查仍保留，
+Stage 的 private-path／完整 hash inventory 與 Verify 的 loaded identity／readiness 也不變。
+`daily-code-contract.json`、設定與 schema migration 的變更仍需遷移，不能以 CodeOnly 隱藏。
+npm 因執行中 binary 保留的 `@openai/.codex[-win32-x64]-<8字元>` 退休目錄不打包，也不刪除。
+
+Workspace→CC 的 Bridge update 由已載入 CC 版本中的 `WorkspaceUpdate` 匯入同版 `DailyCode`；
+source `daily-code-update.ps1` 則直接匯入 workspace 的 `DailyCode`。兩者採用時間不同。
+升級既有 owner 時，先經 Workspace 更新 CC、核對新 owner 身分，再用新 request 更新 Bridge；
+不可只跑 source CLI 就宣稱正式 Workspace owner 已採用修補。
 
 `dist/tests` 僅允許 TypeScript 產生的 `.js`／`.js.map` 變更；SQL、migration 目錄、schema/config/dependency 檔案仍受原 gate 限制。`Preflight` 唯讀驗證舊／新完整 inventory、settings/adoption 一致性、pending operations 與確切 changed paths，不建立 lock／operation、不解密 bearer、不呼叫 owner lifecycle。它不證明 idle、owner 或新 runtime Ready；完整 owner Preflight、active-work/drain、Stopped、Ready／認證仍由獨立 Update 執行。禁止在依附舊 Bridge 的 Codex Job 內直接 Update 或安排背景 Update；先等 Job terminal，再由已認證的獨立 NORMAL 路徑執行。
 

@@ -52,7 +52,7 @@ async function fixture(t: TestContext) {
   });
   const client = await connect();
   const candidate = (patch: Partial<ReviewInput> = {}): ReviewInput => ({ origin: "DIRECT", projectId: project.id, dataClassification: "personal",
-    userIntent: "EXPLICIT_USER_REQUEST", contentPolicy: "PERSONAL_PUBLIC_NO_SECRETS_OR_REGULATED_ORDERS", idempotencyKey: randomUUID(),
+    userIntent: "EXPLICIT_USER_REQUEST", contentPolicy: "PERSONAL_PUBLIC_NO_SECRETS", idempotencyKey: randomUUID(),
     target: "personal source inspection", executionMode: "NORMAL", cwd: project.path, scriptSnapshot: "# proposal only\r\nWrite-Output 'review'\r\n",
     args: ["literal value"], risk: "No action in this review", sideEffects: "None from review", ...patch });
   const call = async (operation: string, args: object, caller = client) => await caller.callTool({
@@ -80,6 +80,13 @@ test("real Bridge MCP exposes strict model-visible review tools without a resour
   assert.deepEqual(tool("get").inputSchema.required, ["requestId", "digest"]);
   assert.deepEqual(tool("decide").inputSchema.required, ["requestId", "digest", "decision", "userIntent"]);
   assert.deepEqual(tool("receipt").inputSchema.required, ["requestId"]);
+  const policies = ["PERSONAL_PUBLIC_NO_SECRETS", "PERSONAL_PUBLIC_NO_SECRETS_OR_REGULATED_ORDERS"];
+  const requestProps = tool("request").inputSchema.properties as Record<string, { enum?: string[] }>;
+  assert.deepEqual(requestProps.contentPolicy!.enum, policies);
+  assert.doesNotMatch(tool("request").description!, /regulated live orders/i);
+  const normalProps = listed.find(t => t.name === "codex_powershell_normal_execute")!.inputSchema.properties as
+    Record<string, { properties?: Record<string, { enum?: string[] }> }>;
+  assert.deepEqual(normalProps.request!.properties!.contentPolicy!.enum, policies);
   const props = tool("decide").inputSchema.properties as Record<string, { enum?: string[]; const?: string }>;
   assert.deepEqual(props.decision!.enum, ["ACCEPTED", "DECLINED"]);
   assert.equal(props.userIntent!.const, "EXPLICIT_USER_DECISION");
@@ -136,9 +143,37 @@ test("strict MCP schema rejects malformed, forged authority, mixed origins and s
     { ...base, productionAuthorized: true }, { ...base, trusted: true }, { ...base, host: {} }, { ...base, grant: {} },
     { ...base, ttlMs: 1 }, { ...base, scriptSnapshot: "x".repeat(8001) }, { ...base, args: ["-Password", "DO_NOT_STORE"] },
     { ...base, scriptSnapshot: "$api_key = 'DO_NOT_STORE'" }, { ...base, scriptSnapshot: "Write-Output sk-abcdefghijklmnopqrst" },
-    { ...base, scriptSnapshot: "broker.execute('live')" }, { ...base, scriptSnapshot: "Write-Output \u202esecret" }];
+    { ...base, scriptSnapshot: "-----BEGIN PRIVATE KEY-----\nSYNTHETIC_ONLY" },
+    { ...base, scriptSnapshot: "Write-Output \u202esecret" }];
   for (const args of bad) assert.equal((await f.call("request", args)).isError, true);
   assert.equal(await readFile(join(f.directory, "receipts.jsonl"), "utf8"), "");
+});
+
+test("trading text is accepted without execution; current and legacy policies preserve receipt bytes on reopen", async t => {
+  const f = await fixture(t);
+  const terms = ["正式下單", "受管制", "place_order", "submit_order", "broker.execute", "PLACE-ORDER", "submitorder"];
+  const records = [];
+  for (const contentPolicy of ["PERSONAL_PUBLIC_NO_SECRETS", "PERSONAL_PUBLIC_NO_SECRETS_OR_REGULATED_ORDERS"] as const) {
+    for (const term of terms) {
+      const r = await f.request({ contentPolicy, target: term, scriptSnapshot: `# ${term}\r\n`, args: [term],
+        risk: term, sideEffects: term });
+      const receipt = await f.store.readReview(r.binding.requestId);
+      assert.equal(receipt.request.contentPolicy, contentPolicy);
+      assert.equal(receipt.digest, digest(receipt.request));
+      assert.equal(receipt.executionDispatched, false);
+      assert.equal(receipt.productionAuthorized, false);
+      records.push({ r, receipt });
+    }
+  }
+  const path = join(f.directory, "receipts.jsonl"), before = await readFile(path, "utf8");
+  const client = await f.restart();
+  for (const { r, receipt } of records) {
+    assert.deepEqual(await f.store.readReview(r.binding.requestId), receipt);
+    const view = await f.call("get", r.binding, client);
+    assert.deepEqual(view.structuredContent?.request, receipt.request);
+    assert.deepEqual((await f.call("request", r.input, client)).structuredContent, r.summary);
+  }
+  assert.equal(await readFile(path, "utf8"), before);
 });
 
 test("valid UUID reaches review; schema, scope and store failures remain distinct and safe", async t => {

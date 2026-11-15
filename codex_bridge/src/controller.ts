@@ -32,7 +32,7 @@ import type {
   PendingApproval,
   WorkPackage,
 } from "./types.js";
-import { digestWorkPackage, type WorkPackagePreview } from "./work-package.js";
+import { digestWorkPackage, normalizeTurnSpeed, recordModelSelection, type WorkPackagePreview } from "./work-package.js";
 
 const MAX_LOCAL_THREAD_INVENTORY = 10_000;
 
@@ -114,6 +114,10 @@ export class CodexBridgeController {
 
   get status(): AppServerTransport["status"] {
     return this.backgroundFailure ? "unavailable" : this.appServer.status;
+  }
+
+  get maintenancePending() {
+    return this.backgroundTasks.size + this.activeRecoveries.size + this.jobLocks.size + this.liveApprovals.size;
   }
 
   async close(): Promise<void> {
@@ -500,6 +504,11 @@ export class CodexBridgeController {
   }
 
   async dispatch(input: DispatchInput): Promise<{ record: JobRecord; created: boolean }> {
+    return this.store.withAdmission(() => this.dispatchAdmitted(input));
+  }
+
+  private async dispatchAdmitted(input: DispatchInput): Promise<{ record: JobRecord; created: boolean }> {
+    normalizeTurnSpeed(input.preview.workPackage.speed);
     if (input.source === "model_direct") {
       this.requireDirectProject(input.preview.workPackage.projectId);
       if (input.preview.workPackage.dataClassification === "company_approved") throw new DirectOperationError("DIRECT_COMPANY_AUTHORIZATION_REQUIRES_APP");
@@ -531,21 +540,37 @@ export class CodexBridgeController {
   }
 
   async sendMessage(input: ConversationSendInput): Promise<ConversationSendResult> {
-    return this.withJobLock(input.jobId, () => this.sendMessageLocked(input));
+    return this.store.withAdmission(() => this.withJobLock(input.jobId, () => this.sendMessageLocked(input)));
   }
 
   private async sendMessageLocked(input: ConversationSendInput, source: "app" | "model_direct" = "app"): Promise<ConversationSendResult> {
+      const speed = normalizeTurnSpeed(input.speed);
       let job = requireJob(this.store, input.jobId);
-      await this.assertProjectStillOperable(job.project);
       const active = ["running", "awaiting_approval"].includes(job.status);
+      // Resolve inheritance here, before recording, so explicit submission and
+      // inherited settings stay distinguishable in the durable message record.
+      const currentModel = job.selectionRecorded ? job.model : job.model ?? job.workPackage.model;
+      const currentEffort = job.selectionRecorded ? job.effort : job.effort ?? job.workPackage.effort;
+      const inherited = source === "model_direct" || active ? { model: currentModel, effort: currentEffort } : undefined;
+      const selection = recordModelSelection(input, inherited, active ? "steer" : "turn");
+      input = { ...input, ...selection, model: input.model ?? inherited?.model, effort: input.effort ?? inherited?.effort };
+      await this.assertProjectStillOperable(job.project);
+      const stagedInputArtifacts = await this.textBundles.resolveMany(
+        input.inputBundleIds ?? [], job.project.id, input.dataClassification,
+      );
+      // Retry identity precedes active-turn gates: an accepted new turn may now be running.
+      if (await this.store.isUserMessageRetry(job.id, { ...input, inputArtifacts: stagedInputArtifacts })) {
+        return { record: job, accepted: false, delivery: "duplicate" };
+      }
       if (!active && !isTerminal(job.status)) {
         throw new Error("Wait for the current conversation turn to start before sending another message.");
       }
       if (active) {
+        if (input.speed !== undefined) {
+          throw new Error("Speed cannot be selected for an active turn. Omit speed to steer; select it only for a new turn.");
+        }
         const currentMode = job.currentExecutionMode ?? job.workPackage.executionMode;
         const currentReviewer = job.currentApprovalReviewer ?? job.workPackage.approvalReviewer ?? "user";
-        const currentModel = job.model ?? job.workPackage.model;
-        const currentEffort = job.effort ?? job.workPackage.effort;
         if (
           input.executionMode !== currentMode ||
           input.approvalReviewer !== currentReviewer ||
@@ -555,12 +580,8 @@ export class CodexBridgeController {
           throw new Error("Execution mode, approval reviewer, model, and reasoning effort cannot change while a turn is running.");
         }
       }
+      input = { ...input, speed: active ? undefined : speed };
       await this.validateModelSelection(input.model, input.effort);
-      const stagedInputArtifacts = await this.textBundles.resolveMany(
-        input.inputBundleIds ?? [],
-        job.project.id,
-        input.dataClassification,
-      );
       const appended = await this.store.appendUserMessage(input.jobId, { ...input, inputArtifacts: stagedInputArtifacts });
       if (!appended.created) {
         return { record: appended.record, accepted: false, delivery: "duplicate" };
@@ -622,14 +643,14 @@ export class CodexBridgeController {
   async directThreadAction(kind: "compact" | "review" | "fork", input: {
     jobId: string; requestId: string; expectedThreadId: string; expectedTurnId: string;
   }) {
-    return this.withJobLock(input.jobId, async () => {
+    return this.store.withAdmission(() => this.withJobLock(input.jobId, async () => {
       const job = requireJob(this.store, input.jobId);
       await this.assertDirectJob(job, false);
       if (job.threadId !== input.expectedThreadId) throw new DirectOperationError("DIRECT_THREAD_CHANGED");
-      // 0.154.0 allocates the fork id remotely without a replay key. A lost response or crash
+      // Native fork allocates the id remotely without a replay key. A lost response or crash
       // cannot be reconciled atomically with JobStore/UnifiedConversationRegistry ownership.
       if (kind === "fork") throw new DirectOperationError("DIRECT_FORK_OWNERSHIP_UNSUPPORTED",
-        "Fork is blocked: protocol 0.154.0 cannot guarantee recoverable Bridge ownership after a lost response.");
+        "Fork is blocked: the native protocol cannot guarantee recoverable Bridge ownership after a lost response.");
       return this.runDirectRequest(job, `${kind}:${normalizeIdempotencyKey(input.requestId)}`, {
         expectedThreadId: input.expectedThreadId, expectedTurnId: input.expectedTurnId,
       }, async () => {
@@ -682,11 +703,12 @@ export class CodexBridgeController {
         if (error instanceof DirectOperationError) throw error;
         throw new DirectOperationError("DIRECT_ACTION_UNAVAILABLE", "Action delivery could not be confirmed. Inspect the job; do not retry with a new request id.");
       });
-    });
+    }));
   }
 
   async directMessage(input: DirectConversationSendInput, expectedTurnId?: string, steerOnly = false) {
-    return this.withJobLock(input.jobId, async () => {
+    normalizeTurnSpeed(input.speed);
+    return this.store.withAdmission(() => this.withJobLock(input.jobId, async () => {
       const job = requireJob(this.store, input.jobId);
       await this.assertDirectJob(job, false);
       if (input.dataClassification === "company_approved") throw new DirectOperationError("DIRECT_COMPANY_AUTHORIZATION_REQUIRES_APP");
@@ -698,11 +720,9 @@ export class CodexBridgeController {
         await this.sendMessageLocked({
           ...input,
           approvalReviewer: input.approvalReviewer ?? job.currentApprovalReviewer ?? job.workPackage.approvalReviewer ?? "user",
-          model: input.model ?? job.model ?? job.workPackage.model,
-          effort: input.effort ?? job.effort ?? job.workPackage.effort,
         }, "model_direct");
       }, input.approvalReviewer === undefined ? { ...input, approvalReviewer: "user", expectedTurnId } : undefined);
-    });
+    }));
   }
 
   async directCancel(jobId: string, requestId: string, expectedTurnId: string) {
@@ -748,6 +768,11 @@ export class CodexBridgeController {
   }
 
   async sendLocalThreadMessage(input: LocalConversationSendInput): Promise<ConversationSendResult> {
+    return this.store.withAdmission(() => this.sendLocalThreadMessageAdmitted(input));
+  }
+
+  private async sendLocalThreadMessageAdmitted(input: LocalConversationSendInput): Promise<ConversationSendResult> {
+    normalizeTurnSpeed(input.speed);
     const history = await this.historyReader.read(input.localThreadId);
     const response = history.response;
     const rawThread = isObject(response.thread) ? response.thread : undefined;
@@ -757,6 +782,13 @@ export class CodexBridgeController {
     const summary = await this.normalizeLocalThread(rawThread);
     if (!summary || summary.historyOnly) {
       throw new Error("This local conversation belongs to a protected or unavailable workspace.");
+    }
+    if (summary.threadStatus === "active") {
+      const owned = this.store.findByThreadId(input.localThreadId);
+      if (owned && ["running", "awaiting_approval"].includes(owned.status)) {
+        return this.sendMessage({ ...input, jobId: owned.id });
+      }
+      throw new Error("The local Codex thread is active. Wait for it to finish before starting a new turn or selecting speed.");
     }
     const project = this.requireOperableProject(summary.projectId);
     await this.assertProjectStillOperable(project);
@@ -772,6 +804,7 @@ export class CodexBridgeController {
       dataClassification: input.dataClassification,
       model: input.model,
       effort: input.effort,
+      speed: normalizeTurnSpeed(input.speed),
       inputBundleIds: [],
     } satisfies WorkPackage;
     const synchronizedAt = new Date().toISOString();
@@ -832,7 +865,7 @@ export class CodexBridgeController {
   }
 
   async steer(jobId: string, message: string): Promise<JobRecord> {
-    return this.withJobLock(jobId, () => this.steerLocked(jobId, message));
+    return this.store.withAdmission(() => this.withJobLock(jobId, () => this.steerLocked(jobId, message)));
   }
 
   private async steerLocked(jobId: string, message: string): Promise<JobRecord> {
@@ -914,7 +947,7 @@ export class CodexBridgeController {
         approvalsReviewer: job.workPackage.approvalReviewer ?? "user",
         permissions: permissionProfile,
         serviceName: "codex-handoff-bridge",
-        ...(job.workPackage.model ? { model: job.workPackage.model } : {}),
+        ...(job.workPackage.model ? { model: job.workPackage.model, allowProviderModelFallback: false } : {}),
       });
       const threadId = nestedId(threadResponse, "thread");
       if (!threadId) {
@@ -940,6 +973,7 @@ export class CodexBridgeController {
         permissions: permissionProfile,
         ...(job.workPackage.model ? { model: job.workPackage.model } : {}),
         ...(job.workPackage.effort ? { effort: job.workPackage.effort } : {}),
+        serviceTierForTurn: normalizeTurnSpeed(job.workPackage.speed) === "fast" ? "fast" : "default",
         input: [
           {
             type: "text",
@@ -982,9 +1016,12 @@ export class CodexBridgeController {
         serviceName: "codex-handoff-bridge",
         ...(input.model ? { model: input.model } : {}),
       });
-      const threadId = nestedId(resumed, "thread") ?? job.threadId;
-      if (!threadId) {
-        throw new Error("Codex App Server did not return a resumed thread id.");
+      if (isObject(resumed.thread) && localThreadStatus(resumed.thread.status) === "active") {
+        throw new Error("The resumed Codex thread is active. A new turn and its requested speed cannot be applied.");
+      }
+      const threadId = nestedId(resumed, "thread");
+      if (!threadId || threadId !== job.threadId) {
+        throw new DirectOperationError("PERMISSION_PROFILE_UNVERIFIED", "PERMISSION_PROFILE_UNVERIFIED: resume_thread_mismatch");
       }
       await this.applyThreadPermissions(threadId, permissionProfile, input.approvalReviewer);
       this.threadSyncStates.delete(threadId);
@@ -1000,6 +1037,7 @@ export class CodexBridgeController {
         permissions: permissionProfile,
         ...(input.model ? { model: input.model } : {}),
         ...(input.effort ? { effort: input.effort } : {}),
+        serviceTierForTurn: normalizeTurnSpeed(input.speed) === "fast" ? "fast" : "default",
         input: [{ type: "text", text: buildCodexUserInput({
           message: input.content,
           context: input.context,
@@ -1029,13 +1067,21 @@ export class CodexBridgeController {
     if (!model && !effort) {
       return;
     }
-    const models = await this.listModels();
+    let models: CodexModelOption[];
+    try {
+      models = await this.listModels();
+    } catch (error) {
+      if (!model) throw error;
+      // Discovery is advisory for explicit IDs. Retain known effort constraints
+      // from the last successful inventory when a refresh fails.
+      models = this.modelCache?.models ?? [];
+    }
     const selected = model
       ? models.find((candidate) => candidate.id === model)
       : models.find((candidate) => candidate.isDefault) ?? models[0];
     if (!selected) {
-      if (model === "gpt-6-astra") throw new DirectOperationError("GPT6_MODEL_NOT_EXPOSED_BY_APP_SERVER");
-      throw new Error(model ? `Codex model '${model}' is not available.` : "Codex did not return a default model.");
+      if (model) return; // App Server owns support and authorization for unlisted IDs.
+      throw new Error("Codex did not return a default model.");
     }
     if (effort && !selected.supportedReasoningEfforts.some((option) => option.reasoningEffort === effort)) {
       throw new Error(`Reasoning effort '${effort}' is not available for model '${selected.id}'.`);
@@ -1069,32 +1115,64 @@ export class CodexBridgeController {
   }
 
   private async applyThreadPermissions(threadId: string, permissions: string, approvalReviewer: "user" | "auto_review"): Promise<void> {
-    // Apply before the next turn loads environment instructions, then confirm the
-    // active policy. settings/update acknowledges enqueueing, not application.
+    // settings/update only acknowledges enqueueing. Native can omit notifications
+    // for no-ops; only exact-thread native readback can authorize the next turn.
     const sandboxType = permissions === ":danger-full-access" ? "dangerFullAccess" : "readOnly";
     const update = async (params: Record<string, unknown>, expectedProfile: string | null) => {
-      let appliedHandler!: (message: JsonRpcNotification) => void;
+      const differences = (settings: Record<string, unknown>, sandboxKey: string): string[] => {
+        const sandbox = settings[sandboxKey];
+        const fields: string[] = [];
+        if (expectedProfile === null ? settings.activePermissionProfile !== null
+          : !isObject(settings.activePermissionProfile) || settings.activePermissionProfile.id !== expectedProfile) fields.push("profile");
+        if (!isObject(sandbox) || sandbox.type !== sandboxType) fields.push("sandbox");
+        if (sandboxType === "readOnly" && (!isObject(sandbox) || sandbox.networkAccess !== true)) fields.push("network");
+        if (settings.approvalPolicy !== "on-request") fields.push("policy");
+        if (settings.approvalsReviewer !== approvalReviewer) fields.push("reviewer");
+        return fields;
+      };
+      let notification = "missing";
+      let phase = "update";
+      let fields: string[] = [];
+      let readbacks = 0;
+      // Bounded field names only: never persist raw native settings or errors.
+      const failure = (reason: string) => new DirectOperationError("PERMISSION_PROFILE_UNVERIFIED",
+        `PERMISSION_PROFILE_UNVERIFIED: stage=${expectedProfile === null ? "sandbox" : "profile"}; reason=${reason}; fields=${fields.join(",") || "none"}; notification=${notification}; readbacks=${readbacks}`);
+      const observed = (message: JsonRpcNotification) => {
+        if (message.method !== "thread/settings/updated" || message.params?.threadId !== threadId) return;
+        const settings = message.params.threadSettings;
+        notification = !isObject(settings) ? "malformed"
+          : differences(settings, "sandboxPolicy").length ? "mismatched" : "matching";
+      };
+      this.appServer.on("notification", observed);
       let timeout!: ReturnType<typeof setTimeout>;
-      const applied = new Promise<void>((resolve, reject) => {
-        appliedHandler = (message) => {
-          if (message.method !== "thread/settings/updated" || message.params?.threadId !== threadId) return;
-          const settings = message.params.threadSettings;
-          if (isObject(settings) && (expectedProfile === null ? settings.activePermissionProfile === null
-            : isObject(settings.activePermissionProfile) && settings.activePermissionProfile.id === expectedProfile)
-            && isObject(settings.sandboxPolicy) && settings.sandboxPolicy.type === sandboxType
-            && (sandboxType !== "readOnly" || settings.sandboxPolicy.networkAccess === true)
-            && settings.approvalPolicy === "on-request" && settings.approvalsReviewer === approvalReviewer) resolve();
-        };
-        this.appServer.on("notification", appliedHandler);
-        timeout = setTimeout(() => reject(new DirectOperationError("PERMISSION_PROFILE_UNVERIFIED")), 5_000);
+      const expired = new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(failure(phase === "poll" ? "readback_mismatch" : `${phase}_timeout`)), 5_000);
       });
       try {
-        await Promise.all([applied, this.appServer.request("thread/settings/update", {
+        await Promise.race([expired, this.appServer.request("thread/settings/update", {
           threadId, ...params, approvalPolicy: "on-request", approvalsReviewer: approvalReviewer,
-        })]);
+        }).catch(() => { throw failure("update_failed"); })]);
+        while (true) {
+          phase = "readback";
+          readbacks += 1;
+          const verified = await Promise.race([expired, this.appServer.request<Record<string, unknown>>(
+            "thread/resume", { threadId, excludeTurns: true },
+          ).catch(() => { throw failure("readback_failed"); })]);
+          // Never retarget a continuation or race an independently active turn.
+          if (nestedId(verified, "thread") !== threadId) {
+            fields = ["threadId"]; throw failure("readback_mismatch");
+          }
+          if (!isObject(verified.thread) || localThreadStatus(verified.thread.status) !== "idle") {
+            fields = ["threadStatus"]; throw failure("thread_not_idle");
+          }
+          fields = differences(verified, "sandbox");
+          if (!fields.length) return;
+          phase = "poll";
+          await Promise.race([expired, new Promise<void>((resolve) => setTimeout(resolve, 100))]);
+        }
       } finally {
         clearTimeout(timeout);
-        this.appServer.off("notification", appliedHandler);
+        this.appServer.off("notification", observed);
       }
     };
     if (permissions === ":danger-full-access") {
@@ -1104,14 +1182,6 @@ export class CodexBridgeController {
       await update({ sandboxPolicy: { type: "dangerFullAccess" } }, null);
     }
     await update({ permissions }, permissions);
-    const verified = await this.appServer.request<Record<string, unknown>>("thread/resume", { threadId, excludeTurns: true });
-    if (nestedId(verified, "thread") !== threadId
-      || !isObject(verified.activePermissionProfile) || verified.activePermissionProfile.id !== permissions
-      || !isObject(verified.sandbox) || verified.sandbox.type !== sandboxType
-      || (sandboxType === "readOnly" && verified.sandbox.networkAccess !== true)
-      || verified.approvalPolicy !== "on-request" || verified.approvalsReviewer !== approvalReviewer) {
-      throw new DirectOperationError("PERMISSION_PROFILE_UNVERIFIED");
-    }
   }
 
   private async selectPermissionProfile(job: JobRecord, executionMode = job.currentExecutionMode ?? job.workPackage.executionMode): Promise<string> {
@@ -1150,7 +1220,7 @@ export class CodexBridgeController {
       if (telemetry) {
         if (eventThreadId !== job.threadId || !eventTurnId || eventTurnId !== job.turnId) return;
         await this.store.applyConversationNotification(jobId, message.method === "model/rerouted"
-          ? { ...message, params: { ...params, requestedModel: job.model ?? job.workPackage.model ?? null } } : message);
+          ? { ...message, params: { ...params, requestedModel: (job.selectionRecorded ? job.model : job.model ?? job.workPackage.model) ?? null } } : message);
         return;
       }
       if (isTerminal(job.status)) return;

@@ -45,7 +45,18 @@ for (const marker of [
   'rpcRequest("ui/download-file"',
   'rpcRequest("ui/message"',
   'id="model"',
+  'id="model-preset-note"',
+  'state.status.modelPresets',
+  'function selectedModelPreset()',
+  'modelPreset: preset.id',
+  '請明確選擇一組',
+  'id="custom-model"',
+  'data-custom="true"',
+  '手動指定不代表模型已驗證可用',
   'id="effort"',
+  'id="speed"',
+  '下一回合速度',
+  '請求速度',
   'id="reviewer"',
   'data-approval=',
   'company-confirm-checkbox',
@@ -108,6 +119,20 @@ assert.match(html, /@media \(max-width: 760px\)[\s\S]*?\.workspace\.rail-open \.
 const inlineScript = html.match(/<script>([\s\S]*?)<\/script>/)?.[1];
 assert.ok(inlineScript, "Widget must include an inline bridge script.");
 new Script(inlineScript, { filename: "codex-console.inline.js" });
+
+const selectionStart = inlineScript.indexOf("        function requestedSelectionLabel");
+const selectionEnd = inlineScript.indexOf("        function renderProjectedMessage", selectionStart);
+assert.ok(selectionStart >= 0 && selectionEnd > selectionStart, "Submitted model metadata formatter must be testable.");
+const selectionContext = { effortLabel: (value) => value || "" };
+new Script(`${inlineScript.slice(selectionStart, selectionEnd)}\nglobalThis.label = requestedSelectionLabel;`).runInNewContext(selectionContext);
+assert.equal(selectionContext.label({}), "提交模型 未知（舊紀錄，來源未知） · 推理 未知（舊紀錄，來源未知）");
+assert.match(selectionContext.label({ model: "legacy-model", effort: "high" }), /legacy-model（舊紀錄，來源未知）/);
+assert.equal(selectionContext.label({ selectionRecorded: true, modelSource: "default", effortSource: "default" }),
+  "提交模型 預設（省略，交由預設） · 推理 預設（省略，交由預設）");
+assert.equal(selectionContext.label({ selectionRecorded: true, model: "gpt-6-astra", effort: "xhigh", modelSource: "explicit", effortSource: "inherited" }),
+  "提交模型 gpt-6-astra（明確提交） · 推理 xhigh（沿用）");
+assert.equal(selectionContext.label({ selectionRecorded: true, selectionKind: "steer", model: "gpt-6-astra", effort: "xhigh" }),
+  "同回合補充 · 未變更模型或推理");
 
 const registryApplyStart = inlineScript.indexOf("        function applyConversationRegistryResponse");
 const registryApplyEnd = inlineScript.indexOf("        function mergeJob", registryApplyStart);

@@ -32,9 +32,10 @@ function New-CbDailyContext([string]$CodeRoot,[switch]$RequireBearer) {
     $s=Read-CbDailySettings (Split-Path -Parent $CodeRoot)
     if($env:CODEX_HOME -and $env:CODEX_HOME -ine $s.codexHome){throw 'DAILY_CONFIG_CHANGED_MIGRATION_REQUIRED'}
     $env:CODEX_HOME=$s.codexHome
+    # Cold startup can exceed 20s; retain the installed runtime's bounded 60s budget.
     $args=@{ProjectRoot=$CodeRoot;DataDir=$s.dataDir;ProjectsFile=$s.projectsFile;CodexCommand=$s.codexCommand;
         NodePath=$s.nodePath;TunnelClientPath=$s.tunnelClientPath;TunnelProfileDir=$s.tunnelProfileDir;
-        KeyStorePath=$s.keyStorePath;SecretPath=$s.secretPath;Token=$null}
+        KeyStorePath=$s.keyStorePath;SecretPath=$s.secretPath;Token=$null;ServerReadyTimeoutSeconds=60}
     $context=New-CodexBridgeRuntimeContext @args
     # Read-CbDailySettings already pins the daily layout. Configuration/handoffs
     # belong to the stable component, never Runtime/versions/<version>/code.

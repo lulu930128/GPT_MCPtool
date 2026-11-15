@@ -1234,7 +1234,7 @@
         left: -12px;
         bottom: calc(100% + 10px);
         display: grid;
-        grid-template-columns: repeat(2, minmax(160px, 1fr));
+        grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 12px;
         width: min(430px, calc(100vw - 70px));
         padding: 14px;
@@ -1249,7 +1249,8 @@
         color: var(--ledger-muted);
         font: 10px/1.2 var(--ledger-mono);
       }
-      body[data-ledger="project-ledger"] .settings-popover select {
+      body[data-ledger="project-ledger"] .settings-popover select,
+      body[data-ledger="project-ledger"] .settings-popover input {
         width: 100%;
         min-width: 0;
         height: 34px;
@@ -1260,6 +1261,11 @@
         font-family: "Segoe UI Variable Text", "Segoe UI", sans-serif;
         font-size: 12px;
       }
+      body[data-ledger="project-ledger"] .settings-popover .custom-model-field,
+      body[data-ledger="project-ledger"] .settings-popover .model-preset-field { grid-column: 1 / -1; }
+      body[data-ledger="project-ledger"] .settings-popover .custom-model-field[hidden] { display: none; }
+      .custom-model-field input { padding: 0 9px; }
+      .custom-model-field small { line-height: 1.5; }
       body[data-ledger="project-ledger"] .send {
         display: flex;
         align-items: center;
@@ -1646,7 +1652,8 @@
         background: var(--ledger-surface);
         box-shadow: none;
       }
-      body[data-theme="night-shift"] .settings-popover select {
+      body[data-theme="night-shift"] .settings-popover select,
+      body[data-theme="night-shift"] .settings-popover input {
         border-color: var(--ledger-line);
         background: var(--ledger-canvas);
         color: var(--ledger-ink);
@@ -1975,6 +1982,7 @@
 
         <div class="composer-wrap">
           <form class="composer" id="composer">
+            <div id="memory-maintenance" role="status" aria-live="polite" hidden style="padding:10px 12px;border:1px solid #bd8a42;border-radius:6px;color:var(--ledger-ink);background:var(--ledger-rail-soft);margin-bottom:8px;line-height:1.5;overflow-wrap:anywhere"></div>
             <textarea id="message" rows="1" maxlength="4000" required placeholder="傳訊息給 Codex" aria-label="對話訊息"></textarea>
             <details class="context-panel" id="context-panel">
               <summary>背景與文字文件</summary>
@@ -2014,12 +2022,21 @@
                     <option value="auto_review">自動審核</option>
                     <option value="user">每次詢問</option>
                   </select></label>
-                  <label>模型<select class="composer-select" id="model" aria-label="模型">
-                    <option value="">Codex 預設模型</option>
+                  <label class="model-preset-field">模型／推理預設組合<select class="composer-select" id="model" aria-label="模型／推理預設組合" aria-describedby="model-preset-note">
+                    <option value="">請明確選擇一組</option>
                   </select></label>
                   <label>推理強度<select class="composer-select" id="effort" aria-label="推理強度">
                     <option value="">預設推理</option>
                   </select></label>
+                  <label>下一回合速度<select class="composer-select" id="speed" aria-label="下一回合速度" title="僅套用本次新回合；送出後回到 Standard。執行中補充訊息不會改變速度。">
+                    <option value="standard">Standard · 標準</option>
+                    <option value="fast">Fast · 加速</option>
+                  </select></label>
+                  <label class="custom-model-field" id="custom-model-field" hidden>Model ID
+                    <input id="custom-model" type="text" maxlength="120" autocomplete="off" spellcheck="false" placeholder="例如 gpt-6.1-sol" aria-describedby="custom-model-note" />
+                    <small id="custom-model-note">手動指定不代表模型已驗證可用；模型與推理強度由 App Server 最終判定。</small>
+                  </label>
+                  <small class="custom-model-field" id="model-preset-note" role="status">請依工作範圍選擇固定組合；不會自動選擇模型。</small>
                 </div>
               </details>
               <button class="send" id="send" type="submit" aria-label="送出" title="送出"><span class="send-arrow" aria-hidden="true">↑</span></button>
@@ -2244,6 +2261,10 @@
         async function callTool(name, args, options) {
           await bridgeReady;
           const response = await rpcRequest("tools/call", { name: name, arguments: args });
+          if (response && response.structuredContent && response.structuredContent.maintenance) {
+            state.maintenance = response.structuredContent.maintenance;
+            renderComposerState();
+          }
           if (response && response.isError) {
             throw new Error(response.content && response.content[0] && response.content[0].text || "工具執行失敗。");
           }
@@ -2254,6 +2275,7 @@
         function updateFromResponse(response) {
           const data = response && response.structuredContent;
           if (!data) return;
+          if (data.maintenance) state.maintenance = data.maintenance;
           if (data.status && data.status.service === "codex-handoff-bridge") {
             applyStatus(data.status);
             state.draft = Object.assign({}, state.draft, data.draft || {});
@@ -2271,6 +2293,7 @@
 
         function applyStatus(status) {
           state.status = status;
+          if (status.maintenance) state.maintenance = status.maintenance;
           (status.projects || []).forEach((project) => state.expandedProjects.add(project.id));
           if (!state.selectedProjectId) {
             state.selectedProjectId = state.draft.projectId || status.projects && status.projects[0] && status.projects[0].id || "";
@@ -2489,6 +2512,7 @@
         }
 
         function syncSettingsFromJob(job) {
+          $("#speed").value = "standard";
           $("#mode").value = job.executionMode || "plan";
           $("#reviewer").value = job.approvalReviewer || "user";
           $("#classification").value = job.dataClassification || "personal";
@@ -2511,6 +2535,7 @@
         }
 
         function startNewConversation(projectId) {
+          if (state.maintenance && state.maintenance.admission === "closed") return;
           const operableProjectId = isOperableProjectId(projectId) ? projectId : firstProjectId();
           state.selectedJob = null;
           state.selectionGeneration += 1;
@@ -2530,6 +2555,8 @@
           $("#reviewer").value = state.draft.approvalReviewer || "auto_review";
           $("#classification").value = "personal";
           renderModelOptions(state.draft.model || "", state.draft.effort || "");
+          $("#speed").value = state.draft.speed === "fast" ? "fast" : "standard";
+          renderSettingsSummary();
           state.draft = {};
           state.railOverlayOpen = false;
           syncWorkspacePanels();
@@ -2586,8 +2613,10 @@
         });
         $("#mode").addEventListener("change", renderSettingsSummary);
         $("#reviewer").addEventListener("change", renderSettingsSummary);
-        $("#model").addEventListener("change", () => { renderEffortOptions("", true); renderSettingsSummary(); });
+        $("#model").addEventListener("change", () => { renderModelOptions(); });
+        $("#custom-model").addEventListener("input", () => { renderEffortOptions(undefined, true); });
         $("#effort").addEventListener("change", renderSettingsSummary);
+        $("#speed").addEventListener("change", renderSettingsSummary);
         $("#add-text-artifact").addEventListener("click", openTextEntry);
         $("#toggle-context").addEventListener("click", () => {
           const panel = $("#context-panel");
@@ -2634,6 +2663,7 @@
         }
 
         async function sendMessage() {
+          if (state.maintenance && state.maintenance.admission === "closed") throw new Error("不可接續任務：等待現有工作完成後自動重啟。草稿已保留。");
           const message = $("#message").value.trim();
           const context = $("#context").value.trim();
           if (!message) throw new Error("請先輸入要交給 Codex 的內容。");
@@ -2647,6 +2677,11 @@
           if (classification === "company_approved" && !companyAuthorizationConfirmed) {
             throw new Error("請先確認公司內容已獲准傳送。");
           }
+          const active = state.selectedJob && !terminal.has(state.selectedJob.status);
+          const model = selectedModelId();
+          const preset = selectedModelPreset();
+          if (!active && isCustomModelSelection() && !model) throw new Error("請輸入自訂 Model ID，或改選固定組合。");
+          if (!active && !isCustomModelSelection() && !preset) throw new Error("請明確選擇一組模型／推理預設組合。");
           const inputBundleIds = await stageDraftArtifacts(
             state.selectedProjectId,
             classification,
@@ -2657,8 +2692,9 @@
             executionMode: $("#mode").value,
             approvalReviewer: $("#reviewer").value,
             dataClassification: classification,
-            model: $("#model").value || undefined,
-            effort: $("#effort").value || undefined,
+            ...(active ? {} : preset ? { modelPreset: preset.id, model: preset.model, effort: preset.effort }
+              : { modelSelection: "custom", model: model, effort: $("#effort").value || undefined }),
+            speed: state.selectedJob && !terminal.has(state.selectedJob.status) ? undefined : $("#speed").value,
             inputBundleIds: inputBundleIds,
           };
           if (!state.selectedJob) {
@@ -2671,6 +2707,8 @@
             }, common);
             const preview = await callTool("codex_job_preview", workPackage);
             await callTool("codex_job_dispatch", Object.assign({}, preview.workPackage, {
+              modelPreset: common.modelPreset,
+              modelSelection: common.modelSelection,
               previewDigest: preview.previewDigest,
               idempotencyKey: makeId(),
               companyAuthorizationConfirmed: companyAuthorizationConfirmed,
@@ -2687,6 +2725,8 @@
           }
           $("#message").value = "";
           $("#context").value = "";
+          $("#speed").value = "standard";
+          renderSettingsSummary();
           $("#company-confirm-checkbox").checked = false;
           $("#context-panel").open = false;
           state.draftArtifacts = [];
@@ -2978,10 +3018,10 @@
         function renderThreadControls(job) {
           if (!job) return "";
           const routing = job.conversation && job.conversation.modelRouting;
-          const requested = job.model || routing && routing.requestedModel || "Codex 預設";
           const fields = [job.executionMode === "plan" ? "Plan · 唯讀" : "Agent · 可修改",
-            job.approvalReviewer === "auto_review" ? "自動審核" : "每次詢問", "指定 " + requested,
-            "推理 " + (effortLabel(job.effort) || "預設"), "Controller " + controllerLabel(state.status && state.status.controller)];
+            job.approvalReviewer === "auto_review" ? "自動審核" : "每次詢問", requestedSelectionLabel(job),
+            "Controller " + controllerLabel(state.status && state.status.controller)];
+          if (job.speed) fields.push("請求速度 " + (job.speed === "fast" ? "Fast" : "Standard"));
           if (routing && routing.executedModel) fields.push((routing.turnId && job.turnId && routing.turnId !== job.turnId ? "前次回合實際 " : "實際 ") + routing.executedModel + "（轉送自 " + routing.fromModel + "）");
           return fields.map((text) => '<span>' + escapeHtml(text) + '</span>').join("") + tokenSummary(job.conversation && job.conversation.tokenUsage);
         }
@@ -2991,6 +3031,7 @@
         }
 
         function directActionEligible(job) {
+          if (state.maintenance && state.maintenance.admission === "closed") return false;
           return Boolean(job && job.directActionHistoryEligible === true && job.source !== "local" && !job.readOnly &&
             job.threadId && job.turnId && terminal.has(job.status) && isOperableProjectId(job.projectId) &&
             ["idle", "notLoaded"].includes(job.conversation && job.conversation.status) &&
@@ -3450,7 +3491,7 @@
           const project = currentProject();
           const signature = JSON.stringify(job
             ? [job.id, job.title, job.status, job.hasDiff, job.hasResult, (job.artifacts || []).map((item) => [item.id, item.sha256]), state.cancelArmedUntil > Date.now(), state.displayMode,
-              job.executionMode, job.approvalReviewer, job.model, job.effort, job.conversation && [job.conversation.tokenUsage, job.conversation.modelRouting], directActionEligible(job), state.status && state.status.controller]
+              job.executionMode, job.approvalReviewer, job.model, job.effort, job.speed, job.selectionRecorded, job.modelSource, job.effortSource, job.conversation && [job.conversation.tokenUsage, job.conversation.modelRouting], directActionEligible(job), state.status && state.status.controller]
             : ["new", state.selectedProjectId, state.displayMode]);
           if (signature === state.headerSignature) { syncWorkspacePanels(); return; }
           state.headerSignature = signature;
@@ -3753,6 +3794,13 @@
                 isStreaming: false,
                 text: message.content,
                 context: message.context,
+                speed: message.speed,
+                model: message.model,
+                effort: message.effort,
+                selectionRecorded: message.selectionRecorded,
+                selectionKind: message.selectionKind,
+                modelSource: message.modelSource,
+                effortSource: message.effortSource,
                 inputArtifacts: message.inputArtifacts,
                 createdAt: message.at,
               });
@@ -3775,10 +3823,20 @@
             '<div class="activity-body">' + activityBody(item, approval) + '</div></details>';
         }
 
+        function requestedSelectionLabel(item) {
+          if (item.selectionKind === "steer") return "同回合補充 · 未變更模型或推理";
+          const sourceLabel = (source) => ({ explicit: "明確提交", inherited: "沿用", default: "省略，交由預設" }[source] || "來源未知");
+          const recorded = item.selectionRecorded === true;
+          const model = item.model || (recorded && item.modelSource === "default" ? "預設" : "未知");
+          const effort = effortLabel(item.effort) || (recorded && item.effortSource === "default" ? "預設" : "未知");
+          return "提交模型 " + model + "（" + (recorded ? sourceLabel(item.modelSource) : "舊紀錄，來源未知") + "） · 推理 " + effort +
+            "（" + (recorded ? sourceLabel(item.effortSource) : "舊紀錄，來源未知") + "）";
+        }
+
         function renderProjectedMessage(item, key) {
           const role = item.type === "userMessage" ? "user" : "assistant";
           const failed = ["failed", "interrupted", "declined"].includes(item.status);
-          const meta = role === "user" ? "你" : "Codex";
+          const meta = (role === "user" ? "你 · " + requestedSelectionLabel(item) : "Codex") + (item.speed ? " · 請求速度 " + (item.speed === "fast" ? "Fast" : "Standard") : "");
           const time = formatTime(item.createdAt);
           const context = item.context
             ? '<details class="message-context"><summary>附加背景</summary><pre>' + escapeHtml(item.context) + '</pre></details>'
@@ -3992,55 +4050,100 @@
             escapeAttr(approval.id) + '" data-decision="accept">核准</button></div></article>';
         }
 
+        function isCustomModelSelection() {
+          const option = $("#model").selectedOptions[0];
+          return Boolean(option && option.dataset && option.dataset.custom === "true");
+        }
+
+        function selectedModelId() {
+          const preset = selectedModelPreset();
+          return isCustomModelSelection() ? $("#custom-model").value.trim() : preset ? preset.model : "";
+        }
+
+        function selectedModelPreset() {
+          return (state.status && state.status.modelPresets || []).find((preset) => preset.id === $("#model").value);
+        }
+
         function renderModelOptions(preferredModel, preferredEffort) {
-          const models = state.status && state.status.models || [];
-          const signature = JSON.stringify(models.map((model) => [
-            model.id,
-            model.displayName,
-            model.isDefault,
-            model.defaultReasoningEffort,
-            model.supportedReasoningEfforts,
-          ]));
+          const presets = state.status && state.status.modelPresets || [];
+          const signature = JSON.stringify(presets);
           const modelSelect = $("#model");
-          const currentModel = preferredModel !== undefined ? preferredModel : modelSelect.value;
+          const wasCustom = isCustomModelSelection();
+          const currentModel = preferredModel !== undefined ? preferredModel : selectedModelId();
+          const currentEffort = preferredEffort !== undefined ? preferredEffort
+            : selectedModelPreset() ? selectedModelPreset().effort : $("#effort").value;
+          const preset = presets.find((item) => item.model === currentModel && item.effort === currentEffort);
+          const custom = preferredModel === undefined && wasCustom
+            || Boolean(currentModel && !preset);
           if (signature !== state.modelSignature) {
             state.modelSignature = signature;
-            const defaultModel = models.find((model) => model.isDefault);
-            modelSelect.innerHTML = '<option value="">自動' +
-              (defaultModel ? " · " + escapeHtml(defaultModel.displayName) : " · Codex 預設") + '</option>' +
-              models.map((model) => '<option value="' + escapeAttr(model.id) + '">' +
-                escapeHtml(model.displayName) + (model.isDefault ? " · 預設" : "") + '</option>').join("");
+            modelSelect.innerHTML = '<option value="">請明確選擇一組</option>' +
+              presets.map((item) => '<option value="' + escapeAttr(item.id) + '">' +
+                escapeHtml(item.id + " · " + item.availability) + '</option>').join("") +
+              '<optgroup label="進階相容功能（非固定組合）"><option value="" data-custom="true">手動指定 Model ID</option></optgroup>';
           }
-          if (Array.from(modelSelect.options).some((option) => option.value === (currentModel || ""))) {
-            modelSelect.value = currentModel || "";
+          if (custom) {
+            modelSelect.selectedIndex = modelSelect.options.length - 1;
+            if (preferredModel !== undefined || !wasCustom) $("#custom-model").value = currentModel;
+          } else {
+            modelSelect.value = preset ? preset.id : "";
           }
-          renderEffortOptions(preferredEffort, false);
+          $("#custom-model-field").hidden = !custom;
+          renderEffortOptions(currentEffort, false);
+          $("#model-preset-note").textContent = custom ? "進階手動選擇不代表已驗證可用；不會自動換模型。"
+            : preset ? preset.availability + " · " + preset.reason + " · " + preset.availabilityReason
+              : "請依工作範圍選擇固定組合；不會自動選擇模型。";
           renderSettingsSummary();
         }
 
         function renderEffortOptions(preferredEffort, preserveCurrent) {
+          const preset = selectedModelPreset();
+          if (!preset && !isCustomModelSelection()) {
+            $("#effort").innerHTML = '<option value="">請先選擇組合</option>';
+            $("#effort").disabled = true;
+            renderSettingsSummary();
+            return;
+          }
+          if (preset) {
+            $("#effort").innerHTML = '<option value="' + escapeAttr(preset.effort) + '">' + escapeHtml(effortLabel(preset.effort)) + '（固定）</option>';
+            $("#effort").value = preset.effort;
+            $("#effort").disabled = true;
+            renderSettingsSummary();
+            return;
+          }
           const models = state.status && state.status.models || [];
-          const selectedModel = models.find((model) => model.id === $("#model").value)
-            || models.find((model) => model.isDefault)
-            || models[0];
+          const modelId = selectedModelId();
+          const explicit = isCustomModelSelection() || Boolean(modelId);
+          const selectedModel = explicit ? models.find((model) => model.id === modelId)
+            : models.find((model) => model.isDefault) || models[0];
           const effortSelect = $("#effort");
           const current = preserveCurrent ? effortSelect.value : (preferredEffort !== undefined ? preferredEffort : effortSelect.value);
-          const efforts = selectedModel && selectedModel.supportedReasoningEfforts || [];
+          const efforts = selectedModel ? selectedModel.supportedReasoningEfforts || []
+            : explicit ? ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"].map((reasoningEffort) => ({ reasoningEffort })) : [];
           effortSelect.innerHTML = '<option value="">預設推理' +
             (selectedModel && selectedModel.defaultReasoningEffort ? " · " + effortLabel(selectedModel.defaultReasoningEffort) : "") +
             '</option>' + efforts.map((option) => '<option value="' + escapeAttr(option.reasoningEffort) + '">' +
               escapeHtml(effortLabel(option.reasoningEffort)) + '</option>').join("");
-          effortSelect.value = Array.from(effortSelect.options).some((option) => option.value === (current || "")) ? (current || "") : "";
+          if (current && !efforts.some((option) => option.reasoningEffort === current)) {
+            effortSelect.innerHTML += '<option value="' + escapeAttr(current) + '">' +
+              escapeHtml(effortLabel(current)) + '（未列於此模型的推理選項）</option>';
+          }
+          effortSelect.value = current || "";
+          effortSelect.disabled = !isCustomModelSelection() || state.busy || Boolean(state.selectedJob && (!terminal.has(state.selectedJob.status) || state.selectedJob.readOnly));
           renderSettingsSummary();
         }
 
         function renderSettingsSummary() {
           const mode = $("#mode").value === "workspace_write" ? "Agent 可修改" : "Plan 唯讀";
           const reviewer = $("#reviewer").value === "auto_review" ? "自動審核" : "每次詢問";
-          const model = $("#model").selectedOptions[0] && $("#model").selectedOptions[0].textContent || "Codex 預設";
+          const model = isCustomModelSelection() ? "手動指定 " + (selectedModelId() || "（尚未輸入）")
+            : $("#model").selectedOptions[0] && $("#model").selectedOptions[0].textContent || "Codex 預設";
           const effort = $("#effort").selectedOptions[0] && $("#effort").selectedOptions[0].textContent || "預設推理";
           $("#compact-settings-summary").textContent = mode + " · " + reviewer;
           $("#run-settings-summary").textContent = mode + " · " + reviewer;
+          const speed = $("#speed").disabled ? "速度暫不可變更" : "下回合 " + ($("#speed").value === "fast" ? "Fast" : "Standard");
+          $("#run-settings-summary").textContent += " · " + speed;
+          $("#compact-settings-summary").textContent += " · " + speed;
           $("#run-settings-summary").title = model + " · " + effort;
         }
 
@@ -4191,7 +4294,17 @@
           const active = job && !terminal.has(job.status);
           const readOnly = Boolean(job && job.readOnly);
           const hasProject = isOperableProjectId(state.selectedProjectId);
-          $("#send").disabled = state.busy || !hasProject || readOnly;
+          const maintenance = state.maintenance;
+          const draining = Boolean(maintenance && maintenance.admission === "closed");
+          const banner = $("#memory-maintenance");
+          banner.hidden = !draining;
+          if (draining) {
+            const phase = maintenance.phase === "failed" ? "自動重啟失敗／需處理" : maintenance.phase === "draining" ? "等待現有工作完成，再自動重啟" : "等待 Control Center 自動重啟並驗證";
+            const pending = maintenance.pendingWork || {};
+            banner.textContent = "不可接續任務 · " + phase + "。草稿保留，仍可查看進度、處理核准或取消。記憶體 " + Math.round(maintenance.heapUsed / 1048576) + " / " + Math.round(maintenance.thresholdBytes / 1048576) + " MiB；待完成工作 " + (pending.jobs || 0) + "、核准 " + (pending.approvals || 0) + "。";
+          }
+          $("#new-chat").disabled = draining || state.busy;
+          $("#send").disabled = draining || state.busy || !hasProject || readOnly;
           $("#send").classList.toggle("busy", state.busy);
           $("#send").innerHTML = state.busy ? '<span class="send-pending" aria-hidden="true">···</span>' : '<span class="send-arrow" aria-hidden="true">↑</span>';
           $("#send").setAttribute("aria-label", state.busy ? "處理中" : "送出");
@@ -4200,7 +4313,10 @@
           $("#mode").disabled = state.busy || Boolean(active) || readOnly;
           $("#reviewer").disabled = state.busy || Boolean(active) || readOnly;
           $("#model").disabled = state.busy || Boolean(active) || readOnly;
-          $("#effort").disabled = state.busy || Boolean(active) || readOnly;
+          $("#custom-model").disabled = state.busy || Boolean(active) || readOnly;
+          $("#effort").disabled = state.busy || Boolean(active) || readOnly || !isCustomModelSelection();
+          $("#speed").disabled = state.busy || Boolean(active) || readOnly;
+          renderSettingsSummary();
           $("#classification").disabled = state.busy || readOnly;
           $("#message").disabled = state.busy || !hasProject || readOnly;
           $("#context").disabled = state.busy || !hasProject || readOnly;

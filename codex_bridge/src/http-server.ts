@@ -11,6 +11,7 @@ export interface BridgeHttpServerOptions {
   port: number;
   bearerToken?: string;
   log?: (message: string) => void;
+  onError?: (error: unknown) => void;
   /** HTTP composition root defers admission until the local control receiver is ready. */
   deferAdmission?: boolean;
 }
@@ -20,6 +21,7 @@ export interface BridgeHttpServerHandle {
   port: number;
   url: string;
   isIdle: () => boolean;
+  quiesce?: () => Promise<void>;
   activate: () => void;
   close: () => Promise<void>;
 }
@@ -34,6 +36,8 @@ export async function startBridgeHttpServer(
   let activeRequests = 0;
   const httpServer = createServer(async (req, res) => {
     activeRequests++;
+    const counted = req.method === "POST";
+    if (counted && runtime.activity) runtime.activity.http++;
     try {
     if (!accepting) { sendJson(res, 503, { ok: false, error: "Runtime not ready." }); return; }
     if (!req.url) {
@@ -78,10 +82,11 @@ export async function startBridgeHttpServer(
       }
       sendJsonRpcError(res, 405, -32000, "Method not allowed.");
     } catch (error) {
+      options.onError?.(error);
       options.log?.(`MCP HTTP error: ${error instanceof Error ? error.message : String(error)}`);
       if (!res.headersSent) sendJsonRpcError(res, 500, -32603, "Internal server error.");
     }
-    } finally { activeRequests--; }
+    } finally { activeRequests--; if (counted && runtime.activity) runtime.activity.http--; }
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -99,6 +104,22 @@ export async function startBridgeHttpServer(
     port: actualPort,
     url,
     isIdle: () => accepting && activeRequests === 0,
+    quiesce: async () => {
+      accepting = false;
+      let waiting = true;
+      try {
+        await waitForClose((async () => {
+          while (waiting && (activeRequests || runtime.activity?.tools || runtime.activity?.http)) {
+            await new Promise(resolve => setTimeout(resolve, 20));
+          }
+        })(), 15_000, "HTTP_DRAIN_UNKNOWN");
+      } catch (error) {
+        // Retain the work fence, but restore read/poll/approval visibility when
+        // shutdown has not begun. An uncertain tool must never be force-ended.
+        if (!closing) accepting = true;
+        throw error;
+      } finally { waiting = false; }
+    },
     activate: () => {
       if (closing) throw new Error("HTTP_CLOSING");
       accepting = true;
@@ -116,6 +137,9 @@ export async function startBridgeHttpServer(
     })(),
   };
   try {
+    const review = await runtime.reviewStoreDiagnostics?.();
+    await runtime.memoryMaintenance?.reconcilePreviousRuntime(review?.startup.status === "OPEN"
+      && review.current.lifecycle === "OPEN" && review.current.presence === "PRESENT" && review.current.owner === "THIS_INSTANCE");
     options.log?.(`Codex Handoff Bridge listening at ${url}`);
     if (!options.bearerToken) {
       options.log?.("WARNING: no HTTP bearer token is configured; keep the listener on localhost behind the secure tunnel.");
@@ -135,6 +159,8 @@ export function healthPayload(runtime: BridgeRuntime) {
     version: "1.1.0",
     buildId: runtime.config.buildId,
     pid: process.pid,
+    memoryMaintenance: runtime.memoryMaintenance?.snapshot(),
+    stores: { jobs: "OPEN", review: runtime.approvalStore ? "OPEN" : "UNAVAILABLE" },
     selfReload: { contract: "remote-self-reload-r1", drain: runtime.store.selfReloadDrain },
     controller: runtime.controller.status,
     projectIds: Array.from(runtime.config.projects.keys()),

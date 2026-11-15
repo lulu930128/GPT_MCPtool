@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { AppServerTransport } from "./app-server-client.js";
 import { redactString } from "./redaction.js";
 
-// Audited against the installed @openai/codex 0.154.0 experimental protocol.
+// Audited against the installed @openai/codex 0.165.0 experimental protocol.
 // These schemas select fields; arbitrary nested server payloads never cross this boundary.
 const text = z.string().transform((value) => redactString(value).slice(0, 160));
 const count = z.number().int().nonnegative().safe();
@@ -68,7 +68,7 @@ export class ControlPlaneReader {
         return { data: { summary: usageSummary.parse(value.summary), dailyUsageBuckets: buckets?.slice(0, 90).map((row) => dailyBucket.parse(row)) ?? null }, truncated: (buckets?.length ?? 0) > 90 };
       }),
     ]);
-    return { protocolVersion: "0.154.0", fetchedAt: new Date().toISOString(), rateLimits, accountUsage };
+    return { protocolVersion: this.transport.protocolVersion ?? null, fetchedAt: new Date().toISOString(), rateLimits, accountUsage };
   }
 
   async runtime(cwd: string) {
@@ -83,10 +83,12 @@ export class ControlPlaneReader {
       }),
       this.page("permissionProfile/list", { cwd }, profile),
       this.read("windowsSandbox/readiness", {}, (raw) => ({ data: z.object({ status: z.enum(["ready", "notConfigured", "updateRequired"]) }).parse(raw), truncated: false })),
-      this.read("modelProvider/capabilities/read", {}, (raw) => ({ data: z.object({ namespaceTools: z.boolean(), imageGeneration: z.boolean(), webSearch: z.boolean() }).parse(raw), truncated: false })),
+      // 0.165 removed namespaceTools. Preserve older boolean evidence and report
+      // unknown when absent; removal does not mean the provider lacks support.
+      this.read("modelProvider/capabilities/read", {}, (raw) => ({ data: z.object({ namespaceTools: z.boolean().optional().transform((value) => value ?? null), imageGeneration: z.boolean(), webSearch: z.boolean() }).parse(raw), truncated: false })),
       this.page("experimentalFeature/list", {}, feature),
     ]);
-    return { protocolVersion: "0.154.0", fetchedAt: new Date().toISOString(), server, permissionProfiles, windowsSandbox, modelProvider, experimentalFeatures };
+    return { protocolVersion: this.transport.protocolVersion ?? null, fetchedAt: new Date().toISOString(), server, permissionProfiles, windowsSandbox, modelProvider, experimentalFeatures };
   }
 
   async inventory(cwd: string, kind: "all" | "skills" | "hooks" | "mcp" = "all") {
@@ -95,7 +97,7 @@ export class ControlPlaneReader {
       kind === "all" || kind === "hooks" ? this.inventoryEntries("hooks/list", cwd, "hooks", hook) : undefined,
       kind === "all" || kind === "mcp" ? this.page("mcpServerStatus/list", { detail: "toolsAndAuthOnly" }, mcp) : undefined,
     ]);
-    return { protocolVersion: "0.154.0", fetchedAt: new Date().toISOString(), skills, hooks, mcpServers };
+    return { protocolVersion: this.transport.protocolVersion ?? null, fetchedAt: new Date().toISOString(), skills, hooks, mcpServers };
   }
 
   private inventoryEntries<T>(method: "skills/list" | "hooks/list", cwd: string, field: "skills" | "hooks", schema: z.ZodType<T, z.ZodTypeDef, any>) {

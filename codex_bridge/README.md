@@ -1,5 +1,9 @@
 # Codex Handoff Bridge
 
+2026-11-12 修復：記憶體維護保留 1500 MiB heapUsed、每 60 秒連續兩次超標、拒收新工作及完整排空。排空後由既有 CC 直接呼叫普通 RestartCore，不要求額外交接 ACK、獨立 per-intent receipt 或 180 秒接手期限。新 Core 綁定 HTTP listener、確認舊 PID 已退出、工作排空且兩個 stores 正常後，保存事故原始紀錄並結清舊 intent，自動恢復接單與 10 分鐘冷卻。實際重啟結果不明時保留原 intent 的 restarting，先讀回現況，不對舊 Core 重派；正常新 Core 不繼承永久故障鎖。舊 `-MemoryMaintenanceIntentId` 僅保留相容呼叫。此為緩解，未修 session leak/OOM 根因；source 與正式採用證據見 [修復紀錄](docs/agent-runs/memory-drain-restart-20261110/RecoveryProgress-20261112.md)。
+
+Runtime 診斷寫入既有 `CODEX_BRIDGE_DATA_DIR/diagnostics/runtime.jsonl`，保留 active 與 `.1`～`.3` 共最多 4 MiB。記錄啟動／ready、每分鐘記憶體觀察、HTTP 例外、未捕捉例外／Promise rejection、cooperative 關閉與退出碼，並帶 PID、instance、Build 與時間。HTTP 錯誤每分鐘最多 60 筆，另回報略過筆數；致命事件不受此限制。只保存允許的錯誤類型／code 與程式相對位置，不保存 message、request、環境變數、完整 stack 或 raw stderr。Logger 使用 `uncaughtExceptionMonitor`，不改變 Node 原本的致命錯誤退出行為；寫入失敗只輸出一次固定 `RUNTIME_DIAGNOSTICS_WRITE_FAILED`，不因此停止服務。設定載入前失敗、OS 強制終止、native OOM／abort 或斷電可能沒有最後 exit 紀錄，不能只憑缺少 exit 判定原因。實作與部署驗收見 [本次紀錄](docs/agent-runs/runtime-diagnostics-20261106/Progress.md)。
+
 日常 `Update -CandidateRoot` 在同一 transaction 內完成 Build／Stage，再停機、選版與 Verify。一般中斷使用同 boot 的 `Recover -OperationId`；只在確認原 owner 已退出且 lock identity 未變時保留原 bytes 並退休殘留鎖，從不改 journal。Source Verify 同時核對 core、MCP 與 reviewStore。2026-10-28 修補的 Stage／正式驗收狀態及本機命令見 [可靠更新交接](docs/agent-runs/reliable-daily-update-20261028/Handoff.md)。
 
 安全停止 transport 的兩個 native helper 以 CC 的 `src/NormalOperator.Native.cs`、`src/RemoteSelfReload.Native.cs` 為 canonical source；daily Stage 複製到版本內的 `scripts/shared-native` 並驗 hash。CC caller 依獨立 CC selector 與 wrapper inventory 驗證，不需要內附 CC owner。
@@ -31,7 +35,7 @@ bearer 的入口會回 `AUTHENTICATED_MCP_REQUIRED`。本輪未部署、未驗�
 - [Job Recovery](docs/JobRecovery.md)：持久化狀態、interrupted job、artifact、重啟與保留原則。
 - [Architecture v1](docs/design/architecture-v1.md)：第一版產品決策、state model 與 non-goals。
 - [Conversation Model](docs/ConversationModel.md)：App Server history、live item 投影、cursor、reconnect 與 prompt-neutral input 契約。
-- [Control Plane Contract](docs/ControlPlaneContract.md)：0.154.0 usage／diagnostics／inventory、通知投影與 compact／review／fork 安全邊界。
+- [Control Plane Contract](docs/ControlPlaneContract.md)：usage／diagnostics／inventory、App Server 實報版本、通知投影與 compact／review／fork 安全邊界。
 
 ## 第一版能力
 
@@ -42,7 +46,7 @@ bearer 的入口會回 `AUTHENTICATED_MCP_REQUIRED`。本輪未部署、未驗�
   active send/steer 與 cancel 必須指定 `expectedTurnId`，cancel 另帶 `requestId`。
   同 key 不同內容拒絕；不明 delivery 不重送。Receipt 持久保存，每 job 上限 10,000，達限拒絕新 direct 請求。
 - `codex_model_list(forceRefresh?)` 回傳模型、efforts、fetchedAt、cacheHit 與 controller identity。
-  CLI 精確釘版 `0.154.0`；Astra 可用性與 effort 以實際 App Server 回傳為準。
+  Bridge 私有 CLI 精確釘版 `0.165.0`，Win32 native 隨官方套件同版安裝；模型可用性與 effort 以實際 App Server 回傳為準。
   模型清單會讀取全部分頁；不完整或失敗不偽裝成空清單。
 - Direct content 可操作 user/auto_review job；續接或 steer 省略 reviewer 時沿用既有設定，
   歷史工作缺少 reviewer 時沿用 user。只有使用者明確要求且在 turn 之間才能變更 reviewer。
@@ -79,7 +83,24 @@ bearer 的入口會回 `AUTHENTICATED_MCP_REQUIRED`。本輪未部署、未驗�
   `turn/steer`。
 - Initial turn、follow-up 與 steer 只由使用者明確輸入和純資料標記區段組成。Bridge 仍產生
   `request.md` 供稽核，但不再把稽核模板或行為提示送進模型輸入。
-- 模型與推理強度由 App Server `model/list` 動態提供，並與執行模式一起放在輸入框下方。
+- Bridge 正常選單固定三組 `modelPreset`：`gpt-6-astra/xhigh`、`gpt-6.1-sol/xhigh`、`gpt-6.1-sol/medium`。
+  唯一定義在 `src/model-presets.ts`；GUI 從 Bridge status 的 `modelPresets` 讀取，與 native `models` 分開。
+  `gpt-5.6-sol/medium` 不再是固定選項；native `codex_model_list` 仍如實回傳 provider 清單，不增刪或偽造 ID。
+  未列出的模型標為 `NOT VERIFIED`；已列出但不支援該 effort 則為 `UNAVAILABLE`。`NATIVE LISTED` 也只代表清單列出，
+  不代表執行或帳號授權已驗證。選擇未列出的 Sol 6.1 仍只嘗試 exact ID；拒絕時保留原失敗，無 fallback／自動重送。
+  新任務必須明確傳 `modelPreset`，或完整且吻合的 `model` + `effort`；省略、半組與衝突組合拒絕，不自動選 Astra。
+  ChatGPT 可依任務範圍選擇：複雜跨模組／高風險工作用 Astra xhigh，聚焦深度推理用 Sol xhigh，範圍明確的一般工作用 Sol medium。
+  這是選擇指引，不是效能或可用性保證；固定組合不控制 Fast Mode、reviewer 或權限。
+  Direct continuation／active steer 省略選擇時沿用原設定；執行中不得改組合。歷史 custom model 紀錄不遷移或補造。
+  進階「手動指定 Model ID」保留在獨立選項群；MCP 須明確帶 `modelSelection: "custom"` 及非空 `model`，
+  不可與 `modelPreset` 同用。ID 最多 120 字元，前後空白移除；preview 回傳的工作包只含解析後的 pair，
+  手動 dispatch 時仍須帶 `modelSelection: "custom"`。此相容入口不屬於固定三組，重繪與後續回合保留選擇。
+  已知模型仍檢查列出的 effort；清單外模型或清單讀取失敗時，明確指定的 ID 交給 App Server 判定。
+  手動指定不表示已驗證可用；App Server 拒絕時顯示失敗，不換模型、不自動重送。
+- 手動速度 `speed: standard | fast` 適用於 preview／dispatch／direct send 與 Widget 的每次新 Turn；省略即 standard。
+  `turn/start` 明確傳 `serviceTierForTurn: "default" | "fast"`，不寫 sticky `serviceTier` 或 config.toml，不自動選模型。
+  Widget 送出及切換對話後重設 Standard；active steer 須省略 speed，明確帶任何速度會拒絕。
+  request.md 記初始請求，Job/messages/projection 顯示各回合請求速度，不代表已驗證實際 tier；舊紀錄未知時不補造。
 - `plan` 唯讀與 `workspace_write` 兩種執行模式。
 - 權限 reviewer 可依對話選擇 `auto_review` 或 `user`；預設自動審核。所有 `workspace_write`
   使用內建 `:danger-full-access`，解除 Codex 檔案系統與網路隔離，並保留 `approvalPolicy=on-request`。
@@ -362,7 +383,7 @@ Control Center Status 讀取限額 8192 bytes，驗證固定 contract／allowlis
 | `codex_inventory` | read-only | configured project skills／hooks 與 server-wide MCP 狀態；不提供 call／reload |
 | `codex_direct_thread_compact` | model-visible action | 明確 compact idle job/thread，exact identity 與持久 receipt |
 | `codex_direct_thread_review` | model-visible action | inline uncommitted changes review，plan 權限與既有 history owner |
-| `codex_direct_thread_fork` | blocked action | 0.154.0 無可復原的跨 owner fork transaction；不建立 native thread |
+| `codex_direct_thread_fork` | blocked action | native protocol 無可復原的跨 owner fork transaction；不建立 native thread |
 
 `plan` 模式即使收到 file change request 也不能核准。公司資料分類另外要求控制台中的明確授權勾選。
 Bridge 對所有 turn 保持 `approvalPolicy=on-request`。`auto_review` 只替換 App Server reviewer，

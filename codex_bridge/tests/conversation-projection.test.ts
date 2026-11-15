@@ -8,6 +8,42 @@ import {
   reduceConversationNotification,
 } from "../src/conversation-projection.js";
 
+test("selection metadata joins exact client ids, survives native sync, and keeps legacy unknown distinct from new default", () => {
+  const response = { thread: { id: "selection-thread", turns: [{ id: "turn", items: [
+    { id: "native-explicit", type: "userMessage", clientId: "explicit", content: [{ type: "text", text: "Native text" }] },
+    { id: "native-legacy", type: "userMessage", clientId: "legacy", content: [] },
+    { id: "native-default", type: "userMessage", clientId: "default", content: [] },
+    { id: "native-old-value", type: "userMessage", clientId: "old-value", content: [] },
+  ] }] } };
+  const messages: import("../src/types.js").ConversationMessage[] = [
+    { id: "1", clientMessageId: "explicit", role: "user", at: "2026-10-28T00:00:00Z", content: "Original", model: "gpt-6-astra", effort: "xhigh", selectionRecorded: true, selectionKind: "turn", modelSource: "explicit", effortSource: "inherited" },
+    { id: "2", clientMessageId: "legacy", role: "user", at: "2026-10-28T00:00:00Z", content: "Old" },
+    { id: "3", clientMessageId: "default", role: "user", at: "2026-10-28T00:00:00Z", content: "New", selectionRecorded: true, selectionKind: "turn", modelSource: "default", effortSource: "default" },
+    { id: "4", clientMessageId: "old-value", role: "user", at: "2026-10-28T00:00:00Z", content: "Old", model: "legacy-model", effort: "high" },
+    { id: "5", clientMessageId: "unmatched", role: "user", at: "2026-10-28T00:00:00Z", content: "Native text", model: "must-not-join" },
+  ];
+  const native = hydrateConversationProjection(createConversationProjection(), response);
+  const merged = mergeConversationMessages(native, messages, true);
+  const [explicit, legacy, omitted, oldValue] = merged.turns[0]!.items;
+  assert.equal(explicit!.text, "Native text");
+  assert.deepEqual([explicit!.model, explicit!.effort, explicit!.selectionRecorded, explicit!.modelSource, explicit!.effortSource], ["gpt-6-astra", "xhigh", true, "explicit", "inherited"]);
+  assert.equal(legacy!.selectionRecorded, undefined);
+  assert.equal(legacy!.model, undefined);
+  assert.equal(omitted!.selectionRecorded, true);
+  assert.equal(omitted!.modelSource, "default");
+  assert.equal(oldValue!.model, "legacy-model");
+  assert.equal(oldValue!.selectionRecorded, undefined);
+  assert.equal(merged.turns[0]!.items.length, 4);
+  const synced = mergeConversationProjectionMetadata(native, merged);
+  assert.deepEqual(synced.turns[0]!.items.map((item) => [item.model, item.effort, item.selectionRecorded, item.modelSource]),
+    merged.turns[0]!.items.map((item) => [item.model, item.effort, item.selectionRecorded, item.modelSource]));
+  const fallback = mergeConversationMessages(createConversationProjection(), messages);
+  assert.equal(fallback.turns[0]!.items[0]!.modelSource, "explicit");
+  response.thread.turns[0]!.items[0]!.clientId = "different-client";
+  const replaced = mergeConversationProjectionMetadata(hydrateConversationProjection(createConversationProjection(), response), merged);
+  assert.equal(replaced.turns[0]!.items[0]!.model, undefined, "Native item identity alone must not attach another submission's metadata.");
+});
+
 test("historical timestamp lineage is independent of hydration clock and repairs legacy checkpoints", () => {
   const startedAt = "2026-10-08T01:00:00.000Z";
   const completedAt = "2026-10-08T01:05:00.000Z";
@@ -108,14 +144,15 @@ test("Bridge message metadata joins by exact client id without overwriting App S
     lastMetadataCheckedAt: "2026-08-29T00:00:00.000Z",
   });
   const merged = mergeConversationMessages(native, [
-    { id: "message-b", clientMessageId: "client-b", role: "user", content: "Stale B", context: "Context B", at: "2026-08-29T00:00:02.000Z" },
-    { id: "message-a", clientMessageId: "client-a", role: "user", content: "Stale A", context: "Context A", at: "2026-08-29T00:00:01.000Z" },
-    { id: "message-missing", role: "user", content: "Must not be positionally appended", at: "2026-08-29T00:00:03.000Z" },
+    { id: "message-b", clientMessageId: "client-b", role: "user", speed: "standard", content: "Stale B", context: "Context B", at: "2026-08-29T00:00:02.000Z" },
+    { id: "message-a", clientMessageId: "client-a", role: "user", speed: "fast", content: "Stale A", context: "Context A", at: "2026-08-29T00:00:01.000Z" },
+    { id: "message-missing", role: "user", speed: "fast", content: "Must not be positionally appended", at: "2026-08-29T00:00:03.000Z" },
   ]);
 
   const users = merged.turns.flatMap((turn) => turn.items).filter((item) => item.type === "userMessage");
   assert.deepEqual(users.map((item) => item.text), ["Native A", "Native B"]);
   assert.deepEqual(users.map((item) => item.context), ["Context A", "Context B"]);
+  assert.deepEqual(users.map((item) => item.speed), ["fast", "standard"]);
 });
 
 test("thread/read hydrates ordered multi-turn history without raw reasoning", () => {

@@ -15,6 +15,8 @@ export interface JsonRpcServerRequest extends JsonRpcNotification {
 
 export interface AppServerTransport {
   readonly status: AppServerStatus;
+  /** App Server build reported by initialize; unknown until a successful handshake. */
+  readonly protocolVersion?: string | null;
   ensureStarted(): Promise<void>;
   close(): Promise<void>;
   request<T = Record<string, unknown>>(method: string, params?: Record<string, unknown>): Promise<T>;
@@ -48,6 +50,7 @@ export class CodexAppServerClient extends EventEmitter implements AppServerTrans
   private pending = new Map<number, PendingRequest>();
   private startPromise?: Promise<void>;
   private currentStatus: AppServerStatus = "idle";
+  private currentProtocolVersion: string | null = null;
   private closing = false;
   private readonly requestTimeoutMs: number;
 
@@ -58,6 +61,10 @@ export class CodexAppServerClient extends EventEmitter implements AppServerTrans
 
   get status(): AppServerStatus {
     return this.currentStatus;
+  }
+
+  get protocolVersion(): string | null {
+    return this.currentProtocolVersion;
   }
 
   async ensureStarted(): Promise<void> {
@@ -136,6 +143,7 @@ export class CodexAppServerClient extends EventEmitter implements AppServerTrans
   private async start(): Promise<void> {
     this.closing = false;
     this.currentStatus = "starting";
+    this.currentProtocolVersion = null;
     let child: ChildProcessWithoutNullStreams;
     try {
       await this.options.beforeSpawn?.();
@@ -163,6 +171,7 @@ export class CodexAppServerClient extends EventEmitter implements AppServerTrans
     child.once("exit", (code, signal) => {
       const error = new Error(`Codex App Server exited (code=${String(code)}, signal=${String(signal)}).`);
       this.child = undefined;
+      this.currentProtocolVersion = null;
       this.currentStatus = this.closing ? "idle" : "unavailable";
       for (const pending of this.pending.values()) {
         clearTimeout(pending.timer);
@@ -184,6 +193,12 @@ export class CodexAppServerClient extends EventEmitter implements AppServerTrans
         throw new Error("Codex App Server returned an invalid initialize response.");
       }
       this.notify("initialized", {});
+      // initialize has no protocol-version field. Its userAgent reports the
+      // running server build, even when a custom launcher is configured.
+      // Return only the version, never the raw user agent or Codex home.
+      this.currentProtocolVersion = typeof result.userAgent === "string"
+        ? /^codex-handoff-bridge\/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?:\s|$)/.exec(result.userAgent)?.[1] ?? null
+        : null;
       this.currentStatus = "ready";
     } catch (error) {
       this.currentStatus = "unavailable";

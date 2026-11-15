@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 import type { BridgeRuntime } from "./runtime.js";
 import type { BridgeHttpServerHandle } from "./http-server.js";
 import { waitForClose } from "./close-resources.js";
+import type { RuntimeDiagnostics } from "./runtime-diagnostics.js";
+import { maintenanceIdle } from "./memory-maintenance.js";
 
 export function closeIdleRuntime(runtime: BridgeRuntime, http: BridgeHttpServerHandle, requestId: string): Promise<"CLOSED" | "ACTIVE_WORK_PRESENT"> {
   const observation = { canRelease: true };
@@ -17,7 +19,15 @@ async function drainAndClose(runtime: BridgeRuntime, http: BridgeHttpServerHandl
   await runtime.store.beginSelfReload(requestId, new Date(Date.now() + 60_000).toISOString());
   if (!observation.canRelease) throw new Error("COOPERATIVE_SHUTDOWN_UNKNOWN");
   const jobs = runtime.store.listAll();
-  if (!http.isIdle() || !["idle", "ready"].includes(runtime.controller.status) || jobs.some(job =>
+  if (runtime.store.memoryDraining && runtime.maintenanceWork) {
+    const work = runtime.maintenanceWork();
+    // Reads may still be finishing. Freeze HTTP first, then let accepted tools
+    // settle; ordinary polling cannot hold the drain open indefinitely.
+    if (work.jobs === 0 && work.approvals === 0 && work.operations === 0) await http.quiesce?.();
+  }
+  if ((!runtime.store.memoryDraining && !http.isIdle())
+    || (runtime.maintenanceWork && !maintenanceIdle(runtime.maintenanceWork()))
+    || !["idle", "ready"].includes(runtime.controller.status) || jobs.some(job =>
     ["queued", "preparing", "running", "awaiting_approval"].includes(job.status) || job.pendingApprovalCount > 0)) {
     await runtime.store.endSelfReload(requestId, () => observation.canRelease);
     if (!observation.canRelease) throw new Error("COOPERATIVE_SHUTDOWN_UNKNOWN");
@@ -30,7 +40,7 @@ async function drainAndClose(runtime: BridgeRuntime, http: BridgeHttpServerHandl
 }
 
 /** Runtime receiver only. Existing component controller remains lifecycle owner. */
-export function startCooperativeShutdown(runtime: BridgeRuntime, http: BridgeHttpServerHandle) {
+export function startCooperativeShutdown(runtime: BridgeRuntime, http: BridgeHttpServerHandle, diagnostics?: RuntimeDiagnostics) {
   if (process.platform !== "win32") return { ready: Promise.resolve(), close: async () => {} };
   const instance = randomUUID();
   const child = spawn("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", ["-NoProfile", "-NonInteractive", "-File",
@@ -48,8 +58,14 @@ export function startCooperativeShutdown(runtime: BridgeRuntime, http: BridgeHtt
   void ready.catch(() => undefined);
   const seen = new Set<string>();
   const exit = new Promise<void>(resolve => {
-    child.once("exit", () => { ended = true; readyReject(new Error("COOPERATIVE_CHANNEL_UNAVAILABLE")); resolve(); });
-    child.once("error", () => { ended = true; readyReject(new Error("COOPERATIVE_CHANNEL_UNAVAILABLE")); resolve(); });
+    child.once("exit", (exitCode, signal) => {
+      diagnostics?.record("cooperative_host_exit", { exitCode, signal });
+      ended = true; readyReject(new Error("COOPERATIVE_CHANNEL_UNAVAILABLE")); resolve();
+    });
+    child.once("error", (error) => {
+      diagnostics?.record("cooperative_failed", { error });
+      ended = true; readyReject(new Error("COOPERATIVE_CHANNEL_UNAVAILABLE")); resolve();
+    });
   });
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (text: string) => {
@@ -74,11 +90,14 @@ export function startCooperativeShutdown(runtime: BridgeRuntime, http: BridgeHtt
     seen.add(requestId); pending = true;
     void (async () => {
       try {
+        diagnostics?.record("cooperative_shutdown");
         const code = await closeIdleRuntime(runtime, http, requestId);
         respond(requestId, nonce, code);
         if (code === "ACTIVE_WORK_PRESENT") { pending = false; return; }
+        diagnostics?.record("cooperative_closed");
         used = true; child.stdin.end();
-      } catch {
+      } catch (error) {
+        diagnostics?.record("cooperative_failed", { error });
         used = true; respond(requestId, nonce, "UNKNOWN"); child.stdin.end();
       }
     })();

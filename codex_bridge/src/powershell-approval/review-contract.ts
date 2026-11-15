@@ -9,7 +9,8 @@ const id = z.string().uuid();
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 // Reject rather than redact: review must preserve exact bytes. This is a bounded
 // detector, not a proof that arbitrary text contains no secrets.
-const sensitive = /password|passwd|api[_-]?key|access[_-]?token|client[_-]?secret|authorization|credential|private[ _-]?key|BEGIN .*PRIVATE KEY|\b(?:token|secret|cookie)\b|https?:\/\/[^\s/]+:[^\s/]+@|\b(?:place[_-]?order|submit[_-]?order|broker\.execute)\b|正式下單|受管制|-enc(?:odedcommand)?\b/i;
+// Applies only to Bridge PowerShell requests, not Codex App Server policy.
+const sensitive = /password|passwd|api[_-]?key|access[_-]?token|client[_-]?secret|authorization|credential|private[ _-]?key|BEGIN .*PRIVATE KEY|\b(?:token|secret|cookie)\b|https?:\/\/[^\s/]+:[^\s/]+@|-enc(?:odedcommand)?\b/i;
 const text = (max: number) => z.string().min(1).max(max).refine(value =>
   redactString(value) === value && !sensitive.test(value) && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u202a-\u202e\u2066-\u2069]/.test(value), "Unsafe review text");
 
@@ -19,7 +20,9 @@ export const reviewInputSchema = z.object({
   jobId: id.optional(), turnId: text(128).optional(),
   sourceFailureItemId: text(128).optional(),
   userIntent: z.literal("EXPLICIT_USER_REQUEST"),
-  contentPolicy: z.literal("PERSONAL_PUBLIC_NO_SECRETS_OR_REGULATED_ORDERS"),
+  // Prefer the current name; retain the legacy value verbatim for callers and
+  // persisted receipt digests. Neither value imposes a trading-text restriction.
+  contentPolicy: z.enum(["PERSONAL_PUBLIC_NO_SECRETS", "PERSONAL_PUBLIC_NO_SECRETS_OR_REGULATED_ORDERS"]),
   idempotencyKey: id,
   target: text(256), executionMode: modeSchema, cwd: text(1024),
   scriptSnapshot: text(8000), args: z.array(z.union([text(512), z.literal("")])).max(32),

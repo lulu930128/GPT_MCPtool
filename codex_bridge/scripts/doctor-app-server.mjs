@@ -31,6 +31,11 @@ async function readPages(method, params) {
 
 try {
   await client.ensureStarted();
+  // The native process owns login. Never read credentials or emit account metadata.
+  const account = await client.request("account/read", { refreshToken: false }).then(
+    (value) => ({ status: "available", signedIn: value.account != null, requiresOpenaiAuth: value.requiresOpenaiAuth === true }),
+    () => ({ status: "unavailable", signedIn: null }),
+  );
   const [profiles, models] = await Promise.all([
     readPages("permissionProfile/list", { cwd: projectPath }),
     readPages("model/list", { includeHidden: false }),
@@ -48,6 +53,7 @@ try {
     throw new Error("Control-plane protocol normalization failed.");
   }
   console.log(JSON.stringify({ ok: true, verification: "isolated-read-only-capabilities", realTurnStarted: false,
+    protocolVersion: client.protocolVersion, account,
     planStartup: "UNVERIFIED", planHttps: "UNVERIFIED", secretIsolation: "UNVERIFIED",
     controlPlane,
     profiles: profiles.filter((profile) => profile.id.startsWith("codex-bridge-") || profile.id === ":danger-full-access").map(({ id, allowed }) => ({ id, allowed })),

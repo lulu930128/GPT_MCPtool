@@ -114,17 +114,24 @@ not a promise that every turn will finish without intervention.
 The controller passes the reviewer to `thread/start`, `thread/resume` and `turn/start` with the selected
 permission profile, exact workspace roots and `approvalPolicy=on-request`. Each `turn/start` explicitly
 selects its profile: App Server 0.154 can rejoin a loaded thread without applying `thread/resume`
-permission overrides. Follow-up turns and inline Native Review first apply `thread/settings/update`
-and wait for the matching `thread/settings/updated` notification, then read back the exact profile,
-sandbox (including enabled network for Plan), approval policy and reviewer before starting work. New Plan
+permission overrides. Follow-up turns and inline Native Review first apply `thread/settings/update`,
+then confirm the exact thread id, idle state, profile, sandbox (including enabled network for Plan),
+approval policy and reviewer via native `thread/resume(excludeTurns=true)` before starting work.
+Native may acknowledge an unchanged setting without emitting `thread/settings/updated`; notifications
+are diagnostic observations and never substitute for readback. New Plan
 threads also verify the returned profile and read-only/network policy before `turn/start`. This verifies
 reported settings, not successful sandbox execution or HTTPS. The update acknowledgement alone only
-confirms enqueueing. A five-second application timeout or an
-unavailable or mismatched result blocks the operation. Native Review always requires read-only.
+confirms enqueueing. Each update stage retains a five-second deadline covering acknowledgement and
+readback; mismatched settings are polled every 100 ms within that deadline to allow queued application.
+An unavailable readback, wrong thread, non-idle thread, persistent mismatch or timeout blocks the operation.
+Late responses cannot start work and updates/user messages are never automatically resent. Failures retain
+`PERMISSION_PROFILE_UNVERIFIED` with bounded stage/reason, mismatched field names, notification state and
+readback count; raw native settings/errors are not included. Native Review always requires read-only.
 For write resumes, native 0.154 requires applying `sandboxPolicy=dangerFullAccess` before selecting
 `:danger-full-access`; otherwise a prior managed read-only policy can survive as `workspaceWrite`
 despite the Full Access profile id. These are separate acknowledged updates, with no turn between
-them. The final readback must confirm both the named profile and `dangerFullAccess` policy.
+them. Each stage requires native readback; the final readback must confirm both the named profile and
+`dangerFullAccess` policy.
 The Bridge does not
 classify commands or auto-accept requests. If App Server emits a command/file-change request to the
 Bridge, it remains an exact pending human approval even on an auto_review job. Unsupported requests

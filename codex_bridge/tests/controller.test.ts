@@ -28,6 +28,10 @@ class FakeTransport extends EventEmitter implements AppServerTransport {
   threadListResponses = new Map<string, Record<string, unknown>>();
   modelListResponses = new Map<string, Record<string, unknown>>();
   failSteer = false;
+  failTurnStart = false;
+  threadServiceTier = "fast";
+  resumeThreadStatus = "idle";
+  tiersByTurn = new Map<string, unknown>();
   failControlAction = false;
   wrongReviewThread = false;
   activePermissions = "codex-bridge-read-only";
@@ -36,6 +40,10 @@ class FakeTransport extends EventEmitter implements AppServerTransport {
   ignorePermissionUpdate = false;
   failPermissionUpdate = false;
   deferPermissionNotification = false;
+  omitPermissionNotification = false;
+  deferPermissionApplication = false;
+  pendingPermissionApplication?: () => void;
+  permissionNotificationOverride?: JsonRpcNotification;
   pendingPermissionNotification?: JsonRpcNotification;
   permissionReadbackOverride?: Record<string, unknown>;
   permissionStartOverride?: Record<string, unknown>;
@@ -91,34 +99,41 @@ class FakeTransport extends EventEmitter implements AppServerTransport {
     }
     // Native 0.154 rejoins a loaded session without changing its permissions.
     if (method === "thread/resume") return {
-      thread: { id: String(params?.threadId) },
+      thread: { id: String(params?.threadId), status: { type: this.resumeThreadStatus } },
       activePermissionProfile: this.activePermissions ? { id: this.activePermissions } : null,
       sandbox: { type: this.activeSandbox, networkAccess: true },
       approvalPolicy: "on-request", approvalsReviewer: this.activeReviewer,
-      ...this.permissionReadbackOverride,
+      ...(params?.excludeTurns ? this.permissionReadbackOverride : {}),
     } as T;
     if (method === "thread/settings/update") {
       if (this.failPermissionUpdate) throw new Error("Settings update unavailable");
-      if (!this.ignorePermissionUpdate) {
-        assert.ok(!(params?.permissions && params?.sandboxPolicy), "native policy and named profile are mutually exclusive");
-        if (params?.sandboxPolicy) {
-          this.activePermissions = "";
-          this.activeSandbox = "dangerFullAccess";
-        } else {
-          this.activePermissions = String(params?.permissions);
-          this.activeSandbox = this.activePermissions === "codex-bridge-read-only" ? "readOnly"
-            : this.activeSandbox === "readOnly" ? "workspaceWrite" : "dangerFullAccess";
+      const apply = () => {
+        const before = [this.activePermissions, this.activeSandbox, this.activeReviewer].join("|");
+        if (!this.ignorePermissionUpdate) {
+          assert.ok(!(params?.permissions && params?.sandboxPolicy), "native policy and named profile are mutually exclusive");
+          if (params?.sandboxPolicy) {
+            this.activePermissions = "";
+            this.activeSandbox = "dangerFullAccess";
+          } else {
+            this.activePermissions = String(params?.permissions);
+            this.activeSandbox = this.activePermissions === "codex-bridge-read-only" ? "readOnly"
+              : this.activeSandbox === "readOnly" ? "workspaceWrite" : "dangerFullAccess";
+          }
+          this.activeReviewer = String(params?.approvalsReviewer);
         }
-        this.activeReviewer = String(params?.approvalsReviewer);
-      }
-      const notification = { method: "thread/settings/updated", params: {
-        threadId: params?.threadId,
-        threadSettings: { activePermissionProfile: this.activePermissions ? { id: this.activePermissions } : null,
-          sandboxPolicy: { type: this.activeSandbox, networkAccess: true },
-          approvalPolicy: "on-request", approvalsReviewer: this.activeReviewer },
-      } };
-      if (this.deferPermissionNotification) this.pendingPermissionNotification = notification;
-      else this.emitNotification(notification);
+        const notification = { method: "thread/settings/updated", params: {
+          threadId: params?.threadId,
+          threadSettings: { activePermissionProfile: this.activePermissions ? { id: this.activePermissions } : null,
+            sandboxPolicy: { type: this.activeSandbox, networkAccess: true },
+            approvalPolicy: "on-request", approvalsReviewer: this.activeReviewer },
+        } };
+        // Native emits changed settings, but can acknowledge a no-op without a notification.
+        if (before === [this.activePermissions, this.activeSandbox, this.activeReviewer].join("|") || this.omitPermissionNotification) return;
+        if (this.deferPermissionNotification) this.pendingPermissionNotification = notification;
+        else this.emitNotification(this.permissionNotificationOverride ?? notification);
+      };
+      if (this.deferPermissionApplication) this.pendingPermissionApplication = apply;
+      else apply();
       return {} as T;
     }
     if (method === "thread/read") {
@@ -133,8 +148,10 @@ class FakeTransport extends EventEmitter implements AppServerTransport {
       nextCursor: null,
     }) as T;
     if (method === "turn/start") {
+      if (this.failTurnStart) throw new Error("Unsupported field serviceTierForTurn");
       if (typeof params?.permissions === "string") this.activePermissions = params.permissions;
       const id = `turn-${++this.turnCount}`;
+      this.tiersByTurn.set(id, params?.serviceTierForTurn ?? this.threadServiceTier);
       this.permissionsByTurn.set(id, this.activePermissions);
       return { turn: { id } } as T;
     }
@@ -833,10 +850,18 @@ test("controller adopts and continues an operable local Codex thread on explicit
   };
   const controller = new CodexBridgeController(config, store, textBundles, fake);
 
+  (fake.threadReadResponse.thread as any).status = { type: "active" };
+  await assert.rejects(controller.sendLocalThreadMessage({ localThreadId: threadId, clientMessageId: randomUUID(),
+    content: "Do not steer a native turn", speed: "fast", executionMode: "workspace_write",
+    approvalReviewer: "auto_review", dataClassification: "personal" }), /local Codex thread is active/);
+  assert.equal(store.listAll().length, 0);
+  assert.equal(fake.requests.some((request) => ["thread/resume", "turn/start", "turn/steer"].includes(request.method)), false);
+  (fake.threadReadResponse.thread as any).status = { type: "notLoaded" };
   const sent = await controller.sendLocalThreadMessage({
     localThreadId: threadId,
     clientMessageId: randomUUID(),
     content: "Continue implementing the agreed change.",
+    speed: "fast",
     executionMode: "workspace_write",
     approvalReviewer: "auto_review",
     dataClassification: "personal",
@@ -852,12 +877,23 @@ test("controller adopts and continues an operable local Codex thread on explicit
   assert.deepEqual(resume?.params?.runtimeWorkspaceRoots, [discoveredPath]);
   assert.equal(resume?.params?.permissions, ":danger-full-access");
   assert.equal(turn?.params?.cwd, discoveredPath);
+  assert.equal(turn?.params?.serviceTierForTurn, "fast");
+  assert.equal(resume?.params?.serviceTier, undefined);
   assert.match(String((turn?.params?.input as Array<{ text: string }>)[0]?.text), /Continue implementing the agreed change/);
   const snapshot = await store.snapshot(sent.record.id);
   assert.equal(snapshot.threadId, threadId);
   assert.equal(snapshot.projectId.startsWith("local:"), true);
   assert.equal(snapshot.status, "running");
   assert.equal(snapshot.conversation?.turns.some((candidate) => candidate.turnId === "turn-existing"), true);
+  assert.equal(store.listPage(10).data.length, 1);
+  assert.equal(snapshot.speed, "fast");
+  fake.emitNotification({ method: "turn/completed", params: { threadId, turnId: "turn-1", status: "completed" } });
+  await waitFor(() => store.get(sent.record.id)?.status === "completed");
+  await controller.sendLocalThreadMessage({ localThreadId: threadId, clientMessageId: randomUUID(), content: "Next standard turn",
+    executionMode: "workspace_write", approvalReviewer: "auto_review", dataClassification: "personal" });
+  await waitFor(() => store.get(sent.record.id)?.turnId === "turn-2");
+  assert.equal(fake.tiersByTurn.get("turn-2"), "default");
+  assert.equal((await store.snapshot(sent.record.id)).speed, "standard");
   assert.equal(store.listPage(10).data.length, 1);
 });
 
@@ -990,6 +1026,113 @@ async function activeRecoveryFixture(context: import("node:test").TestContext, o
   return { controller, store, fake, jobId: dispatched.record.id, config, bundles };
 }
 
+for (const speed of [undefined, "standard", "fast"] as const) {
+  test(`per-turn speed ${speed ?? "omitted"} overrides a fast thread without sticky writes`, async (context) => {
+    const { controller, store, fake, jobId, config } = await activeRecoveryFixture(context, { speed, model: "gpt-test", effort: "high" });
+    assert.equal(fake.tiersByTurn.get("turn-1"), speed === "fast" ? "fast" : "default");
+    assert.equal(store.get(jobId)?.workPackage.speed, speed ?? "standard");
+    assert.equal((await store.snapshot(jobId)).speed, speed ?? "standard");
+    assert.equal((await store.snapshot(jobId)).messages[0]?.speed, speed ?? "standard");
+    fake.emitNotification({ method: "turn/completed", params: { threadId: "thread-1", turnId: "turn-1", status: "completed" } });
+    await waitFor(() => store.get(jobId)?.status === "completed");
+    const input = { jobId, clientMessageId: "speed-followup-1", content: "Continue", executionMode: "plan" as const,
+      approvalReviewer: "auto_review" as const, dataClassification: "personal" as const, model: "gpt-test", effort: "high" as const };
+    await controller.sendMessage(input);
+    await waitFor(() => store.get(jobId)?.turnId === "turn-2");
+    assert.equal(fake.tiersByTurn.get("turn-2"), "default", "No Fast carry-over even when native thread tier is fast");
+    assert.equal((await controller.sendMessage(input)).delivery, "duplicate");
+    assert.equal((await store.snapshot(jobId)).speed, "standard");
+    const projection = (await store.snapshot(jobId)).conversation;
+    assert.ok(projection?.turns.flatMap((turn) => turn.items).some((item) => item.clientMessageId === input.clientMessageId && item.speed === "standard"));
+    fake.emitNotification({ method: "turn/completed", params: { threadId: "thread-1", turnId: "turn-2", status: "completed" } });
+    await waitFor(() => store.get(jobId)?.status === "completed");
+    const fast = { ...input, clientMessageId: "speed-followup-fast", speed: "fast" as const };
+    await controller.sendMessage(fast);
+    await waitFor(() => store.get(jobId)?.turnId === "turn-3");
+    assert.equal(fake.tiersByTurn.get("turn-3"), "fast");
+    assert.equal((await controller.sendMessage(fast)).delivery, "duplicate", "Fast retry during active turn must not redeliver");
+    await assert.rejects(controller.sendMessage({ ...fast, speed: "standard" }), /already used/);
+    for (const request of fake.requests) {
+      assert.equal(Object.hasOwn(request.params ?? {}, "serviceTier"), false, request.method);
+      if (request.method !== "turn/start") assert.equal(Object.hasOwn(request.params ?? {}, "serviceTierForTurn"), false, request.method);
+    }
+    const last = fake.requests.filter((request) => request.method === "turn/start").at(-1)!.params!;
+    assert.equal(last.model, "gpt-test"); assert.equal(last.effort, "high");
+    assert.equal(last.approvalPolicy, "on-request"); assert.equal(last.approvalsReviewer, "auto_review");
+    const reloaded = new JobStore(config.jobsDir, config.handoffDir);
+    await reloaded.initialize();
+    assert.equal((await reloaded.snapshot(jobId)).speed, "fast");
+    assert.equal((await reloaded.snapshot(jobId)).messages.find((message) => message.clientMessageId === fast.clientMessageId)?.speed, "fast");
+  });
+}
+
+test("active speed selection and invalid speed fail before message or native delivery", async (context) => {
+  const { controller, store, fake, jobId } = await activeRecoveryFixture(context, { speed: "fast" });
+  const input = { jobId, clientMessageId: "active-speed-message", content: "Guidance", executionMode: "plan" as const,
+    approvalReviewer: "auto_review" as const, dataClassification: "personal" as const };
+  const count = (await store.snapshot(jobId)).messages.length;
+  for (const speed of ["standard", "fast", "turbo", null] as any[]) {
+    await assert.rejects(controller.sendMessage({ ...input, speed }), /Speed cannot|Unsupported speed/);
+    await assert.rejects(controller.directMessage({ ...input, clientMessageId: `direct-speed-${speed}`, speed }, "turn-1", true), /Speed cannot|Unsupported speed/);
+  }
+  assert.equal((await store.snapshot(jobId)).messages.length, count);
+  assert.equal(fake.requests.filter((request) => request.method === "turn/steer").length, 0);
+  assert.equal((await controller.sendMessage(input)).delivery, "steer");
+  assert.equal((await store.snapshot(jobId)).speed, "fast");
+  assert.equal((await store.snapshot(jobId)).messages.find((message) => message.clientMessageId === input.clientMessageId)?.speed, undefined);
+  assert.equal(fake.requests.at(-1)?.params?.serviceTierForTurn, undefined);
+});
+
+test("direct speed retries survive reload and the next omitted speed starts standard", async (context) => {
+  const { controller, store, fake, jobId, config, bundles } = await activeRecoveryFixture(context);
+  fake.emitNotification({ method: "turn/completed", params: { threadId: "thread-1", turnId: "turn-1", status: "completed" } });
+  await waitFor(() => store.get(jobId)?.status === "completed");
+  const input = { jobId, clientMessageId: "direct-speed-fast", content: "Continue", executionMode: "plan" as const,
+    dataClassification: "personal" as const, speed: "fast" as const };
+  await controller.directMessage(input);
+  await waitFor(() => store.get(jobId)?.turnId === "turn-2");
+  assert.equal(fake.tiersByTurn.get("turn-2"), "fast");
+  assert.equal((await controller.directMessage(input)).delivery, "duplicate");
+  await assert.rejects(controller.directMessage({ ...input, speed: "standard" }), /DIRECT_REQUEST_CONFLICT/);
+  await controller.close();
+  const reloaded = new JobStore(config.jobsDir, config.handoffDir); await reloaded.initialize();
+  const native = new FakeTransport();
+  const fresh = new CodexBridgeController(config, reloaded, bundles, native);
+  assert.equal((await fresh.directMessage(input)).delivery, "duplicate");
+  assert.equal(native.requests.length, 0);
+  await fresh.directMessage({ ...input, clientMessageId: "direct-speed-default", speed: undefined });
+  await waitFor(() => reloaded.get(jobId)?.status === "running");
+  assert.equal(native.tiersByTurn.get("turn-1"), "default");
+  await fresh.close();
+});
+
+test("a native active turn discovered on resume never silently receives new speed", async (context) => {
+  const { controller, store, fake, jobId } = await activeRecoveryFixture(context);
+  fake.emitNotification({ method: "turn/completed", params: { threadId: "thread-1", turnId: "turn-1", status: "completed" } });
+  await waitFor(() => store.get(jobId)?.status === "completed");
+  fake.resumeThreadStatus = "active";
+  await controller.directMessage({ jobId, clientMessageId: "native-active-speed", content: "Continue", speed: "fast",
+    executionMode: "plan", dataClassification: "personal" });
+  await waitFor(() => store.get(jobId)?.status === "failed");
+  assert.match(store.get(jobId)?.result?.message ?? "", /resumed Codex thread is active/);
+  assert.equal(fake.requests.filter((request) => request.method === "turn/start").length, 1);
+  assert.equal(fake.requests.some((request) => request.method === "turn/steer"), false);
+});
+
+test("unsupported per-turn tier fails safely without fallback or resend", async (context) => {
+  const { controller, store, fake, jobId } = await activeRecoveryFixture(context);
+  fake.emitNotification({ method: "turn/completed", params: { threadId: "thread-1", turnId: "turn-1", status: "completed" } });
+  await waitFor(() => store.get(jobId)?.status === "completed");
+  fake.failTurnStart = true;
+  const input = { jobId, clientMessageId: "unsupported-speed", content: "Continue", executionMode: "plan" as const,
+    dataClassification: "personal" as const, speed: "fast" as const };
+  await controller.directMessage(input);
+  await waitFor(() => store.get(jobId)?.status === "failed");
+  assert.match(store.get(jobId)?.result?.message ?? "", /Unsupported field serviceTierForTurn/);
+  assert.equal((await controller.directMessage(input)).delivery, "duplicate");
+  assert.equal(fake.requests.filter((request) => request.method === "turn/start").length, 2);
+});
+
 test("direct dispatch enforces allowlist, reviewer, classification and stable work-package identity", async (context) => {
   const { controller, store, fake } = await activeRecoveryFixture(context);
   const preview = previewWorkPackage({ projectId: "omi", title: "Direct", objective: "Inspect", approvalReviewer: "user" });
@@ -1006,6 +1149,9 @@ test("direct dispatch enforces allowlist, reviewer, classification and stable wo
   await assert.rejects(controller.dispatch({ ...input, preview: changed, previewDigest: changed.previewDigest }), /idempotency/);
   const changedReviewer = previewWorkPackage({ ...preview.workPackage, approvalReviewer: "auto_review" });
   await assert.rejects(controller.dispatch({ ...input, preview: changedReviewer, previewDigest: changedReviewer.previewDigest }), /idempotency/);
+  const changedSpeed = previewWorkPackage({ ...preview.workPackage, speed: "fast" });
+  await assert.rejects(controller.dispatch({ ...input, preview: changedSpeed, previewDigest: changedSpeed.previewDigest }), /idempotency/);
+  await assert.rejects(controller.dispatch({ ...input, preview: changedSpeed }), /changed after preview/);
   await waitFor(() => store.get(a.record.id)?.status === "running");
   await waitForConversationRevision(store, a.record.id, 2);
   assert.equal(fake.requests.filter((r) => r.method === "thread/start").length, 2);
@@ -1067,9 +1213,130 @@ test("model discovery follows pages, exposes cache metadata and rejects incomple
   await assert.rejects(controller.listModels(true), /MODEL_LIST_INCOMPLETE/);
   fake.modelListResponses.set("", { data: [], nextCursor: null });
   await controller.listModels(true);
-  await assert.rejects(controller.validateModelSelection("gpt-6-astra"), /GPT6_MODEL_NOT_EXPOSED_BY_APP_SERVER/);
+  await controller.validateModelSelection("gpt-6-astra", "ultra");
+  await assert.rejects(controller.validateModelSelection(undefined, "high"), /did not return a default model/);
   await controller.close();
 });
+
+test("submitted model selection records explicit, inherited, default and same-turn steering without rewriting history", async (context) => {
+  const { controller, store, fake, jobId, config } = await idleControlFixture(context, { model: "gpt-6-astra", effort: "xhigh" });
+  const initial = (await store.snapshot(jobId)).messages[0]!;
+  assert.deepEqual([initial.selectionRecorded, initial.selectionKind, initial.model, initial.modelSource, initial.effort, initial.effortSource],
+    [true, "turn", "gpt-6-astra", "explicit", "xhigh", "explicit"]);
+  const input = { jobId, clientMessageId: "selection-inherited", content: "Continue", executionMode: "plan" as const, dataClassification: "personal" as const };
+  await controller.directMessage(input);
+  await waitFor(() => store.get(jobId)?.turnId === "turn-2");
+  const inherited = (await store.snapshot(jobId)).messages.find((message) => message.clientMessageId === input.clientMessageId)!;
+  assert.deepEqual([inherited.selectionRecorded, inherited.model, inherited.modelSource, inherited.effort, inherited.effortSource],
+    [true, "gpt-6-astra", "inherited", "xhigh", "inherited"]);
+  assert.equal(fake.requests.filter((request) => request.method === "turn/start").at(-1)?.params?.model, "gpt-6-astra");
+  await controller.directMessage({ ...input, clientMessageId: "selection-steer" }, "turn-2", true);
+  const steer = (await store.snapshot(jobId)).messages.find((message) => message.clientMessageId === "selection-steer")!;
+  assert.equal(steer.selectionKind, "steer");
+  assert.equal(steer.modelSource, "inherited");
+  const nativeSteer = fake.requests.find((request) => request.method === "turn/steer")!;
+  assert.equal(nativeSteer.params?.model, undefined);
+  assert.equal(nativeSteer.params?.effort, undefined);
+  await assert.rejects(controller.directMessage({ ...input, clientMessageId: "selection-invalid-steer", model: "other" }, "turn-2", true), /cannot change/);
+  await controller.directCancel(jobId, "selection-stop", "turn-2");
+  await controller.sendMessage({ ...input, clientMessageId: "selection-default", approvalReviewer: "auto_review" });
+  await waitFor(() => store.get(jobId)?.turnId === "turn-3");
+  const defaultSnapshot = await store.snapshot(jobId);
+  const omitted = defaultSnapshot.messages.find((message) => message.clientMessageId === "selection-default")!;
+  assert.deepEqual([omitted.selectionRecorded, omitted.model, omitted.modelSource, omitted.effort, omitted.effortSource],
+    [true, undefined, "default", undefined, "default"]);
+  assert.equal(defaultSnapshot.model, undefined, "Current explicit omission must not resurrect the first turn model.");
+  assert.equal(defaultSnapshot.effort, undefined);
+  fake.emitNotification({ method: "model/rerouted", params: { threadId: "thread-1", turnId: "turn-3", fromModel: "native-default", toModel: "routed", reason: "highRiskCyberActivity" } });
+  await waitForConversationRevision(store, jobId, defaultSnapshot.serverConversationRevision + 1);
+  assert.equal((await store.snapshot(jobId)).conversation?.modelRouting?.requestedModel, null, "Reroute must not attach the first turn's model to a later default submission.");
+  assert.equal((await controller.directMessage(input)).delivery, "duplicate", "Omitted direct retry retains original inheritance after settings change.");
+  await controller.directCancel(jobId, "selection-stop-default", "turn-3");
+  await controller.close();
+  const restarted = new JobStore(config.jobsDir, config.handoffDir);
+  await restarted.initialize();
+  const recovered = await restarted.snapshot(jobId);
+  assert.deepEqual(recovered.messages.filter((message) => message.role === "user").map((message) => [message.clientMessageId, message.model, message.modelSource, message.effortSource, message.selectionKind]),
+    defaultSnapshot.messages.filter((message) => message.role === "user").map((message) => [message.clientMessageId, message.model, message.modelSource, message.effortSource, message.selectionKind]));
+  assert.equal(recovered.model, undefined);
+});
+
+test("custom models reach native start and direct follow-up unchanged without inheriting default-model efforts", async (context) => {
+  const model = "gpt-6.1-sol";
+  const { controller, store, fake, jobId } = await idleControlFixture(context, { model, effort: "max" });
+  const start = fake.requests.find((r) => r.method === "thread/start")!;
+  const turn = fake.requests.find((r) => r.method === "turn/start")!;
+  assert.equal(start.params?.model, model);
+  assert.equal(start.params?.allowProviderModelFallback, false);
+  assert.equal(turn.params?.model, model);
+  assert.equal(turn.params?.effort, "max");
+  assert.equal(turn.params?.serviceTierForTurn, "default");
+  assert.equal((await store.snapshot(jobId)).model, model);
+  assert.deepEqual((await controller.listModels()).map((m) => m.id), ["gpt-test"], "Custom selection must not change discovery");
+  await assert.rejects(controller.validateModelSelection("gpt-test", "max"), /not available/);
+
+  const input = { jobId, clientMessageId: "custom-follow-up", content: "Continue", executionMode: "plan" as const,
+    approvalReviewer: "auto_review" as const, dataClassification: "personal" as const, model: "Vendor/Exact-Model.ID", effort: "ultra" as const };
+  await controller.directMessage(input);
+  await waitFor(() => store.get(jobId)?.status === "running");
+  const resumed = fake.requests.find((r) => r.method === "thread/resume" && r.params?.model)!;
+  const followUp = fake.requests.filter((r) => r.method === "turn/start").at(-1)!;
+  assert.equal(resumed.params?.model, input.model);
+  assert.equal(followUp.params?.model, input.model);
+  assert.equal(followUp.params?.effort, input.effort);
+  assert.equal(followUp.params?.serviceTierForTurn, "default");
+  assert.equal((await controller.directMessage(input)).delivery, "duplicate");
+  assert.equal(fake.requests.filter((r) => r.method === "turn/start").length, 2);
+});
+
+test("discovery failures allow explicit custom IDs but preserve cached known effort checks and default errors", async (context) => {
+  const { controller, fake } = await activeRecoveryFixture(context);
+  const request = fake.request.bind(fake);
+  const failing = context.mock.method(fake, "request", async <T>(method: string, params?: Record<string, unknown>): Promise<T> => {
+    if (method === "model/list") throw new Error("Discovery offline");
+    return request<T>(method, params);
+  });
+  await controller.validateModelSelection("gpt-6.1-sol", "max");
+  await assert.rejects(controller.validateModelSelection(undefined, "high"), /Discovery offline/);
+  await assert.rejects(controller.modelListDiagnostics(), /Discovery offline/, "Discovery reporting must still fail honestly");
+  failing.mock.restore();
+  await controller.listModels();
+  context.mock.method(controller, "listModels", async () => { throw new Error("Refresh offline"); });
+  await controller.validateModelSelection("gpt-6.1-sol", "max");
+  await controller.validateModelSelection("gpt-test", "high");
+  await assert.rejects(controller.validateModelSelection("gpt-test", "max"), /not available/);
+});
+
+for (const [phase, method, reason] of [
+  ["initial", "thread/start", "Model gpt-6.1-sol is not supported"],
+  ["initial", "turn/start", "Effort ultra is not supported for gpt-6.1-sol"],
+  ["follow-up", "thread/resume", "Model gpt-6.1-sol is not authorized"],
+  ["follow-up", "turn/start", "Model gpt-6.1-sol is not available"],
+] as const) {
+  test(`custom model native rejection at ${phase} ${method} is surfaced once without fallback`, async (context) => {
+    const { controller, store, fake, jobId } = await idleControlFixture(context);
+    const request = fake.request.bind(fake);
+    fake.requests.length = 0;
+    context.mock.method(fake, "request", async <T>(name: string, params?: Record<string, unknown>): Promise<T> => {
+      if (name === method) { fake.requests.push({ method: name, params }); throw new Error(reason); }
+      return request<T>(name, params);
+    });
+    let failedId = jobId;
+    if (phase === "initial") {
+      const preview = previewWorkPackage({ projectId: "omi", title: "Custom model", objective: "Offline only", model: "gpt-6.1-sol", effort: "ultra" });
+      failedId = (await controller.dispatch({ preview, previewDigest: preview.previewDigest, idempotencyKey: "custom-rejected" })).record.id;
+    } else {
+      await controller.sendMessage({ jobId, clientMessageId: "custom-rejected", content: "Continue", executionMode: "plan",
+        approvalReviewer: "auto_review", dataClassification: "personal", model: "gpt-6.1-sol", effort: "ultra" });
+    }
+    await waitFor(() => store.get(failedId)?.status === "failed");
+    assert.ok(store.get(failedId)?.result?.message.includes(reason));
+    assert.equal((await store.snapshot(failedId)).model, "gpt-6.1-sol");
+    assert.equal(fake.requests.filter((r) => r.method === method).length, 1);
+    assert.ok(fake.requests.filter((r) => r.params?.model).every((r) => r.params?.model === "gpt-6.1-sol"));
+    assert.equal(fake.requests.filter((r) => r.method === "turn/start").length, method === "turn/start" ? 1 : 0);
+  });
+}
 
 test("direct follow-up resumes once and an old cancel cannot stop the new turn", async (context) => {
   const { controller, store, fake, jobId, config } = await activeRecoveryFixture(context, { approvalReviewer: "user" });
@@ -1230,6 +1497,38 @@ async function idleControlFixture(context: import("node:test").TestContext, over
   return { ...fixture, input: { jobId: fixture.jobId, requestId: "control-request", expectedThreadId: "thread-1", expectedTurnId: "turn-1" } };
 }
 
+test("memory drain seals every controller work entry but accepted continuation still prepares and completes", async context => {
+  const { controller, store, fake, input, config } = await idleControlFixture(context);
+  let release!: () => void, entered!: () => void;
+  const waiting = new Promise<void>(r => { entered = r; }); const barrier = new Promise<void>(r => { release = r; });
+  const validate = controller.validateModelSelection.bind(controller);
+  controller.validateModelSelection = async (...args) => { entered(); await barrier; return validate(...args); };
+  const message = { jobId: input.jobId, clientMessageId: randomUUID(), content: "Already admitted continuation",
+    executionMode: "plan" as const, approvalReviewer: "user" as const, dataClassification: "personal" as const };
+  const accepted = controller.sendMessage(message); await waiting;
+  await store.setMemoryAdmission(() => ({ phase: "draining" }));
+  const previous = fake.requests.length;
+  const preview = previewWorkPackage({ projectId: "omi", title: "blocked", objective: "new task" });
+  const newOperations = [
+    () => controller.dispatch({ preview, previewDigest: preview.previewDigest, idempotencyKey: randomUUID() }),
+    () => controller.sendMessage({ ...message, clientMessageId: randomUUID() }),
+    () => controller.directMessage({ ...message, clientMessageId: randomUUID() }),
+    () => controller.steer(input.jobId, "extra work"),
+    () => controller.sendLocalThreadMessage({ ...message, localThreadId: "thread-1" }),
+    ...(["compact", "review", "fork"] as const).map(kind => () => controller.directThreadAction(kind, input)),
+  ];
+  await Promise.all(newOperations.map(run => assert.rejects(run(), (e: any) => e.code === "MEMORY_MAINTENANCE")));
+  assert.equal(fake.requests.length, previous, "rejected work never reaches App Server");
+  release(); assert.equal((await accepted).accepted, true);
+  await waitFor(() => store.get(input.jobId)?.status === "running");
+  const turnId = store.get(input.jobId)!.turnId!;
+  fake.emitNotification({ method: "turn/completed", params: { threadId: "thread-1", turnId, status: "completed" } });
+  await waitFor(() => store.get(input.jobId)?.status === "completed");
+  const reopened = new JobStore(config.jobsDir, config.handoffDir); await reopened.initialize();
+  assert.equal((await reopened.snapshot(input.jobId)).result?.status, "completed");
+  assert.equal(store.memoryDraining, true);
+});
+
 test("compact receipt is durable/replay-safe and lifecycle maps the new turn to the existing job", async (context) => {
   const { controller, store, fake, input, config, bundles } = await idleControlFixture(context);
   const results = await Promise.all([controller.directThreadAction("compact", input), controller.directThreadAction("compact", input)]);
@@ -1281,7 +1580,7 @@ for (const failure of ["ignored", "unavailable"] as const) {
     fake.ignorePermissionUpdate = failure === "ignored";
     fake.failPermissionUpdate = failure === "unavailable";
     await assert.rejects(controller.directThreadAction("review", input),
-      failure === "ignored" ? /PERMISSION_PROFILE_UNVERIFIED/ : /Action delivery could not be confirmed/);
+      failure === "ignored" ? /PERMISSION_PROFILE_UNVERIFIED/ : /reason=update_failed/);
     assert.equal(fake.requests.filter((call) => call.method === "review/start").length, 0);
     assert.equal(store.get(input.jobId)?.turnId, input.expectedTurnId);
     assert.equal(fake.listenerCount("notification"), 1, "permission wait listener must be released on failure");
@@ -1322,41 +1621,185 @@ for (const sandbox of [{ type: "readOnly", networkAccess: false }, { type: "read
   });
 }
 
-test("plan resume waits for applied settings from its exact thread before starting work", async (context) => {
+test("plan resume waits for exact native readback despite delayed application and unrelated notifications", async (context) => {
   const { controller, store, fake, input } = await idleControlFixture(context, { executionMode: "workspace_write", approvalReviewer: "user" });
   fake.deferPermissionNotification = true;
+  fake.deferPermissionApplication = true;
   const startedBefore = fake.requests.filter((call) => call.method === "turn/start").length;
   await controller.sendMessage({ jobId: input.jobId, clientMessageId: "delayed-plan", content: "Inspect", executionMode: "plan", approvalReviewer: "user", dataClassification: "personal" });
-  await waitFor(() => fake.pendingPermissionNotification !== undefined);
+  await waitFor(() => fake.pendingPermissionApplication !== undefined);
   assert.equal(fake.requests.filter((call) => call.method === "turn/start").length, startedBefore, "enqueue acknowledgement is not application");
-  const notification = fake.pendingPermissionNotification!;
-  fake.emitNotification({ ...notification, params: { ...notification.params, threadId: "other-thread" } });
+  fake.emitNotification({ method: "thread/settings/updated", params: { threadId: "other-thread", threadSettings: {} } });
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(fake.requests.filter((call) => call.method === "turn/start").length, startedBefore);
-  fake.emitNotification(notification);
+  fake.pendingPermissionApplication!();
   await waitFor(() => store.get(input.jobId)?.status === "running");
   assert.equal(fake.permissionsByTurn.get(store.get(input.jobId)!.turnId!), "codex-bridge-read-only");
   assert.equal(fake.listenerCount("notification"), 1);
+  // Notification delivery after verification must not deliver the user message again.
+  fake.emitNotification(fake.pendingPermissionNotification!);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(fake.requests.filter((call) => call.method === "turn/start").length, startedBefore + 1);
 });
 
 for (const [failure, readback] of [
   ["missing profile", { activePermissionProfile: null }],
+  ["wrong profile", { activePermissionProfile: { id: ":danger-full-access" } }],
   ["wrong sandbox", { sandbox: { type: "dangerFullAccess" } }],
   ["disabled network", { sandbox: { type: "readOnly", networkAccess: false } }],
   ["missing network evidence", { sandbox: { type: "readOnly" } }],
   ["wrong approval policy", { approvalPolicy: "never" }],
   ["wrong reviewer", { approvalsReviewer: "auto_review" }],
+  ["wrong thread", { thread: { id: "other-thread", status: { type: "idle" } } }],
+  ["missing thread", { thread: null }],
+  ["busy thread", { thread: { id: "thread-1", status: { type: "active" } } }],
 ] as const) {
   test(`plan resume starts no turn when native readback has ${failure}`, async (context) => {
     const { controller, store, fake, input } = await idleControlFixture(context, { executionMode: "workspace_write", approvalReviewer: "user" });
     fake.permissionReadbackOverride = readback;
     const startedBefore = fake.requests.filter((call) => call.method === "turn/start").length;
     await controller.sendMessage({ jobId: input.jobId, clientMessageId: "unverified-plan", content: "Inspect", executionMode: "plan", approvalReviewer: "user", dataClassification: "personal" });
-    await waitFor(() => store.get(input.jobId)?.status === "failed");
+    await waitFor(() => store.get(input.jobId)?.status === "failed", 7_000);
     assert.match(store.get(input.jobId)?.result?.message ?? "", /PERMISSION_PROFILE_UNVERIFIED/);
     assert.equal(fake.requests.filter((call) => call.method === "turn/start").length, startedBefore);
+    assert.equal(fake.listenerCount("notification"), 1);
   });
 }
+
+test("unchanged Plan settings need no notification when native readback is exact", async (context) => {
+  const { controller, store, fake, jobId } = await idleControlFixture(context, { approvalReviewer: "user" });
+  let settingsNotifications = 0;
+  fake.on("notification", message => { if (message.method === "thread/settings/updated") settingsNotifications += 1; });
+  fake.requests.length = 0;
+  await controller.sendMessage({ jobId, clientMessageId: "native-noop", content: "Continue",
+    executionMode: "plan", approvalReviewer: "user", dataClassification: "personal" });
+  await waitFor(() => store.get(jobId)?.status === "running");
+  assert.equal(settingsNotifications, 0);
+  assert.equal(fake.requests.filter(r => r.method === "thread/settings/update").length, 1);
+  assert.equal(fake.requests.filter(r => r.method === "turn/start").length, 1);
+});
+
+test("Full Access cannot bind its named profile until intermediate sandbox readback is verified", async (context) => {
+  const { controller, store, fake, jobId } = await idleControlFixture(context, { approvalReviewer: "user" });
+  fake.permissionReadbackOverride = { activePermissionProfile: { id: ":danger-full-access" } };
+  fake.requests.length = 0;
+  await controller.sendMessage({ jobId, clientMessageId: "unverified-sandbox-stage", content: "Continue",
+    executionMode: "workspace_write", approvalReviewer: "user", dataClassification: "personal" });
+  await waitFor(() => store.get(jobId)?.status === "failed", 7_000);
+  assert.match(store.get(jobId)?.result?.message ?? "", /stage=sandbox; reason=readback_mismatch; fields=profile/);
+  const updates = fake.requests.filter(r => r.method === "thread/settings/update");
+  assert.equal(updates.length, 1);
+  assert.deepEqual(updates[0].params?.sandboxPolicy, { type: "dangerFullAccess" });
+  assert.equal(updates[0].params?.permissions, undefined);
+  assert.equal(fake.requests.some(r => r.method === "turn/start"), false);
+  assert.equal(fake.listenerCount("notification"), 1);
+});
+
+for (const executionMode of ["plan", "workspace_write"] as const) {
+  for (const approvalReviewer of ["user", "auto_review"] as const) {
+    test(`${executionMode} ${approvalReviewer} continuation verifies readback without notifications and deduplicates concurrent sends`, async (context) => {
+      const { controller, store, fake, jobId } = await idleControlFixture(context, {
+        executionMode, approvalReviewer, model: "gpt-test", effort: "high", speed: "fast",
+      });
+      fake.omitPermissionNotification = true;
+      fake.requests.length = 0;
+      const input = { jobId, clientMessageId: "no-notification", content: "Continue once", executionMode,
+        speed: "fast" as const, dataClassification: "personal" as const };
+      const receipts = await Promise.all([controller.directMessage(input), controller.directMessage(input)]);
+      assert.equal(receipts.filter(r => r.delivery === "duplicate").length, 1);
+      await waitFor(() => store.get(jobId)?.status === "running");
+      const starts = fake.requests.filter(r => r.method === "turn/start");
+      assert.equal(starts.length, 1);
+      assert.equal(starts[0].params?.clientUserMessageId, input.clientMessageId);
+      assert.equal(starts[0].params?.approvalsReviewer, approvalReviewer);
+      assert.equal(starts[0].params?.model, "gpt-test");
+      assert.equal(starts[0].params?.effort, "high");
+      assert.equal(starts[0].params?.serviceTierForTurn, "fast");
+      assert.equal(starts[0].params?.permissions, executionMode === "plan" ? "codex-bridge-read-only" : ":danger-full-access");
+      const updates = fake.requests.filter(r => r.method === "thread/settings/update");
+      assert.equal(updates.length, executionMode === "plan" ? 1 : 2);
+      assert.ok(fake.requests.some(r => r.method === "thread/resume" && r.params?.excludeTurns === true));
+      assert.equal(fake.listenerCount("notification"), 1);
+    });
+  }
+}
+
+for (const notification of [
+  { method: "thread/settings/updated", params: { threadId: "thread-1", threadSettings: null } },
+  { method: "thread/settings/updated", params: { threadId: "thread-1", threadSettings: { sandbox: { type: "readOnly" } } } },
+  { method: "thread/settings/updated", params: { threadId: "other-thread", threadSettings: {} } },
+] as JsonRpcNotification[]) {
+  test(`exact readback survives unusable notification ${JSON.stringify(notification.params)}`, async (context) => {
+    const { controller, store, fake, jobId } = await idleControlFixture(context, { executionMode: "workspace_write" });
+    fake.permissionNotificationOverride = notification;
+    fake.requests.length = 0;
+    await controller.sendMessage({ jobId, clientMessageId: "unusable-notification", content: "Continue",
+      executionMode: "plan", approvalReviewer: "user", dataClassification: "personal" });
+    await waitFor(() => store.get(jobId)?.status === "running");
+    assert.equal(fake.requests.filter(r => r.method === "turn/start").length, 1);
+    assert.equal(fake.listenerCount("notification"), 1);
+  });
+}
+
+for (const method of ["thread/settings/update", "thread/resume"]) {
+  test(`permission confirmation bounds a hanging ${method} and ignores its late success`, async (context) => {
+    const { controller, store, fake, jobId } = await idleControlFixture(context);
+    const request = fake.request.bind(fake);
+    let release!: (value: unknown) => void;
+    context.mock.method(fake, "request", async <T>(name: string, params?: Record<string, unknown>): Promise<T> => {
+      if (name === method && (name !== "thread/resume" || params?.excludeTurns)) {
+        fake.requests.push({ method: name, params });
+        return new Promise<unknown>(resolve => { release = resolve; }) as Promise<T>;
+      }
+      return request<T>(name, params);
+    });
+    const before = fake.requests.filter(r => r.method === "turn/start").length;
+    await controller.sendMessage({ jobId, clientMessageId: "hanging-confirmation", content: "Continue",
+      executionMode: "plan", approvalReviewer: "user", dataClassification: "personal" });
+    await waitFor(() => store.get(jobId)?.status === "failed", 7_000);
+    assert.match(store.get(jobId)?.result?.message ?? "", new RegExp(`reason=${method === "thread/resume" ? "readback" : "update"}_timeout`));
+    release({ thread: { id: "thread-1", status: { type: "idle" } }, activePermissionProfile: { id: "codex-bridge-read-only" },
+      sandbox: { type: "readOnly", networkAccess: true }, approvalPolicy: "on-request", approvalsReviewer: "user" });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(fake.requests.filter(r => r.method === "turn/start").length, before);
+    assert.equal(fake.requests.filter(r => r.method === "thread/settings/update").length, 1, "no mutation retry after timeout");
+    assert.equal(fake.listenerCount("notification"), 1);
+  });
+}
+
+test("unavailable native permission readback fails closed with bounded diagnostics", async (context) => {
+  const { controller, store, fake, jobId } = await idleControlFixture(context);
+  fake.omitPermissionNotification = true;
+  const request = fake.request.bind(fake);
+  context.mock.method(fake, "request", async <T>(method: string, params?: Record<string, unknown>): Promise<T> => {
+    if (method === "thread/resume" && params?.excludeTurns) throw new Error("private-native-payload");
+    return request<T>(method, params);
+  });
+  fake.requests.length = 0;
+  await controller.sendMessage({ jobId, clientMessageId: "unavailable-readback", content: "Continue",
+    executionMode: "plan", approvalReviewer: "user", dataClassification: "personal" });
+  await waitFor(() => store.get(jobId)?.status === "failed");
+  const message = store.get(jobId)?.result?.message ?? "";
+  assert.match(message, /reason=readback_failed.*notification=missing; readbacks=1/);
+  assert.doesNotMatch(message, /private-native-payload/);
+  assert.equal(fake.requests.some(r => r.method === "turn/start"), false);
+  assert.equal(fake.listenerCount("notification"), 1);
+});
+
+test("initial resume must return the requested thread before any permission mutation", async (context) => {
+  const { controller, store, fake, jobId } = await idleControlFixture(context);
+  const request = fake.request.bind(fake);
+  context.mock.method(fake, "request", async <T>(method: string, params?: Record<string, unknown>): Promise<T> => {
+    if (method === "thread/resume") return { thread: { id: "other-thread", status: { type: "idle" } } } as T;
+    return request<T>(method, params);
+  });
+  fake.requests.length = 0;
+  await controller.sendMessage({ jobId, clientMessageId: "wrong-resume-thread", content: "Continue",
+    executionMode: "plan", approvalReviewer: "user", dataClassification: "personal" });
+  await waitFor(() => store.get(jobId)?.status === "failed");
+  assert.match(store.get(jobId)?.result?.message ?? "", /resume_thread_mismatch/);
+  assert.equal(fake.requests.some(r => ["thread/settings/update", "turn/start"].includes(r.method)), false);
+});
 
 test("thread actions fail closed on identity, busy native threads, changed project, classification and fork ownership", async (context) => {
   const { controller, store, fake, input, config } = await idleControlFixture(context);

@@ -42,6 +42,8 @@ if (process.platform === "win32") {
 // Keep the real launch-policy checks above, but all smoke writes stay isolated.
 config.handoffDir = join(root, "handoff");
 const runtime = await createBridgeRuntime(config);
+// Preset/catalog wiring is offline; never launch native discovery in this smoke.
+runtime.controller.listModels = async () => [];
 // Self-reload status otherwise spawns the real native pipe helper. Keep this
 // isolated HTTP test independent of the machine's production owner and policy.
 runtime.selfReload = new SelfReloadClient(runtime.store, async () => { throw new ReloadError("OWNER_UNAVAILABLE"); });
@@ -145,8 +147,16 @@ try {
   const normalTool = tools.find((tool) => tool.name === "codex_powershell_normal_execute");
   assert.equal(normalTool.annotations.readOnlyHint, false);
   assert.notDeepEqual(normalTool._meta?.ui?.visibility, ["app"]);
-  assert.deepEqual(Object.keys(normalTool.inputSchema.properties).sort(), ["digest", "requestId", "userIntent"]);
+  assert.deepEqual(Object.keys(normalTool.inputSchema.properties).sort(), ["digest", "request", "requestId", "userIntent"]);
   assert.equal(normalTool.inputSchema.additionalProperties, false);
+  const directSchema = normalTool.inputSchema.properties.request;
+  const directFields = ["args", "contentPolicy", "cwd", "dataClassification", "executionMode", "idempotencyKey",
+    "origin", "projectId", "risk", "scriptSnapshot", "sideEffects", "target"];
+  assert.deepEqual(Object.keys(directSchema.properties).sort(), directFields);
+  assert.deepEqual([...directSchema.required].sort(), directFields);
+  assert.equal(directSchema.additionalProperties, false);
+  assert.deepEqual(directSchema.properties.contentPolicy.enum,
+    ["PERSONAL_PUBLIC_NO_SECRETS", "PERSONAL_PUBLIC_NO_SECRETS_OR_REGULATED_ORDERS"]);
   const proposal = await client.callTool({ name: "codex_powershell_review_request", arguments: {
     origin: "DIRECT", projectId: "smoke", dataClassification: "personal", idempotencyKey: randomUUID(),
     userIntent: "EXPLICIT_USER_REQUEST", contentPolicy: "PERSONAL_PUBLIC_NO_SECRETS_OR_REGULATED_ORDERS",
@@ -162,9 +172,45 @@ try {
   assert.equal(forged.isError, true);
   const execution = await client.callTool({ name: normalTool.name, arguments: binding });
   assert.equal(execution.isError, true);
-  assert.equal(execution.structuredContent.code, "NOT_DEPLOYED", JSON.stringify(execution));
+  assert.equal(execution.structuredContent.code, "NORMAL_DEPLOYMENT_MISSING", JSON.stringify(execution));
   assert.equal(execution.structuredContent.retryAllowed, false);
+  assert.equal(execution.structuredContent.nextAction, "DEPLOY_COMPATIBLE_CONTROL_CENTER_HOST");
+  assert.equal(execution.structuredContent.receipt.hostApproval.state, "NOT_ADMITTED");
+  assert.equal(execution.structuredContent.receipt.osExecutionReceipt, null);
   assert.equal(await runtime.approvalStore.readReviewExecution(binding.requestId), undefined);
+  const directRequest = { origin: "DIRECT", projectId: "smoke", dataClassification: "personal",
+    idempotencyKey: randomUUID(), contentPolicy: "PERSONAL_PUBLIC_NO_SECRETS", target: "isolated inline HTTP smoke",
+    executionMode: "NORMAL", cwd: projectPath, scriptSnapshot: "[Console]::Out.WriteLine('INLINE_NORMAL_OK')",
+    args: ["", "exact argument"], risk: "stdout only", sideEffects: "none" };
+  for (const patch of [{ approved: true }, { origin: "CODEX_DERIVED" }, { executionMode: "ADMIN" },
+    { args: [null] }, { jobId: randomUUID() }]) {
+    const malformed = await client.callTool({ name: normalTool.name, arguments: {
+      request: { ...directRequest, ...patch }, userIntent: binding.userIntent,
+    } });
+    assert.equal(malformed.isError, true);
+    assert.equal(await runtime.approvalStore.readReviewByIdempotencyKey(directRequest.idempotencyKey), undefined);
+  }
+  const ambiguous = await client.callTool({ name: normalTool.name, arguments: { ...binding, request: directRequest } });
+  assert.equal(ambiguous.isError, true, "Inline and legacy bindings cannot be submitted together.");
+  assert.equal(await runtime.approvalStore.readReviewByIdempotencyKey(directRequest.idempotencyKey), undefined);
+  const inlineExecution = await client.callTool({ name: normalTool.name, arguments: {
+    request: directRequest, userIntent: binding.userIntent,
+  } });
+  assert.equal(inlineExecution.isError, true);
+  assert.equal(inlineExecution.structuredContent.code, "NORMAL_DEPLOYMENT_MISSING", JSON.stringify(inlineExecution));
+  assert.equal(inlineExecution.structuredContent.retryAllowed, false);
+  assert.equal(inlineExecution.structuredContent.receipt.hostApproval.state, "NOT_ADMITTED");
+  assert.equal(inlineExecution.structuredContent.receipt.osExecutionReceipt, null);
+  const savedInline = await runtime.approvalStore.readReviewByIdempotencyKey(directRequest.idempotencyKey);
+  assert.ok(savedInline, "Inline input saves an exact non-executed request before Host dispatch.");
+  for (const key of directFields) assert.deepEqual(savedInline.request[key], directRequest[key], key);
+  assert.equal(await runtime.approvalStore.readReviewExecution(savedInline.request.requestId), undefined);
+  const inlineReceipt = await client.callTool({ name: "codex_powershell_receipt", arguments: {
+    idempotencyKey: directRequest.idempotencyKey,
+  } });
+  assert.notEqual(inlineReceipt.isError, true);
+  assert.equal(inlineReceipt.structuredContent.requestId, savedInline.request.requestId);
+  assert.equal(inlineReceipt.structuredContent.digest, savedInline.digest);
   assert.equal(runtime.controller.status, "idle", "NORMAL rejection must not start App Server.");
   const privilegedStatus = await client.callTool({ name: "codex_privileged_status", arguments: {} });
   assert.equal(privilegedStatus.structuredContent.deployment, "NOT DEPLOYED");
@@ -178,7 +224,7 @@ try {
   assert.equal(reloadStatus.structuredContent.deployment, "NOT_DEPLOYED");
   assert.equal(runtime.store.selfReloadDrain, null, "Read-only reload status cannot acquire admission.");
   assert.equal(tools.find((tool) => tool.name === "codex_self_reload_request").annotations.readOnlyHint, false);
-  assert.equal(tools.find((tool) => tool.name === "render_codex_console")?._meta?.ui?.resourceUri, "ui://codex-bridge/chat-workspace-v15.html");
+  assert.equal(tools.find((tool) => tool.name === "render_codex_console")?._meta?.ui?.resourceUri, "ui://codex-bridge/chat-workspace-v18.html");
   for (const name of names.filter((name) => name.startsWith("codex_direct_") || name === "codex_model_list")) {
     assert.notDeepEqual(tools.find((tool) => tool.name === name)?._meta?.ui?.visibility, ["app"]);
     const properties = tools.find((tool) => tool.name === name)?.inputSchema.properties;
@@ -188,7 +234,7 @@ try {
       assert.equal(properties?.approvalReviewer?.default, undefined, "Defaults are resolved by work-package/controller, not transport.");
     } else assert.equal(properties?.approvalReviewer, undefined);
   }
-  const directInput = { projectId: "smoke", title: "Direct smoke", objective: "Inspect only", dataClassification: "personal", idempotencyKey: "direct-http-smoke" };
+  const directInput = { projectId: "smoke", title: "Direct smoke", objective: "Inspect only", modelPreset: "gpt-6.1-sol/medium", dataClassification: "personal", idempotencyKey: "direct-http-smoke" };
   for (const [change, code] of [[{ projectId: "unknown" }, "DIRECT_PROJECT_NOT_ALLOWLISTED"], [{ dataClassification: "company_approved" }, "DIRECT_COMPANY_AUTHORIZATION_REQUIRES_APP"]]) {
     const rejected = await client.callTool({ name: "codex_direct_job_dispatch", arguments: { ...directInput, ...change } });
     assert.equal(rejected.structuredContent?.error?.code, code);
@@ -307,7 +353,7 @@ try {
 
   const previewResult = await client.callTool({
     name: "codex_job_preview",
-    arguments: { projectId: "smoke", title: "Smoke preview", objective: "Verify the non-mutating contract.", inputBundleIds: [bundleId] },
+    arguments: { projectId: "smoke", title: "Smoke preview", objective: "Verify the non-mutating contract.", modelPreset: "gpt-6.1-sol/medium", inputBundleIds: [bundleId] },
   });
   assert.match(previewResult.structuredContent?.previewDigest, /^[0-9a-f]{64}$/);
   assert.equal(runtime.store.list().length, 0, "Preview must not create a job.");
@@ -315,8 +361,9 @@ try {
     ["snapshot", "native"], "The read tool must expose separate snapshot and native recovery modes.");
 
   const resources = await client.listResources();
-  assert.ok(resources.resources.some((resource) => resource.uri === "ui://codex-bridge/chat-workspace-v15.html"));
-  const widget = await client.readResource({ uri: "ui://codex-bridge/chat-workspace-v15.html" });
+  assert.ok(resources.resources.some((resource) => resource.uri === "ui://codex-bridge/chat-workspace-v18.html"));
+  const widget = await client.readResource({ uri: "ui://codex-bridge/chat-workspace-v18.html" });
+  assert.equal(runtime.controller.status, "idle", "Offline HTTP smoke must not start App Server.");
   assert.equal(widget.contents[0]?.mimeType, "text/html;profile=mcp-app");
   assert.match(widget.contents[0]?.text || "", /ui\/initialize/);
   assert.match(widget.contents[0]?.text || "", /ui\/request-display-mode/);

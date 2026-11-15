@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { Script } from "node:vm";
 import test from "node:test";
+import { MODEL_PRESETS, modelPresetCatalog } from "../src/model-presets.js";
 
 const html = readFileSync(new URL("../../web/codex-console.html", import.meta.url), "utf8");
 const script = html.match(/<script>([\s\S]*?)<\/script>/)![1]!;
@@ -11,7 +12,7 @@ function fixture(names: string[], context: Record<string, any> = {}) {
     const start = script.search(new RegExp(`        (?:async )?function ${name}\\(`));
     assert.ok(start >= 0, name);
     const rest = script.slice(start + 1);
-    const next = rest.search(/\n        (?:(?:async )?function |bridgeReady\.then)/);
+    const next = rest.search(/\n        (?:(?:async )?function |bridgeReady\.then|\$\()/);
     assert.ok(next >= 0, name);
     return script.slice(start, start + 1 + next);
   }).join("\n");
@@ -21,8 +22,168 @@ function fixture(names: string[], context: Record<string, any> = {}) {
 }
 const failureHelpers = ["isTechnicalItem", "needsApprovalAttention", "isFailedActivity", "isSuccessfulActivity", "reliableOperationValue", "sameTechnicalOperation", "turnFailurePresentation", "turnWorkCounts", "publicFailureText", "renderCompactFailure"];
 const markdownHelpers = ["renderSafeMarkdown", "markdownInline", "markdownCells", "markdownTableStart", "safeMarkdownUrl"];
-const renderHelpers = [...markdownHelpers, ...failureHelpers, "escapeHtml", "escapeAttr", "formatTime", "formatBytes", "formatDuration", "projectionStatusLabel", "activityTitle", "activitySubtitle", "activityStatusClass", "activityIcon", "activityBody", "isNarrative", "renderProjectedMessage", "renderConversationItem", "renderApproval", "renderDockWork", "metric"];
+const renderHelpers = [...markdownHelpers, ...failureHelpers, "escapeHtml", "escapeAttr", "formatTime", "formatBytes", "formatDuration", "projectionStatusLabel", "activityTitle", "activitySubtitle", "activityStatusClass", "activityIcon", "activityBody", "isNarrative", "requestedSelectionLabel", "effortLabel", "renderProjectedMessage", "renderConversationItem", "renderApproval", "renderDockWork", "metric"];
 const narrative = (id: string, type: string, text = id) => ({ id, type, text, status: "completed" });
+
+// Match native select semantics: replacing options resets selection; duplicate
+// empty values distinguish the default option from the explicit custom mode.
+function modelSelectFixture() {
+  let markup = "";
+  const select = {
+    options: [] as any[], selectedIndex: -1, disabled: false,
+    get innerHTML() { return markup; },
+    set innerHTML(value: string) {
+      markup = value;
+      this.options = Array.from(value.matchAll(/<option value="([^"]*)"([^>]*)>([\s\S]*?)<\/option>/g), (m) => ({
+        value: m[1]!, textContent: m[3]!, dataset: /data-custom="true"/.test(m[2]!) ? { custom: "true" } : {},
+      }));
+      this.selectedIndex = this.options.length ? 0 : -1;
+    },
+    get selectedOptions() { return this.options.slice(this.selectedIndex, this.selectedIndex + 1); },
+    get value() { return this.options[this.selectedIndex]?.value ?? ""; },
+    set value(value: string) { this.selectedIndex = this.options.findIndex((option) => option.value === value); },
+  };
+  return select;
+}
+
+function modelWidgetFixture() {
+  const nodes: Record<string, any> = { "#model": modelSelectFixture(), "#effort": modelSelectFixture() };
+  const $ = (id: string): any => nodes[id] ??= { value: "", hidden: false, disabled: false, classList: { toggle() {} }, setAttribute() {} };
+  $("#mode").value = "plan"; $("#reviewer").value = "auto_review"; $("#speed").value = "standard";
+  $("#classification").value = "personal";
+  const state: any = { selectedProjectId: "omi", selectedJob: null, draftArtifacts: [], expandedProjects: new Set(), status: { modelPresets: modelPresetCatalog([]), models: [
+    { id: "gpt-test", displayName: "GPT Test", isDefault: true, defaultReasoningEffort: "low", supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "high" }] },
+  ] } };
+  const calls: any[] = [];
+  const names = ["isCustomModelSelection", "selectedModelId", "selectedModelPreset", "renderModelOptions", "renderEffortOptions", "renderSettingsSummary", "effortLabel", "escapeHtml", "escapeAttr",
+    "sendMessage", "syncSettingsFromJob", "renderComposerState", "applyStatus", "updateFromResponse"];
+  const { api, scope } = fixture(names, {
+    state, $, isOperableProjectId: () => true, stageDraftArtifacts: async () => [], deriveTitle: (s: string) => s,
+    makeId: () => "model-widget-fixture", renderCompanyConfirmation() {}, renderDraftArtifacts() {}, requestAnimationFrame() {}, resizeComposerInput() {},
+    callTool: async (name: string, args: any) => { calls.push({ name, args }); return { workPackage: args, previewDigest: "fixture" }; },
+    render: () => api.renderModelOptions(),
+  });
+  api.renderModelOptions();
+  return { api, scope, state, $, calls };
+}
+
+test("custom model input survives dynamic options, status refresh, selection reload and effort changes", () => {
+  const { api, state, $ } = modelWidgetFixture();
+  assert.equal($("#model").options[1].value, "gpt-6-astra/xhigh");
+  assert.deepEqual($("#effort").options.map((o: any) => o.value), [""]);
+  $("#model").selectedIndex = $("#model").options.length - 1;
+  api.renderModelOptions();
+  assert.equal($("#custom-model-field").hidden, false);
+  $("#custom-model").value = "  gpt-6.1-sol  ";
+  api.renderEffortOptions("max", false);
+  const status = { service: "codex-handoff-bridge", models: [], modelPresets: modelPresetCatalog([]) };
+  api.updateFromResponse({ structuredContent: status });
+  assert.equal($("#custom-model").value, "  gpt-6.1-sol  ", "Refresh must not rewrite the draft input");
+  assert.equal(api.selectedModelId(), "gpt-6.1-sol");
+  assert.equal($("#effort").value, "max");
+  assert.match($("#run-settings-summary").title, /gpt-6\.1-sol/);
+  api.syncSettingsFromJob({ model: "gpt-6.1-sol", effort: "ultra" });
+  assert.equal(api.selectedModelId(), "gpt-6.1-sol");
+  assert.equal($("#effort").value, "ultra");
+  state.status.models = [{ id: "gpt-6.1-sol", displayName: "Newly listed", supportedReasoningEfforts: [{ reasoningEffort: "high" }] }];
+  api.renderModelOptions();
+  assert.equal(api.isCustomModelSelection(), true);
+  assert.equal($("#effort").value, "ultra", "Updated capabilities must not silently replace an explicit effort");
+  assert.match($("#effort").innerHTML, /未列於此模型/);
+  $("#model").value = "gpt-6.1-sol/medium"; api.renderModelOptions();
+  assert.equal($("#custom-model-field").hidden, true);
+  assert.equal(api.selectedModelId(), "gpt-6.1-sol");
+  state.status.models = []; api.renderModelOptions();
+  assert.equal(api.isCustomModelSelection(), false, "Native inventory does not replace the selected fixed pair");
+  assert.equal(api.selectedModelId(), "gpt-6.1-sol");
+  api.renderModelOptions("", "");
+  assert.equal(api.isCustomModelSelection(), false);
+  assert.equal(api.selectedModelId(), "");
+});
+
+test("memory maintenance banner disables new/send, retains drafts and exposes failure until verified reopening", async () => {
+  const { api, state, $, calls } = modelWidgetFixture();
+  $("#message").value = "unsent draft"; $("#context").value = "draft context";
+  state.maintenance = { admission: "closed", phase: "draining", heapUsed: 1600 * 1048576, thresholdBytes: 1500 * 1048576,
+    pendingWork: { jobs: 2, approvals: 1 } };
+  api.renderComposerState();
+  assert.equal($("#new-chat").disabled, true); assert.equal($("#send").disabled, true);
+  assert.equal($("#message").disabled, false); assert.match($("#memory-maintenance").textContent, /不可接續任務.*等待現有工作完成/);
+  await assert.rejects(api.sendMessage(), /不可接續任務/); assert.equal(calls.length, 0);
+  assert.equal($("#message").value, "unsent draft"); assert.equal($("#context").value, "draft context");
+  state.maintenance.phase = "failed"; api.renderComposerState(); assert.match($("#memory-maintenance").textContent, /自動重啟失敗／需處理/);
+  state.maintenance = { admission: "open", phase: "cooldown" }; api.renderComposerState();
+  assert.equal($("#send").disabled, false); assert.equal($("#memory-maintenance").hidden, true);
+  assert.equal($("#message").value, "unsent draft");
+});
+
+test("fixed widget choices require selection, retain exact pairs and expose native uncertainty", async () => {
+  const { api, state, $, calls } = modelWidgetFixture();
+  assert.deepEqual($("#model").options.filter((o: any) => o.value).map((o: any) => o.value), MODEL_PRESETS.map((p) => p.id));
+  $("#message").value = "No implicit default";
+  await assert.rejects(api.sendMessage(), /請明確選擇/);
+  assert.equal(calls.length, 0);
+  for (const preset of MODEL_PRESETS) {
+    state.selectedJob = null;
+    $("#model").value = preset.id; api.renderModelOptions();
+    assert.equal($("#effort").value, preset.effort);
+    assert.equal($("#effort").disabled, true);
+    assert.match($("#model-preset-note").textContent, /NOT VERIFIED/);
+    api.renderModelOptions(); api.renderComposerState();
+    assert.equal($("#model").value, preset.id);
+    assert.equal($("#effort").disabled, true);
+    $("#message").value = "New task";
+    await api.sendMessage();
+    for (const call of calls.slice(-2)) {
+      assert.equal(call.args.modelPreset, preset.id);
+      assert.equal(call.args.model, preset.model); assert.equal(call.args.effort, preset.effort);
+      assert.equal(call.args.speed, "standard");
+    }
+    state.selectedJob = { id: "bridge", status: "completed" };
+    $("#message").value = "Follow-up"; await api.sendMessage();
+    assert.equal(calls.at(-1).args.modelPreset, preset.id);
+    state.selectedJob.status = "running";
+    $("#message").value = "Steer"; await api.sendMessage();
+    for (const field of ["modelPreset", "modelSelection", "model", "effort", "speed"]) assert.equal(calls.at(-1).args[field], undefined);
+  }
+  state.selectedJob = { status: "completed" };
+  api.syncSettingsFromJob({ model: "gpt-5.6-sol", effort: "medium" });
+  assert.equal(api.isCustomModelSelection(), true, "Historic custom pairs remain readable outside the fixed presets");
+  assert.equal(api.selectedModelId(), "gpt-5.6-sol"); assert.equal($("#effort").value, "medium");
+});
+
+test("custom widget dispatch and app/local follow-ups send exact IDs and efforts; empty or rejected input never resends", async () => {
+  const { api, scope, state, $, calls } = modelWidgetFixture();
+  api.renderModelOptions("gpt-6.1-sol", "max");
+  $("#message").value = "Initial";
+  await api.sendMessage();
+  assert.deepEqual(calls.map((c) => c.name), ["codex_job_preview", "codex_job_dispatch"]);
+  for (const call of calls) { assert.equal(call.args.modelSelection, "custom"); assert.equal(call.args.model, "gpt-6.1-sol"); assert.equal(call.args.effort, "max"); assert.equal(call.args.speed, "standard"); }
+  for (const job of [{ id: "bridge", status: "completed" }, { id: "local", source: "local", localThreadId: "native", status: "completed" }]) {
+    state.selectedJob = job; $("#message").value = "Continue";
+    await api.sendMessage();
+    assert.equal(calls.at(-1).name, "codex_conversation_send");
+    assert.equal(calls.at(-1).args.model, "gpt-6.1-sol");
+    assert.equal(calls.at(-1).args.effort, "max");
+  }
+  const count = calls.length;
+  $("#custom-model").value = "  "; $("#message").value = "Do not default";
+  api.renderModelOptions();
+  assert.equal(api.isCustomModelSelection(), true);
+  await assert.rejects(api.sendMessage(), /請輸入自訂 Model ID/);
+  assert.equal(calls.length, count);
+  $("#custom-model").value = "gpt-6.1-sol";
+  let rejectedCalls = 0;
+  scope.callTool = async () => { rejectedCalls++; throw new Error("Model not supported by App Server"); };
+  await assert.rejects(api.sendMessage(), /Model not supported by App Server/);
+  assert.equal(rejectedCalls, 1);
+  assert.equal($("#message").value, "Do not default");
+  assert.equal(api.selectedModelId(), "gpt-6.1-sol");
+  for (const change of [{ busy: true }, { busy: false, selectedJob: { status: "running" } }, { selectedJob: { status: "completed", readOnly: true } }]) {
+    Object.assign(state, change); api.renderComposerState();
+    assert.equal($("#custom-model").disabled, true);
+  }
+});
 
 test("composer grows to its cap, preserves editor scroll and skips unchanged measurements", () => {
   const input: any = { value: "draft", clientWidth: 400, scrollHeight: 52, scrollTop: 0, style: {} };
@@ -44,15 +205,89 @@ test("composer grows to its cap, preserves editor scroll and skips unchanged mea
 
 test("composer settings keep Agent/Plan and reviewer visible without duplicating controls", () => {
   const nodes: any = { "#mode": { value: "workspace_write" }, "#reviewer": { value: "user" }, "#model": { selectedOptions: [{ textContent: "model" }] }, "#effort": { selectedOptions: [{ textContent: "high" }] }, "#compact-settings-summary": {}, "#run-settings-summary": {} };
-  const { api } = fixture(["renderSettingsSummary"], { $: (id: string) => nodes[id] });
+  nodes["#speed"] = { value: "standard", disabled: false };
+  const { api } = fixture(["renderSettingsSummary", "isCustomModelSelection", "selectedModelId"], { $: (id: string) => nodes[id] });
   api.renderSettingsSummary();
-  assert.equal(nodes["#run-settings-summary"].textContent, "Agent 可修改 · 每次詢問");
+  assert.equal(nodes["#run-settings-summary"].textContent, "Agent 可修改 · 每次詢問 · 下回合 Standard");
   assert.equal(nodes["#run-settings-summary"].title, "model · high");
   nodes["#mode"].value = "plan"; nodes["#reviewer"].value = "auto_review";
   api.renderSettingsSummary();
-  assert.equal(nodes["#run-settings-summary"].textContent, "Plan 唯讀 · 自動審核");
+  assert.equal(nodes["#run-settings-summary"].textContent, "Plan 唯讀 · 自動審核 · 下回合 Standard");
+  nodes["#speed"].value = "fast"; api.renderSettingsSummary();
+  assert.match(nodes["#run-settings-summary"].textContent, /下回合 Fast/);
+  nodes["#speed"].disabled = true; api.renderSettingsSummary();
+  assert.match(nodes["#run-settings-summary"].textContent, /速度暫不可變更/);
   assert.equal((html.match(/id="context-panel"/g) || []).length, 1);
   assert.equal((html.match(/id="add-text-artifact"/g) || []).length, 1);
+});
+
+test("widget sends manual speed for new turns, resets after success, and omits it for steer", async () => {
+  const nodes: any = {};
+  const $ = (id: string) => nodes[id] ??= { value: "", selectedOptions: [], checked: false, open: false, classList: { toggle() {} }, setAttribute() {} };
+  $("#message").value = "Inspect"; $("#mode").value = "plan"; $("#reviewer").value = "auto_review";
+  $("#classification").value = "personal"; $("#speed").value = "fast";
+  const state: any = { selectedProjectId: "omi", selectedJob: null, draftArtifacts: [], status: { modelPresets: modelPresetCatalog([]) } };
+  $("#model").value = "gpt-6.1-sol/medium";
+  const calls: any[] = [];
+  const { api } = fixture(["sendMessage", "syncSettingsFromJob", "renderComposerState", "startNewConversation", "isCustomModelSelection", "selectedModelId", "selectedModelPreset"], {
+    state, $, isOperableProjectId: () => true, stageDraftArtifacts: async () => [], deriveTitle: (s: string) => s,
+    makeId: () => "fixture-message", renderDraftArtifacts() {}, renderSettingsSummary() {}, renderModelOptions() {}, renderCompanyConfirmation() {},
+    requestAnimationFrame() {}, resizeComposerInput() {},
+    firstProjectId: () => "omi", syncWorkspacePanels() {}, render() {}, focusWithoutScroll() {},
+    callTool: async (name: string, args: any) => { calls.push({ name, args }); return { workPackage: args, previewDigest: "fixture" }; },
+  });
+  await api.sendMessage();
+  assert.equal(calls[0].name, "codex_job_preview"); assert.equal(calls[0].args.speed, "fast");
+  assert.equal(calls[1].name, "codex_job_dispatch"); assert.equal(calls[1].args.speed, "fast");
+  assert.equal($("#speed").value, "standard");
+  state.selectedJob = { id: "job", status: "completed", speed: "fast" }; $("#message").value = "Next";
+  await api.sendMessage();
+  assert.equal(calls.at(-1).args.speed, "standard", "Previous job Fast must not become next-turn default");
+  state.selectedJob = { id: "local", source: "local", localThreadId: "native", status: "completed" };
+  $("#message").value = "Local follow-up"; $("#speed").value = "fast";
+  await api.sendMessage(); assert.equal(calls.at(-1).args.localThreadId, "native"); assert.equal(calls.at(-1).args.speed, "fast");
+  state.selectedJob = { id: "job", status: "running", speed: "fast" };
+  $("#message").value = "Steer"; $("#speed").value = "fast";
+  api.renderComposerState(); assert.equal($("#speed").disabled, true);
+  await api.sendMessage(); assert.equal(calls.at(-1).args.speed, undefined);
+  state.selectedJob.status = "completed"; api.renderComposerState(); assert.equal($("#speed").disabled, false);
+  $("#speed").value = "fast"; api.syncSettingsFromJob(state.selectedJob);
+  assert.equal($("#speed").value, "standard", "Switching conversation never restores its previous requested Fast");
+  state.timelineSignatures = new Map(); state.draft = { speed: "fast" };
+  api.startNewConversation("omi"); assert.equal($("#speed").value, "fast", "Explicit MCP draft selection is used once");
+  api.startNewConversation("omi"); assert.equal($("#speed").value, "standard", "Next blank draft does not retain Fast");
+  assert.match(html, /id="speed"[\s\S]*?<option value="standard">Standard/);
+});
+
+test("widget shows requested speed on projected messages without claiming actual tier", () => {
+  const { api } = fixture([...renderHelpers, "legacyConversation"]);
+  const history = api.legacyConversation([{ id: "u", role: "user", speed: "fast", content: "Inspect" }]);
+  assert.equal(history.turns[0].items[0].speed, "fast");
+  assert.match(api.renderProjectedMessage(history.turns[0].items[0], "u"), /請求速度 Fast/);
+  assert.doesNotMatch(api.renderProjectedMessage({ type: "userMessage", text: "Old history" }, "old"), /請求速度/);
+});
+
+test("widget preserves each turn's submitted model and effort provenance, including defaults, legacy unknowns and steer", () => {
+  const { api } = fixture([...renderHelpers, "legacyConversation"]);
+  const rows = [
+    { id: "explicit", role: "user", content: "Initial", model: "gpt-test", effort: "xhigh", selectionRecorded: true, selectionKind: "turn", modelSource: "explicit", effortSource: "explicit" },
+    { id: "inherited", role: "user", content: "Continue", model: "gpt-test", effort: "xhigh", selectionRecorded: true, selectionKind: "turn", modelSource: "inherited", effortSource: "inherited" },
+    { id: "default", role: "user", content: "Omitted", selectionRecorded: true, selectionKind: "turn", modelSource: "default", effortSource: "default" },
+    { id: "old-known", role: "user", content: "Old known", model: "old-model", effort: "high" },
+    { id: "old-unknown", role: "user", content: "Old unknown" },
+    { id: "steer", role: "user", content: "Same turn", model: "gpt-test", effort: "xhigh", selectionRecorded: true, selectionKind: "steer", modelSource: "inherited", effortSource: "inherited" },
+  ];
+  const items = api.legacyConversation(rows).turns.flatMap((turn: any) => turn.items);
+  assert.equal(items.length, rows.length);
+  const rendered = new Map(items.map((item: any) => [item.id, api.renderProjectedMessage(item, item.id)]));
+  assert.match(String(rendered.get("legacy:explicit")), /提交模型 gpt-test（明確提交） · 推理 極高（明確提交）/);
+  assert.match(String(rendered.get("legacy:inherited")), /提交模型 gpt-test（沿用） · 推理 極高（沿用）/);
+  assert.match(String(rendered.get("legacy:default")), /提交模型 預設（省略，交由預設） · 推理 預設（省略，交由預設）/);
+  assert.match(String(rendered.get("legacy:old-known")), /提交模型 old-model（舊紀錄，來源未知）/);
+  assert.match(String(rendered.get("legacy:old-unknown")), /提交模型 未知（舊紀錄，來源未知） · 推理 未知（舊紀錄，來源未知）/);
+  assert.doesNotMatch(String(rendered.get("legacy:old-unknown")), /預設/);
+  assert.match(String(rendered.get("legacy:steer")), /同回合補充 · 未變更模型或推理/);
+  assert.doesNotMatch(String(rendered.get("legacy:steer")), /提交模型/);
 });
 
 test("Markdown renders headings, lists, tables, code and safe links without interpreting HTML", () => {
@@ -158,10 +393,10 @@ test("turn summary preserves real counts and keeps current unresolved errors vis
 });
 
 test("header distinguishes requested/executed models and never derives pressure from cumulative usage", () => {
-  const { api } = fixture(["renderThreadControls", "tokenSummary", "metric", "escapeHtml", "controllerLabel", "effortLabel"], { state: { status: { controller: "ready" } } });
+  const { api } = fixture(["renderThreadControls", "requestedSelectionLabel", "tokenSummary", "metric", "escapeHtml", "controllerLabel", "effortLabel"], { state: { status: { controller: "ready" } } });
   const usage = { total: { totalTokens: 990000 }, last: { totalTokens: 100 }, modelContextWindow: 1000 };
   const rendered = api.renderThreadControls({ model: "requested", executionMode: "plan", approvalReviewer: "user", conversation: { tokenUsage: usage, modelRouting: { executedModel: "executed", fromModel: "requested" } } });
-  assert.match(rendered, /指定 requested/);
+  assert.match(rendered, /提交模型 requested（舊紀錄，來源未知）/);
   assert.match(rendered, /實際 executed/);
   assert.match(rendered, /max="1000" value="100"/);
   assert.doesNotMatch(api.tokenSummary({ ...usage, modelContextWindow: null }), /<progress/);
