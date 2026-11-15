@@ -75,7 +75,21 @@ function Test-McpCcBridgeUpdateIdle($Manifest) {
     if($probe.Count -ne 1){throw 'ACTIVE_STATE_UNKNOWN'}
     $uri=[uri]$probe[0].url
     if(-not $uri.IsLoopback -or $uri.Scheme -cne 'http' -or $uri.AbsolutePath -cne '/health'){throw 'ACTIVE_STATE_UNKNOWN'}
-    try{$h=Invoke-RestMethod -Uri $uri.AbsoluteUri -TimeoutSec 3 -UseBasicParsing}catch{throw 'ACTIVE_STATE_UNKNOWN'}
+    try{$h=Invoke-RestMethod -Uri $uri.AbsoluteUri -TimeoutSec 3 -UseBasicParsing}catch{
+        # HTTP absence alone is not stopped evidence. Ask the existing selected
+        # controller, which resolves exact process/listener ownership read-only.
+        $workspace=Get-McpCcUpdateWorkspace $Manifest
+        . (Join-Path $workspace 'project_reading/scripts/component-update-common.ps1')
+        try {
+            Import-Module (Join-Path $PSScriptRoot 'McpControlCenter.DailyCode.psm1') -Force
+            $dailyRoot=Join-Path $workspace 'codex_bridge/Runtime'
+            $selected=Get-McpDailyStatus $dailyRoot
+            $codeRoot=Join-Path $selected.root 'codex_bridge'
+            $s=Invoke-ComponentUpdateProcess -Executable (Join-Path $PSHOME 'powershell.exe') -Arguments ('-NoProfile -NonInteractive -File "'+(Join-Path $codeRoot 'scripts/runtime-control.ps1')+'" -Action Status') -WorkingDirectory $codeRoot -Json
+            if((Get-McpDailyStatus $dailyRoot).version -ceq $selected.version -and $s.ok -and $s.after.status -ceq 'Stopped' -and $s.after.server.ownership -ceq 'Stopped' -and $s.after.tunnel.ownership -ceq 'Stopped'){return $true}
+        }catch{}
+        throw 'STATE_UNVERIFIED'
+    }
     if($h.service -cne 'codex-handoff-bridge' -or $h.jobs.scope -cne 'all' -or $h.controller -cnotin @('ready','idle') -or
         $h.jobs.active -isnot [int] -or $h.jobs.awaitingApproval -isnot [int] -or $h.jobs.active -lt 0 -or $h.jobs.awaitingApproval -lt 0){throw 'ACTIVE_STATE_UNKNOWN'}
     return ($h.jobs.active -eq 0 -and $h.jobs.awaitingApproval -eq 0)
@@ -176,8 +190,139 @@ function Invoke-McpCcWorkspaceUpdate($Owner,$Request,$Manifest,[string]$RuntimeR
     }catch{
         $code=Get-McpCcUpdateError $_
         $phase=if($dispatch){'RECOVERY_REQUIRED'}else{'REJECTED'}
-        if($code -eq 'ACTIVE_STATE_UNKNOWN'){$phase='QUEUED'}
+        # An unverified state is visible for original-ID inspection, never an
+        # endless idle retry. Only confirmed active work uses the idle queue.
+        if($code -in @('ACTIVE_STATE_UNKNOWN','STATE_UNVERIFIED')){$phase='RECOVERY_REQUIRED'}
         $Owner.CompleteUpdate($Request.requestId,$phase,$code,$null,$null,$null,$null,$null)
     }
 }
 Export-ModuleMember -Function Publish-McpCcUpdateSources,Invoke-McpCcWorkspaceUpdate,Get-McpCcUpdateDefinition,Get-McpCcUpdateDigest
+
+Set-StrictMode -Version 3.0
+$ErrorActionPreference='Stop'
+
+function Initialize-McpCcOmiSource {
+    $repo='C:\project\Open Market Intelligence'
+    foreach($name in @('apply-omi-update.ps1','omi-runtime-control.ps1','OmiRuntimeControl.cs','OmiOwnedShutdown.cs')) {
+        $path=Join-Path $repo ('scripts/'+$name)
+        for($p=$path;$p;$p=[IO.Path]::GetDirectoryName($p)) {
+            if((Get-Item -LiteralPath $p -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'OMI_REPARSE_REJECTED'}
+        }
+    }
+    if(-not ('Omi.RuntimeControl.Controller' -as [type])) {
+        Add-Type -Path @((Join-Path $repo 'scripts/OmiRuntimeControl.cs'),(Join-Path $repo 'scripts/OmiOwnedShutdown.cs')) -ReferencedAssemblies System.Web.Extensions,System.Core,System.Windows.Forms
+    }
+    # Both scripts define functions only when dot-sourced. No credentials, status
+    # mutation, Controller construction or execution startup occurs here.
+    . (Join-Path $repo 'scripts/apply-omi-update.ps1')
+    . (Join-Path $repo 'scripts/omi-runtime-control.ps1')
+    $script:RepoRoot=$repo
+    $lifecycle=Get-OmiLifecycleSourceId
+    $application=[Omi.OwnedShutdown.ProductionSession]::ApplicationRelease($repo)
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try{$digest=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes("cc-omi-launcher-update-v1`n$lifecycle`n$application")))).Replace('-','').ToLowerInvariant()}
+    finally{$sha.Dispose()}
+    return [pscustomobject]@{digest=$digest;lifecycle=$lifecycle;application=$application}
+}
+function Assert-McpCcOmiDeployment($Manifest) {
+    if(-not [McpCc.WorkspaceLocal.OmiContract]::IndependentOwner()){throw 'OMI_CC_OWNER_JOB_UNVERIFIED'}
+    if(-not $Manifest.PSObject.Properties['codeDeployment'] -or
+        $Manifest.codeDeployment.workspaceRoot -ine 'C:\GPT_MCPtool' -or
+        $Manifest.codeDeployment.managerRoot -ine [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))) {throw 'OMI_DEPLOYED_CC_REQUIRED'}
+    Import-Module (Join-Path $PSScriptRoot 'McpControlCenter.Deployment.psm1')
+    $d=$Manifest.codeDeployment
+    $selector=Get-Content -LiteralPath (Join-Path $d.runtimeRoot 'current.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    if($selector.contract -cne 'mcpcc-current-v1' -or $selector.version -cne $d.version){throw 'OMI_CC_SELECTION_CHANGED'}
+    $null=Test-McpCcDeploymentVersion $d.runtimeRoot $d.version
+}
+function Publish-McpCcOmiSource($Owner,$Manifest) {
+    try{Assert-McpCcOmiDeployment $Manifest;$s=Initialize-McpCcOmiSource;$Owner.PublishOmiSource($s.digest,$Manifest.codeDeployment.version)}
+    catch{$Owner.PublishOmiSource($null,$null)}
+}
+function Get-McpCcOmiPreflight {
+    $repo='C:\project\Open Market Intelligence'
+    # Reuse OMI's exact capture and read-only status functions, not port/PID guesses.
+    . (Join-Path $repo 'scripts/apply-omi-update.ps1')
+    $identity=Get-OmiUpdateOwner -Repo $repo
+    try {
+        $sha=[Security.Cryptography.SHA256]::Create()
+        try{$suffix=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($repo.ToLowerInvariant())))).Replace('-','').ToLowerInvariant().Substring(0,24)}finally{$sha.Dispose()}
+        $status=Read-OmiUpdateOwnerStatus ('omi-runtime-'+$suffix) $identity.Process
+        if($status.schema -cne 'omi.runtime-control.v1' -or -not $status.owner_id -or $status.launcher.pid -ne $identity.Pid -or
+            [Math]::Abs(([DateTime]::Parse($status.launcher.created_at).ToUniversalTime().Ticks)-$identity.Created.Ticks) -ge 10 -or
+            $identity.Process.HasExited){throw 'OMI_OLD_OWNER_UNVERIFIED'}
+        if($status.restart.update_action -cne 'ApplyUpdate'){throw 'OMI_ADOPTION_GATE_UNVERIFIED'}
+        if(-not [Omi.RuntimeControl.Controller]::ExecutionLeasesFree($repo)){throw 'UPDATE_EXECUTION_STOP_REQUIRED'}
+        return [pscustomobject]@{ownerId=$status.owner_id;pid=$identity.Pid;createdTicks=$identity.Created.Ticks}
+    } finally {foreach($node in $identity.Nodes){$node.Process.Dispose()}}
+}
+function Start-McpCcOmiUpdater {return [McpCc.WorkspaceLocal.OmiChild]::Start()}
+function Read-McpCcOmiNativeReceipt([string]$Output) {
+    # Original updater emits progress text before its final compressed JSON.
+    # Only the last nonempty line is a receipt; no whole-stdout JSON assumption.
+    $lines=@($Output.TrimEnd() -split '\r?\n');$line=$lines[-1]
+    if($line.Length -gt 16384 -or -not $line.StartsWith('{')){throw 'OMI_UPDATER_RECEIPT_UNVERIFIED'}
+    try{$r=$line | ConvertFrom-Json -ErrorAction Stop}catch{throw 'OMI_UPDATER_RECEIPT_UNVERIFIED'}
+    foreach($key in @('request_id','action','status','phase','old_owner_stop','owner_pid','owner_created','launcher_adoption','update_applied','backend_readiness','frontend_readiness','successor','vbs_invocations')) {
+        if(-not $r.PSObject.Properties[$key]){throw 'OMI_UPDATER_SCHEMA_UNVERIFIED'}
+    }
+    if([string]$r.request_id -cnotmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' -or
+        $r.action -cne 'ApplyUpdate' -or [string]$r.status -cnotmatch '^UPDATE_[A-Z_]+$' -or
+        $r.old_owner_stop -cnotin @('UNCONFIRMED','CONFIRMED','FORCED_EXIT_CONFIRMED')){throw 'OMI_UPDATER_SCHEMA_UNVERIFIED'}
+    return $r
+}
+function ConvertFrom-McpCcOmiResult([string]$Output,[int]$ExitCode,$Source,$Old) {
+    $r=Read-McpCcOmiNativeReceipt $Output
+    # No schema field is invented for the legacy receipt. Validate its actual
+    # shape and native correlation, including the successor's operation UUID.
+    $s=$r.successor
+    if(-not $s -or -not $s.update_operation -or $s.update_operation.request_id -cne $r.request_id){throw 'OMI_NATIVE_CORRELATION_UNVERIFIED'}
+    if($r.owner_pid -ne $Old.pid -or [Math]::Abs(([DateTime]::Parse($r.owner_created).ToUniversalTime().Ticks)-$Old.createdTicks) -ge 10 -or
+        $s.launcher_pid -le 0 -or $s.launcher_pid -eq $Old.pid -or [DateTime]::Parse($s.launcher_created).ToUniversalTime().Ticks -le $Old.createdTicks){throw 'OMI_OWNER_GENERATION_UNVERIFIED'}
+    if($ExitCode -ne 0 -or $r.status -cne 'UPDATE_BACKEND_READY' -or $r.phase -cne 'COMPLETE' -or $r.vbs_invocations -cne 1 -or
+        $r.old_owner_stop -cnotin @('CONFIRMED','FORCED_EXIT_CONFIRMED') -or
+        $r.launcher_adoption -cne 'VERIFIED' -or $r.update_applied -cne 'LAUNCHER_AND_BACKEND_VERIFIED' -or
+        $r.backend_readiness -cne 'VERIFIED' -or $s.backend_verified -cne $true -or $s.http_readiness -cne 'VERIFIED' -or
+        $s.loaded_lifecycle_source_id -cne $Source.lifecycle -or $s.application_release_id -cne $Source.application -or
+        $s.update_operation.status -cne 'succeeded'){throw 'OMI_UPDATER_RESULT_UNVERIFIED'}
+    return $r.request_id
+}
+function Invoke-McpCcOmiUpdate($Owner,$Request,$Manifest) {
+    $dispatched=$false;$child=$null;$nativeId=$null
+    try {
+        Assert-McpCcOmiDeployment $Manifest
+        $source=Initialize-McpCcOmiSource
+        if($source.digest -cne $Request.expectedSourceDigest){throw 'OMI_SOURCE_CHANGED'}
+        $old=Get-McpCcOmiPreflight
+        $Owner.PreflightOmi($Request.requestId,$source.lifecycle,$source.application,$old.ownerId,$old.pid,$old.createdTicks)
+        # Recheck source immediately before the sole fixed launch. The original
+        # updater re-attests exact owner, execution fence and all writer gates.
+        if((Initialize-McpCcOmiSource).digest -cne $source.digest){throw 'OMI_SOURCE_CHANGED'}
+        $dispatched=$true
+        $child=Start-McpCcOmiUpdater
+        $Owner.ProgressOmi($Request.requestId,$child.Pid,$child.CreatedTicks)
+        $clock=[Diagnostics.Stopwatch]::StartNew();$timedOut=$false
+        while(-not $child.Finished) {
+            if(-not $timedOut -and $clock.ElapsedMilliseconds -ge 900000){
+                $timedOut=$true;$Owner.ObserveOmi($Request.requestId,'OMI_UPDATER_TIMEOUT_CHECK_ORIGINAL_RECEIPT')
+            }
+            Start-Sleep -Milliseconds 50
+        }
+        # Keep validated native UUID even when a terminal success check fails.
+        try{$nativeId=(Read-McpCcOmiNativeReceipt $child.Output).request_id}catch{if($child.ExitCode -ne 0){throw $child.ErrorCode};throw}
+        if($timedOut){throw 'OMI_UPDATER_TIMEOUT_CHECK_ORIGINAL_RECEIPT'}
+        $nativeId=ConvertFrom-McpCcOmiResult $child.Output $child.ExitCode $source $old
+        if((Initialize-McpCcOmiSource).digest -cne $source.digest){throw 'OMI_SOURCE_CHANGED_DURING_UPDATE'}
+        $Owner.CompleteOmi($Request.requestId,'ACCEPTED','OMI_LAUNCHER_BACKEND_VERIFIED',$nativeId)
+    } catch {
+        $code=($_.Exception.Message -split ':')[0]
+        if($code -cnotmatch '^[A-Z][A-Z0-9_]{0,95}$'){$code='OMI_UPDATE_UNVERIFIED'}
+        $phase=if($dispatched){'RECOVERY_REQUIRED'}else{'REJECTED'}
+        $Owner.CompleteOmi($Request.requestId,$phase,$code,$nativeId)
+    } finally {
+        # Even a receipt-write/observation failure cannot drop a live updater.
+        # The existing tray maintenance worker remains busy until it exits.
+        if($child){try{while(-not $child.Finished){Start-Sleep -Milliseconds 100}}finally{$child.Dispose()}}
+    }
+}
+Export-ModuleMember -Function Publish-McpCcOmiSource,Invoke-McpCcOmiUpdate

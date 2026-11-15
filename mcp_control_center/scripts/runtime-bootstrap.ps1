@@ -33,6 +33,67 @@ function Get-BootstrapTray([string]$Version){
     if($process.Path -ine $ps -or ($ticks-($ticks%10)) -ne ($cim-($cim%10))){$process.Dispose();throw 'CC_TRAY_INSTANCE_CHANGED'}
     return $process
 }
+
+function Stop-BootstrapTray($Tray){
+    if(-not $Tray){return}
+    try{
+        $signal=[Threading.EventWaitHandle]::OpenExisting('Local\McpCc.InstalledTrayExit.v1.'+$Tray.Id+'.'+$Tray.StartTime.ToUniversalTime().Ticks)
+        try{[void]$signal.Set()}finally{$signal.Dispose()}
+        if(-not $Tray.WaitForExit(60000)){throw 'CC_TRAY_EXIT_REFUSED_OR_BUSY'}
+    }finally{$Tray.Dispose()}
+}
+function Start-BootstrapVerifiedTray([string]$Version,[string]$ExpectedPin){
+    $existing=Get-BootstrapTray $Version
+    if($existing){$existing.Dispose()}else{
+        $start=Start-Process -FilePath (Join-Path $env:WINDIR 'System32/wscript.exe') -ArgumentList ('"'+(Join-Path $source 'scripts/start-runtime-tray.vbs')+'"') -WindowStyle Hidden -PassThru
+        $start.Dispose()
+    }
+    $watch=[Diagnostics.Stopwatch]::StartNew();$observed=$null
+    while(-not $observed -and $watch.ElapsedMilliseconds -lt 30000){Start-Sleep -Milliseconds 250;$observed=Get-BootstrapTray $Version}
+    if(-not $observed){throw 'CC_TRAY_START_UNVERIFIED'}
+    try{
+        $signal=$null
+        while(-not $signal -and $watch.ElapsedMilliseconds -lt 45000){
+            try{$signal=[Threading.EventWaitHandle]::OpenExisting('Local\McpCc.InstalledTrayExit.v1.'+$observed.Id+'.'+$observed.StartTime.ToUniversalTime().Ticks)}
+            catch [Threading.WaitHandleCannotBeOpenedException]{Start-Sleep -Milliseconds 250}
+        }
+        if(-not $signal -or $observed.HasExited){throw 'CC_TRAY_READINESS_UNVERIFIED'}
+        $signal.Dispose();$ipcReady=$false
+        while(-not $ipcReady -and $watch.ElapsedMilliseconds -lt 60000){
+            try{$ipcReady=[McpCc.WorkspaceLocal.OwnerProbe]::Status($observed.Id,$observed.StartTime.ToUniversalTime().Ticks)}catch{$ipcReady=$false}
+            if(-not $ipcReady){Start-Sleep -Milliseconds 250}
+        }
+        if(-not $ipcReady){throw 'CC_WORKSPACE_IPC_NOT_READY'}
+        $verified=Test-McpCcDeploymentVersion $runtime $Version
+        if((Get-FileHash -LiteralPath (Join-Path $verified.managerRoot 'code-inventory.json') -Algorithm SHA256).Hash.ToLowerInvariant() -cne $ExpectedPin){throw 'CC_VERIFIED_VERSION_CHANGED'}
+        $again=Read-ComponentUpdateJson (Join-Path $runtime 'current.json')
+        if($again.version -cne $Version){throw 'CC_SELECTION_CHANGED'}
+    }finally{$observed.Dispose()}
+}
+function Restore-BootstrapPrevious {
+    $original=Read-ComponentUpdateJson $transition
+    $stopPath=Join-Path $history 'old-stopped.json'
+    if(-not $original.PSObject.Properties['previousBuildId'] -or -not(Test-Path -LiteralPath $stopPath)){throw 'CC_ROLLBACK_EVIDENCE_MISSING'}
+    $stop=Read-ComponentUpdateJson $stopPath
+    if($original.requestId -cne $RequestId -or $original.to -cne $VersionId -or $original.preparedBuildId -cne $request.preparedBuildId -or
+        $stop.requestId -cne $RequestId -or $stop.version -cne $original.from -or $stop.buildId -cne $original.previousBuildId){throw 'CC_ROLLBACK_EVIDENCE_MISSING'}
+    $prior=Test-McpCcDeploymentVersion $runtime $original.from
+    $priorPin=(Get-FileHash -LiteralPath (Join-Path $prior.managerRoot 'code-inventory.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+    if($priorPin -cne $original.previousBuildId){throw 'CC_ROLLBACK_VERSION_CHANGED'}
+    $selected=Read-ComponentUpdateJson (Join-Path $runtime 'current.json')
+    if($selected.contract -cne 'mcpcc-current-v1' -or $selected.version -cnotin @($original.from,$original.to)){throw 'CC_BOOTSTRAP_SUPERSEDED'}
+    $rollback=Join-Path $history 'rollback-intent.json'
+    if(-not(Test-Path -LiteralPath $rollback)){Write-ComponentUpdateJson $rollback @{requestId=$RequestId;from=$original.to;to=$original.from;buildId=$priorPin}}
+    # A failed start can still have produced a tray. Retire only that exact
+    # instance through its ordinary cooperative Exit before restoring selection.
+    Stop-BootstrapTray (Get-BootstrapTray $original.to)
+    $again=Read-ComponentUpdateJson (Join-Path $runtime 'current.json')
+    if($again.version -cne $selected.version){throw 'CC_SELECTION_CHANGED'}
+    if($selected.version -cne $original.from){$null=Set-McpCcDeploymentSelection $source $original.from}
+    Start-BootstrapVerifiedTray $original.from $priorPin
+    $store.Complete($RequestId,'REJECTED','CC_ROLLED_BACK_OWNER_AND_IPC_VERIFIED',$original.from,$original.from,$priorPin,$true,$request.preparedBuildId)
+}
+
 try{
     try{$held=$lease.WaitOne(0)}catch [Threading.AbandonedMutexException]{$held=$true}
     if(-not $held){$store.Read($RequestId)|ConvertTo-Json -Depth 6;exit 0}
@@ -41,6 +102,7 @@ try{
     $request=$store.Read($RequestId)
     if($request.phase -in @('ACCEPTED','REJECTED')){$request|ConvertTo-Json -Depth 6;exit 0}
     $stopped=Test-Path -LiteralPath $transition
+    if(Test-Path -LiteralPath (Join-Path $history 'rollback-intent.json')){Restore-BootstrapPrevious;$store.Read($RequestId)|ConvertTo-Json -Depth 6;exit 0}
     $candidate=Test-McpCcDeploymentVersion $runtime $VersionId
     $pin=(Get-FileHash -LiteralPath (Join-Path $candidate.managerRoot 'code-inventory.json') -Algorithm SHA256).Hash.ToLowerInvariant()
     if(-not $request.preparedBuildId -or $pin -cne $request.preparedBuildId){throw 'CC_CANDIDATE_CHANGED'}
@@ -56,57 +118,32 @@ try{
     $tray=Get-BootstrapTray $oldVersion
     if($oldVersion -cne $VersionId){
         if(-not(Test-Path -LiteralPath $transition)){
-            Write-ComponentUpdateJson $transition @{requestId=$RequestId;from=$oldVersion;to=$VersionId;preparedBuildId=$pin;createdAt=[DateTime]::UtcNow.ToString('o')}
+            $prior=Test-McpCcDeploymentVersion $runtime $oldVersion
+            $priorPin=(Get-FileHash -LiteralPath (Join-Path $prior.managerRoot 'code-inventory.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+            Write-ComponentUpdateJson $transition @{requestId=$RequestId;from=$oldVersion;to=$VersionId;preparedBuildId=$pin;previousBuildId=$priorPin;createdAt=[DateTime]::UtcNow.ToString('o')}
         }
         # Once Exit may be signalled, uncertainty belongs to this operation even
         # when a resumed helper did not itself perform the earlier transition.
         $stopped=$true
-        if($tray){
-            try{
-                # The worker releases its in-process active request before this
-                # fixed event is signalled. Exit retains normal busy/drain gates.
-                $signal=[Threading.EventWaitHandle]::OpenExisting('Local\McpCc.InstalledTrayExit.v1.'+$tray.Id+'.'+$tray.StartTime.ToUniversalTime().Ticks)
-                try{[void]$signal.Set()}finally{$signal.Dispose()}
-                if(-not $tray.WaitForExit(60000)){throw 'CC_TRAY_EXIT_REFUSED_OR_BUSY'}
-            }finally{$tray.Dispose()}
+        Stop-BootstrapTray $tray
+        $oldStopped=Join-Path $history 'old-stopped.json'
+        $original=Read-ComponentUpdateJson $transition
+        if(-not(Test-Path -LiteralPath $oldStopped) -and $original.PSObject.Properties['previousBuildId']){
+            Write-ComponentUpdateJson $oldStopped @{requestId=$RequestId;version=$original.from;buildId=$original.previousBuildId;confirmedAt=[DateTime]::UtcNow.ToString('o')}
         }
         $null=Set-McpCcDeploymentSelection $source $VersionId
     }elseif($tray){$tray.Dispose();$tray=$null;$stopped=$true}
-    $targetTray=Get-BootstrapTray $VersionId
-    if(-not $targetTray){
-        # Includes interruption after selection and before ordinary Start.
-        # The stable launcher verifies the selected tree and singleton again.
-        $start=Start-Process -FilePath (Join-Path $env:WINDIR 'System32/wscript.exe') -ArgumentList ('"'+(Join-Path $source 'scripts/start-runtime-tray.vbs')+'"') -WindowStyle Hidden -PassThru
-        $start.Dispose()
-        $stopped=$true
-    }else{$targetTray.Dispose()}
-    $watch=[Diagnostics.Stopwatch]::StartNew();$observed=$null
-    while(-not $observed -and $watch.ElapsedMilliseconds -lt 30000){Start-Sleep -Milliseconds 250;$observed=Get-BootstrapTray $VersionId}
-    if(-not $observed){throw 'CC_TRAY_START_UNVERIFIED'}
-    try{
-        # Its ordinary Exit signal is created only by the live selected owner.
-        $signal=$null
-        while(-not $signal -and $watch.ElapsedMilliseconds -lt 45000){
-            try{$signal=[Threading.EventWaitHandle]::OpenExisting('Local\McpCc.InstalledTrayExit.v1.'+$observed.Id+'.'+$observed.StartTime.ToUniversalTime().Ticks)}
-            catch [Threading.WaitHandleCannotBeOpenedException]{Start-Sleep -Milliseconds 250}
-        }
-        if(-not $signal -or $observed.HasExited){throw 'CC_TRAY_READINESS_UNVERIFIED'}
-        $signal.Dispose()
-        $ipcReady=$false
-        while(-not $ipcReady -and $watch.ElapsedMilliseconds -lt 60000){
-            try{$ipcReady=[McpCc.WorkspaceLocal.OwnerProbe]::Status($observed.Id,$observed.StartTime.ToUniversalTime().Ticks)}catch{$ipcReady=$false}
-            if(-not $ipcReady){Start-Sleep -Milliseconds 250}
-        }
-        if(-not $ipcReady){throw 'CC_WORKSPACE_IPC_NOT_READY'}
-        $null=Test-McpCcDeploymentVersion $runtime $VersionId
-        $again=Get-Content -LiteralPath (Join-Path $runtime 'current.json') -Raw -Encoding UTF8|ConvertFrom-Json
-        if($again.version -cne $VersionId){throw 'CC_SELECTION_CHANGED'}
-        $store.Complete($RequestId,'ACCEPTED','CC_OWNER_AND_IPC_VERIFIED',$VersionId,$VersionId,$pin,$true,$pin)
-        $store.Read($RequestId)|ConvertTo-Json -Depth 6
-    }finally{$observed.Dispose()}
+    Start-BootstrapVerifiedTray $VersionId $pin
+    $store.Complete($RequestId,'ACCEPTED','CC_OWNER_AND_IPC_VERIFIED',$VersionId,$VersionId,$pin,$true,$pin)
+    $store.Read($RequestId)|ConvertTo-Json -Depth 6
+
 }catch{
     $code=([string]$_.Exception.Message -split ':')[0]
     if($code -cnotmatch '^[A-Z][A-Z0-9_]{0,95}$'){$code='CC_BOOTSTRAP_FAILED'}
+    if($stopped -and $code -ne 'CC_BOOTSTRAP_SUPERSEDED'){
+        try{Restore-BootstrapPrevious;$store.Read($RequestId)|ConvertTo-Json -Depth 6;exit 0}
+        catch{$code=([string]$_.Exception.Message -split ':')[0];if($code -cnotmatch '^[A-Z][A-Z0-9_]{0,95}$'){$code='CC_ROLLBACK_UNVERIFIED'}}
+    }
     $store.Complete($RequestId,$(if($code -eq 'CC_BOOTSTRAP_SUPERSEDED'){'REJECTED'}elseif($stopped){'RECOVERY_REQUIRED'}else{'REJECTED'}),$code,$null,$null,$null,$null,$request.preparedBuildId)
     $store.Read($RequestId)|ConvertTo-Json -Depth 6
     exit 1

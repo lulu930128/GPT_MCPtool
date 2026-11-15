@@ -134,6 +134,7 @@ $script:WorkspaceLocalOwner = $null
 $script:WorkspaceLocalWorker = $null
 $script:UpdateSourceAge = 60
 $script:UpdateDispatchAge = 5
+$script:MemoryMaintenanceAge = 0
 $script:WorkspaceLocalStartupReason = 'WORKSPACE_LOCAL_REGISTRY_UNSUPPORTED'
 # The existing tray mutex is already acquired. No second manager or poller.
 # Installed v4 has already passed activation above; retain the same singleton.
@@ -746,9 +747,10 @@ $timer.add_Tick({
         try { $null=$script:WorkspaceLocalWorker.shell.EndInvoke($script:WorkspaceLocalWorker.pending) }
         catch { Write-Warning 'Workspace maintenance result unknown; inspect its request receipt.' }
         finally {
-            if ($script:WorkspaceLocalOwner.HasActiveRequest -and $script:WorkspaceLocalWorker.requestId) {
+            if ($null -ne $script:WorkspaceLocalOwner -and $script:WorkspaceLocalOwner.HasActiveRequest -and $script:WorkspaceLocalWorker.requestId) {
                 try {
-                    if($script:WorkspaceLocalWorker.kind -eq 'update'){$script:WorkspaceLocalOwner.CompleteUpdate($script:WorkspaceLocalWorker.requestId,'RECOVERY_REQUIRED','UPDATE_WORKER_RESULT_UNCERTAIN',$null,$null,$null,$null,$null)}
+                    if($script:WorkspaceLocalWorker.kind -eq 'omi'){$script:WorkspaceLocalOwner.CompleteOmi($script:WorkspaceLocalWorker.requestId,'RECOVERY_REQUIRED','OMI_WORKER_RESULT_UNCERTAIN',$null)}
+                    elseif($script:WorkspaceLocalWorker.kind -eq 'update'){$script:WorkspaceLocalOwner.CompleteUpdate($script:WorkspaceLocalWorker.requestId,'RECOVERY_REQUIRED','UPDATE_WORKER_RESULT_UNCERTAIN',$null,$null,$null,$null,$null)}
                     else{$script:WorkspaceLocalOwner.Complete($script:WorkspaceLocalWorker.requestId,'UNKNOWN')}
                 }
                 catch { Write-Warning 'Workspace receipt update unavailable; durable UNKNOWN remains.' }
@@ -775,7 +777,27 @@ $timer.add_Tick({
             catch { $maintenance.Dispose();$script:WorkspaceLocalOwner.Complete($request.requestId,'UNKNOWN') }
         }
     }
+    $script:MemoryMaintenanceAge++
+    if(-not $script:Closing -and -not $script:ExitRequested -and $script:MemoryMaintenanceAge -ge 5 -and
+        $null -eq $script:WorkspaceLocalWorker -and $null -eq $script:ControllerProcess){
+        $script:MemoryMaintenanceAge=0
+        $worker=[PowerShell]::Create()
+        [void]$worker.AddScript('param($module,$manifest,$runtime) Import-Module $module; Invoke-McpCcMemoryMaintenanceTick -Manifest $manifest -RuntimeRoot $runtime')
+        [void]$worker.AddArgument((Join-Path $projectRoot 'src/McpControlCenter.MemoryMaintenance.psm1')).AddArgument($manifest).AddArgument($RuntimeRoot)
+        try{$script:WorkspaceLocalWorker=@{shell=$worker;pending=$worker.BeginInvoke();requestId=$null;kind='memory'}}
+        catch{$worker.Dispose();Write-Warning 'Memory maintenance observation unavailable.'}
+    }
     $script:UpdateSourceAge++;$script:UpdateDispatchAge++
+    if(-not $script:Closing -and $null -ne $script:WorkspaceLocalOwner -and $null -eq $script:WorkspaceLocalWorker -and $null -eq $script:ControllerProcess){
+        $omiRequest=$script:WorkspaceLocalOwner.TakePendingOmi()
+        if($null -ne $omiRequest){
+            $worker=[PowerShell]::Create()
+            [void]$worker.AddScript('param($module,$owner,$request,$manifest) Import-Module $module; Invoke-McpCcOmiUpdate $owner $request $manifest')
+            [void]$worker.AddArgument((Join-Path $projectRoot 'src/McpControlCenter.WorkspaceUpdate.psm1')).AddArgument($script:WorkspaceLocalOwner).AddArgument($omiRequest).AddArgument($manifest)
+            try{$script:WorkspaceLocalWorker=@{shell=$worker;pending=$worker.BeginInvoke();requestId=$omiRequest.requestId;kind='omi'}}
+            catch{$worker.Dispose();$script:WorkspaceLocalOwner.CompleteOmi($omiRequest.requestId,'RECOVERY_REQUIRED','OMI_WORKER_START_UNCERTAIN',$null)}
+        }
+    }
     if(-not $script:Closing -and -not $script:ExitRequested -and $null -ne $script:WorkspaceLocalOwner -and $null -eq $script:WorkspaceLocalWorker -and $null -eq $script:ControllerProcess){
         $update=$null
         if($script:UpdateDispatchAge -ge 5){$update=$script:WorkspaceLocalOwner.TakePendingUpdate();$script:UpdateDispatchAge=0}
@@ -786,7 +808,7 @@ $timer.add_Tick({
                 [void]$worker.AddArgument((Join-Path $projectRoot 'src/McpControlCenter.WorkspaceUpdate.psm1')).AddArgument($script:WorkspaceLocalOwner).AddArgument($update).AddArgument($manifest).AddArgument($RuntimeRoot)
                 $kind='update';$requestId=$update.requestId
             }else{
-                [void]$worker.AddScript('param($module,$owner,$manifest) Import-Module $module; Publish-McpCcUpdateSources -Owner $owner -Manifest $manifest')
+                [void]$worker.AddScript('param($module,$owner,$manifest) Import-Module $module; Publish-McpCcUpdateSources -Owner $owner -Manifest $manifest; Publish-McpCcOmiSource $owner $manifest')
                 [void]$worker.AddArgument((Join-Path $projectRoot 'src/McpControlCenter.WorkspaceUpdate.psm1')).AddArgument($script:WorkspaceLocalOwner).AddArgument($manifest)
                 $kind='sources';$requestId=$null;$script:UpdateSourceAge=0
             }

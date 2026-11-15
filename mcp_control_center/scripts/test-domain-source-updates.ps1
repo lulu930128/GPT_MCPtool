@@ -39,7 +39,13 @@ function Test-AssetCallbacks {
     $health=[pscustomobject]@{ok=$true;service='personal-asset-os';version='1.0';database='ready';buildId='0123456789abcdef';buildIdentity='startup-v1';schemaRevision='schema1'}
     $ready=[pscustomobject]@{ready=$true;frontendReady=$true;buildId='0123456789abcdef';buildIdentity='startup-v1'}
     function Invoke-RestMethod {param($Uri,[switch]$UseBasicParsing,$TimeoutSec) if($Uri -match '/readyz$'){return $ready};return $health}
+    $schemaPreflight={[pscustomobject]@{allowed=($health.schemaRevision -ceq 'schema1');code='MIGRATION_REQUIRED'}}
     Assert-Check (& $preflight).allowed 'asset exact existing schema preflight'
+    $reply.after.status='Stopped';$reply.after.server.ownership='Stopped';$reply.after.tunnel.ownership='Stopped'
+    Assert-Check (& $preflight).allowed 'asset confirmed stopped and compatible schema can update code'
+    $reply.after.status='OwnershipUnknown'
+    Assert-Check (-not (& $preflight).allowed) 'asset unknown state cannot claim stopped'
+    $reply.after.status='Ready';$reply.after.server.ownership='OwnedReady';$reply.after.tunnel.ownership='OwnedReady'
     $health.schemaRevision='schema0'
     $gate=& $preflight
     Assert-Check (-not $gate.allowed -and $gate.code -ceq 'MIGRATION_REQUIRED') 'asset schema migration denied'

@@ -234,6 +234,13 @@ namespace McpCc.WorkspaceLocal {
             string capacityRoot=System.IO.Path.Combine(root,"capacity");var full=new ReceiptStore(capacityRoot);
             for(int i=0;i<256;i++) full.Reserve(System.Guid.NewGuid().ToString("D"),Contract.Ids[i%7]);
             Reject(()=>full.Reserve(System.Guid.NewGuid().ToString("D"),"codex_bridge"));
+            string terminalRoot=System.IO.Path.Combine(root,"terminal-capacity");var history=new ReceiptStore(terminalRoot);string retained=null;
+            for(int i=0;i<260;i++) {
+                retained=System.Guid.NewGuid().ToString("D");history.Reserve(retained,"codex_bridge");history.Complete(retained,"COMPLETED");
+            }
+            Check(history.Read(retained).outcome=="COMPLETED");
+            string uncertain=System.Guid.NewGuid().ToString("D");history.Reserve(uncertain,"codex_bridge");
+            Check(history.Read(uncertain).outcome=="UNKNOWN");
             return checks;
         }
     }

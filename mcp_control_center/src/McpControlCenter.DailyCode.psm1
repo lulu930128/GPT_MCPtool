@@ -146,6 +146,10 @@ function New-McpDailyCandidate {
                     if($child.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'DAILY_REPARSE_REJECTED'}
                     $childRelative=$child.FullName.Substring($Source.Length+1).Replace('\','/')
                     Assert-DailyCodePath $childRelative
+                    # npm can retain the previous Windows package while its native
+                    # process is still running. It is not part of the installed
+                    # dependency tree; preserve it in source, never publish it.
+                    if($child.PSIsContainer -and $childRelative -cmatch '^codex_bridge/node_modules/@openai/\.codex(?:-win32-x64)?-[A-Za-z0-9]{8}$'){continue}
                     if(-not $child.PSIsContainer -and $childRelative -ceq 'codex_bridge/control-center/update.json'){continue}
                     if($child.PSIsContainer){$stack.Push($child.FullName)}else{$items.Add($child)}
                 }
@@ -205,10 +209,12 @@ function Assert-DailyCompatible($Before,$After) {
     if(-not $changed.Count){throw 'DAILY_NO_CODE_CHANGE'}
     foreach($p in $changed) {
         # Filenames are not semantic contracts: installed-runtime and nested approval
-        # source are ordinary code. Keep explicit compatibility/config/dependency
-        # documents byte-identical; the author reviews semantics with -CodeOnly.
+        # source and Bridge-private dependencies are ordinary code. Package/lock
+        # updates do not imply persistent-data migration. Keep explicit state and
+        # configuration contracts byte-identical; Stage/Verify still enforce the
+        # private-path, full inventory, source pin and loaded identity checks.
         if($p -match '(?i)(^|/)(migrations?|schema-migrations)(/|$)|\.sql$' -or
-            $p -notmatch '^(codex_bridge/(src|dist/src|web|scripts)/.+\.(ts|js|mjs|map|html|css|svg|ps1|psm1|cs|vbs)|codex_bridge/dist/tests/.+\.(js|js\.map)|mcp_control_center/(src|scripts)/.+\.(ps1|psm1|cs|vbs))$') {
+            $p -notmatch '^(codex_bridge/(src|dist/src|web|scripts)/.+\.(ts|js|mjs|map|html|css|svg|ps1|psm1|cs|vbs)|codex_bridge/dist/tests/.+\.(js|js\.map)|codex_bridge/(package(?:-lock)?\.json|node_modules/.+)|mcp_control_center/(src|scripts)/.+\.(ps1|psm1|cs|vbs))$') {
             throw ('DAILY_MIGRATION_REQUIRED: '+$p)
         }
     }

@@ -1,5 +1,13 @@
 # MCP Control Center
 
+2026-11-12 修復：既有 tray 的 maintenance slot 在原 component mutex 內讀取固定 loopback 維護投影，排空後直接委派普通 RestartCore；移除獨立 per-intent claim／receipt gate，不增加交接 ACK、人工確認、manager 或服務。繁忙／preflight 未派送時下一輪仍可處理。Bridge 在真正 Stop/Start 前保存最小 attempt marker，結果不明先讀回 health，不對 restarting 的舊 Core 重派；新 Core 自行驗證 stores、舊 PID 退出及 listener 後恢復准入。普通 Bridge RestartCore 超時不強殺 controller。先採用 CC，再採用 Bridge；source 與正式證據見 [修復紀錄](../codex_bridge/docs/agent-runs/memory-drain-restart-20261110/RecoveryProgress-20261112.md)。
+
+2026-11-05 source：新增獨立版本 `cc-omi-launcher-update-v1` 的固定 Launcher 換版 IPC。既有 tray 的 maintenance worker 執行固定 `C:\project\Open Market Intelligence\scripts\apply-omi-update.ps1`；本機短 client 不建立常駐樹。此路由不加入八元件 auto-start、不修改 Workspace tool enum，亦不把 OMI side effect 夾在 `omi_search` reload 或 CC self-update。正式採用前須先走 CC 官方 source-update，再核對 capability／owner；見 [契約、驗證及 Reviewer 操作順序](docs/OmiLauncherRemoteUpdate.md)。
+
+Bridge 的 DailyCode 程式換版包含其私有 package／lock／node_modules 升級；持久資料、設定、秘密、
+完整 inventory 與 loaded identity 檢查維持原邊界。Workspace owner 會載入自身版本內的 DailyCode，
+這項修補須先更新 CC，再由新 owner 更新 Bridge；詳見 [日常換版](../codex_bridge/docs/DailyCodeUpdate.md)。
+
 Phase 2 的 Workspace source 更新使用同一 local pipe 的 v2 request，與原固定七列 v1 status/reload 分開。元件 owned `control-center/update.json` sidecar 不改動 descriptor schema1。CC 在 dispatch 前保存 requestId、參數 digest 與 canonical operationId；相同 request 重送觀察／恢復原操作，終態不可被晚到 worker 改回進行中。CC self-update 由短命 `runtime-bootstrap.ps1` 接管，正常 Exit 只關 CC，不停止 Bridge；selected tree、exact tray 與綁定 PID/starttime 的 Workspace IPC 都核對後才接受。Build source drift、未知執行／owner、migration 需要與權限拒絕均保留明確結果。正式 Phase 2 入口／採用狀態見 [Phase2-Result](../codex_bridge/docs/agent-runs/reliable-daily-update-20261028/Phase2-Result.md)。
 
 Bridge 日常更新與 Reconcile／Workspace `reload_runtime` 共用 component action mutex；取得 mutex 後才由既有 helper 重讀 Bridge selector。CC 修補仍經 Stage → 正常 tray Exit → SelectStopped → 無 `--boot` 的穩定 launcher 導入，見 [可靠更新交接](../codex_bridge/docs/agent-runs/reliable-daily-update-20261028/Handoff.md)。本機直接呼叫 controller 不等於 Workspace MCP 驗收。
@@ -39,7 +47,7 @@ Secure MCP Tunnel 故障，中樞仍可獨立檢查、記錄與協調啟動。
 目前預設的 registry v3 已登錄八個元件，全部使用 `unified-lifecycle-v3`
 component controller，並由各元件自己持有 runtime ownership。八個正式元件都維持 enabled、
 auto-start；English Study 常駐 Hub、MCP 與元件自有 tunnel。OMI backend 維持 external
-dependency，不屬於 Control Center lifecycle ownership；Memory Core 與 Personal Asset OS
+dependency，其 process lifecycle 仍由 OMI Launcher 擁有；明確換版可使用上述獨立固定路由。Memory Core 與 Personal Asset OS
 的正式私人資料也不屬於 manager authority：
 
 - `autoStartCore=true`

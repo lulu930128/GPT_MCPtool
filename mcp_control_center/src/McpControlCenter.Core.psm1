@@ -3306,6 +3306,7 @@ function Invoke-McpCcBoundedPowerShell {
     param(
         [Parameter(Mandatory = $true)][string]$ScriptPath,
         [string[]]$Arguments = @(),
+        [switch]$ObserveTimeout,
         [Parameter(Mandatory = $true)][string]$WorkingDirectory,
         [Parameter(Mandatory = $true)][string]$RuntimeRoot,
         [Parameter(Mandatory = $true)][ValidateRange(1, 300)][int]$TimeoutSeconds,
@@ -3352,6 +3353,7 @@ function Invoke-McpCcBoundedPowerShell {
         $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
         while (-not $process.WaitForExit(100)) {
             if ([DateTime]::UtcNow -ge $deadline) {
+                if ($ObserveTimeout) { throw 'MEMORY_RESTART_UNKNOWN: Controller remains owned; do not replay.' }
                 Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
                 $null = $process.WaitForExit(5000)
                 throw "Component action timed out after $TimeoutSeconds seconds; status must be checked before retrying."
@@ -3557,10 +3559,13 @@ function Invoke-McpCcComponentAction {
             "show_diagnostic_tray"
         )][string]$Action,
         [switch]$PlanOnly,
+        [string]$MemoryMaintenanceIntentId,
         [string]$RuntimeRoot = (Get-McpCcDefaultRuntimeRoot),
         [int]$ActionTimeoutSeconds = 0,
         [ValidateRange(1024, 1048576)][int]$MaxCapturedOutputBytes = 65536
     )
+    if ($MemoryMaintenanceIntentId -and ($ComponentId -cne 'codex_bridge' -or $Action -cne 'restart_core' -or
+        $MemoryMaintenanceIntentId -cnotmatch '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$')) { throw 'MEMORY_MAINTENANCE_SCOPE_REJECTED' }
     if ($Manifest.schemaVersion -eq 4) {
         Assert-McpCcInstalledActivation $Manifest
         $Manifest=Read-McpCcManifest -Path (Join-Path $PSScriptRoot '..\config\registry.json')
@@ -3613,13 +3618,15 @@ function Invoke-McpCcComponentAction {
             $arguments = @()
             if ($binding.runtimeMode -eq "component-controller") {
                 $arguments += @($binding.standardArguments)
+                if ($MemoryMaintenanceIntentId) { $arguments += @('-MemoryMaintenanceIntentId',$MemoryMaintenanceIntentId) }
             }
             else {
                 $specArguments = Get-McpCcObjectProperty -Object $actionSpec -Name "arguments"
                 if ($specArguments.found) { $arguments += @($specArguments.value | ForEach-Object { [string]$_ }) }
             }
             $timeoutSeconds = if ($ActionTimeoutSeconds -gt 0) { $ActionTimeoutSeconds } else { Get-McpCcComponentTimingSeconds -Manifest $Manifest -Component $component -Name "controllerActionTimeoutSeconds" }
-            $execution = Invoke-McpCcBoundedPowerShell -ScriptPath $actionPath -Arguments $arguments -WorkingDirectory $component.resolvedRoot -RuntimeRoot $RuntimeRoot -TimeoutSeconds $timeoutSeconds -MaxCapturedOutputBytes $MaxCapturedOutputBytes
+            $observeRestart = $ComponentId -ceq 'codex_bridge' -and $binding.semanticAction -ceq 'restart_core'
+            $execution = Invoke-McpCcBoundedPowerShell -ScriptPath $actionPath -Arguments $arguments -WorkingDirectory $component.resolvedRoot -RuntimeRoot $RuntimeRoot -TimeoutSeconds $timeoutSeconds -MaxCapturedOutputBytes $MaxCapturedOutputBytes -ObserveTimeout:$observeRestart
             $controllerProcessId = $execution.processId
             $exitCode = $execution.exitCode
             $outputText = ([string]$execution.stdout).Trim()

@@ -69,8 +69,10 @@ function Start-Process {
     if($FilePath -ine (Join-Path $env:WINDIR 'System32/wscript.exe') -or $ArgumentList -cne ('"'+(Join-Path $Manager 'scripts/start-runtime-tray.vbs')+'"') -or $WindowStyle -cne 'Hidden' -or -not $PassThru){throw 'CC_FIXTURE_LAUNCH_CONTRACT'}
     [IO.File]::AppendAllText((Join-Path $Manager 'actions.txt'),"start`n")
     if($Mode -eq 'interrupt-start'){throw 'CC_FIXTURE_START_INTERRUPTED'}
+    $selected=(Get-Content -LiteralPath (Join-Path $Manager 'Runtime/current.json') -Raw|ConvertFrom-Json).version
+    if($Mode -eq 'fail-new' -and $selected -eq 'target'){throw 'CC_FIXTURE_NEW_START_FAILED'}
     $info=New-Object Diagnostics.ProcessStartInfo
-    $info.FileName=Join-Path $PSHOME 'powershell.exe';$info.Arguments='-NoProfile -NonInteractive -File "'+(Join-Path $Manager 'Runtime/versions/target/scripts/tray.ps1')+'"'
+    $info.FileName=Join-Path $PSHOME 'powershell.exe';$info.Arguments='-NoProfile -NonInteractive -File "'+(Join-Path $Manager ('Runtime/versions/'+$selected+'/scripts/tray.ps1'))+'"'
     $info.UseShellExecute=$false;$info.CreateNoWindow=$true;$info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true
     [Diagnostics.Process]::Start($info)
 }
@@ -87,6 +89,7 @@ exit $LASTEXITCODE
     $null=$store.Reserve($request)
     $pin=(Get-FileHash -LiteralPath (Join-Path $manager 'Runtime/versions/target/code-inventory.json')).Hash.ToLowerInvariant()
     $store.Complete($id,'RUNNING','CC_BOOTSTRAP_PENDING',$null,$null,$null,$null,$pin)
+    if($Name -in @('start','later')){Write-ComponentUpdateJson (Join-Path $state ('workspace-update-requests/bootstrap/'+$id+'/transition-intent.json')) @{requestId=$id;from='old';to='target';preparedBuildId=$pin}}
     [pscustomobject]@{root=$case;manager=$manager;requestId=$id;store=$store;pin=$pin}
 }
 function Invoke-BootstrapCase($Case,[string]$Mode){
@@ -122,13 +125,22 @@ function Stop-FixtureTray([string]$Manager){
 try{
     $case=New-BootstrapCase 'start' old
     $first=Invoke-BootstrapCase $case interrupt-start
-    Assert-Bootstrap ($first.exitCode -eq 1 -and $first.receipt.phase -eq 'RECOVERY_REQUIRED' -and $first.receipt.code -eq 'CC_FIXTURE_START_INTERRUPTED') ('selection followed by start failure remains recoverable: '+($first|ConvertTo-Json -Compress -Depth 5))
+    Assert-Bootstrap ($first.exitCode -eq 1 -and $first.receipt.phase -eq 'RECOVERY_REQUIRED' -and $first.receipt.code -eq 'CC_ROLLBACK_EVIDENCE_MISSING') ('selection followed by start failure remains recoverable: '+($first|ConvertTo-Json -Compress -Depth 5))
     Assert-Bootstrap ((Read-ComponentUpdateJson (Join-Path $case.manager 'Runtime/current.json')).version -eq 'target') 'start failure occurs after selection'
     Assert-Bootstrap (Test-Path -LiteralPath (Join-Path $case.manager ('.local/runtime/workspace-update-requests/bootstrap/'+$case.requestId+'/transition-intent.json'))) 'original transition intent is durable'
     $second=Invoke-BootstrapCase $case start
     Assert-Bootstrap ($second.exitCode -eq 0 -and $second.receipt.phase -eq 'ACCEPTED' -and $second.receipt.code -eq 'CC_OWNER_AND_IPC_VERIFIED' -and $second.receipt.preparedBuildId -eq $case.pin) ('same request starts selected owner and verifies real isolated native IPC: '+($second|ConvertTo-Json -Compress -Depth 5))
     $actions=Get-Content -LiteralPath (Join-Path $case.manager 'actions.txt')
     Assert-Bootstrap (@($actions|Where-Object {$_ -eq 'select'}).Count -eq 1 -and @($actions|Where-Object {$_ -eq 'start'}).Count -eq 2) 'reentry does not select again'
+    Stop-FixtureTray $case.manager
+
+    $case=New-BootstrapCase 'rollback' old
+    $result=Invoke-BootstrapCase $case fail-new
+    Assert-Bootstrap ($result.exitCode -eq 0 -and $result.receipt.phase -eq 'REJECTED' -and $result.receipt.code -eq 'CC_ROLLED_BACK_OWNER_AND_IPC_VERIFIED' -and $result.receipt.ready -eq $true) ('failed new tray restores verified old owner and IPC: '+($result|ConvertTo-Json -Compress -Depth 5))
+    Assert-Bootstrap ($result.receipt.requestId -eq $case.requestId -and $result.receipt.preparedBuildId -eq $case.pin -and $result.receipt.selectedVersion -eq 'old') 'rollback preserves original ID and candidate pin'
+    $before=[IO.File]::ReadAllText((Join-Path $case.manager 'actions.txt'))
+    $replay=Invoke-BootstrapCase $case start
+    Assert-Bootstrap ($replay.receipt.code -eq $result.receipt.code -and [IO.File]::ReadAllText((Join-Path $case.manager 'actions.txt')) -ceq $before) 'rollback terminal replay does not select or start'
     Stop-FixtureTray $case.manager
 
     $case=New-BootstrapCase 'selected' target

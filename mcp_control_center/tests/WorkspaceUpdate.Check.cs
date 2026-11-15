@@ -61,6 +61,44 @@ namespace McpCc.WorkspaceLocal {
                 owner.CompleteUpdate(pending,"RECOVERY_REQUIRED","UPDATE_BLOCKED_BY_OTHER_OPERATION",null,null,null,null,null);
                 Check(store.Read(pending).blockedByOperationId==new string('1',32) && store.Read(pending).preparedBuildId==new string('f',64),"other operation and candidate pin preserved");
             }
+            string capacity=System.IO.Path.Combine(root,"capacity");
+            var historyStore=new UpdateStore(capacity);string archived=null;
+            for(int i=0;i<270;i++){
+                string id=System.Guid.NewGuid().ToString();archived=id;
+                historyStore.Reserve(Request("update","project_reading",id,"old-v1",new string('a',64)));
+                historyStore.Complete(id,"REJECTED","UPDATE_NOT_APPLIED",null,null,null,null,null);
+            }
+            string unknown=System.Guid.NewGuid().ToString(),queued=System.Guid.NewGuid().ToString();
+            var original=Request("update","project_reading",unknown,"pending-v1",new string('a',64));
+            historyStore.Reserve(original);historyStore.Complete(unknown,"RECOVERY_REQUIRED","UNKNOWN_RESULT",null,null,null,null,null);
+            historyStore.Reserve(Request("update","project_reading",queued,"next-v1",new string('a',64)));
+            using(var owner=Open(capacity)){
+                owner.PublishSourceDigest("project_reading",new string('a',64));
+                Check(owner.DispatchUpdate(Request("update_status","project_reading","","","")).Contains("component_controller"),"status works after terminal history exceeds 256");
+                Check(owner.DispatchUpdate(Request("update_preview","project_reading","","next-v1","")).Contains("SOURCE_OBSERVED"),"preview works after terminal history exceeds 256");
+                Check(owner.DispatchUpdate(Request("update_receipt","",archived,"","")).Contains("RECEIPT_OBSERVED"),"historical receipt works after terminal history exceeds 256");
+                Check(owner.DispatchUpdate(Request("update","project_reading",archived,"old-v1",new string('a',64))).Contains("REQUEST_REPLAY"),"270 terminal IDs remain queryable and deduplicated");
+                Check(owner.TakePendingUpdate().requestId==queued,"terminal history does not prevent owner initialization or queue restoration");
+                owner.CompleteUpdate(queued,"QUEUED","WAITING_FOR_IDLE",null,null,null,null,null);
+                string history=System.IO.Path.Combine(capacity,"workspace-update-requests","history");
+                int before=System.IO.Directory.GetFiles(history).Length;
+                string updated=historyStore.Read(queued).updatedAt;
+                for(int i=0;i<30;i++) owner.CompleteUpdate(queued,"QUEUED","WAITING_FOR_IDLE",null,null,null,null,null);
+                Check(System.IO.Directory.GetFiles(history).Length==before && historyStore.Read(queued).updatedAt==updated,"unchanged idle observations do not grow immutable history");
+                Check(owner.TakePendingUpdate()==null,"idle rechecks are bounded by interval");
+                System.Threading.Thread.Sleep(5100);
+                Check(owner.TakePendingUpdate().requestId==queued,"same idle request becomes eligible again");
+                owner.CompleteUpdate(queued,"QUEUED","WAITING_FOR_IDLE",null,null,null,null,null);
+                Check(System.IO.Directory.GetFiles(history).Length==before,"real idle poll cycle does not toggle RUNNING and write history");
+                Check(historyStore.Read(unknown).phase=="RECOVERY_REQUIRED" && historyStore.Read(unknown).code=="UNKNOWN_RESULT","unknown receipt is preserved");
+                Check(owner.DispatchUpdate(original).Contains("REQUEST_REPLAY"),"uncertain request reuses original ID");
+                Check(owner.TakePendingUpdate().requestId==unknown,"uncertain replay remains inspectable");
+                owner.CompleteUpdate(unknown,"RECOVERY_REQUIRED","UNKNOWN_RESULT",null,null,null,null,null);
+                System.Threading.Thread.Sleep(5100);
+                Check(owner.TakePendingUpdate().requestId==queued,"idle transition retains original queued request");
+                owner.CompleteUpdate(queued,"ACCEPTED","UPDATE_ACCEPTED","next-v1","1.0",new string('b',64),true,new string('b',64));
+                Check(historyStore.Read(queued).phase=="ACCEPTED","idle request can finish after waiting");
+            }
             bool denied=false;try{Request("update","project_reading",System.Guid.NewGuid().ToString(),"BAD.VERSION",new string('c',64));}catch{denied=true;}Check(denied,"version bound");
             return count;
         }

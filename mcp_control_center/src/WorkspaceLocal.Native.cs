@@ -15,8 +15,8 @@ using System.Web.Script.Serialization;
 using Microsoft.Win32.SafeHandles;
 
 namespace McpCc.WorkspaceLocal {
-    // This assembly has no lifecycle or process-launch API. The existing owner
-    // publishes a sanitized in-memory sample; IPC never starts a new probe job.
+    // IPC publishes sanitized metadata. The OMI v3 adapter can launch only the
+    // fixed updater from the already running owner; clients cannot launch work.
     public static class Contract {
         public const int MaxBytes = 16384, DeadlineMs = 1800;
         public const string PipeName = "mcpcc-workspace-local-v1";
@@ -34,6 +34,7 @@ namespace McpCc.WorkspaceLocal {
                 !Regex.IsMatch(json,@"\A\s*\{\s*""[A-Za-z]+""\s*:\s*""[a-zA-Z0-9_-]*""(?:\s*,\s*""[A-Za-z]+""\s*:\s*""[a-zA-Z0-9_-]*"")*\s*\}\s*\z")) throw new InvalidOperationException("INVALID_REQUEST");
             var result=new Dictionary<string,string>(StringComparer.Ordinal);
             foreach(Match m in Regex.Matches(json,@"""([A-Za-z]+)""\s*:\s*""([a-zA-Z0-9_-]*)""")) result.Add(m.Groups[1].Value,m.Groups[2].Value);
+            if(result.ContainsKey("v") && result["v"]=="3") return OmiContract.Request(result,challenge);
             if(result.ContainsKey("v") && result["v"]=="2") return UpdateContract.Request(result,challenge);
             string[] keys={"v","nonce","challenge","operation","componentId","action","requestId","confirmation"};
             if(result.Count!=keys.Length) throw new InvalidOperationException("INVALID_REQUEST");
@@ -152,6 +153,7 @@ namespace McpCc.WorkspaceLocal {
         [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] internal static extern SafePipeHandle CreateNamedPipe(string name,uint mode,uint pipeMode,uint instances,uint output,uint input,uint timeout,ref SecurityAttributes security);
         [DllImport("kernel32.dll",SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)] internal static extern bool CancelIoEx(SafePipeHandle pipe,IntPtr overlapped);
         [DllImport("kernel32.dll",SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)] internal static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe,out uint processId);
+        [DllImport("kernel32.dll",SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)] internal static extern bool IsProcessInJob(IntPtr process,IntPtr job,[MarshalAs(UnmanagedType.Bool)] out bool inJob);
     }
 
     internal static class Frame {
@@ -266,8 +268,13 @@ namespace McpCc.WorkspaceLocal {
         internal Receipt Reserve(string id, string componentId) {
             if(!Contract.Has(Contract.Ids,componentId)) throw new InvalidOperationException("INVALID_REQUEST");
             string path=FilePath(id);Directory.CreateDirectory(root);
-            // Bounded, no automatic eviction: dropping old keys would permit replay.
-            int count=0;foreach(string file in Directory.EnumerateFiles(root)) if(++count>=256) throw new InvalidOperationException("RECEIPT_CAPACITY");
+            // Keep the same request index for replay; only uncertain requests
+            // consume admission capacity. Completed history is never evicted.
+            int count=0;foreach(string file in Directory.EnumerateFiles(root,"*.json")) {
+                bool uncertain=true;
+                try { uncertain=Read(Path.GetFileNameWithoutExtension(file)).outcome=="UNKNOWN"; } catch { }
+                if(uncertain && ++count>=256) throw new InvalidOperationException("RECEIPT_CAPACITY");
+            }
             string now=DateTimeOffset.UtcNow.ToString("o");
             var r=new Receipt {requestId=id.ToLowerInvariant(),componentId=componentId,action="reload_runtime",confirmation="interrupt_current_requests",outcome="UNKNOWN",createdAt=now,updatedAt=now};
             WriteNew(path,r);return r;
@@ -388,16 +395,21 @@ namespace McpCc.WorkspaceLocal {
         }
         public UpdateReceipt[] Pending() {
             var rows=new List<UpdateReceipt>();if(!Directory.Exists(root)) return rows.ToArray();
-            PathFor(Guid.Empty.ToString());int count=0;
-            foreach(string path in Directory.GetFiles(root,"*.json")) {
-                if(++count>256) throw new InvalidOperationException("RECEIPT_CAPACITY");
+            PathFor(Guid.Empty.ToString());
+            // The retained request files are the query/replay index. Terminal
+            // history never consumes pending capacity or prevents owner startup.
+            foreach(string path in Directory.EnumerateFiles(root,"*.json")) {
                 var r=Read(Path.GetFileNameWithoutExtension(path));if(r.phase=="QUEUED" || r.phase=="RUNNING") rows.Add(r);
             }
             return rows.ToArray();
         }
         public UpdateReceipt Reserve(Dictionary<string,string> request) {
             string id=request["requestId"].ToLowerInvariant(),path=PathFor(id);Directory.CreateDirectory(root);
-            if(Directory.GetFiles(root,"*.json").Length>=256) throw new InvalidOperationException("RECEIPT_CAPACITY");
+            int active=0;
+            foreach(string prior in Directory.EnumerateFiles(root,"*.json")) {
+                var saved=Read(Path.GetFileNameWithoutExtension(prior));
+                if(saved.phase!="ACCEPTED" && saved.phase!="REJECTED" && ++active>=256) throw new InvalidOperationException("RECEIPT_CAPACITY");
+            }
             string now=DateTimeOffset.UtcNow.ToString("o");
             var r=new UpdateReceipt{requestId=id,componentId=request["componentId"],action="update_from_source",versionId=request["versionId"],expectedSourceDigest=request["expectedSourceDigest"],idlePolicy="wait_for_idle",
                 parameterDigest=UpdateContract.ParameterDigest(request["componentId"],request["versionId"],request["expectedSourceDigest"]),operationId=id.Replace("-",""),phase="QUEUED",code="UPDATE_QUEUED",createdAt=now,updatedAt=now};
@@ -428,12 +440,163 @@ namespace McpCc.WorkspaceLocal {
             // A late worker can never regress or replace a terminal receipt.
             if(r.phase=="ACCEPTED" || r.phase=="REJECTED") return;
             if(prepared!=null && r.preparedBuildId!=null && prepared!=r.preparedBuildId) throw new InvalidOperationException("PREPARED_IDENTITY_CONFLICT");
+            if(r.phase==phase && r.code==code && r.selectedVersion==selected && r.observedVersion==observed && r.observedBuildId==build && r.ready==ready && (prepared==null || r.preparedBuildId==prepared)) return;
             r.phase=phase;r.code=code;r.selectedVersion=selected;r.observedVersion=observed;r.observedBuildId=build;if(prepared!=null) r.preparedBuildId=prepared;if(phase=="ACCEPTED") r.blockedByOperationId=null;r.ready=ready;r.updatedAt=DateTimeOffset.UtcNow.ToString("o");Save(r,false);
             }
         }
         public void BlockedBy(string id,string operation) {
             if(!Regex.IsMatch(operation,"\\A[0-9a-f]{32}\\z")) throw new InvalidOperationException("INVALID_OPERATION");
             using(Lock(id)) {var r=Read(id);if(r.phase=="ACCEPTED" || r.phase=="REJECTED") return;r.blockedByOperationId=operation;Save(r,false);}
+        }
+    }
+
+    // Separate fixed semantic contract; v1/v2 target lists and DTOs are unchanged.
+    public static class OmiContract {
+        public const string Version="cc-omi-launcher-update-v1";
+        public const string Root=@"C:\project\Open Market Intelligence";
+        public static bool IndependentOwner() {
+            using(var p=Process.GetCurrentProcess()){bool inJob;return Native.IsProcessInJob(p.Handle,IntPtr.Zero,out inJob) && !inJob;}
+        }
+        public static Dictionary<string,string> Request(Dictionary<string,string> r,string challenge) {
+            string[] keys={"v","nonce","challenge","operation","requestId","expectedSourceDigest"};
+            if(r.Count!=keys.Length) throw new InvalidOperationException("INVALID_REQUEST");
+            foreach(string k in keys) if(!r.ContainsKey(k)) throw new InvalidOperationException("INVALID_REQUEST");
+            if(r["v"]!="3" || !UpdateContract.Digest(r["nonce"]) || !UpdateContract.Digest(challenge) || r["challenge"]!=challenge) throw new InvalidOperationException("INVALID_REQUEST");
+            if(r["operation"]=="omi_status" && r["requestId"]=="" && r["expectedSourceDigest"]=="") return r;
+            if(r["operation"]=="omi_receipt" && Contract.IsRequestId(r["requestId"]) && r["expectedSourceDigest"]=="") return r;
+            if(r["operation"]=="omi_apply" && Contract.IsRequestId(r["requestId"]) && UpdateContract.Digest(r["expectedSourceDigest"])) return r;
+            throw new InvalidOperationException("INVALID_REQUEST");
+        }
+    }
+    public sealed class OmiReceipt {
+        public string contract=OmiContract.Version;
+        public string requestId,expectedSourceDigest,ccVersion,phase,code,createdAt,updatedAt,nativeRequestId;
+        public int? updaterPid;
+        public string updaterCreatedTicks;
+        public string expectedLifecycle,expectedApplication,oldOwnerId,oldLauncherCreatedTicks;
+        public int? oldLauncherPid;
+    }
+    // Admission/receipt namespace in the existing CC owner, not a second updater.
+    internal sealed class OmiStore {
+        readonly string root;
+        public OmiStore(string runtime) {root=Path.Combine(Path.GetFullPath(runtime),"omi-launcher-update-requests");}
+        string PathFor(string id) {
+            if(!Contract.IsRequestId(id)) throw new InvalidOperationException("INVALID_REQUEST");
+            for(string p=root;!String.IsNullOrEmpty(p);p=Path.GetDirectoryName(p)) if(Directory.Exists(p) && (File.GetAttributes(p)&FileAttributes.ReparsePoint)!=0) throw new InvalidOperationException("RECEIPT_UNAVAILABLE");
+            string path=Path.Combine(root,id.ToLowerInvariant()+".json");
+            if(File.Exists(path) && (File.GetAttributes(path)&FileAttributes.ReparsePoint)!=0) throw new InvalidOperationException("RECEIPT_UNAVAILABLE");
+            return path;
+        }
+        public OmiReceipt Read(string id) {
+            string path=PathFor(id);if(!File.Exists(path)) return null;
+            using(var f=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.Read|FileShare.Delete)) {
+                if(f.Length>4096) throw new InvalidOperationException("RECEIPT_UNAVAILABLE");
+                using(var s=new StreamReader(f,new UTF8Encoding(false,true))) {
+                    var r=Contract.Json().Deserialize<OmiReceipt>(s.ReadToEnd());
+                    if(r==null || r.contract!=OmiContract.Version || r.requestId!=id.ToLowerInvariant() || !UpdateContract.Digest(r.expectedSourceDigest) ||
+                        !Contract.Has(new[]{"QUEUED","RUNNING","ACCEPTED","REJECTED","RECOVERY_REQUIRED"},r.phase) ||
+                        (!String.IsNullOrEmpty(r.nativeRequestId) && !Contract.IsRequestId(r.nativeRequestId))) throw new InvalidOperationException("RECEIPT_UNAVAILABLE");
+                    return r;
+                }
+            }
+        }
+        IEnumerable<OmiReceipt> All() {
+            PathFor(Guid.Empty.ToString());if(!Directory.Exists(root)) yield break;
+            int count=0;foreach(string p in Directory.EnumerateFiles(root,"*.json")) {
+                if(++count>2048) throw new InvalidOperationException("RECEIPT_CAPACITY");yield return Read(Path.GetFileNameWithoutExtension(p));
+            }
+        }
+        public bool Blocks() {
+            foreach(var r in All()) if(r.phase=="QUEUED" || r.phase=="RUNNING" || r.phase=="RECOVERY_REQUIRED") return true;
+            return false;
+        }
+        void Save(OmiReceipt r,bool create) {
+            string path=PathFor(r.requestId);Directory.CreateDirectory(root);
+            string temp=Path.Combine(root,".pending-"+Guid.NewGuid().ToString("N"));
+            byte[] bytes=Encoding.UTF8.GetBytes(Contract.Json().Serialize(r));
+            using(var f=new FileStream(temp,FileMode.CreateNew,FileAccess.Write,FileShare.None)){f.Write(bytes,0,bytes.Length);f.Flush(true);}
+            if(create) File.Move(temp,path);
+            else {
+                string history=Path.Combine(root,"history");Directory.CreateDirectory(history);
+                if((File.GetAttributes(history)&FileAttributes.ReparsePoint)!=0) throw new InvalidOperationException("RECEIPT_UNAVAILABLE");
+                File.Replace(temp,path,Path.Combine(history,r.requestId+"-"+Guid.NewGuid().ToString("N")+".json"));
+            }
+        }
+        public OmiReceipt Reserve(Dictionary<string,string> request,string version) {
+            string now=DateTimeOffset.UtcNow.ToString("o");
+            var r=new OmiReceipt{requestId=request["requestId"].ToLowerInvariant(),expectedSourceDigest=request["expectedSourceDigest"],ccVersion=version,phase="QUEUED",code="OMI_APPLY_QUEUED",createdAt=now,updatedAt=now};Save(r,true);return r;
+        }
+        public void Progress(string id,int pid,long ticks) {
+            var r=Read(id);if(r.phase!="QUEUED" || pid<=0 || ticks<=0) throw new InvalidOperationException("INVALID_OUTCOME");
+            r.phase="RUNNING";r.code="OMI_UPDATER_DISPATCHED";r.updaterPid=pid;r.updaterCreatedTicks=ticks.ToString(System.Globalization.CultureInfo.InvariantCulture);r.updatedAt=DateTimeOffset.UtcNow.ToString("o");Save(r,false);
+        }
+        public void Preflight(string id,string lifecycle,string application,string owner,int pid,long ticks) {
+            var r=Read(id);if(r.phase!="QUEUED" || !UpdateContract.Digest(lifecycle) || !UpdateContract.Digest(application) || !Contract.IsRequestId(owner) || pid<=0 || ticks<=0) throw new InvalidOperationException("INVALID_PREFLIGHT");
+            r.expectedLifecycle=lifecycle;r.expectedApplication=application;r.oldOwnerId=owner;r.oldLauncherPid=pid;r.oldLauncherCreatedTicks=ticks.ToString();Save(r,false);
+        }
+        public void Complete(string id,string phase,string code,string nativeId) {
+            var r=Read(id);if(r==null || !Contract.Has(new[]{"ACCEPTED","REJECTED","RECOVERY_REQUIRED"},phase) || !Regex.IsMatch(code,"\\A[A-Z][A-Z0-9_]{0,95}\\z") ||
+                (!String.IsNullOrEmpty(nativeId) && !Contract.IsRequestId(nativeId))) throw new InvalidOperationException("INVALID_OUTCOME");
+            if(r.phase=="ACCEPTED" || r.phase=="REJECTED") return;
+            if(!String.IsNullOrEmpty(r.nativeRequestId) && !String.IsNullOrEmpty(nativeId) && r.nativeRequestId!=nativeId) throw new InvalidOperationException("OPERATION_CONFLICT");
+            r.phase=phase;r.code=code;if(!String.IsNullOrEmpty(nativeId)) r.nativeRequestId=nativeId.ToLowerInvariant();r.updatedAt=DateTimeOffset.UtcNow.ToString("o");Save(r,false);
+        }
+        public void RecoverInterrupted() {foreach(var r in All()) if(r.phase=="RUNNING" || r.phase=="QUEUED") Complete(r.requestId,"RECOVERY_REQUIRED","OMI_OWNER_RESTARTED_NO_REDISPATCH",null);}
+    }
+    // Retained process and bounded stream capture. No Job/breakaway, shell or kill.
+    public sealed class OmiChild : IDisposable {
+        readonly Process process;
+        readonly Task<string> output,error;
+        readonly object capture=new object();
+        string outputTail="",errorTail="";
+        Stopwatch exitDrain;
+        public bool StreamDrainBoundReached {get;private set;}
+        public static OmiChild Start() {
+            if(!OmiContract.IndependentOwner()) throw new InvalidOperationException("OMI_CC_OWNER_JOB_UNVERIFIED");
+            var i=new ProcessStartInfo{FileName=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),@"WindowsPowerShell\v1.0\powershell.exe"),
+                Arguments="-NoProfile -NonInteractive -File \""+OmiContract.Root+@"\scripts\apply-omi-update.ps1"+"\"",WorkingDirectory=OmiContract.Root};
+            return new OmiChild(i);
+        }
+        internal OmiChild(ProcessStartInfo info) {
+            info.UseShellExecute=false;info.CreateNoWindow=true;info.RedirectStandardOutput=true;info.RedirectStandardError=true;
+            process=new Process{StartInfo=info};if(!process.Start()) throw new InvalidOperationException("OMI_UPDATER_START_FAILED");
+            IntPtr retained=process.Handle;output=Drain(process.StandardOutput,false);error=Drain(process.StandardError,true);
+        }
+        async Task<string> Drain(StreamReader reader,bool stderr) {
+            char[] buffer=new char[2048];string tail="";int n;
+            try {while((n=await reader.ReadAsync(buffer,0,buffer.Length).ConfigureAwait(false))>0){tail+=new string(buffer,0,n);if(tail.Length>32768) tail=tail.Substring(tail.Length-32768);lock(capture){if(stderr) errorTail=tail;else outputTail=tail;}}}
+            catch(IOException){}catch(ObjectDisposedException){}
+            return tail;
+        }
+        public int Pid {get{return process.Id;}}
+        public long CreatedTicks {get{return process.StartTime.ToUniversalTime().Ticks;}}
+        // A legitimate successor can inherit stdout. Its lifetime must not hold
+        // this finite updater open. Never WaitForExit()'s unbounded stream drain.
+        public bool Finished {get{if(!process.HasExited) return false;if(exitDrain==null) exitDrain=Stopwatch.StartNew();if(output.IsCompleted && error.IsCompleted) return true;if(exitDrain.ElapsedMilliseconds<1500) return false;StreamDrainBoundReached=true;return true;}}
+        public int ExitCode {get{return process.ExitCode;}}
+        public bool StreamsSettled {get{return output.IsCompleted && error.IsCompleted;}}
+        public string Output {get{lock(capture) return outputTail;}}
+        public string ErrorCode {get{string s;lock(capture) s=errorTail.Trim();return Regex.IsMatch(s,"\\AUPDATE_[A-Z_]{1,80}\\z") ? s : "OMI_UPDATER_RESULT_UNVERIFIED";}}
+        public void Dispose(){process.Dispose();}
+    }
+    public static class OmiClient {
+        public static string Call(string operation,string id,string digest,int ownerPid,long ownerTicks) {
+            return CallPipe(Contract.PipeName,operation,id,digest,ownerPid,ownerTicks);
+        }
+        internal static string CallPipe(string name,string operation,string id,string digest,int ownerPid,long ownerTicks) {
+            using(var owner=Process.GetProcessById(ownerPid)) using(var pipe=new NamedPipeClientStream(".",name,PipeDirection.InOut,PipeOptions.Asynchronous)) {
+                IntPtr retained=owner.Handle;if(owner.HasExited || owner.StartTime.ToUniversalTime().Ticks!=ownerTicks) throw new InvalidOperationException("CC_OWNER_CHANGED");
+                pipe.Connect(Contract.DeadlineMs);uint peer;
+                if(!Native.GetNamedPipeServerProcessId(pipe.SafePipeHandle,out peer) || peer!=(uint)ownerPid) throw new InvalidOperationException("CC_PIPE_OWNER_MISMATCH");
+                var clock=Stopwatch.StartNew();string challenge=Frame.Read(pipe,clock),nonce=Contract.Nonce();
+                var r=new Dictionary<string,string>{{"v","3"},{"nonce",nonce},{"challenge",challenge},{"operation",operation},{"requestId",id},{"expectedSourceDigest",digest}};
+                string body=Contract.Json().Serialize(r);Contract.Request(body,challenge);Frame.Write(pipe,body,clock);
+                string reply=Frame.Read(pipe,clock);var result=Contract.Json().Deserialize<Dictionary<string,object>>(reply);
+                if(!Native.GetNamedPipeServerProcessId(pipe.SafePipeHandle,out peer) || peer!=(uint)ownerPid || owner.HasExited ||
+                    !result.ContainsKey("v") || (string)result["v"]!="3" || (string)result["nonce"]!=nonce || (string)result["operation"]!=operation || (string)result["requestId"]!=id ||
+                    (string)result["contract"]!=OmiContract.Version) throw new InvalidOperationException("OMI_REPLY_UNVERIFIED");
+                return reply;
+            }
         }
     }
 
@@ -448,7 +611,12 @@ namespace McpCc.WorkspaceLocal {
         bool closing;
         readonly ReceiptStore receipts;
         readonly UpdateStore updates;
+        readonly OmiStore omi;
+        OmiReceipt pendingOmi;
+        string activeOmi, omiSource, omiVersion;
+        long omiObserved;
         readonly Queue<string> updateQueue=new Queue<string>();
+        readonly Dictionary<string,long> updateRetryAt=new Dictionary<string,long>();
         readonly Dictionary<string,string> sourceDigests=new Dictionary<string,string>();
         string activeUpdate;
         bool normalRecovery;
@@ -459,6 +627,8 @@ namespace McpCc.WorkspaceLocal {
         internal Owner(string name, string runtimeRoot) {
             receipts=new ReceiptStore(runtimeRoot);
             updates=new UpdateStore(runtimeRoot);
+            omi=new OmiStore(runtimeRoot);
+            omi.RecoverInterrupted(); // Observation only; never re-enqueue an uncertain Apply.
             foreach(var r in updates.Pending()) {
                 if(r.phase=="QUEUED") updateQueue.Enqueue(r.requestId);
                 else updates.Complete(r.requestId,"RECOVERY_REQUIRED","OWNER_RESTARTED",r.selectedVersion,r.observedVersion,r.observedBuildId,null,r.preparedBuildId);
@@ -497,35 +667,74 @@ namespace McpCc.WorkspaceLocal {
                 finally { activeRequest=null; }
             }
         }
-        public bool HasActiveRequest { get { lock(sync) return activeRequest!=null || activeUpdate!=null; } }
+        public bool HasActiveRequest { get { lock(sync) return activeRequest!=null || activeUpdate!=null || activeOmi!=null; } }
+        public void PublishOmiSource(string digest,string version) {
+            lock(sync) { if(digest!=null && !UpdateContract.Digest(digest)) throw new InvalidOperationException("INVALID_SOURCE_DIGEST");
+                omiSource=digest;omiVersion=version;omiObserved=Stopwatch.GetTimestamp(); }
+        }
+        public OmiReceipt TakePendingOmi() { lock(sync) {var r=pendingOmi;pendingOmi=null;return r;} }
+        public void ProgressOmi(string id,int pid,long ticks) { lock(sync) {omi.Progress(id,pid,ticks);} }
+        public void PreflightOmi(string id,string lifecycle,string app,string owner,int pid,long ticks) {lock(sync) {omi.Preflight(id,lifecycle,app,owner,pid,ticks);} }
+        public void CompleteOmi(string id,string phase,string code,string nativeId) {
+            lock(sync) {try{omi.Complete(id,phase,code,nativeId);}finally{if(activeOmi==id) activeOmi=null;} }
+        }
+        public void ObserveOmi(string id,string code) {lock(sync) {omi.Complete(id,"RECOVERY_REQUIRED",code,null);} }
+        internal string DispatchOmi(Dictionary<string,string> r) {
+            lock(sync) {
+                string code="OMI_CAPABILITY_OBSERVED";OmiReceipt receipt=null;
+                bool fresh=omiSource!=null && Stopwatch.GetTimestamp()-omiObserved<90*Stopwatch.Frequency;
+                if(r["operation"]=="omi_receipt") {receipt=omi.Read(r["requestId"]);code=receipt==null ? "RECEIPT_NOT_FOUND" : "RECEIPT_OBSERVED";}
+                else if(r["operation"]=="omi_apply") {
+                    receipt=omi.Read(r["requestId"]);
+                    if(receipt!=null) {code=receipt.expectedSourceDigest==r["expectedSourceDigest"] ? "REQUEST_REPLAY" : "REQUEST_CONFLICT";if(code=="REQUEST_CONFLICT") receipt=null;}
+                    else if(closing) code="OWNER_CLOSING";
+                    else if(!fresh || String.IsNullOrEmpty(omiVersion)) code="OMI_CAPABILITY_UNAVAILABLE";
+                    else if(omiSource!=r["expectedSourceDigest"]) code="OMI_SOURCE_CHANGED";
+                    else if(activeRequest!=null || activeUpdate!=null || activeOmi!=null || updateQueue.Count!=0) code="ACTION_BUSY";
+                    else if(omi.Blocks()) code="OMI_PRIOR_REQUEST_REQUIRES_INSPECTION";
+                    else {receipt=omi.Reserve(r,omiVersion);pendingOmi=receipt;activeOmi=receipt.requestId;code="OMI_APPLY_QUEUED";}
+                }
+                return Contract.Json().Serialize(new {v="3",contract=OmiContract.Version,nonce=r["nonce"],operation=r["operation"],requestId=r["requestId"],code=code,
+                    supported=true,available=fresh && !closing && !HasActiveRequest && updateQueue.Count==0 && !omi.Blocks(),sourceDigest=fresh ? omiSource : null,ccVersion=omiVersion,
+                    ccPid=Process.GetCurrentProcess().Id,receipt=receipt});
+            }
+        }
+        string SafeOmiDispatch(Dictionary<string,string> r) {
+            try{return DispatchOmi(r);}catch{return Contract.Json().Serialize(new {v="3",contract=OmiContract.Version,nonce=r["nonce"],operation=r["operation"],requestId=r["requestId"],code="RECEIPT_UNAVAILABLE",supported=true,available=false,receipt=(OmiReceipt)null});}
+        }
         public void PublishSourceDigest(string id,string digest) { lock(sync) {if(!UpdateContract.Supported(id) || (digest!=null && !UpdateContract.Digest(digest))) throw new InvalidOperationException("INVALID_SOURCE_DIGEST");sourceDigests[id]=digest;} }
         public bool TakeNormalRecovery() { lock(sync) {bool value=normalRecovery;normalRecovery=false;return value;} }
         public UpdateReceipt TakePendingUpdate() {
             lock(sync) {
-                if(closing || activeRequest!=null || activeUpdate!=null || updateQueue.Count==0) return null;
+                if(closing || activeRequest!=null || activeUpdate!=null || activeOmi!=null || updateQueue.Count==0) return null;
                 UpdateReceipt r=null;string id=null;
-                while(updateQueue.Count>0){
+                int remaining=updateQueue.Count;
+                while(remaining-->0){
                     id=updateQueue.Dequeue();r=updates.Read(id);
+                    long retry;
+                    if(updateRetryAt.TryGetValue(id,out retry) && Stopwatch.GetTimestamp()<retry){updateQueue.Enqueue(id);r=null;continue;}
+                    updateRetryAt.Remove(id);
                     if(r!=null && (r.phase=="QUEUED" || r.phase=="RECOVERY_REQUIRED" || (r.phase=="RUNNING" && r.componentId=="mcp_control_center" && r.preparedBuildId!=null))) break;
                     r=null;
                 }
                 if(r==null) return null;
                 activeUpdate=id;
-                // QUEUED is durable and never expires. RUNNING is written before
-                // dispatch. Recovery retains its original uncertain boundary.
-                if(r.phase=="QUEUED") updates.Complete(id,"RUNNING","DISPATCHING",null,null,null,null,null);
+                // QUEUED is durable and never expires. Idle polls retain their
+                // unchanged receipt; the canonical DailyCode reservation precedes
+                // lifecycle dispatch. Recovery retains its uncertain boundary.
+                if(r.phase=="QUEUED" && r.code!="WAITING_FOR_IDLE") updates.Complete(id,"RUNNING","DISPATCHING",null,null,null,null,null);
                 return r;
             }
         }
         public void CompleteUpdate(string id,string phase,string code,string selected,string observed,string build,bool? ready,string prepared) {
-            lock(sync) {try{updates.Complete(id,phase,code,selected,observed,build,ready,prepared);}finally{activeUpdate=null;} if(phase=="QUEUED" && !updateQueue.Contains(id)) updateQueue.Enqueue(id);}
+            lock(sync) {try{updates.Complete(id,phase,code,selected,observed,build,ready,prepared);}finally{activeUpdate=null;} if(phase=="QUEUED" && !updateQueue.Contains(id)){updateRetryAt[id]=Stopwatch.GetTimestamp()+5*Stopwatch.Frequency;updateQueue.Enqueue(id);}}
         }
         public void ReleaseUpdate(string id) { lock(sync) {if(activeUpdate!=id) throw new InvalidOperationException("ACTIVE_REQUEST_REQUIRED");activeUpdate=null;} }
         public UpdateReceipt ReadUpdate(string id) {lock(sync) return updates.Read(id);}
         public void SetUpdateBlocker(string id,string operation) {lock(sync) updates.BlockedBy(id,operation);}
         public bool TryBeginShutdown() {
             lock(sync) {
-                closing=true;return activeRequest==null && activeUpdate==null;
+                closing=true;return activeRequest==null && activeUpdate==null && activeOmi==null;
             }
         }
         internal string Dispatch(Dictionary<string,string> request) {
@@ -540,7 +749,7 @@ namespace McpCc.WorkspaceLocal {
                         if(code=="REQUEST_CONFLICT") receipt=null;
                     }
                     else if(closing) { code="OWNER_CLOSING"; }
-                    else if(activeRequest!=null || activeUpdate!=null) { code="ACTION_BUSY"; }
+                    else if(activeRequest!=null || activeUpdate!=null || activeOmi!=null) { code="ACTION_BUSY"; }
                     else {
                         // Persist UNKNOWN before making work visible to the tray. Crash or
                         // timeout never authorizes re-enqueue with the same requestId.
@@ -608,7 +817,7 @@ namespace McpCc.WorkspaceLocal {
                         string challenge=Contract.Nonce();Frame.Write(pipe,challenge,clock);
                         var request=Contract.Request(Frame.Read(pipe,clock),challenge);
                         Snapshot sample;lock(sync) sample=snapshot;
-                        string reply=request["v"]=="2" ? SafeUpdateDispatch(request) : (request["operation"]=="restart" || request["operation"]=="receipt") ? SafeDispatch(request) : sample==null && request["operation"]=="diagnostics" ? Snapshot.DiagnosticsReply(request,null,"SNAPSHOT_UNAVAILABLE",null) : sample==null ? Contract.Json().Serialize(new {
+                        string reply=request["v"]=="3" ? SafeOmiDispatch(request) : request["v"]=="2" ? SafeUpdateDispatch(request) : (request["operation"]=="restart" || request["operation"]=="receipt") ? SafeDispatch(request) : sample==null && request["operation"]=="diagnostics" ? Snapshot.DiagnosticsReply(request,null,"SNAPSHOT_UNAVAILABLE",null) : sample==null ? Contract.Json().Serialize(new {
                             v="1",nonce=request["nonce"],operation=request["operation"],componentId=request["componentId"],action=request["action"],requestId=request["requestId"],
                             code="SNAPSHOT_UNAVAILABLE",components=new Row[0],supported=(object)null,mutationEnabled=false,allowed=false,executable=false,found=(object)null,completed=(object)null,receipt=(object)null
                         }) : sample.Reply(request);
