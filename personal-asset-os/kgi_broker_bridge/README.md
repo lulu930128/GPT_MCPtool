@@ -122,6 +122,12 @@ interpreter 不存在或不是絕對路徑，服務會在啟動前 fail closed�
 
 ## 驗證
 
+獨立一次性離線入口：`python -m kgi_broker_bridge.order_cli --dry-run`。
+它只預覽固定的 2330／BUY／2160／1 股／盤中零股／ROD／CASH，不載入 SDK、
+不讀取環境認證、不登入、不送單，未加入 HTTP 或 MCP route。
+Source／FakeSDK 驗證與正式環境 E2E 的差距見
+[離線訂單交接](docs/OrderPreview.md)。
+
 synthetic regression 不會安裝、登入或呼叫正式 `kgisuperpy`：
 
 ```powershell

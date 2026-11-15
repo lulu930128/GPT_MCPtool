@@ -50,7 +50,8 @@ def create_app(
     broker_runtime = BrokerBridgeRuntime(resolved) if broker_reader is None else None
     resolved_mobile_usb_bridge = mobile_usb_bridge or MobileUsbBridge(resolved)
     mcp_server = create_mcp_server(
-        database, resolved, resolved_broker_reader, resolved_fx_reader
+        database, resolved, resolved_broker_reader, resolved_fx_reader,
+        loaded_build_id=startup_build_id,
     )
     mcp_app = mcp_server.streamable_http_app(
         streamable_http_path="/",

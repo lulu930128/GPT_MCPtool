@@ -28,21 +28,24 @@ $build={
     if(-not(Test-Path -LiteralPath (Join-Path $stageDist 'index.html') -PathType Leaf)){throw 'UPDATE_FRONTEND_BUILD_MISSING'}
 }
 $identity={
-    param($unusedArtifact)
-    Invoke-ComponentUpdateProcess -Executable $python -Arguments ('"'+(Join-Path $scriptsRoot 'source-update-identity.py')+'"') -WorkingDirectory $root -Json
+    param($stageArtifact)
+    $stageArgs=if($stageArtifact){' --frontend-dist "'+$stageArtifact+'"'}else{''}
+    Invoke-ComponentUpdateProcess -Executable $python -Arguments ('"'+(Join-Path $scriptsRoot 'source-update-identity.py')+'"'+$stageArgs) -WorkingDirectory $root -Json
 }
 $status={Invoke-ComponentUpdateProcess -Executable $powershell -Arguments ('-NoProfile -NonInteractive -File "'+(Join-Path $scriptsRoot 'runtime-control.ps1')+'" -Action Status') -WorkingDirectory $root -Json}
+$schemaPreflight={
+    Import-Module (Join-Path $scriptsRoot 'component-runtime.psm1') -Force
+    $context=New-PersonalAssetOsRuntimeContext -ProjectRoot $root
+    Invoke-ComponentUpdateProcess -Executable $python -Arguments ('"'+(Join-Path $scriptsRoot 'source-update-identity.py')+'" --schema-data-dir "'+$context.dataDir+'"') -WorkingDirectory $root -Json
+}
 $preflight={
     $reply=& $status
-    $allowed=$reply.ok -and $reply.after.status -in @('Ready','Degraded','Unhealthy')
+    $allowed=$reply.ok -and $reply.after.status -in @('Ready','Degraded','Unhealthy','Stopped')
     foreach($role in @('server','tunnel')){if($reply.after.$role.ownership -notin @('OwnedReady','Stopped')){$allowed=$false}}
     if(-not $allowed){return [pscustomobject]@{allowed=$false;code='UPDATE_OWNER_PREFLIGHT_REJECTED'}}
-    # Existing app startup runs migrations. A code-only update may reach that
-    # owner only when the running DB already reports the exact source head.
-    # No DB, settings or finance payload is read by this adapter.
-    $expected=& $identity $null
-    try{$health=Invoke-RestMethod -UseBasicParsing -Uri 'http://127.0.0.1:18876/api/health' -TimeoutSec 5}catch{return [pscustomobject]@{allowed=$false;code='UPDATE_SCHEMA_STATE_UNVERIFIED'}}
-    [pscustomobject]@{allowed=($health.ok -and $health.service -eq 'personal-asset-os' -and $health.schemaRevision -ceq $expected.schemaRevision);code='MIGRATION_REQUIRED'}
+    # Both running and stopped paths consult only the migration owner's
+    # read-only schema metadata. Startup remains the sole migration executor.
+    try { & $schemaPreflight } catch { [pscustomobject]@{allowed=$false;code='UPDATE_SCHEMA_STATE_UNVERIFIED'} }
 }
 $reload={
     $reply=Invoke-ComponentUpdateProcess -Executable $powershell -Arguments ('-NoProfile -NonInteractive -File "'+(Join-Path $scriptsRoot 'runtime-control.ps1')+'" -Action ReloadRuntime') -WorkingDirectory $root -TimeoutMs 240000 -Json -Lifecycle

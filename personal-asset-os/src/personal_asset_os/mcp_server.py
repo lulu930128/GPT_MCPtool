@@ -51,7 +51,10 @@ def create_mcp_server(
     settings: Settings,
     broker_reader: BrokerSnapshotProvider | None = None,
     fx_reader: FxRateProvider | None = None,
+    *,
+    loaded_build_id: str | None = None,
 ) -> MCPServer:
+    startup_build_id = loaded_build_id or source_build_id(settings.project_root)
     resolved_broker_reader = broker_reader or BrokerBridgeClient(settings)
     resolved_fx_reader = fx_reader or OfficialUsdTwdRateProvider(settings)
     mcp = MCPServer(
@@ -241,7 +244,8 @@ def create_mcp_server(
             {
                 "service": "personal-asset-os",
                 "version": __version__,
-                "build_id": source_build_id(settings.project_root),
+                "build_id": startup_build_id,
+                "build_identity": "startup-v1",
                 "base_currency": settings.base_currency,
                 "http_policy": "loopback-only",
                 "mcp_policy": "private-tunnel-read-only",
