@@ -1,5 +1,13 @@
 # GPT MCP Tool Workspace
 
+2026-11-10 source：Bridge 記憶體維護沿既有 JobStore admission 與 CC tray maintenance slot。連續兩次每分鐘 heapUsed >1500 MiB 後顯示「不可接續任務」，等待既有工作排空，自動委派原 RestartCore 同版重啟，驗證後恢復並冷卻 10 分鐘。正式採用由本 job terminal 後的 Reviewer 處理；見 [驗收與部署交接](codex_bridge/docs/agent-runs/memory-drain-restart-20261110/Handoff.md)。
+
+2026-11-05 source：CC 的固定 OMI Launcher 換版路由由已部署 tray owner 委派原 OMI updater，與 `omi_search` reload／CC self-update 分開。短 client 只送明確請求與讀 receipt；OMI 仍擁有 exact ownership、Execution 離線、writer drain 與 successor 驗證。採用順序與限制見 [OMI 遠端換版交接](mcp_control_center/docs/OmiLauncherRemoteUpdate.md)。本輪未執行正式啟停／換版。
+
+2026-10-28 Phase 2：Workspace 的 `mcp_component_update_*` v2 工具將 source 更新交給 CC durable admission，再委派各元件 owned adapter；原 v1 `reload_runtime` 保持相容。九個 target 包含八個 MCP 與 CC 自身。Node、OMI、Memory Core、PAOS adapters 共用 `project_reading/scripts/component-update-common.ps1` 的有界 finite-child capture／原子證據寫入，Node 型 artifact 另共用 `node-source-update.ps1` 的 staging／恢復；build、依賴、schema、loaded identity 與 reload 規則仍由各元件定義，不含 domain 資料。Bridge 沿 canonical DailyCode，CC 沿短命 bootstrap 與既有 launcher；詳見同一工作包的 [Phase 2 交付](codex_bridge/docs/agent-runs/reliable-daily-update-20261028/Phase2-Result.md)。
+
+2026-10-28 可靠日常更新使用既有 DailyCode 協調器；鎖序為 CC Bridge action mutex → Bridge update.lock → 短命 owner 的 lifecycle mutex。Source／隔離測試／Stage 與正式換版分開驗收，交接見 [可靠更新工作包](codex_bridge/docs/agent-runs/reliable-daily-update-20261028/Handoff.md)。
+
 Bridge daily package 的安全停止 transport 使用 CC 維護的 `NormalOperator.Native.cs` 與 `RemoteSelfReload.Native.cs`，Stage 僅將這兩個 native code dependency 複製到 Bridge 的 `scripts/shared-native` 並核對 hash；不打包 CC owner、launcher 或 registry。CC caller 依 CC 自己的 selector 與 wrapper inventory 驗證。
 
 CC 與 Bridge 分別使用各自的 `Runtime\versions` 與 `current.json`；唯一 Startup 由 CC 的 `start-runtime-tray.vbs --boot` 持有，Bridge 換版只處理自身程序。資料仍在各自既有位置，不搬移也不打包。首次交接沿用舊 owner 的正常停機，驗收後才清除舊 Program Files 程式；Live 尚未完成，詳見 [日常換版](codex_bridge/docs/DailyCodeUpdate.md) 與 [CC 獨立 Runtime](mcp_control_center/docs/IndependentRuntime.md)。
