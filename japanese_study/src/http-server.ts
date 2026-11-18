@@ -112,6 +112,11 @@ export function computeBuildId(): string {
       "./config.js",
       "./http-server.js",
       "./server.js",
+      "./review-ui.js",
+      "./ui/review.html",
+      "./ui/review.css",
+      "./ui/bridge.js",
+      "./ui/review.js",
     ].map((artifact) =>
       createHash("sha256")
         .update(readFileSync(new URL(artifact, import.meta.url)))

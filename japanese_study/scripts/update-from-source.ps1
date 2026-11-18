@@ -12,6 +12,7 @@ $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershel
 $build={
     param($stageDist,$childJournalRoot)
     Invoke-ComponentUpdateProcess -Executable $node -Arguments ('"'+(Join-Path $root 'node_modules\typescript\bin\tsc')+'" -p "'+(Join-Path $root 'tsconfig.json')+'" --outDir "'+$stageDist+'"') -WorkingDirectory $root -ChildJournalRoot $childJournalRoot | Out-Null
+    Invoke-ComponentUpdateProcess -Executable $node -Arguments ('"'+(Join-Path $root 'scripts\build-ui.mjs')+'" "'+$stageDist+'"') -WorkingDirectory $root -ChildJournalRoot $childJournalRoot | Out-Null
 }
 $identity={
     param($distRoot)
@@ -19,7 +20,15 @@ $identity={
 }
 $preflight={
     $reply=Invoke-ComponentUpdateProcess -Executable $powershell -Arguments ('-NoProfile -NonInteractive -File "'+(Join-Path $root 'scripts\runtime-control.ps1')+'" -Action Status') -WorkingDirectory $root -Json
-    [pscustomobject]@{ allowed=($reply.ok -and $reply.after.status -in @('Ready','Degraded','Stopped')); code='UPDATE_OWNER_PREFLIGHT_REJECTED' }
+    $status=$reply.after
+    # The running artifact may predate the source, but the owner and each live endpoint must be verified.
+    $allowed=($reply.ok -eq $true -and $null -ne $status -and
+        $status.hub.ownership -eq 'OwnedReady' -and $status.hub.healthy -eq $true -and
+        $status.mcp.ownership -eq 'OwnedReady' -and
+        $status.tunnel.ownership -eq 'OwnedReady' -and $status.tunnel.ready -eq $true -and
+        (($status.status -eq 'Ready' -and $status.mcp.healthy -eq $true) -or
+         ($status.status -eq 'Unhealthy' -and $status.mcp.identityStatus -eq 'ArtifactMismatch')))
+    [pscustomobject]@{ allowed=$allowed; code='UPDATE_OWNER_PREFLIGHT_REJECTED' }
 }
 $reload={
     $reply=Invoke-ComponentUpdateProcess -Executable $powershell -Arguments ('-NoProfile -NonInteractive -File "'+(Join-Path $root 'scripts\runtime-control.ps1')+'" -Action ReloadRuntime') -WorkingDirectory $root -TimeoutMs 240000 -Json -Lifecycle

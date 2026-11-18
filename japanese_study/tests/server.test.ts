@@ -23,6 +23,9 @@ const expectedToolNames = [
   "study_get_summary",
   "study_list_practice_sessions",
   "study_list_study_lists",
+  "study_open_review",
+  "study_read_review_workspace",
+  "study_update_review_workspace",
   "study_preview_item_creation",
   "study_preview_item_lifecycle",
   "study_preview_item_revision",
@@ -49,7 +52,7 @@ test("published MCP contract exposes the complete learning-content v8.1 surface"
     host: "127.0.0.1",
     port: 0,
   });
-  const client = new Client({ name: "contract-test", version: "1.2.1" });
+  const client = new Client({ name: "contract-test", version: "1.3.0" });
   const transport = new StreamableHTTPClientTransport(new URL(handle.url));
 
   try {
@@ -57,9 +60,9 @@ test("published MCP contract exposes the complete learning-content v8.1 surface"
     assert.equal(healthResponse.status, 200);
     const health = (await healthResponse.json()) as Record<string, unknown>;
     assert.equal(health.service, "japanese-study-mcp");
-    assert.equal(health.version, "1.2.1");
+    assert.equal(health.version, "1.3.0");
     assert.equal(health.contractVersion, "learning-content-v8.1");
-    assert.equal(health.toolCount, 34);
+    assert.equal(health.toolCount, 37);
     assert.match(String(health.buildId), /^[0-9a-f]{16}$/);
 
     await client.connect(transport);
@@ -68,6 +71,30 @@ test("published MCP contract exposes the complete learning-content v8.1 surface"
       response.tools.map((tool) => tool.name).sort(),
       expectedToolNames,
     );
+    const openReview = response.tools.find(tool => tool.name === "study_open_review")!;
+    assert.equal((openReview._meta?.ui as Record<string, unknown>).resourceUri, "ui://japanese-study/review-v1.html");
+    assert.equal(openReview.annotations?.readOnlyHint, true);
+    for (const name of ["study_search_items", "study_get_item", "study_get_due_reviews", "study_set_manual_labels", "study_record_attempt"]) {
+      const meta = response.tools.find(tool => tool.name === name)!._meta!;
+      assert.deepEqual((meta.ui as Record<string, unknown>).visibility, ["model", "app"]);
+      assert.equal(meta["openai/widgetAccessible"], true);
+      assert.equal(meta["openai/outputTemplate"], undefined);
+    }
+    for (const name of ["study_read_review_workspace", "study_update_review_workspace"]) {
+      const tool = response.tools.find(entry => entry.name === name)!;
+      assert.deepEqual((tool._meta?.ui as Record<string, unknown>).visibility, ["app"]);
+      assert.equal(tool.annotations?.readOnlyHint, name === "study_read_review_workspace");
+    }
+    const attempt = response.tools.find(tool => tool.name === "study_record_attempt")!;
+    assert.ok((attempt.inputSchema.properties?.result as { enum: string[] }).enum.includes("hard"));
+    const resource = await client.readResource({ uri: "ui://japanese-study/review-v1.html" });
+    const widget = resource.contents[0];
+    assert.equal(widget.mimeType, "text/html;profile=mcp-app");
+    assert.deepEqual((widget._meta?.ui as Record<string, unknown>).csp, { connectDomains: [], resourceDomains: [] });
+    assert.ok("text" in widget);
+    assert.match(widget.text, /id="jstudy-app"/);
+    assert.match(widget.text, /ui\/initialize/);
+    assert.doesNotMatch(widget.text, /<!--STUDY_|<script[^>]+src=|<link[^>]+href=|localStorage|fetch\(/);
 
     const preview = response.tools.find(
       (tool) => tool.name === "study_preview_practice_record",
@@ -174,7 +201,7 @@ test("practice tools enforce contract-version invariants before Hub I/O", async 
     host: "127.0.0.1",
     port: 0,
   });
-  const client = new Client({ name: "practice-contract-test", version: "1.2.1" });
+  const client = new Client({ name: "practice-contract-test", version: "1.3.0" });
   const transport = new StreamableHTTPClientTransport(new URL(handle.url));
   const invalidV2Submission = {
     submissionId: "submission-contract-0001",
@@ -267,7 +294,7 @@ test("learning-workbench projections satisfy their published output schemas", as
     host: "127.0.0.1",
     port: 0,
   });
-  const client = new Client({ name: "projection-schema-test", version: "1.2.1" });
+  const client = new Client({ name: "projection-schema-test", version: "1.3.0" });
   const transport = new StreamableHTTPClientTransport(new URL(handle.url));
 
   try {
@@ -323,7 +350,7 @@ test("Hub domain errors remain typed across the MCP boundary", async () => {
     host: "127.0.0.1",
     port: 0,
   });
-  const client = new Client({ name: "typed-error-test", version: "1.2.1" });
+  const client = new Client({ name: "typed-error-test", version: "1.3.0" });
   const transport = new StreamableHTTPClientTransport(new URL(handle.url));
 
   try {

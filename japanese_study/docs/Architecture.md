@@ -21,6 +21,8 @@ The adapter is not a second study system and must not copy Hub domain rules or p
 | --- | --- |
 | MCP schemas, annotations, HTTP/STDIO transport | `japanese_study` adapter |
 | Tool-to-API field mapping | `japanese_study` adapter |
+| ChatGPT library / flashcard UI and Host transport | Adapter App resource; no direct Hub/DB access |
+| Review content eligibility and manual-label filtering | Japanese Study Hub |
 | Vocabulary/grammar/question data | Japanese Study Hub |
 | Stable item ids and search semantics | Japanese Study Hub |
 | Practice scoring, atomic submission, idempotency | Japanese Study Hub |

@@ -23,7 +23,7 @@ $staleForeign = $null
 $context = $null
 
 try {
-  foreach ($directory in @('scripts', 'tests', 'dist\src', '.tmp', '.tunnel-client', '.secrets')) { New-Item -ItemType Directory -Force -Path (Join-Path $testRoot $directory) | Out-Null }
+  foreach ($directory in @('scripts', 'tests', 'dist\src\ui', '.tmp', '.tunnel-client', '.secrets')) { New-Item -ItemType Directory -Force -Path (Join-Path $testRoot $directory) | Out-Null }
   New-Item -ItemType Directory -Force -Path $hubRoot | Out-Null
   foreach ($name in @('japanese-study-runtime.psm1', 'component-runtime.psm1', 'runtime-control.ps1')) { Copy-Item -LiteralPath (Join-Path $sourceRoot "scripts\$name") -Destination (Join-Path $testRoot "scripts\$name") }
   [IO.File]::WriteAllText((Join-Path $hubRoot 'pyproject.toml'), '[project]', $utf8)
@@ -34,7 +34,12 @@ try {
   $hubChild = @'
 const http=require("http");
 const port=Number(process.argv[2]);
-http.createServer((request,response)=>{const body=JSON.stringify({ok:true,service:"japanese-study-hub",version:"test"});response.writeHead(200,{"content-type":"application/json","content-length":Buffer.byteLength(body)});response.end(body)}).listen(port,"127.0.0.1");
+const fs=require("fs"), path=require("path");
+http.createServer((request,response)=>{
+  const ok=!fs.existsSync(path.join(__dirname,"hub-down"));
+  response.writeHead(ok?200:503,{"content-type":"application/json"});
+  response.end(JSON.stringify({ok,service:"japanese-study-hub",version:"test"}));
+}).listen(port,"127.0.0.1");
 '@
   $hubRunner = @'
 const {spawn}=require("child_process");
@@ -46,17 +51,30 @@ process.on("SIGTERM",finish);process.on("SIGINT",finish);setInterval(()=>{},1000
   $mcpServer = @'
 const http=require("http");
 const port=Number(process.env.JSTUDY_MCP_PORT);
-http.createServer((request,response)=>{const body=JSON.stringify({ok:true,service:"japanese-study-mcp",version:"test",contractVersion:"test-contract",buildId:"test-build",toolCount:14});response.writeHead(200,{"content-type":"application/json","content-length":Buffer.byteLength(body)});response.end(body)}).listen(port,"127.0.0.1");
+const fs=require("fs"), path=require("path");
+const override=path.resolve(__dirname,"../../mcp-health.json");
+const old={ok:true,service:"japanese-study-mcp",version:"1.3.0",contractVersion:"learning-content-v8.1",buildId:"05651d6c7d65518c",toolCount:35};
+http.createServer((request,response)=>{
+  const health=fs.existsSync(override)?JSON.parse(fs.readFileSync(override,"utf8")):old;
+  if(health===null){request.socket.destroy();return;}
+  response.writeHead(200,{"content-type":"application/json"});
+  response.end(JSON.stringify(health));
+}).listen(port,"127.0.0.1");
 '@
   $tunnelServer = @"
 const http=require("http");
 const port=$tunnelPort;
-http.createServer((request,response)=>{const body=request.url==="/readyz"?"ready":"ok";response.writeHead(200,{"content-type":"text/plain","content-length":Buffer.byteLength(body)});response.end(body)}).listen(port,"127.0.0.1");
+const fs=require("fs"), path=require("path");
+http.createServer((request,response)=>{
+  const ready=!fs.existsSync(path.join(__dirname,"tunnel-down"));
+  response.writeHead(ready?200:503,{"content-type":"text/plain"});
+  response.end(ready?"ready":"unavailable");
+}).listen(port,"127.0.0.1");
 "@
   [IO.File]::WriteAllText((Join-Path $testRoot 'fake-hub-child.js'), $hubChild, $utf8)
   [IO.File]::WriteAllText((Join-Path $testRoot 'fake-hub-runner.js'), $hubRunner, $utf8)
   [IO.File]::WriteAllText((Join-Path $testRoot 'dist\src\http-main.js'), $mcpServer, $utf8)
-  foreach ($artifact in @('api-client.js', 'config.js', 'http-server.js', 'server.js')) { [IO.File]::WriteAllText((Join-Path $testRoot "dist\src\$artifact"), '// test', $utf8) }
+  foreach ($artifact in @('api-client.js', 'config.js', 'http-server.js', 'server.js', 'review-ui.js', 'ui\review.html', 'ui\review.css', 'ui\bridge.js', 'ui\review.js')) { [IO.File]::WriteAllText((Join-Path $testRoot "dist\src\$artifact"), '// test', $utf8) }
   [IO.File]::WriteAllText((Join-Path $testRoot 'fake-tunnel.js'), $tunnelServer, $utf8)
 
   $controller = Join-Path $testRoot 'scripts\runtime-control.ps1'
@@ -69,7 +87,7 @@ http.createServer((request,response)=>{const body=request.url==="/readyz"?"ready
     -TunnelClientPath $nodePath -TunnelProfileDir (Join-Path $testRoot '.tunnel-client') -TunnelProfile 'test' `
     -TunnelHealthUrl "http://127.0.0.1:$tunnelPort" -TunnelArguments $tunnelArguments -TunnelIdentity 'fake-tunnel.js' `
     -KeyStorePath (Join-Path $testRoot 'scripts\key-store.ps1') -SecretPath (Join-Path $testRoot '.secrets\test.dpapi') `
-    -ExpectedBuildId 'test-build' -ExpectedMcpVersion 'test' -ExpectedContractVersion 'test-contract' -ExpectedToolCount 14 `
+    -ExpectedBuildId '05651d6c7d65518c' -ExpectedMcpVersion '1.3.0' -ExpectedContractVersion 'learning-content-v8.1' -ExpectedToolCount 35 `
     -CoreReadyTimeoutSeconds 10 -TunnelRecoveryDelaysSeconds 5
   function Invoke-TestController([string]$Action, [bool]$ExpectSuccess = $true) {
     if ($Action -eq 'SelfTest') {
@@ -149,6 +167,92 @@ http.createServer((request,response)=>{const body=request.url==="/readyz"?"ready
   Assert-True ($hubPid1 -gt 0 -and $hubListener1 -gt 0 -and $hubPid1 -ne $hubListener1) 'Hub runner and listener identities are distinct'
   Assert-True (@($ensure.document.after.ownedPids).Count -eq 3) 'three managed root PIDs are recorded'
 
+  # Run the actual updater gate against real isolated controller probes without starting the updater.
+  $tokens = $null; $parseErrors = $null
+  $adapter = [Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $sourceRoot 'scripts\update-from-source.ps1'), [ref]$tokens, [ref]$parseErrors)
+  Assert-Equal @($parseErrors).Count 0 'source updater parses'
+  $assignment = $adapter.Find({ param($item)
+    $item -is [Management.Automation.Language.AssignmentStatementAst] -and $item.Left.Extent.Text -ceq '$preflight'
+  }, $true)
+  $preflightCallback = $assignment.Right.Find({ param($item)
+    $item -is [Management.Automation.Language.ScriptBlockExpressionAst]
+  }, $true).ScriptBlock.GetScriptBlock()
+  $root = $testRoot
+  $powershell = (Get-Command powershell.exe).Source
+  $updateContext = $context.PSObject.Copy()
+  function Invoke-ComponentUpdateProcess([string]$Executable, [string]$Arguments, [string]$WorkingDirectory, [switch]$Json) {
+    if ($Arguments -cne ('-NoProfile -NonInteractive -File "' + $controller + '" -Action Status') -or
+        $WorkingDirectory -cne $testRoot -or -not $Json) { throw 'Unexpected updater dispatch in preflight test.' }
+    $script:preflightStatus = Get-JapaneseStudyRuntimeStatus -Context $updateContext
+    return [pscustomobject]@{ ok = $true; after = $script:preflightStatus }
+  }
+  function Assert-UpdateGate([string]$Name, [bool]$Allowed, [string]$Status, [string]$IdentityStatus) {
+    $gate = & $preflightCallback
+    Assert-Equal $gate.allowed $Allowed "$Name preflight decision"
+    Assert-Equal $script:preflightStatus.status $Status "$Name strict runtime status"
+    Assert-Equal $script:preflightStatus.mcp.identityStatus $IdentityStatus "$Name MCP identity"
+    Assert-Equal $script:preflightStatus.mcp.healthy ($IdentityStatus -eq 'Current') "$Name strict MCP health"
+    if (-not $Allowed) { Assert-Equal $gate.code 'UPDATE_OWNER_PREFLIGHT_REJECTED' "$Name rejection code" }
+  }
+
+  $updateContext.expectedToolCount = 37
+  $updateContext.expectedBuildId = 'a3c8512a459254b9'
+  Assert-UpdateGate 'Owned legacy build and tool count' $true 'Unhealthy' 'ArtifactMismatch'
+  $updateContext.expectedBuildId = $context.expectedBuildId
+  Assert-UpdateGate 'Owned legacy tool count' $true 'Unhealthy' 'ArtifactMismatch'
+  $updateContext.expectedToolCount = 35
+  $updateContext.expectedBuildId = 'a3c8512a459254b9'
+  Assert-UpdateGate 'Owned legacy build' $true 'Unhealthy' 'ArtifactMismatch'
+  $updateContext.expectedBuildId = $context.expectedBuildId
+  Assert-UpdateGate 'Owned current build' $true 'Ready' 'Current'
+
+  $tunnelDown = Join-Path $testRoot 'tunnel-down'
+  [IO.File]::WriteAllText($tunnelDown, '')
+  try { Assert-UpdateGate 'Tunnel down with current MCP' $false 'Degraded' 'Current' }
+  finally { Remove-Item -LiteralPath $tunnelDown }
+  $updateContext.expectedToolCount = 37
+  foreach ($failure in @('hub-down', 'tunnel-down')) {
+    $marker = Join-Path $testRoot $failure
+    [IO.File]::WriteAllText($marker, '')
+    try { Assert-UpdateGate $failure $false 'Unhealthy' 'ArtifactMismatch' }
+    finally { Remove-Item -LiteralPath $marker }
+  }
+
+  $pidBytes = [IO.File]::ReadAllBytes($context.mcpPidFile)
+  try {
+    [IO.File]::WriteAllText($context.mcpPidFile, 'invalid', $utf8)
+    Assert-UpdateGate 'MCP ownership mismatch with healthy endpoints' $false 'OwnershipMismatch' 'ArtifactMismatch'
+  } finally { [IO.File]::WriteAllBytes($context.mcpPidFile, $pidBytes) }
+  $ownerBytes = [IO.File]::ReadAllBytes($context.mcpOwnerFile)
+  try {
+    Remove-Item -LiteralPath $context.mcpOwnerFile
+    Assert-UpdateGate 'MCP ownership unknown with healthy endpoints' $false 'OwnershipUnknown' 'ArtifactMismatch'
+  } finally { [IO.File]::WriteAllBytes($context.mcpOwnerFile, $ownerBytes) }
+
+  $healthOverride = Join-Path $testRoot 'mcp-health.json'
+  $healthy = @{ ok = $true; service = 'japanese-study-mcp'; version = '1.3.0'; contractVersion = 'learning-content-v8.1'; buildId = '05651d6c7d65518c'; toolCount = 35 }
+  try {
+    [IO.File]::WriteAllText($healthOverride, 'null', $utf8)
+    Assert-UpdateGate 'MCP HTTP unavailable' $false 'Unhealthy' 'Unavailable'
+    [IO.File]::WriteAllText($healthOverride, '{}', $utf8)
+    Assert-UpdateGate 'MCP identity missing' $false 'Unhealthy' 'Invalid'
+    foreach ($case in @(
+      @{ field = 'ok'; value = $false; identity = 'Invalid' },
+      @{ field = 'service'; value = 'other'; identity = 'Invalid' },
+      @{ field = 'buildId'; value = 'invalid'; identity = 'Invalid' },
+      @{ field = 'toolCount'; value = '35'; identity = 'Invalid' },
+      @{ field = 'version'; value = '2.0.0'; identity = 'Incompatible' },
+      @{ field = 'contractVersion'; value = 'other'; identity = 'Incompatible' },
+      @{ field = 'toolCount'; value = 38; identity = 'Incompatible' }
+    )) {
+      $payload = $healthy.Clone()
+      $payload[$case.field] = $case.value
+      [IO.File]::WriteAllText($healthOverride, ($payload | ConvertTo-Json -Compress), $utf8)
+      Assert-UpdateGate ("MCP health {0}={1}" -f $case.field, $case.value) $false 'Unhealthy' $case.identity
+    }
+  } finally { Remove-Item -LiteralPath $healthOverride -ErrorAction SilentlyContinue }
+
   $repair = Invoke-TestController -Action RepairConnectivity
   Assert-Equal $repair.document.after.hub.pid $hubPid1 'repair preserves Hub runner'
   Assert-Equal $repair.document.after.mcp.pid $mcpPid1 'repair preserves MCP adapter'
@@ -171,6 +275,7 @@ http.createServer((request,response)=>{const body=request.url==="/readyz"?"ready
   Assert-True (@($shutdown.document.after.ownedPids).Count -eq 0) 'shutdown leaves no owned roots'
   $shutdownAgain = Invoke-TestController -Action ShutdownRuntime
   Assert-Equal $shutdownAgain.document.after.status 'Stopped' 'shutdown is idempotent'
+  Assert-UpdateGate 'All services stopped' $false 'Stopped' 'Unavailable'
 
   $oldForeignPort = $env:JSTUDY_MCP_PORT
   $env:JSTUDY_MCP_PORT = [string]$mcpPort
@@ -197,7 +302,7 @@ http.createServer((request,response)=>{const body=request.url==="/readyz"?"ready
 
   [pscustomobject]@{
     ok = $true; assertions = $script:Passed
-    actions = @('SelfTest', 'Status', 'EnsureRunning', 'RepairConnectivity', 'RestartCore', 'ReloadRuntime', 'ShutdownRuntime', 'ForeignOwnerGuard')
+    actions = @('SelfTest', 'Status', 'EnsureRunning', 'RepairConnectivity', 'RestartCore', 'ReloadRuntime', 'ShutdownRuntime', 'ForeignOwnerGuard', 'SourceUpdatePreflight')
   } | ConvertTo-Json -Depth 4
 }
 finally {

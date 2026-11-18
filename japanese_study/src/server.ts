@@ -29,14 +29,17 @@ import {
   type SupersedePracticeSessionInput,
 } from "./api-client.js";
 import type { JapaneseStudyMcpConfig } from "./config.js";
+import { loadReviewUi, REVIEW_MIME_TYPE, REVIEW_RESOURCE_URI } from "./review-ui.js";
 
-export const JAPANESE_STUDY_MCP_VERSION = "1.2.1";
+export const JAPANESE_STUDY_MCP_VERSION = "1.3.0";
 export const JAPANESE_STUDY_CONTRACT_VERSION = "learning-content-v8.1";
-export const JAPANESE_STUDY_TOOL_COUNT = 34;
+export const JAPANESE_STUDY_TOOL_COUNT = 37;
+
+const appAccessible = { ui: { visibility: ["model", "app"] }, "openai/widgetAccessible": true };
 
 const kindSchema = z.enum(["vocab", "grammar", "question"]);
 const labelSchema = z.enum(["known", "unknown", "uncertain", "suspended"]);
-const attemptResultSchema = z.enum(["seen", "correct", "wrong", "easy", "again"]);
+const attemptResultSchema = z.enum(["seen", "correct", "wrong", "easy", "again", "hard"]);
 const targetKindSchema = z.enum(["vocab", "grammar"]);
 const targetRoleSchema = z.enum(["primary", "secondary", "context"]);
 const questionValiditySchema = z.enum(["valid", "void", "unscored"]);
@@ -358,6 +361,22 @@ export function createJapaneseStudyMcpServer(config: JapaneseStudyMcpConfig): Mc
     },
   );
 
+  const reviewHtml = loadReviewUi();
+  server.registerResource("japanese-study-review", REVIEW_RESOURCE_URI, { mimeType: REVIEW_MIME_TYPE }, async () => ({
+    contents: [{ uri: REVIEW_RESOURCE_URI, mimeType: REVIEW_MIME_TYPE, text: reviewHtml,
+      _meta: { ui: { prefersBorder: true, csp: { connectDomains: [], resourceDomains: [] } },
+        "openai/widgetCSP": { connect_domains: [], resource_domains: [] },
+        "openai/widgetDescription": "日文單字與文法庫、熟悉度標記及翻卡自評。" } }],
+  }));
+  server.registerTool("study_open_review", {
+    title: "開啟日文複習室",
+    description: "Open the Japanese study library and self-rated flashcards in ChatGPT. Use when the user wants to browse, memorize, or review vocabulary/grammar directly. Opening never records a review.",
+    annotations: readOnlyAnnotations,
+    inputSchema: { kind: z.enum(["vocab", "grammar"]).optional() },
+    outputSchema: { ...baseOutputSchema, contract_version: z.string().optional(), kind: z.string().optional(), kind_explicit: z.boolean().optional() },
+    _meta: { ui: { resourceUri: REVIEW_RESOURCE_URI }, "openai/outputTemplate": REVIEW_RESOURCE_URI },
+  }, async ({ kind }) => safeResult(async () => ({ ...await client.reviewAppStatus(true), kind: kind || "vocab", kind_explicit: !!kind }), "已開啟日文複習室。"));
+
   server.registerTool(
     "study_get_summary",
     {
@@ -498,10 +517,113 @@ export function createJapaneseStudyMcpServer(config: JapaneseStudyMcpConfig): Mc
       ),
   );
 
+  const reviewStateMeta = { ui: { visibility: ["app"] }, "openai/widgetAccessible": true };
+  const reviewKinds = z.enum(["vocab", "grammar"]);
+  const reviewFilters = {
+    kind: reviewKinds,
+    query: z.string().max(200).optional(),
+    jlpt_level: z.string().max(20).nullable().optional(),
+  };
+  const reviewLabels = z.enum(["known", "unknown", "uncertain", "unmarked"]);
+  const reviewItemId = z.string().min(1).max(128);
+  const reviewLevels = z.enum(["N1", "N2", "N3", "N4", "N5", "N4-5", "unclassified"]);
+  const cardPreferences = {
+    kind: reviewKinds,
+    direction: z.enum(["ja", "zh"]),
+    jlpt_levels: z.array(reviewLevels).max(7).nullable().optional(),
+    manual_labels: z.array(reviewLabels).max(4).nullable().optional(),
+  };
+  const reviewSession = z.string().regex(/^flash-[0-9a-f-]{36}$/);
+
+  server.registerTool("study_read_review_workspace", {
+    title: "讀取複習位置與卡片",
+    _meta: reviewStateMeta,
+    annotations: readOnlyAnnotations,
+    inputSchema: {
+      scope: z.enum(["workspace", "deck", "items"]),
+      itemIds: z.array(reviewItemId).min(1).max(12).optional(),
+      sessionId: reviewSession.optional(),
+      offset: z.number().int().nonnegative().optional(),
+      library: z.object({
+        ...reviewFilters,
+        manual_label: reviewLabels.nullable().optional(),
+        explicit_kind: z.boolean(),
+      }).strict().optional(),
+    },
+    outputSchema: {
+      ...baseOutputSchema,
+      library: z.record(z.unknown()).optional(),
+      items: z.array(z.record(z.unknown())).optional(),
+      card_preferences: z.record(z.unknown()).optional(),
+      bookmark: z.record(z.unknown()).nullable().optional(),
+      decks: z.array(z.record(z.unknown())).optional(),
+      deck: z.record(z.unknown()).nullable().optional(),
+    },
+  }, ({ scope, sessionId, offset, library, itemIds }) =>
+    safeResult(
+      () => scope === "items" ? client.readReviewItems(itemIds ?? []) : client.readReviewWorkspace(scope, sessionId, offset, library),
+      "已取得複習資料。",
+    ));
+
+  server.registerTool("study_update_review_workspace", {
+    title: "保存複習位置或提交目前卡片",
+    _meta: reviewStateMeta,
+    annotations: retrySafeWriteAnnotations,
+    inputSchema: {
+      change: z.discriminatedUnion("action", [
+        z.object({
+          action: z.literal("bookmark"),
+          payload: z.object({
+            ...reviewFilters,
+            manual_label: reviewLabels.nullable().optional(),
+            order: z.literal("jlpt-title-id-v1"),
+            offset: z.number().int().nonnegative(),
+            item_id: reviewItemId,
+            neighbor_id: reviewItemId.nullable().optional(),
+            relative_top: z.number().min(-100_000).max(100_000),
+          }).strict(),
+        }).strict(),
+        z.object({
+          action: z.literal("start"),
+          payload: z.object({
+            session_id: reviewSession,
+            previous_id: reviewSession.nullable(),
+            config: z.union([
+              z.object({ ...cardPreferences, mode: z.literal("random") }).strict(),
+              z.object({
+                ...reviewFilters,
+                mode: z.enum(["filtered", "weak", "due"]),
+                direction: z.enum(["ja", "zh"]),
+                manual_label: z.union([reviewLabels, z.literal("needs_review")]).nullable().optional(),
+              }).strict(),
+            ]),
+          }).strict(),
+        }).strict(),
+        z.object({
+          action: z.literal("preferences"),
+          payload: z.object(cardPreferences).strict(),
+        }).strict(),
+        z.object({
+          action: z.literal("move"),
+          payload: z.object({
+            session_id: reviewSession,
+            position: z.number().int().nonnegative(),
+            item_id: reviewItemId,
+            rating: z.enum(["again", "hard", "correct", "easy", "skip"]),
+            occurred_at: z.string().datetime(),
+          }).strict(),
+        }).strict(),
+      ]),
+    },
+    outputSchema: { ...baseOutputSchema, deck: z.record(z.unknown()).optional() },
+  }, ({ change }) =>
+    safeResult(() => client.updateReviewWorkspace(change.action, change.payload), "已保存複習進度。"));
+
   server.registerTool(
     "study_search_items",
     {
       title: "搜尋日文學習項目",
+      _meta: appAccessible,
       description:
         "Use this when the user wants to find vocabulary, grammar, or questions and obtain exact stable item ids before another action. Search includes canonical content plus reviewable proposals, aliases, and components, but results remain item-level candidates.",
       annotations: readOnlyAnnotations,
@@ -510,6 +632,11 @@ export function createJapaneseStudyMcpServer(config: JapaneseStudyMcpConfig): Mc
         kind: kindSchema.optional().describe("Optional item type filter."),
         jlptLevel: z.string().max(20).optional().describe("Optional JLPT level such as N3."),
         limit: z.number().int().min(1).max(50).optional().describe("Maximum matches. Defaults to 20."),
+        offset: z.number().int().min(0).max(1_000_000).optional(),
+        view: z.literal("summary").optional(),
+        anchor: z.string().min(1).max(128).optional(),
+        neighbor: z.string().min(1).max(128).optional(),
+        manualLabel: z.enum(["known", "unknown", "uncertain", "suspended", "unmarked", "needs_review"]).optional(),
       },
       outputSchema: {
         ...baseOutputSchema,
@@ -518,6 +645,7 @@ export function createJapaneseStudyMcpServer(config: JapaneseStudyMcpConfig): Mc
         offset: z.number().int().nonnegative().optional(),
         limit: z.number().int().positive().optional(),
         has_more: z.boolean().optional(),
+        anchor_item_id: z.string().nullable().optional(),
         items: z.array(z.record(z.unknown())).optional(),
       },
     },
@@ -532,6 +660,7 @@ export function createJapaneseStudyMcpServer(config: JapaneseStudyMcpConfig): Mc
     "study_get_item",
     {
       title: "取得單一學習項目",
+      _meta: appAccessible,
       description:
         "Use this when an exact stable study item id is already known and the user needs canonical content, separately labelled proposals, verified aliases/components, manual label, and attempt evidence.",
       annotations: readOnlyAnnotations,
@@ -764,6 +893,7 @@ export function createJapaneseStudyMcpServer(config: JapaneseStudyMcpConfig): Mc
     "study_get_due_reviews",
     {
       title: "取得到期複習",
+      _meta: appAccessible,
       description:
         "Use this to read the bounded SRS due queue. It returns only items actually enrolled in SRS; catalog membership alone never makes an item due. It does not mark any item reviewed.",
       annotations: readOnlyAnnotations,
@@ -1005,10 +1135,12 @@ export function createJapaneseStudyMcpServer(config: JapaneseStudyMcpConfig): Mc
     "study_set_manual_labels",
     {
       title: "設定人工熟悉度分類",
+      _meta: appAccessible,
       description:
         "Use this when the user explicitly wants exact study item ids marked as known, unknown, uncertain, or suspended. Repeating the same labels is safe.",
       annotations: retrySafeWriteAnnotations,
       inputSchema: {
+        preserveNotes: z.boolean().optional(),
         labels: z
           .array(
             z.object({
@@ -1025,9 +1157,9 @@ export function createJapaneseStudyMcpServer(config: JapaneseStudyMcpConfig): Mc
         result: z.record(z.unknown()).optional(),
       },
     },
-    async ({ labels }) =>
+    async ({ labels, preserveNotes }) =>
       safeResult(
-        () => client.setManualLabels(labels as SetManualLabelInput[]),
+        () => client.setManualLabels(labels as SetManualLabelInput[], preserveNotes),
         "已更新人工熟悉度分類。",
       ),
   );
@@ -1036,6 +1168,7 @@ export function createJapaneseStudyMcpServer(config: JapaneseStudyMcpConfig): Mc
     "study_record_attempt",
     {
       title: "記錄一次答題結果",
+      _meta: appAccessible,
       description:
         "Use this when the user has completed one exact study item attempt. eventId must uniquely identify that attempt and must be reused on retry.",
       annotations: retrySafeWriteAnnotations,

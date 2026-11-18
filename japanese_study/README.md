@@ -1,10 +1,10 @@
 # Japanese Study MCP
 
-Private, tool-only MCP adapter for the authoritative Japanese Study Hub at
+Private MCP adapter and ChatGPT review App for the authoritative Japanese Study Hub at
 `C:\project\japanese-study-hub`. ChatGPT and Kuro can use the same bounded tool
 contract without reading source files or legacy progress data directly.
 
-目前 application release 為 `1.2.1`；`learning-content-v8.1` 是獨立的 Hub/MCP contract 版本。除了既有 canonical/proposal 與 bounded alias/component 投影，v8.1 也提供 server-owned practice profile fallback、可直接解析的 typed diagnosis schema，以及 bounded canonical diagnosis catalog read。
+目前 application release 為 `1.3.0`；`learning-content-v8.1` 是獨立的 Hub/MCP contract 版本。此版新增 ChatGPT 內的單字／文法庫及自評翻卡；沿用既有 canonical/proposal、practice profile、typed diagnosis 與 SRS 契約。複習內容的唯讀投影為 `review-content-v1`，需搭配支援 `review-workspace-v2` 的 Hub。
 
 ## Documentation
 
@@ -31,11 +31,15 @@ rollback artifacts remain under `.local/source-updates/`.
   idempotent retry.
 - [Troubleshooting](docs/Troubleshooting.md): Hub, build, MCP, tunnel and ChatGPT cache diagnosis.
 - [ChatGPT setup](docs/ChatGPT-Setup.md): Developer Mode and private tunnel setup.
+- [Review App](docs/ReviewApp.md): two-page UI, persistence, isolated validation and adoption checks.
 
 ## Current tools
 
 | Tool | Effect |
 | --- | --- |
+| `study_open_review` | Open the library and self-rated flashcards without recording progress |
+| `study_read_review_workspace` | Read the Hub bookmark, deck progress, or a card batch from the App |
+| `study_update_review_workspace` | Save the App bookmark or advance one exact card through Hub |
 | `study_get_summary` | Read item, label, and attempt counts |
 | `study_search_items` | Read bounded vocabulary/grammar/question matches |
 | `study_get_item` | Read one exact stable item id |
@@ -71,7 +75,7 @@ rollback artifacts remain under `.local/source-updates/`.
 | `study_supersede_practice_session` | Link an immutable corrected session as the current revision |
 | `study_get_practice_session` | Read immutable questions, answers, targets, evidence, and score |
 
-There are 34 tools. There are intentionally no file browser, SQL, delete, reset, bulk import, shell,
+There are 37 tools. There are intentionally no file browser, SQL, delete, reset, bulk import, shell,
 Anki write, general batch resolver, evidence rebuild, catalog admin, or
 legacy-migration MCP tools. Search selectors return candidates only. Target
 repair writes require exact stable item ids from a prior fingerprinted preview.

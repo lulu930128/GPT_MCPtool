@@ -69,11 +69,16 @@ $McpBuildArtifacts = @(
   (Join-Path $ProjectRoot "dist\src\api-client.js"),
   (Join-Path $ProjectRoot "dist\src\config.js"),
   (Join-Path $ProjectRoot "dist\src\http-server.js"),
-  $McpServerEntry
+  $McpServerEntry,
+  (Join-Path $ProjectRoot "dist\src\review-ui.js"),
+  (Join-Path $ProjectRoot "dist\src\ui\review.html"),
+  (Join-Path $ProjectRoot "dist\src\ui\review.css"),
+  (Join-Path $ProjectRoot "dist\src\ui\bridge.js"),
+  (Join-Path $ProjectRoot "dist\src\ui\review.js")
 )
-$ExpectedMcpVersion = "1.2.1"
+$ExpectedMcpVersion = "1.3.0"
 $ExpectedMcpContractVersion = "learning-content-v8.1"
-$ExpectedMcpToolCount = 34
+$ExpectedMcpToolCount = 37
 $HubPyproject = Join-Path $HubRoot "pyproject.toml"
 $McpUrl = "http://${HostName}:${McpPort}/mcp"
 $McpHealthUrl = "http://${HostName}:${McpPort}/health"
@@ -111,7 +116,8 @@ function Test-McpBuildFresh {
   if (-not (Test-Path -LiteralPath $McpEntry) -or -not (Test-Path -LiteralPath $McpServerEntry)) {
     return $false
   }
-  $sourceFiles = @(Get-ChildItem -LiteralPath (Join-Path $ProjectRoot "src") -Filter "*.ts" -File -Recurse)
+  $sourceFiles = @(Get-ChildItem -LiteralPath (Join-Path $ProjectRoot "src") -File -Recurse |
+    Where-Object { $_.Extension -in @('.ts', '.js', '.html', '.css') })
   if ($sourceFiles.Count -eq 0) {
     return $false
   }

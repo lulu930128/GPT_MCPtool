@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>日文複習室</title><!--STUDY_CSS--></head><body><div id="jstudy-app" aria-label="日文複習室">
+ <header class="js-head"><div class="js-brand">日文複習室</div><button id="js-expand" type="button" hidden>展開</button></header>
+ <nav class="js-nav" aria-label="學習頁面"><button type="button" class="cursor-interaction" data-page="library" aria-pressed="true">單字／文法庫</button><button type="button" class="cursor-interaction" data-page="cards" aria-pressed="false">單字卡複習</button></nav>
+ <main class="js-main">
+  <section id="js-library" aria-label="單字與文法庫">
+   <div class="js-toolbar">
+    <div class="js-switch" aria-label="教材類型"><button type="button" class="cursor-interaction" data-kind="vocab" aria-pressed="true">單字</button><button type="button" class="cursor-interaction" data-kind="grammar" aria-pressed="false">文法</button></div>
+    <label class="js-field js-search">搜尋<input id="js-query" type="search" placeholder="日文、讀音或中文意思" autocomplete="off"></label>
+    <label class="js-field">程度<select id="js-level"><option value="all">全部程度</option><option value="N4-5">N4-5</option><option>N5</option><option>N4</option><option>N3</option><option>N2</option><option>N1</option></select></label>
+    <label class="js-field">我的熟悉度<select id="js-label-filter"><option value="all">全部熟悉度</option><option value="unknown">不熟</option><option value="uncertain">不確定</option><option value="known">熟悉</option><option value="unmarked">未標記</option></select></label>
+    <label class="js-field">顯示<select id="js-density"><option value="full">摘要與詳情</option><option value="compact">精簡速覽</option></select></label>
+   </div>
+   <div class="js-summary"><span id="js-result-count" class="js-muted"></span><label class="js-check"><input id="js-hide" type="checkbox">遮住意思</label></div>
+   <nav class="js-pagination" aria-label="教材分頁">
+    <button id="js-prev" type="button">上一頁</button>
+    <form id="js-page-form"><label>第 <input id="js-page-number" aria-label="頁碼" type="number" min="1" value="1" required> 頁</label>
+    <span id="js-page-total"></span><button id="js-jump" type="submit">跳頁</button></form>
+    <button id="js-next" type="button">下一頁</button>
+    <button id="js-first" type="button">從頭閱讀</button>
+    <button id="js-bookmark" type="button" hidden>接續上次閱讀</button>
+   </nav>
+   <div id="js-scroll" class="js-scroll" tabindex="0" role="region" aria-label="教材清單"><table class="js-table" aria-label="教材與手動熟悉度"><thead><tr><th id="js-title-heading">單字／讀音</th><th>意思・用法・例句</th><th>我的熟悉度</th></tr></thead><tbody id="js-rows"></tbody></table></div>
+   <div id="js-operation" class="js-operation" role="status" aria-live="polite" hidden><span id="js-operation-text"></span><button id="js-retry" type="button" hidden>重試同一筆</button></div>
+   <div id="js-no-results" class="js-empty" hidden>沒有符合的項目</div>
+   <div class="js-bottom"><span id="js-status" role="status" aria-live="polite"></span><button id="js-refresh" type="button">重新整理</button></div>
+   <div class="js-review-foot"><button id="js-use-list" type="button" class="js-primary cursor-interaction">用目前條件隨機翻卡</button></div>
+  </section>
+  <section id="js-cards" aria-label="單字卡複習" hidden>
+   <div class="js-context"><span id="js-card-kind"></span></div>
+   <div class="js-review-options" aria-label="翻卡設定">
+    <div class="js-round-field">
+     <span class="js-round-label" id="js-card-levels-label">等級</span>
+     <details id="js-card-levels" class="js-filter">
+      <summary class="js-round-control" aria-labelledby="js-card-levels-label js-card-levels-value">
+       <span id="js-card-levels-value" class="js-filter-value">全部</span>
+      </summary>
+      <fieldset><legend class="js-sr">等級</legend></fieldset>
+     </details>
+    </div>
+    <div class="js-round-field">
+     <span class="js-round-label" id="js-card-labels-label">熟練度</span>
+     <details id="js-card-labels" class="js-filter">
+      <summary class="js-round-control" aria-labelledby="js-card-labels-label js-card-labels-value">
+       <span id="js-card-labels-value" class="js-filter-value">全部</span>
+      </summary>
+      <fieldset><legend class="js-sr">熟練度</legend></fieldset>
+     </details>
+    </div>
+    <div class="js-round-field">
+     <label class="js-round-label" for="js-direction">方向</label>
+     <select class="js-round-control" id="js-direction"><option value="ja">日文 → 中文</option><option value="zh">中文 → 日文</option></select>
+    </div>
+   </div>
+   <p id="js-deck-summary" class="js-setup-note" role="status" hidden></p>
+   <p id="js-preferences-status" class="js-setup-note" role="status" hidden></p>
+   <button id="js-retry-preferences" type="button" hidden>重試儲存篩選</button>
+   <div id="js-complete" class="js-complete" hidden><h3>本輪結果</h3><p id="js-complete-summary"></p></div>
+   <div class="js-review-foot" id="js-setup"><button id="js-start" class="js-primary cursor-interaction" type="button">開始翻卡</button></div>
+   <div id="js-session" hidden>
+    <article class="js-flash" aria-label="回想卡片">
+     <div class="js-flash-front"><span id="js-card-meta" class="js-muted"></span><div id="js-card-prompt" class="js-flash-word"></div></div>
+     <button id="js-reveal" class="js-primary js-reveal cursor-interaction" type="button">顯示答案</button>
+     <div id="js-answer" class="js-answer" tabindex="-1" aria-label="卡片答案" hidden></div>
+     <div id="js-rating" class="js-rating" hidden><button type="button" class="cursor-interaction" data-rate="again">Again／重來</button><button type="button" class="cursor-interaction" data-rate="hard">Hard／困難</button><button type="button" class="js-primary cursor-interaction" data-rate="correct">Good／正常</button><button type="button" class="cursor-interaction" data-rate="easy">Easy／簡單</button></div>
+    </article>
+   </div>
+   <button id="js-retry-card" type="button" hidden>重新讀取卡片</button>
+   <div id="js-round-actions" class="js-review-foot" hidden>
+    <button id="js-end" type="button" class="cursor-interaction">暫停</button>
+    <button id="js-skip" type="button" class="cursor-interaction">略過</button>
+   </div>
+   <p id="js-review-status" class="js-status" role="status" aria-live="polite"></p>
+  </section>
+ </main>
+</div>
+<!--STUDY_JS--></body></html>

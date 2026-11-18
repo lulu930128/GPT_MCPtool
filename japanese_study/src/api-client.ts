@@ -2,7 +2,7 @@ import type { JapaneseStudyMcpConfig } from "./config.js";
 
 export type StudyKind = "vocab" | "grammar" | "question";
 export type ManualLabel = "known" | "unknown" | "uncertain" | "suspended";
-export type AttemptResult = "seen" | "correct" | "wrong" | "easy" | "again";
+export type AttemptResult = "seen" | "correct" | "wrong" | "easy" | "again" | "hard";
 export type PracticeTargetKind = "vocab" | "grammar";
 export type PracticeTargetRole = "primary" | "secondary" | "context";
 export type PracticeQuestionValidity = "valid" | "void" | "unscored";
@@ -42,11 +42,16 @@ export type PracticeTargetSelector =
   | { type: "search"; query: string };
 
 export interface SearchItemsInput {
+  view?: "summary";
+  anchor?: string;
+  neighbor?: string;
   query?: string;
   kind?: StudyKind;
   jlptLevel?: string;
   tag?: string;
   limit?: number;
+  offset?: number;
+  manualLabel?: "known" | "unknown" | "uncertain" | "suspended" | "unmarked" | "needs_review";
 }
 
 export interface ItemDraftInput {
@@ -333,15 +338,67 @@ export class JapaneseStudyHubClient {
     return this.request("/api/v1/summary");
   }
 
-  searchItems(input: SearchItemsInput): Promise<unknown> {
+  async reviewAppStatus(workspace = false): Promise<Record<string, unknown>> {
+    const health = await this.request("/health") as Record<string, unknown>;
+    const capabilities = Array.isArray(health.capabilities) ? health.capabilities : [];
+    if (!capabilities.includes("review-content-v1") || !capabilities.includes("manual-label-filter-v1") ||
+        (workspace && !capabilities.includes("review-workspace-v2"))) {
+      throw new HubApiError("Hub needs the review App update.", 409, {
+        error: { code: "HUB_REVIEW_UPGRADE_REQUIRED", message: "Hub 尚未載入複習介面所需版本。", retryable: false },
+      });
+    }
+    return { ok: true, contract_version: "review-content-v1" };
+  }
+
+  async searchItems(input: SearchItemsInput): Promise<unknown> {
+    if (!input.view && (input.offset !== undefined || input.manualLabel !== undefined)) await this.reviewAppStatus();
     const query = new URLSearchParams();
+    if (input.view) query.set("view", input.view);
+    if (input.anchor) query.set("anchor", input.anchor);
+    if (input.neighbor) query.set("neighbor", input.neighbor);
     if (input.query) query.set("query", input.query);
     if (input.kind) query.set("kind", input.kind);
     if (input.jlptLevel) query.set("jlpt_level", input.jlptLevel);
     if (input.tag) query.set("tag", input.tag);
     if (input.limit !== undefined) query.set("limit", String(input.limit));
+    if (input.offset !== undefined) query.set("offset", String(input.offset));
+    if (input.manualLabel !== undefined) query.set("manual_label", input.manualLabel);
     const suffix = query.size ? `?${query.toString()}` : "";
     return this.request(`/api/v1/items${suffix}`);
+  }
+
+  readReviewWorkspace(
+    scope: "workspace" | "deck", sessionId?: string, offset?: number,
+    library?: { kind: "vocab" | "grammar"; explicit_kind: boolean; query?: string; jlpt_level?: string | null; manual_label?: string | null },
+  ): Promise<unknown> {
+    if (scope === "workspace") {
+      const query = new URLSearchParams();
+      if (library) {
+        query.set("library", "true");
+        for (const [key, value] of Object.entries(library)) {
+          if (value !== null && value !== undefined) query.set(key, String(value));
+        }
+      }
+      return this.request("/api/v1/review/workspace" + (query.size ? `?${query}` : ""));
+    }
+    const query = new URLSearchParams({ session_id: sessionId ?? "" });
+    if (offset !== undefined) query.set("offset", String(offset));
+    return this.request(`/api/v1/review/deck?${query}`);
+  }
+
+  readReviewItems(itemIds: string[]): Promise<unknown> {
+    return this.request("/api/v1/review/items", {
+      method: "POST",
+      body: JSON.stringify({ item_ids: itemIds }),
+    });
+  }
+
+  updateReviewWorkspace(action: "bookmark" | "start" | "move" | "preferences", payload: object): Promise<unknown> {
+    const paths = { bookmark: "bookmark", start: "deck", move: "deck/move", preferences: "preferences" };
+    return this.request(`/api/v1/review/${paths[action]}`, {
+      method: action === "bookmark" || action === "preferences" ? "PUT" : "POST",
+      body: JSON.stringify(payload),
+    });
   }
 
   getItem(itemId: string): Promise<unknown> {
@@ -561,10 +618,11 @@ export class JapaneseStudyHubClient {
     return this.request(`/api/v1/diagnosis-definitions${suffix}`);
   }
 
-  setManualLabels(labels: SetManualLabelInput[]): Promise<unknown> {
+  setManualLabels(labels: SetManualLabelInput[], preserveNotes = false): Promise<unknown> {
     return this.request("/api/v1/mastery/labels", {
       method: "POST",
       body: JSON.stringify({
+        ...(preserveNotes ? { preserve_notes: true, summary: true } : {}),
         labels: labels.map((entry) => ({
           item_id: entry.itemId,
           label: entry.label,

@@ -224,7 +224,7 @@ function Wait-JsCondition {
 
 function Invoke-JsJsonHealth {
   param([Parameter(Mandatory = $true)][string]$Url)
-  try { return Invoke-RestMethod -UseBasicParsing -Uri $Url -TimeoutSec 2 }
+  try { return Invoke-RestMethod -UseBasicParsing -Uri $Url -TimeoutSec 2 -MaximumRedirection 0 }
   catch { return $null }
 }
 
@@ -246,7 +246,8 @@ function Test-JsBuildCurrent {
   param($Context)
   if (-not (Test-Path -LiteralPath $Context.mcpEntry -PathType Leaf)) { return $false }
   if (-not [string]::IsNullOrWhiteSpace([string]$Context.expectedBuildId)) { return $true }
-  $sources = @(Get-ChildItem -LiteralPath (Join-Path $Context.projectRoot 'src') -Filter '*.ts' -File -Recurse -ErrorAction SilentlyContinue)
+  $sources = @(Get-ChildItem -LiteralPath (Join-Path $Context.projectRoot 'src') -File -Recurse -ErrorAction SilentlyContinue |
+    Where-Object { $_.Extension -in @('.ts', '.js', '.html', '.css') })
   if ($sources.Count -eq 0) { return $false }
   $latestSource = $sources | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
   return (Get-Item -LiteralPath $Context.mcpEntry).LastWriteTimeUtc -ge $latestSource.LastWriteTimeUtc
@@ -258,23 +259,40 @@ function Test-JsHubHealth {
   return ($null -ne $health -and $health.ok -eq $true -and [string]$health.service -eq 'japanese-study-hub')
 }
 
-function Test-JsMcpHealth {
+function Get-JsMcpIdentityStatus {
   param($Context)
   $health = Invoke-JsJsonHealth -Url $Context.mcpHealthUrl
-  return (
-    $null -ne $health -and $health.ok -eq $true -and
-    [string]$health.service -eq 'japanese-study-mcp' -and
-    [string]$health.version -eq $Context.expectedMcpVersion -and
-    [string]$health.contractVersion -eq $Context.expectedContractVersion -and
-    [int]$health.toolCount -eq $Context.expectedToolCount -and
-    [string]$health.buildId -eq (Get-JsExpectedBuildId -Context $Context)
-  )
+  if ($null -eq $health) { return 'Unavailable' }
+  foreach ($field in @('ok', 'service', 'version', 'contractVersion', 'toolCount', 'buildId')) {
+    if ($null -eq $health.PSObject.Properties[$field]) { return 'Invalid' }
+  }
+  if ($health.ok -isnot [bool] -or -not $health.ok -or
+      $health.service -isnot [string] -or $health.service -cne 'japanese-study-mcp' -or
+      $health.version -isnot [string] -or $health.contractVersion -isnot [string] -or
+      $health.buildId -isnot [string] -or $health.buildId -cnotmatch '^[a-f0-9]{16,64}$' -or
+      ($health.toolCount -isnot [int] -and $health.toolCount -isnot [long]) -or $health.toolCount -le 0) {
+    return 'Invalid'
+  }
+  if ($health.version -cne $Context.expectedMcpVersion -or
+      $health.contractVersion -cne $Context.expectedContractVersion -or
+      $health.toolCount -gt $Context.expectedToolCount) {
+    return 'Incompatible'
+  }
+  if ($health.toolCount -eq $Context.expectedToolCount -and $health.buildId -ceq (Get-JsExpectedBuildId -Context $Context)) {
+    return 'Current'
+  }
+  return 'ArtifactMismatch'
+}
+
+function Test-JsMcpHealth {
+  param($Context)
+  return ((Get-JsMcpIdentityStatus -Context $Context) -eq 'Current')
 }
 
 function Test-JsTunnelReady {
   param($Context)
   try {
-    $response = Invoke-WebRequest -UseBasicParsing -Uri "$($Context.tunnelHealthUrl)/readyz" -TimeoutSec 2
+    $response = Invoke-WebRequest -UseBasicParsing -Uri "$($Context.tunnelHealthUrl)/readyz" -TimeoutSec 2 -MaximumRedirection 0
     return ([int]$response.StatusCode -ge 200 -and [int]$response.StatusCode -lt 300 -and $response.Content.Trim() -in @('ready', 'ok'))
   }
   catch { return $false }
@@ -754,7 +772,8 @@ function Get-JapaneseStudyRuntimeStatus {
   $mcp = Resolve-JsRoleOwnership -Context $Context -Role mcp -AdoptLegacyExactListener:$AdoptLegacyExactListeners
   $tunnel = Resolve-JsRoleOwnership -Context $Context -Role tunnel -AdoptLegacyExactListener:$AdoptLegacyExactListeners
   $hubHealthy = Test-JsHubHealth -Context $Context
-  $mcpHealthy = Test-JsMcpHealth -Context $Context
+  $mcpIdentityStatus = Get-JsMcpIdentityStatus -Context $Context
+  $mcpHealthy = $mcpIdentityStatus -eq 'Current'
   $tunnelReady = Test-JsTunnelReady -Context $Context
   $ownerships = @($hub, $mcp, $tunnel)
   $status = if (@($ownerships | Where-Object { $_.state -eq 'OwnershipUnknown' }).Count -gt 0) { 'OwnershipUnknown' }
@@ -767,7 +786,7 @@ function Get-JapaneseStudyRuntimeStatus {
   return [pscustomobject]@{
     status = $status
     hub = [pscustomobject]@{ healthy = $hubHealthy; ownership = $hub.state; pid = $hub.managedPid; listenerPid = $hub.listenerPid; relation = $hub.relation }
-    mcp = [pscustomobject]@{ healthy = $mcpHealthy; ownership = $mcp.state; pid = $mcp.managedPid; listenerPid = $mcp.listenerPid; relation = $mcp.relation }
+    mcp = [pscustomobject]@{ healthy = $mcpHealthy; identityStatus = $mcpIdentityStatus; ownership = $mcp.state; pid = $mcp.managedPid; listenerPid = $mcp.listenerPid; relation = $mcp.relation }
     tunnel = [pscustomobject]@{ ready = $tunnelReady; ownership = $tunnel.state; pid = $tunnel.managedPid; listenerPid = $tunnel.listenerPid; relation = $tunnel.relation }
     ownedPids = $ownedPids
   }
@@ -781,7 +800,7 @@ function New-JapaneseStudyRuntimeContext {
     [string]$TunnelClientPath, [string]$TunnelProfileDir, [string]$TunnelProfile = 'japanese-study', [string]$TunnelHealthUrl = 'http://127.0.0.1:18792',
     [string]$TunnelArguments, [string]$TunnelIdentity,
     [string]$KeyStorePath, [string]$SecretPath, [string]$ExpectedBuildId,
-    [string]$ExpectedMcpVersion = '1.2.1', [string]$ExpectedContractVersion = 'learning-content-v8.1', [int]$ExpectedToolCount = 34,
+    [string]$ExpectedMcpVersion = '1.3.0', [string]$ExpectedContractVersion = 'learning-content-v8.1', [int]$ExpectedToolCount = 37,
     [int]$CoreReadyTimeoutSeconds = 20, [int[]]$TunnelRecoveryDelaysSeconds = @(15, 30, 60)
   )
   $root = (Resolve-Path -LiteralPath $ProjectRoot -ErrorAction Stop).Path
@@ -807,7 +826,7 @@ function New-JapaneseStudyRuntimeContext {
     nodePath = [IO.Path]::GetFullPath($NodePath); uvPath = [IO.Path]::GetFullPath($UvPath)
     hubArguments = $HubArguments; hubIdentity = $HubIdentity; hubPyproject = Join-Path $hub 'pyproject.toml'
     mcpEntry = $mcpEntry; mcpIdentity = [IO.Path]::GetFileName($mcpEntry)
-    mcpBuildArtifacts = @('api-client.js', 'config.js', 'http-server.js', 'server.js' | ForEach-Object { Join-Path $root "dist\src\$_" })
+    mcpBuildArtifacts = @('api-client.js', 'config.js', 'http-server.js', 'server.js', 'review-ui.js', 'ui\review.html', 'ui\review.css', 'ui\bridge.js', 'ui\review.js' | ForEach-Object { Join-Path $root "dist\src\$_" })
     hubBaseUrl = "http://${HostName}:${HubPort}"; hubHealthUrl = "http://${HostName}:${HubPort}/health"; mcpHealthUrl = "http://${HostName}:${McpPort}/health"
     expectedBuildId = $ExpectedBuildId; expectedMcpVersion = $ExpectedMcpVersion; expectedContractVersion = $ExpectedContractVersion; expectedToolCount = $ExpectedToolCount
     tunnelClientPath = [IO.Path]::GetFullPath($TunnelClientPath); tunnelProfileDir = [IO.Path]::GetFullPath($TunnelProfileDir); tunnelProfilePath = $profilePath

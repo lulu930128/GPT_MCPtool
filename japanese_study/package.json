@@ -1,6 +1,6 @@
 {
   "name": "japanese-study-mcp",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "description": "Private MCP adapter for the Japanese Study Hub.",
   "type": "module",
   "private": true,
@@ -10,7 +10,7 @@
     "japanese-study-mcp-stdio": "./dist/src/index.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/build-ui.mjs",
     "test": "npm run build && node --test dist/tests/config.test.js dist/tests/api-client.test.js dist/tests/server.test.js",
     "smoke:http": "npm run build && node scripts/smoke-http.mjs",
     "smoke:hub": "npm run build && node scripts/smoke-hub.mjs",

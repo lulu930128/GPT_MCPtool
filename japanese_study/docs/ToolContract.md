@@ -25,6 +25,9 @@
 | `study_get_quality_inbox` | Read | List missing/incomplete/proposed meaning/alias/component/unresolved quality work |
 | `study_get_due_reviews` | Read | List bounded SRS due items without marking reviewed |
 | `study_list_study_lists` | Read | List imported, inbox, and custom lists |
+| `study_open_review` | Read | Open the ChatGPT library / flashcard resource; check Hub review capabilities |
+| `study_read_review_workspace` | Read (App) | Read the Hub bookmark and deck positions or hydrate an ordered card batch |
+| `study_update_review_workspace` | Write (App) | Save a bookmark, start an exact session, or submit one exact grade/skip with atomic progress |
 | `study_create_study_list` | Idempotent write | Create one typed custom list |
 | `study_add_study_list_items` | Idempotent write | Add exact same-kind item ids to a list |
 | `study_preview_question_candidates` | Read | Generate deterministic candidate payloads |

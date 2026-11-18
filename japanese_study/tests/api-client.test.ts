@@ -3,6 +3,74 @@ import { createServer } from "node:http";
 import test from "node:test";
 import { JapaneseStudyHubClient } from "../src/api-client.js";
 
+test("review pagination checks Hub capabilities and forwards manual-label filters", async () => {
+  const requests: string[] = [];
+  let upgraded = true;
+  const server = createServer((req, res) => {
+    requests.push(req.url!);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify(req.url === "/health"
+      ? { ok: true, capabilities: upgraded ? ["review-content-v1", "manual-label-filter-v1"] : [] }
+      : { ok: true, items: [], total: 60, offset: 50, limit: 50, has_more: false }));
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const client = new JapaneseStudyHubClient({ hubBaseUrl: "http://127.0.0.1:" + address.port, hubTimeoutMs: 2000 });
+  try {
+    await client.searchItems({ kind: "vocab", offset: 50, limit: 50, manualLabel: "needs_review" });
+    assert.equal(requests[0], "/health");
+    const query = new URL(requests[1], "http://test").searchParams;
+    assert.equal(query.get("offset"), "50");
+    assert.equal(query.get("manual_label"), "needs_review");
+    upgraded = false;
+    const count = requests.length;
+    await assert.rejects(client.searchItems({ offset: 0 }), /needs the review App update/);
+    assert.deepEqual(requests.slice(count), ["/health"]);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
+});
+
+test("workspace summaries and batch reads use one Hub request each", async () => {
+  const paths: string[] = [];
+  const requests: Array<{ method: string; body: unknown }> = [];
+  const server = createServer(async (req, res) => {
+    paths.push(req.url!);
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    requests.push({ method: req.method!, body: chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : null });
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify(req.url === "/health"
+      ? { ok: true, capabilities: ["review-content-v1", "manual-label-filter-v1", "review-workspace-v1"] }
+      : { ok: true }));
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const client = new JapaneseStudyHubClient({ hubBaseUrl: "http://127.0.0.1:" + address.port, hubTimeoutMs: 2000 });
+  try {
+    await assert.rejects(client.reviewAppStatus(true), /needs the review App update/);
+    await client.searchItems({ view: "summary", offset: 950, limit: 50, anchor: "vocab:last", neighbor: "vocab:next" });
+    await client.readReviewWorkspace("deck", "flash-00000000-0000-4000-8000-000000000001", 104);
+    await client.readReviewItems(["vocab:first", "vocab:second"]);
+    const prefs = { kind: "vocab", direction: "ja", jlpt_levels: ["N2", "N3"], manual_labels: [] };
+    await client.updateReviewWorkspace("preferences", prefs);
+    assert.equal(paths.length, 5);
+    assert.deepEqual(paths.slice(3), ["/api/v1/review/items", "/api/v1/review/preferences"]);
+    assert.deepEqual(requests.slice(3), [
+      { method: "POST", body: { item_ids: ["vocab:first", "vocab:second"] } },
+      { method: "PUT", body: prefs },
+    ]);
+    const query = new URL(paths[1], "http://test").searchParams;
+    assert.equal(query.get("view"), "summary");
+    assert.equal(query.get("anchor"), "vocab:last");
+    assert.equal(query.get("neighbor"), "vocab:next");
+    assert.match(paths[2], /offset=104$/);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
+});
 
 test("Hub client sends bounded query and bearer auth", async () => {
   let receivedUrl = "";
