@@ -1,7 +1,6 @@
 # 大檔分段傳輸
 
-Source **1.9.0 / contract 2026-11-08.2**。這是既有 archive 模組的 in-process extension，
-共新增四個 tools 與一種 resource URI，沒有新服務、listener、approval gate 或 workspace 寫入工具。
+V2 沿用 **1.9.0 / contract 2026-11-08.2** 引入的分段 Owner 與四個傳輸工具。`read_file` 和 `read_files` 可在 workspace root 準備完整原檔；直接呼叫 `start_segmented_transfer` 的工作沿用 asset/file-return scope。
 1.8.0 的 `package_folder_zip`、`fetch_zip`、`inspect_zip`、`list_zip_entries`、`read_zip_entry`
 及其限制、schema、single-use 暫存行為維持不變。
 
@@ -49,9 +48,9 @@ parts 的 index 從 0 起、offset 是重組檔案中的 byte offset、length �
 | 既有 ZIP 展開量 | 另有 **100 GB** 上限，實際 streaming inflation 與宣告值都驗證 |
 | 每工作 archive output | **100 GB**，ZIP headers 與壓縮後擴張也計入；超過則失敗 |
 | 所有保留工作 staged payload | 合計 **100 GB**；metadata 另受檔數、名稱與固定記錄長度限制 |
-| chunk | 預設 8 MiB，範圍 1 MiB 至 `min(maxFetchFileBytes,12 MiB)`；不改既有 fetch cap |
+| chunk | 預設最多 7,815,168 bytes（base64 與 MCP 封裝預算），舊 manifest 的大分段可由相同 taskId 取得 range links。明確指定的範圍 1 MiB 至 `min(maxFetchFileBytes,12 MiB)`；不改既有 fetch cap |
 | 頁面 | 預設 20、最大 100 筆，parts 與 entries 各自分頁 |
-| 工作 | 一次一個封裝；最多四個保留工作（含等待清理與未到期孤兒） |
+| 工作 | 直接 `start_segmented_transfer` 的封裝一次一個，最多保留四個（含未到期孤兒）。`read_file(s)` 建立的 workspace captures 可使用各自 taskId 同時保留與恢復。 |
 | folder entries | 最多 100,000，包含目錄與 skips；沒有額外 4,096 單目錄門檻 |
 | 既有 ZIP entries | 分段 reader 為 100,000，與 folder writer 一致；原本 inspect_zip/fetch_zip 仍為 2,048 |
 | 名稱 | 沿用 32 層、512 UTF-8 bytes 與 portable name 檢查 |
@@ -78,14 +77,16 @@ payload 記憶體為 O(chunk)，另有受全域 100,000 entries 限制的名稱�
 
 ## 政策、恢復與清理
 
-沿用 WORKSPACE_MCP_ROOTS、assetScopes、fileReturnScopes、shared path guard、root-specific deny。
+直接 `start_segmented_transfer` 的來源沿用 assetScopes、fileReturnScopes、shared path guard 與 root-specific deny。從 `read_file(s)` 啟動的 workspace 原件則沿用該 root 的 research read policy。
 來源每檔讀前/後及整個擷取結束再查 identity；變動、消失或 OS 失敗會使工作失敗。
 資料夾中的 deny、symlink/junction、hardlink、特殊檔排除且列入 manifest；直接指定的這類來源拒絕。
 既有 ZIP 僅 final `.zip` 使用既有窄例外；全部 entries 需通過 deny、CRC、size、local/central header 檢查。
 拒絕 encrypted、特殊 entries、重疊/prefixed/reordered local records、alternate Unicode path fields、不支援 compression。
 這些是明確的 reader 相容性限制，不能以 file 模式繞過 ZIP deny。
 
-`workspace-transfer:///{taskId}/{index}?sha256=...` 沿既有 SDK `resource_link → resources/read` 回傳 base64 blob。
+原 `workspace-transfer:///{taskId}/{index}?sha256=...` URI 與 part SHA 保留。對既有 8–12 MiB part，用原 `taskId` 讀取 parts manifest 的 `records[].ranges`，逐一對 range link 呼叫 `resources/read`，依 part 內的 byte offset 拼接並驗該 part 的 SHA-256，再按 manifest 的 part offset 重組、驗全檔 `archiveSha256`。新舊工作皆受單筆完整序列化 MCP 訊息 10 MiB 預算約束。
+
+`ready` 證明 server 已備妥資料。`finish(complete)` 記錄呼叫端已重組驗 SHA 的聲明；Host 收到或呈現仍須接收端獨立證據。1 GiB 已於隔離 SDK 重組驗證，正式 ChatGPT Host 的同規模 E2E 尚未驗證。
 片段使用 `application/octet-stream` 與 `.part-000001` 等名稱，並非單片可開啟 ZIP。
 連結產生和預讀都不刪檔；讀取可重試，直到 expiry/cleanup 或總傳送額度不足。
 Host 對 MIME、檔名、附件下載 UI 的行為仍須真實 E2E，不能從 MCP schema 推定。
@@ -123,4 +124,4 @@ Python 只用標準庫；source regression 的獨立 ZIP64 驗證也使用 Pytho
 ZIP64 格式依 [PKWARE APPNOTE](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT)，
 existing ZIP streaming reader 沿用已安裝的 [yauzl](https://github.com/thejoshwolfe/yauzl)，無新增依賴。
 Build、隔離 source、正式 runtime、active MCP discovery 與 ChatGPT attachments 是分開的驗收層。
-本次逐層結果見 [Segmented-Transfer-Evidence.md](Segmented-Transfer-Evidence.md)。
+1.9.0 的量測見[分段傳輸驗收](Segmented-Transfer-Evidence.md)，V2 的續傳與大檔實測見 [V2 驗收紀錄](ProjectWorkspaceV2Evidence.md)。

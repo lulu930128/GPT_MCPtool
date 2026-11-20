@@ -69,6 +69,7 @@ export function createComponentDiagnostics(query: ReadOnlyQuery = queryReadOnlyO
 export interface WorkspaceRuntimeContext {
   transport: "stdio" | "streamable-http";
   httpListening: boolean | null;
+  port?: number;
 }
 export interface WorkspaceRuntimeOptions {
   authenticatedMaintenance?: boolean;

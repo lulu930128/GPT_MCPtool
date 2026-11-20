@@ -1,6 +1,8 @@
 # GPT Project Workspace MCP
 
-目前 source application 版本為 `1.9.0`，tool contract 為 `2026-11-08.2`。新增背景分段傳輸、串流 ZIP64、分頁 manifest、可重讀分段與到期清理，保留 1.8.0 小 ZIP 工具。實際採用仍須核對 runtime buildId 與更新 receipt，不能由 source 版本推定。Workspace root、asset scope 與 tool contract 仍依各自的安全契約演進。
+目前 source application 版本為 `2.0.0`，tool contract 為 `2026-11-20.1`。Workspace V2 支援 root 內的大檔文字、binary、Git 歷史與 SQLite 研究，規格、操作與部署界線見 [Project Workspace V2](docs/ProjectWorkspaceV2.md)。
+
+1.9.0 新增背景分段傳輸、串流 ZIP64、分頁 manifest、可重讀分段與到期清理，保留 1.8.0 小 ZIP 工具。實際採用仍須核對 runtime buildId 與更新 receipt，不能由 source 版本推定。Workspace root、asset scope 與 tool contract 仍依各自的安全契約演進。
 
 圖片、Office 與 PDF 檔案的公開讀取設計、限制與設定方式請見
 [docs/Asset-Readers.md](docs/Asset-Readers.md)。
@@ -38,13 +40,13 @@ Workspace 檔案工具接受可選的 `root`；省略時使用 `projects`。路�
 
 - `mcp_component_update_status`、`mcp_component_update_preview`、`mcp_component_update`、`mcp_component_update_receipt`：透過既有 CC owner 執行固定元件的 source Build/Stage/Update；與只重載既有 dist 的 `reload_runtime` 分開。update 使用原 UUID、preview 的 source digest、不可覆寫的 version label 與 `wait_for_idle`，Workspace 自身及 CC 納入獨立 v2 目標集合；沒有更新入口的元件回 `NOT_SUPPORTED`。詳見[更新契約與驗收](docs/LocalComponentManagement.md#2026-10-28-phase-2source-update-v2)。
 
-Git 工具仍僅提供 read-only status／diff inspection；Git mutation 交由 Codex 在使用者明確授權的
+Git 工具提供唯讀 status、diff 與 commit history inspection；Git mutation 交由 Codex 在使用者明確授權的
 任務範圍使用本機 Git、add、commit、branch、push，依根目錄 Git 與公開安全規則執行。
 MCP 沒有 Git mutation 工具不代表 Codex 被禁止執行 Git；不新增任意 shell 或第二套 Git Manager。
 同一授權範圍不逐步重複確認，未包含 Push 的任務不外推 Push／公開發布；破壞性 Git 操作須另行
 明確指定，實際平台／ACL 拒絕須停止回報，不繞過。
 
-- `mcp_component_status`、`mcp_component_preview`、`mcp_component_receipt` 與 `mcp_component_restart`：七個其他 MCP 的既有 CC 狀態／預覽與 durable receipt；七個固定目標皆可在明確確認中斷後人工 reload；同 UUID 換目標會拒絕。重用現有 authenticated HTTP 與唯一 CC tray／component controller，不做額外真人身分驗證。詳見 [本機元件維護與人工採用](docs/LocalComponentManagement.md)。本輪只做 source／隔離驗證。
+- `mcp_component_status`、`mcp_component_preview`、`mcp_component_receipt` 與 `mcp_component_restart`：七個其他 MCP 的既有 CC 狀態／預覽與 durable receipt；七個固定目標皆可在明確確認中斷後人工 reload；同 UUID 換目標會拒絕。重用現有 authenticated HTTP 與唯一 CC tray／component controller，不做額外真人身分驗證。詳見 [本機元件維護與人工採用](docs/LocalComponentManagement.md)。
 
 - `check_tcp_port`、`list_listening_ports`、`inspect_port_owner`、`resolve_dns`、`ping_host`、`http_health_check`：受限 runtime/connectivity 觀察，參數與限制見下節。
 - `create_text_file`、`append_text_file`、`patch_text_file`、`update_json_value`、`make_directory`：只在有效 write policy 啟用時提供，寫入須明確指定 root、路徑與 operation_id。
@@ -54,9 +56,8 @@ MCP 沒有 Git mutation 工具不代表 Codex 被禁止執行 Git；不新增任
 - `list_projects`：列出指定 root 的直接子資料夾，標示 README、AGENTS、git repo。
 - `project_context`：讀取某個專案的 README、AGENTS、package scripts、pyproject 等入口資訊摘要。
 - `list_dir`：受限目錄瀏覽，有深度與筆數上限。
-- `read_file`：讀取 root 內允許的文字檔，有大小與行數上限；`includeSha256=true` 從同一份完整原始 UTF-8 快照產生 hash 與文字視窗，供後續修改使用。
-- `read_files`：依目前設定的檔數、總行數與 bytes 上限，批次讀取已預先通過相同 path guard 的文字視窗。
-- `find_files`：以 relative glob 與副檔名尋找檔案，不回傳絕對路徑。
+- `read_file`、`read_files` 支援 20,000 行、binary range、snapshot 與原始檔分段。`inspect_git`、`inspect_sqlite`、`inspect_runtime` 提供唯讀研究入口。
+- `find_files`：在指定目錄下套用 relative glob 與副檔名篩選，回傳相對於該目錄的路徑。不含 `/` 的 pattern 會比對各層 basename。例如 `path=.git, pattern=HEAD` 可找出 `HEAD`，`pattern=**/*.sqlite` 可找到該層及子目錄的 SQLite 檔。`.db`、`.sqlite3`、`.mdb`、`.accdb`、`.bin` 也適用；走訪時跳過 symlink 項目。
 - `search_text`：在允許範圍內搜尋文字並可回傳前後文；優先使用 npm platform package 內不進 Git 的 `rg`，沒有時使用 bounded JavaScript fallback。
 - `git_status_summary`、`git_diff`、`git_diff_file`：只讀且 project-scoped 的 Git status／patch；denied、binary、symlink、submodule 內容不會外流。
 - `find_symbol`、`find_references`、`import_graph`、`project_map`：TypeScript、JavaScript、Python 的 deterministic lexical 分析；不是 compiler／LSP 語意解析。
@@ -70,25 +71,15 @@ MCP 沒有 Git mutation 工具不代表 Codex 被禁止執行 Git；不新增任
 
 ### 文字預算、續讀與搜尋去重
 
-Source 預設上限為單檔 600 行、批次 12 檔／2400 行、搜尋 120 筆；單檔文字
-256 KiB、批次文字與搜尋結果各 512 KiB。實際值由 `WORKSPACE_MCP_MAX_READ_LINES`、
-`WORKSPACE_MCP_MAX_BATCH_FILES`、`WORKSPACE_MCP_MAX_BATCH_TOTAL_LINES`、
-`WORKSPACE_MCP_MAX_SEARCH_RESULTS` 及既有 bytes 環境變數控制，tool schemas 與說明同步使用設定值。
-以現役 `workspace_info.limits` 為準；source Build 不代表現役已採用。
+V2 預設支援每來源 1 GiB，每次最多 20,000 行。單檔省略 `maxLines` 時沿用 600 行。批次取消預設 12 檔、2,400 行的總限制，保留明確指定的 operator 設定。搜尋每頁預設最多 120 筆。
 
-`read_files` 先保留明確指定的 `maxLines`，再將剩餘行數公平分給省略者；明確預算總和超限仍拒絕。
-Bytes 依剩餘檔案需求公平保留（每檔仍受單檔上限約束），小檔及前檔未用完的額度可釋出給後檔。
-回傳每檔 `appliedLimits`、批次 `totalReturnedLines`／`totalReturnedBytes`；bytes 計算 UTF-8 文字，
-不含 JSON 包裝、metadata 或 MCP 相容性保留的重複文字副本。
+文字回傳 `completedLines`、`nextStartLine`、`nextOffset` 與 `snapshotId`。大檔若尚未掃至檔尾，`totalLines` 可為 null。完整行放不下時，auto 可回傳同一檔案的背景分段工作。使用其 taskId 查狀態及 manifest，依 offset 讀回各 Resource，再核對 SHA-256。已取得的 cursor 或 taskId 可由客戶端自動續讀。
 
-`read_file`／`read_files` 保留原欄位，另回傳 `completedLines`、`nextStartLine`、
-`partialLine`、`truncationReasons`（`max_lines`、`max_returned_bytes`、`partial_line`，
-批次可加 `batch_total_lines`／`batch_total_bytes`）。`nextStartLine=null` 才表示讀完；
-完整行後放不下的下一行不回傳部分內容，直接從該行續讀。
-只有首行可能回傳 UTF-8 安全的部分文字：此時 `completedLines=0`、`eof=false`、
-`nextStartLine` 留在原行，並以 `continuationRequiresMoreBytes`／`requiredBytesForNextLine`
-指出須提高 bytes 預算才能完成。批次可改用 `read_file`；超過單檔 cap 則需 operator 調整設定，
-重複相同預算不會前進。續讀假設檔案未被外部修改；一般讀取不是跨請求快照。
+舊工作如有 8–12 MiB 的 part，用原 taskId 取得 manifest 的 `records[].ranges`，依 offset 組回該 part，驗證原 part 與全檔雜湊。詳見[分段傳輸](docs/Segmented-Transfer.md)。
+
+`read_files` 先檢查每個路徑，再依單檔需求與剩餘額度分配 inline bytes。批次續頁保留原 `files`，將 `nextFileIndex` 傳入 `fileIndex`。預設單檔 inline 預算為 256 KiB。要取得完整原件可指定 `delivery=resource`。每筆完整 MCP 訊息的傳輸預算為 10 MiB。
+
+`search_text` 的 `includeGlobs`、`excludeGlobs` 相對於搜尋目錄，`fileKinds` 可選 `source/tests/translations/docs/git`。搜尋依類型、路徑與行號排序，續頁傳入相同條件與 `cursor=nextCursor`。顯式 `.git` 路徑、`git` 類型或 `includeGitInternals=true` 會納入 Git 內部檔案。
 
 `search_text` 預設維持 `contextMode=per_match` 與原有 `results` schema。
 Opt-in `contextMode=merged` 將同檔重疊或緊鄰視窗合併為唯一 `contexts`，每筆
@@ -100,7 +91,9 @@ Context 的 `id` 對應 `contextId`，並提供 `path`、`startLine`、`endLine`
 
 ### Runtime／connectivity diagnostics
 
-六個 diagnostics 工具均為 readOnlyHint=true、destructiveHint=false。目前預設共 50 tools，檔案 operate mode 為 56。restart／update 維護工具標記 destructive；`package_folder_zip` 與分段工作的 start/finish 因管理 server-owned 暫存檔標記 readOnlyHint=false、destructiveHint=false，不授予 workspace 寫入權限。
+`inspect_runtime` 支援 `health`（預設）、`performance`、`full`。回傳的 `coverage=point_sample` 表示單次觀測；`windowMinutes` 記錄要求的時間窗。缺少量測或 Owner 證據時，依欄位保留 `NOT_INSTRUMENTED` 或 `UNVERIFIED`。
+
+六個 diagnostics 工具均為 readOnlyHint=true、destructiveHint=false。可用工具以當前 MCP `tools/list` 為準。restart／update 維護工具標記 destructive；`package_folder_zip` 與分段工作的 start/finish 因管理 server-owned 暫存檔標記 readOnlyHint=false、destructiveHint=false，不授予 workspace 寫入權限。
 TCP／DNS／HTTP 使用 Node API，Windows listener／PID／ping 使用固定 System32 命令與既有 bounded runner。
 不接受任意 command、flags、executable、cwd、env，也不能啟停任何目標程序或服務。
 
@@ -138,7 +131,9 @@ TCP refusal／ICMP failure 不足以證明服務不存在。Windows PID／image 
 
 ## 安全邊界
 
-所有路徑都必須位於 `WORKSPACE_MCP_ROOTS` 選定的 root 下，並會解析 realpath，避免 `..`、symlink、junction 逃逸。預設會阻擋：
+`workspace_info.denyPolicy` 列出一般排除規則，`researchReadPolicy` 列出 V2 在已設定 root 內的讀取例外。`list_dir`、`find_files`、`read_file(s)` 可發現或讀取 `.git`、資料庫及 `.bin`。`inspect_git` 可讀歷史 `.env` blob；工作樹 `.env`、`.env.*` 仍禁止直接讀。`inspect_sqlite` 以唯讀交易快照查詢 SQLite。`.mdb` 與 `.accdb` 支援 raw bytes。Asset、Writer 依各自既有政策運作。
+
+所有路徑都必須位於 `WORKSPACE_MCP_ROOTS` 選定的 root 下，並會解析 realpath，避免 `..`、symlink、junction 逃逸。一般 `denyPolicy` 的範圍包括：
 
 - `.git`、`.secrets`、`.tunnel-client`、`.tmp`、`node_modules`、`.venv`、`.next`、cache、build output。
 - `.env`、`.env.*`、常見 private key 名稱。
@@ -158,13 +153,9 @@ npm run smoke:roots
 
 ## ChatGPT 用法
 
-建議用托盤程式啟動，這樣可以直接看 server 是否正在跑：
+正式服務由 MCP Control Center 委派給 `project_reading` 的元件 controller。換版時先用 `mcp_component_update_preview` 取得 digest，再提交 source update，用原 requestId 核對終態收據與 running buildId。GPT 端由使用者刷新。
 
-```powershell
-C:\GPT_MCPtool\project_reading\scripts\start-tray.vbs
-```
-
-目前正在遷移到 `unified-lifecycle-v3`：`scripts\runtime-control.ps1` 是唯一 lifecycle
+在 `unified-lifecycle-v3` 下，`scripts\runtime-control.ps1` 是唯一 lifecycle
 owner，以 mutex、listener PID、exact executable、PID file 與 process start-time metadata
 管理 detached MCP server／tunnel。它提供固定動作：
 
@@ -252,7 +243,7 @@ npm run tunnel:key:save-from-env
 
 `npm run tunnel:run` 是長駐程序。它會先讀目前 process env；如果沒有，就會嘗試讀 `.secrets\control-plane-api-key.dpapi`。
 
-`npm run startup:install` 會把 tray launcher 加到目前 Windows 使用者的 Startup 資料夾。`scripts\start-tray.vbs` 現在會自動啟動 MCP server 和 tunnel。
+`npm run startup:install` 與 `scripts\start-tray.vbs` 屬於歷史 tray 啟動流程。
 
 詳細掛到 ChatGPT 的步驟在 [docs/ChatGPT-Setup.md](docs/ChatGPT-Setup.md)。
 
@@ -308,11 +299,7 @@ npm run smoke:http
 npm run smoke:roots
 ```
 
-live server 已啟動時，驗證 MCP initialize、tool schema、四 root、UTF-8 路徑與 deny policy：
-
-```powershell
-npm run smoke:live
-```
+V2 的正式驗證使用已設定的 MCP 連線，讀取 `workspace_runtime_status`，以本次 Control Center 收據比對 running buildId，再呼叫[兩個 find_files 案例](docs/ChatGPT-Setup.md#連上後可以這樣問-chatgpt)。`scripts/smoke-live-mcp.mjs` 與 `scripts/smoke-live-diagnostics.mjs` 內的版本斷言適用於歷史版本 1.7.0。
 
 不要用 `npm start` 或 `node C:\GPT_MCPtool\project_reading\dist\src\http-main.js` 當一次性驗證命令；那是長駐 server，會持續等待 ChatGPT 或 tunnel 連線。
 
@@ -347,13 +334,13 @@ startup_timeout_sec = 10
 - 不要用 `C:\` 或使用者家目錄取代明確的 `WORKSPACE_MCP_ROOTS` allowlist。
 - 寫入須使用已審查的 policy 與 authenticated transport；詳見受限寫入文件。
 
-## 本機 Control Center 通道（source candidate）
+## 本機 Control Center 通道
 
 Workspace 已改接現有 source schema 3 tray 的固定 local pipe。status／preview 採用
 有時間戳的 CC 快照；七個固定元件的明確單一目標人工 reload 使用既有 controller 與 durable UUID 收據。
 未驗證 HTTP／STDIO 不啟用 restart；沿用現有 authenticated HTTP，不另外驗證真人身分。
 沒有 Program Files G2、跨 SID、第二個 manager 或通用 shell。
-本輪未 restart／部署。詳見 [本機維護、限制與採用](docs/LocalComponentManagement.md)。
+維護結果由該次操作的終態收據與 running buildId 核對。詳見 [本機維護、限制與採用](docs/LocalComponentManagement.md)。
 舊 [G2 證據](docs/ReadOnlyG2Evidence.md) 保留為已被取代的 prototype 記錄。
 
 `workspace_runtime_status()` 讀取 Workspace 開機 identity、目前權限、HTTP listener context、

@@ -152,7 +152,7 @@ test("operate is opt-in and malformed policy preserves default workspace tools",
     await server.connect(st); await client.connect(ct);
     try {
       const tools = (await client.listTools()).tools;
-      assert.equal(tools.length, 50);
+      assert.equal(tools.length, 53);
       assert.ok(tools.filter((tool) => !["mcp_component_restart", "mcp_component_update", "package_folder_zip", "start_segmented_transfer", "finish_segmented_transfer"].includes(tool.name)).every((tool) => tool.annotations?.readOnlyHint === true));
       assert.equal((await getWorkspaceInfo(config) as { mode: string }).mode, "read-only");
       assert.equal((await new WorkspaceWriter(config).execute("create_text_file", input("notes/no.txt", { content: "x" }))).code, "WRITE_DISABLED");
@@ -466,7 +466,7 @@ test("authenticated isolated HTTP MCP advertises actual permissions and round-tr
   await client.connect(transport);
   try {
     const tools = (await client.listTools()).tools;
-    assert.equal(tools.length, 56);
+    assert.equal(tools.length, 59);
     for (const name of WRITE_TOOLS) assert.equal(tools.find((tool) => tool.name === name)?.annotations?.readOnlyHint, false);
     assert.equal(tools.find((tool) => tool.name === "get_write_operation")?.annotations?.readOnlyHint, true);
     const args = input("notes/http.txt", { content: "via HTTP MCP" });

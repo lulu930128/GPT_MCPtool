@@ -25,7 +25,8 @@ MCP client
 - `WORKSPACE_MCP_ROOT` remains only as a legacy single-root fallback.
 - Asset readers require a separately configured `WORKSPACE_MCP_ASSET_SCOPES` entry. A normal
   workspace root does not automatically authorize image／Office extraction.
-- Original-byte return is a second, narrower permission: the asset scope id must also appear in
+- `workspace_info.denyPolicy` describes general exclusions. `researchReadPolicy` describes the exceptions used by `list_dir`, `find_files`, `read_file` and `read_files` within configured roots. They cover the entire `.git` tree, `.db`, `.sqlite`, `.sqlite3`, `.mdb`, `.accdb` and `.bin`. `inspect_git` may return historical `.env` blobs. Direct worktree `.env` and `.env.*` paths retain their existing restrictions. `inspect_sqlite` opens SQLite read-only and uses a statement snapshot for paged queries. Raw bytes of a live database can differ from that snapshot.
+- For legacy asset tools, original-byte return is a second, narrower permission: the asset scope id must also appear in
   `WORKSPACE_MCP_FILE_RETURN_SCOPES`. It is disabled by default.
 - Root-specific exclusions from `WORKSPACE_MCP_ROOT_DENY_DIRS` are additive; they cannot weaken
   the global deny policy.
@@ -48,12 +49,12 @@ containment check.
 
 ## Tool permissions
 
-The default public surface contains thirty-one tools, all declared with `readOnlyHint=true`
-and `destructiveHint=false`. The following twenty-five workspace tools use `openWorldHint=false`:
+Use `tools/list` on the running MCP for its available tools and annotations. Workspace research tools include:
 
 - workspace context: `workspace_info`, `list_projects`, `project_context`, `list_dir`,
   `read_file`, `read_files`, `find_files`, `search_text`;
-- Git review: `git_status_summary`, `git_diff`, `git_diff_file`;
+- Git and SQLite research: `inspect_git`, `git_status_summary`, `git_diff`, `git_diff_file`, `inspect_sqlite`;
+- runtime evidence: `inspect_runtime`, `workspace_runtime_status`, `mcp_component_diagnostics`;
 - deterministic lexical code intelligence: `find_symbol`, `find_references`, `import_graph`,
   `project_map`;
 - bounded assets: `inspect_asset`, `read_image`, `read_spreadsheet`, `read_document`,
@@ -128,11 +129,12 @@ Unless the operator explicitly configures stricter positive values:
 
 | Limit | Default |
 | --- | ---: |
-| Text source file size | 20 MiB |
-| Text returned per file | 256 KiB |
-| Lines returned by `read_file` | 300 |
-| Files／lines／bytes returned by `read_files` | 10／1,000／512 KiB |
-| Search results | 80 |
+| Text or binary source size | 1 GiB (1,073,741,824 bytes) |
+| Inline content per file | 256 KiB by default |
+| Text lines per `read_file` window | 600 when omitted, up to 20,000 |
+| `read_files` | Paged by `nextFileIndex`; per-file windows and transfer IDs can be resumed independently |
+| Secure MCP Tunnel | 10 MiB per complete serialized message, including base64 and framing; 120 seconds per request |
+| Search results per page | 120 |
 | Code scan per-file／aggregate source | 1 MiB／32 MiB |
 | `project_map` files／total symbols／symbols per file | 30／300／50 |
 | Directory entries | 200 |
@@ -140,13 +142,13 @@ Unless the operator explicitly configures stricter positive values:
 | Search timeout | 8 seconds |
 
 Asset limits and supported formats are documented in [Asset-Readers.md](Asset-Readers.md).
+For a complete original, request `delivery=resource`. Poll the transfer and read its manifest with the same taskId. For a text window, send its snapshotId with the returned nextStartLine and nextOffset as startLine and offset. For a batch, keep the original files array and pass nextFileIndex as fileIndex. [Segmented transfer](Segmented-Transfer.md) describes range reads and hash verification for legacy parts.
 Increasing a limit changes resource exposure but does not authorize a new root or bypass a deny
 rule.
 
 ## Content and metadata controls
 
-- Secret-like filenames, local env files, VCS internals, dependency folders, caches,
-  virtualenvs, local databases, archives, model weights, and build output are denied by default.
+- General path policy excludes local env and credential files, VCS internals, dependency folders, caches, virtualenvs, databases, archives, model weights and build output. The root-scoped research exceptions above apply only to their read and discovery tools. Writers and asset readers continue using their separate guards.
 - Codex credential and runtime-identity files such as `auth.json`, `cap_sid`,
   `installation_id`, global state, and session indexes are denied even when a reviewed `.codex`
   directory is configured as its own named root.
@@ -157,7 +159,7 @@ rule.
   returned. Speaker notes require explicit `includeNotes=true`.
 - Animated GIF input is returned as one static PNG frame with bounded metadata, not as executable
   animation.
-- `fetch_asset` is the explicit exception to derived/normalized output: it returns original bytes
+- Within asset scopes, `fetch_asset` returns original bytes
   only for an explicitly file-return-enabled asset scope and only after the same path guard and
   deny rules, with a separate 12 MiB default limit. Its resource link is SHA-256-bound so a later
   `resources/read` rejects changed content. MCP success does not prove that ChatGPT rendered a download.
@@ -171,8 +173,7 @@ The normal HTTP listener is loopback-only. ChatGPT access must go through the co
 MCP Tunnel or another explicitly reviewed authenticated HTTPS boundary. Do not expose a broad
 workspace root directly to the public Internet.
 
-Remote MCP callers should require approval before using workspace tools. Approval is an
-additional user-control layer; it does not replace root allowlisting or path validation.
+The server enforces each tool's existing root, scope and path rules. V2 research discovery uses the same read permissions as file access.
 
 ## Safe configuration checklist
 
@@ -193,7 +194,7 @@ responsible for selecting roots and deciding what may leave the host.
 
 ## 2026-10-14：明確單元件人工維護例外
 
-現行 source contract `2026-10-14.1` 的 `mcp_component_restart` 接受七白名單元件的固定 reload，
+歷史契約 `2026-10-14.1` 的 `mcp_component_restart` 接受七白名單元件的固定 reload，
 需 `interrupt_current_requests` 與 UUID，重用 authenticated loopback HTTP；不驗證另一套
 真人身分。其他 read tools 不發送維護 request；Workspace 自身、CC 與未知元件不開放。
 UUID 綁定 componentId／action／confirmation；跨目標 replay 不派送，也不返回舊目標的成功收據。

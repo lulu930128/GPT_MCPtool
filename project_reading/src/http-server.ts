@@ -179,7 +179,7 @@ async function handlePost(
     };
 
     const mcpServer = createWorkspaceMcpServer(config, { authenticatedMaintenance,
-      runtimeContext: () => ({ transport: "streamable-http", httpListening: httpListening() }) });
+      runtimeContext: () => ({ transport: "streamable-http", httpListening: httpListening(), port: req.socket.localPort }) });
     await mcpServer.connect(transport);
   }
 

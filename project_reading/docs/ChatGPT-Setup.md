@@ -13,9 +13,9 @@ npm run smoke:http
 
 `npm run smoke:http` 是一次性驗證命令。它會自動啟動 HTTP MCP server、檢查 `/health` 和 `/mcp`，然後自動關閉。
 
-## 2. 啟動托盤程式
+## 2. 正式 Runtime 與歷史托盤
 
-雙擊：
+正式 V2 由 MCP Control Center 的 `project_reading` 元件 Owner 維護。部署新 source 時先執行 `mcp_component_update_preview`，依預覽 digest 送出 `update_from_source`，以原 requestId 查終態收據。已運行的服務沿用現有 tunnel。以下為歷史 rollback tray 的路徑：
 
 ```text
 C:\GPT_MCPtool\project_reading\scripts\start-tray.vbs
@@ -109,10 +109,9 @@ C:\GPT_MCPtool\project_reading\.secrets\control-plane-api-key.dpapi
 
 這是 Windows DPAPI current-user encrypted 檔案，只給目前 Windows 使用者解密；`.secrets/` 已被 git ignore。
 
-`npm run tunnel:run` 會長駐。日常使用先保存 key，再由 MCP Control Center 或 legacy
-tray 執行 `EnsureRunning`；連線修復、core restart 與完整停止會維持不同 action semantics。
+`npm run tunnel:run` 是手動長駐入口。正式環境由 MCP Control Center 呼叫元件 Owner 維護既有 tunnel；連線修復、core restart 與完整停止各使用對應 action。
 
-開機自動啟動：
+歷史 tray 的開機啟動方式：
 
 ```powershell
 npm run startup:install
@@ -127,7 +126,7 @@ ChatGPT 不能直接連到你電腦上的 `127.0.0.1`。請使用 OpenAI Secure 
 建議流程：
 
 1. 保持這個 server 只綁定 `127.0.0.1:18787`。
-2. 保持 `npm run tunnel:run` 或托盤的 tunnel daemon 正在執行。
+2. 從既有 Control Center 確認 `project_reading` 的 server 與 tunnel Ready。
 3. 在 ChatGPT 的 connector 設定中建立 custom connector / MCP connector。
 4. 連線方式選 `Tunnel` / `通道`，不要選 `伺服器 URL`。
 5. 如果畫面列出 tunnel，就選你剛建立的 `Project Workspace`；如果要手動貼 ID，就填自己的值：
@@ -146,8 +145,7 @@ http://127.0.0.1:18787/mcp
 8. 連上後，請 ChatGPT 列出 tools，或直接呼叫 `workspace_info`。
 
 `workspace_info` 會列出可用 root id。其他工具使用 `root` 欄位選擇範圍。
-所有 root 都套用全域秘密與敏感檔案排除規則；個別 root 可再透過
-`WORKSPACE_MCP_ROOT_DENY_DIRS` 加上更窄的目錄封鎖。
+`denyPolicy` 是通用排除規則；`researchReadPolicy` 說明 workspace root 研究工具可讀的 Git、資料庫與 binary 例外。`WORKSPACE_MCP_ROOT_DENY_DIRS` 記錄個別 root 的額外目錄排除。Asset scope 與寫入權限各由其既有政策決定。
 
 ## Auth 注意事項
 
@@ -157,14 +155,21 @@ http://127.0.0.1:18787/mcp
 
 ## 連上後可以這樣問 ChatGPT
 
-先試：
+下列參數範例使用已設定的 `mcp_tools` 與 `projects`。先呼叫 `workspace_info({})` 檢查實際 root、權限、`limits.text`、buildId 與契約，再以正式 MCP 的 `tools/list` 核對已註冊的 schema。
 
-```text
-Use the project_workspace MCP connector. Call workspace_info, then list_projects.
-```
+| 工具 | 範例參數 |
+| --- | --- |
+| `find_files` | `{"root":"mcp_tools","path":".git","pattern":"HEAD"}` |
+| `read_file` | `{"root":"mcp_tools","path":".git/index","format":"binary","offset":0,"length":32}` |
+| `read_file` 取資料庫檔頭 | `{"root":"projects","path":"Open Market Intelligence/data/execution-runtime/production.sqlite","format":"binary","length":16}` |
+| `read_files` | `{"root":"mcp_tools","files":[{"path":"project_reading/README.md","maxLines":20},{"path":".git/HEAD"}]}` |
+| `inspect_git` | `{"root":"mcp_tools","project":".","operation":"log","revision":"HEAD"}` |
+| `inspect_sqlite` | `{"root":"projects","path":"Open Market Intelligence/data/execution-runtime/production.sqlite","operation":"overview"}` |
+| `inspect_runtime` | `{"target":"project_reading","profile":"health"}` |
+| `search_text` | `{"root":"mcp_tools","path":"project_reading/src","query":"findFiles","includeGlobs":["**/*.ts"],"excludeGlobs":["**/*.test.ts"],"fileKinds":["source"]}` |
 
-接著：
+V2 預設接受最大 1 GiB 的來源檔。每個文字視窗預設讀 600 行，最多 20,000 行。inline 與 Resource 讀回均須符合每筆完整 MCP 訊息 10 MiB 的預算。文字續頁帶上原 `snapshotId`，將 `nextStartLine/nextOffset` 傳入 `startLine/offset`。批次續頁保留原 `files`，傳 `fileIndex=nextFileIndex`。搜尋以原條件加 `cursor=nextCursor`。SQLite 的 SQL 查詢走唯讀 reader，檔頭範例僅取得磁碟 bytes。
 
-```text
-Read the project_context for Open Market Intelligence under root projects, but do not read denied files or secrets.
-```
+要完整原件可傳 `delivery=resource`。保存回傳的 taskId，呼叫 `get_segmented_transfer` 等待 ready，再用 `list_segmented_transfer` 取得各頁 manifest，以 `resources/read` 下載各 part 或 range。依 offset 重組，驗每片及全檔 SHA-256，再以 `finish_segmented_transfer` 回報完成。1 GiB 隔離測試的結果見[驗收紀錄](ProjectWorkspaceV2Evidence.md)。
+
+換版後若 Host 還顯示舊參數，由使用者刷新 GPT 端連接器。刷新後的工具發現與 Resource 讀回須在該 Host 驗證。

@@ -6,10 +6,10 @@ import path from "node:path";
 import { createInterface } from "node:readline";
 import { z } from "zod";
 import type { ServerConfig } from "./config.js";
-import { resolveArchiveSource, digest } from "./archives.js";
+import { digest } from "./archives.js";
 import { assertFileReturnScope } from "./file-transfer.js";
 import { inspectWritePath } from "./path-guard.js";
-import { addBytes, captureFolder, fail, identity, sameIdentity, sourceBytes, StreamingZip64, TRANSFER_LIMITS, writeAll, type CaptureContext } from "./transfer-streams.js";
+import { addBytes, captureFolder, fail, identity, sameIdentity, tunnelPartBytes, resolveTransferFile, sourceBytes, StreamingZip64, TRANSFER_LIMITS, writeAll, type CaptureContext } from "./transfer-streams.js";
 import { validateTransferZip } from "./transfer-zip-validation.js";
 import { initializeBudget, readBudget, reserveBudget } from "./transfer-budget.js";
 
@@ -18,7 +18,7 @@ const OWNED = /^(\d{13}-[a-f0-9-]{36})\.(state\.json|state\.tmp|entries|identiti
 const sha = z.string().regex(/^[a-f0-9]{64}$/);
 const bytes = z.number().int().min(0).max(TRANSFER_LIMITS.bytes);
 const stateSchema = z.object({
-  version: z.literal(1), taskId: z.string().regex(ID), scope: z.string().max(32), path: z.string().max(512),
+  workspace: z.literal(true).optional(), version: z.literal(1), taskId: z.string().regex(ID), scope: z.string().max(32), path: z.string(),
   kind: z.enum(["folder", "file", "zip"]), filename: z.string().max(600), binding: sha,
   state: z.enum(["running", "ready", "failed", "canceled", "completed", "expired"]),
   createdAt: z.number(), expiresAt: z.number(), chunkBytes: z.number().int().positive().max(12 * 1024 * 1024),
@@ -140,19 +140,16 @@ export class SegmentedTransferStore {
     await writeAll(this.lock, Buffer.from(JSON.stringify({ pid: process.pid, nonce: randomUUID() }))); await this.lock.sync();
     try {
       const dir = await fs.opendir(this.directory.path);
-      let scanned = 0;
       for await (const entry of dir) {
-        if (++scanned > 200_000) fail("Transfer recovery scan limit exceeded.");
         const match = OWNED.exec(entry.name);
         if (!match || !ID.test(match[1])) continue;
         const [_, id, suffix] = match;
         this.orphans.add(id);
-        if (this.orphans.size > TRANSFER_LIMITS.jobs) fail("Transfer recovery job capacity exceeded.");
         const inspected = await inspectWritePath(await this.file(id, suffix));
         if (!inspected.stat?.isFile() || inspected.stat.nlink !== 1) fail("Unsafe transfer recovery file.");
         if (suffix.startsWith("part-")) this.stagingBytes = addBytes(this.stagingBytes, inspected.stat.size);
         if (suffix !== "state.json") continue;
-        if (inspected.stat.size > 8192) { this.log("Invalid transfer state retained for expiry cleanup."); continue; }
+        if (inspected.stat.size > 6 * 32767 + 8192) { this.log("Invalid transfer state retained for expiry cleanup."); continue; }
         const handle = await this.open(id, suffix);
         try {
           const data = stateSchema.parse(JSON.parse(await handle.readFile("utf8")));
@@ -182,31 +179,35 @@ export class SegmentedTransferStore {
   private async authorized(config: ServerConfig, id: string) {
     await this.initialize();
     const job = this.jobs.get(id); if (!job) fail("Unknown transfer.");
-    assertFileReturnScope(config, job.data.scope);
+    if (!job.data.workspace) assertFileReturnScope(config, job.data.scope);
     if (binding(config) !== job.data.binding) fail("Transfer scope or deny policy changed; transfer unavailable.");
     return job;
   }
   private view(job: Job) {
-    return { ok: true as const, ...job.data, integrity: job.data.state === "ready" ? "captured_bytes_sha256_verified" : "not_available",
+    return { ok: true as const, ...job.data,
+      ...(job.data.workspace ? { deliveryEvidence: {
+        prepared: job.data.archiveSha256 !== null, delivered: job.data.state === "completed" ? "CALLER_ATTESTED" : "UNKNOWN",
+        reconstructedVerified: job.data.state === "completed" ? "CALLER_SHA256_MATCH" : "UNVERIFIED",
+      } } : {}), integrity: job.data.state === "ready" ? "captured_bytes_sha256_verified" : "not_available",
       payloadLimitBytes: TRANSFER_LIMITS.bytes, inputLimitBytes: TRANSFER_LIMITS.inputBytes,
       remainingPayloadBytes: TRANSFER_LIMITS.bytes - job.data.transmittedBytes,
       cleanupPending: !job.data.cleaned && !["running", "ready"].includes(job.data.state),
       downloadAcknowledged: false, retryable: job.data.state === "ready" && job.data.expiresAt > this.now(),
     };
   }
-  async start(config: ServerConfig, args: TransferStart) {
+  async start(config: ServerConfig, args: TransferStart, expected?: ReturnType<typeof identity>) {
     await this.initialize();
     return this.exclusive(async () => {
-      assertFileReturnScope(config, args.scope);
+      if (!expected) assertFileReturnScope(config, args.scope);
       if (!["folder", "file", "zip"].includes(args.kind)) fail("Invalid transfer kind.");
-      const chunkBytes = args.chunkBytes ?? Math.min(TRANSFER_LIMITS.chunkBytes, config.maxFetchFileBytes);
+      const chunkBytes = args.chunkBytes ?? Math.min(tunnelPartBytes, TRANSFER_LIMITS.chunkBytes, config.maxFetchFileBytes);
       if (!Number.isInteger(chunkBytes) || chunkBytes < TRANSFER_LIMITS.minChunkBytes || chunkBytes > Math.min(config.maxFetchFileBytes, 12 * 1024 * 1024)) fail("Invalid chunkBytes; use 1 MiB through min(maxFetchFileBytes, 12 MiB).");
-      if (this.jobs.size + this.orphans.size >= TRANSFER_LIMITS.jobs || [...this.jobs.values()].some((job) => !!job.work)) fail("TRANSFER_BUSY: one capture at a time, at most four retained jobs.");
-      const source = await resolveArchiveSource(config, args, args.kind === "folder" ? "directory" : args.kind);
+      if (!expected && ([...this.jobs.values()].filter(job => !job.data.workspace).length + this.orphans.size >= TRANSFER_LIMITS.jobs || [...this.jobs.values()].some(job => !job.data.workspace && !!job.work))) fail("TRANSFER_BUSY: one capture at a time, at most four retained jobs.");
+      const source = await resolveTransferFile(config, args, args.kind === "folder" ? "directory" : args.kind, !!expected);
       const expiresAt = this.now() + Math.min(this.options.ttlMs ?? TRANSFER_LIMITS.ttlMs, 14 * 24 * 60 * 60_000);
       const taskId = `${expiresAt}-${randomUUID()}`;
       const job: Job = { controller: new AbortController(), data: {
-        version: 1, taskId, scope: source.scope, path: source.scopeRelative, kind: args.kind,
+        ...(expected ? { workspace: true as const } : {}), version: 1, taskId, scope: source.scope, path: source.scopeRelative, kind: args.kind,
         filename: `${source.scopeRelative === "." ? source.scope : path.posix.basename(source.scopeRelative)}${args.kind === "folder" ? ".zip" : ""}`,
         binding: binding(config), state: "running", createdAt: this.now(), expiresAt, chunkBytes,
         sourceBytes: 0, archiveBytes: 0, transmittedBytes: 0, chunkCount: 0, entryCount: 0, skippedEntries: 0,
@@ -217,11 +218,11 @@ export class SegmentedTransferStore {
       try { await initializeBudget(budget, taskId); } finally { await budget.close(); }
       await this.save(job); this.jobs.set(taskId, job); this.orphans.delete(taskId);
       const initial = this.view(job);
-      job.work = this.capture(config, job).finally(() => { job.work = undefined; });
+      job.work = this.capture(config, job, expected).finally(() => { job.work = undefined; });
       return initial;
     });
   }
-  private async capture(config: ServerConfig, job: Job) {
+  private async capture(config: ServerConfig, job: Job, expected?: ReturnType<typeof identity>) {
     const data = job.data, id = data.taskId, hash = createHash("sha256");
     const handles: FileHandle[] = [];
     let part: FileHandle | undefined, partSize = 0, partHash = createHash("sha256"), partOffset = 0;
@@ -282,7 +283,7 @@ export class SegmentedTransferStore {
       } else {
         const validated = data.kind === "zip" ? await validateTransferZip(ctx, args) : undefined;
         data.expandedBytes = validated?.expandedBytes ?? null;
-        for await (const bytes of sourceBytes(ctx, args, data.kind, validated?.identity)) await output(bytes);
+        for await (const bytes of sourceBytes(ctx, args, data.kind, expected ?? validated?.identity, data.workspace)) await output(bytes);
       }
       await seal();
       // Empty raw files still have an independently downloadable, hash-bound zero-byte part.
@@ -290,7 +291,7 @@ export class SegmentedTransferStore {
       for (const handle of handles) await handle.sync();
       for await (const line of this.lines(id, "identities")) {
         check(); const entry = JSON.parse(line);
-        const resolved = await resolveArchiveSource(config, entry.args, entry.kind);
+        const resolved = await resolveTransferFile(config, entry.args, entry.kind, data.workspace);
         if (!sameIdentity(entry.identity, identity(resolved.stat))) fail("SOURCE_CHANGED: final tree check.");
       }
       check();
@@ -347,7 +348,14 @@ export class SegmentedTransferStore {
     } finally { await handle.close(); }
   }
   private link(job: Job, part: Part) {
-    return { ...part, filename: `${job.data.filename}.part-${String(part.index + 1).padStart(6, "0")}`,
+    const ranges = [];
+    if (part.length > tunnelPartBytes) {
+      for (let offset=0; offset<part.length; offset+=tunnelPartBytes) {
+        const length = Math.min(tunnelPartBytes,part.length-offset);
+        ranges.push({offset,length,resourceUri: `workspace-transfer-range:///${job.data.taskId}/${part.index}/${offset}/${length}?sha256=${part.sha256}`});
+      }
+    }
+    return { ...part, ...(ranges.length ? {ranges} : {}), filename: `${job.data.filename}.part-${String(part.index + 1).padStart(6, "0")}`,
       resourceUri: `workspace-transfer:///${job.data.taskId}/${part.index}?sha256=${part.sha256}`,
       mimeType: "application/octet-stream" as const };
   }
@@ -374,14 +382,16 @@ export class SegmentedTransferStore {
       return { ...this.view(job), collection, offset, total, records, nextOffset: offset + records.length < total ? offset + records.length : null };
     });
   }
-  async read(config: ServerConfig, uri: string): Promise<Buffer> {
+  async read(config: ServerConfig, uri: string, range?: {offset:number;length:number}): Promise<Buffer> {
     return this.exclusive(async () => {
       const match = /^workspace-transfer:\/\/\/(\d{13}-[a-f0-9-]{36})\/(0|[1-9]\d*)\?sha256=([a-f0-9]{64})$/.exec(uri);
       if (!match) fail("Invalid transfer URI.");
       const job = await this.authorized(config, match[1]); this.ready(job);
       const part = await this.part(job, Number(match[2]));
       if (this.link(job, part).resourceUri !== uri || part.length > config.maxFetchFileBytes) fail("Transfer URI or fetch cap mismatch.");
-      const charged = addBytes(job.data.transmittedBytes, part.length);
+      if (range && (!Number.isSafeInteger(range.offset) || !Number.isSafeInteger(range.length) || range.offset < 0 || range.length <= 0 ||
+        range.length > tunnelPartBytes || range.offset + range.length > part.length)) fail("Invalid part range.");
+      const charged = addBytes(job.data.transmittedBytes, range?.length ?? part.length);
       const handle = await this.open(job.data.taskId, partName(part.index));
       let buffer: Buffer;
       try {
@@ -401,7 +411,7 @@ export class SegmentedTransferStore {
       const budget = await this.open(job.data.taskId, "budget", false, true);
       try { await reserveBudget(budget, job.data.taskId, charged); } finally { await budget.close(); }
       await this.save(job);
-      return buffer;
+      return range ? buffer.subarray(range.offset, range.offset + range.length) : buffer;
     });
   }
   async finish(config: ServerConfig, id: string, action: "cancel" | "complete" | "cleanup", archiveSha256?: string) {
@@ -450,9 +460,7 @@ export class SegmentedTransferStore {
       });
       // Orphan files from a crash before state publication: exact namespace, expired ID only.
       const dir = await fs.opendir(this.directory!.path);
-      let scanned = 0;
       for await (const entry of dir) {
-        if (++scanned > 200_000) fail("Transfer cleanup scan limit exceeded.");
         const match = OWNED.exec(entry.name);
         if (match && ID.test(match[1]) && !this.jobs.has(match[1]) && Number(match[1].slice(0, 13)) <= this.now()) await this.remove(match[1], match[2]);
       }

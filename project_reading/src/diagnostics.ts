@@ -171,6 +171,8 @@ export async function httpHealthCheck(input: unknown): Promise<Result> {
   const started = performance.now();
   return new Promise((resolve) => {
     let settled = false;
+    let ttfbMs: number | null = null;
+    let responseHeadersMs: number | null = null;
     let statusCode: number | null = null;
     let bytes = 0;
     const chunks: Buffer[] = [];
@@ -183,13 +185,15 @@ export async function httpHealthCheck(input: unknown): Promise<Result> {
       settled = true;
       clearTimeout(timer);
       request.destroy();
-      resolve({ ok: !code, statusCode, healthy: !code && statusCode !== null && statusCode >= 200 && statusCode < 300,
+      resolve({ ok: !code, statusCode, ttfbMs, responseHeadersMs, healthy: !code && statusCode !== null && statusCode >= 200 && statusCode < 300,
         code, bodyPreview: new StringDecoder("utf8").write(Buffer.concat(chunks)), bodyBytes: bytes, truncated,
         elapsedMs: Math.round(performance.now() - started), timeoutMs: args.timeoutMs, maxBodyBytes: args.maxBodyBytes });
     };
     const timer = setTimeout(() => finish("TIMEOUT", true), args.timeoutMs);
     request.once("error", (error) => finish(errorCode(error), bytes > 0));
+    request.once("socket", socket => socket.prependOnceListener("data", () => { ttfbMs = performance.now() - started; }));
     request.once("response", (response) => {
+      responseHeadersMs = performance.now() - started;
       statusCode = response.statusCode ?? null;
       response.on("error", (error) => finish(errorCode(error), true));
       response.on("aborted", () => finish("RESPONSE_ABORTED", true));

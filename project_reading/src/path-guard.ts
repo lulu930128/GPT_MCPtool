@@ -37,6 +37,11 @@ export async function resolveWorkspacePath(
   return resolvePath(config, inputPath, expectedType, rootId, false);
 }
 
+/** Root-scoped research reads. Writers and asset scopes retain their own policies. */
+export function resolveResearchPath(config: ServerConfig, input: string | undefined, type: ExpectedPathType, root?: string) {
+  return resolvePath(config, input, type, root, false, true);
+}
+
 /** ZIP reader only: exempt the final .zip extension, never names, directories or roots. */
 export async function resolveWorkspaceZipPath(
   config: ServerConfig, inputPath: string, rootId: string,
@@ -49,9 +54,9 @@ export async function resolveWorkspaceZipPath(
 
 async function resolvePath(
   config: ServerConfig, inputPath: string | undefined, expectedType: ExpectedPathType | undefined,
-  rootId: string | undefined, zipOnly: boolean,
+  rootId: string | undefined, zipOnly: boolean, research = false,
 ): Promise<ResolvedWorkspacePath> {
-  const candidate = resolvePathCandidate(config, inputPath, rootId, zipOnly);
+  const candidate = resolvePathCandidate(config, inputPath, rootId, zipOnly, research);
   const workspaceRoot = resolveWorkspaceRoot(config, candidate.rootId);
 
   let real: string;
@@ -62,7 +67,7 @@ async function resolvePath(
   }
 
   assertWithinRoot(workspaceRoot.path, real, "Resolved path escapes the configured workspace root.");
-  const denial = denialReason(config, workspaceRoot, real, zipOnly);
+  const denial = denialReason(config, workspaceRoot, real, zipOnly, research);
   if (denial) throw new WorkspaceAccessError(denial);
   if (zipOnly && path.extname(real).toLowerCase() !== ".zip") {
     throw new WorkspaceAccessError("Archive reader requires a .zip target.");
@@ -94,13 +99,13 @@ export function resolveWorkspacePathCandidate(
 }
 
 function resolvePathCandidate(
-  config: ServerConfig, inputPath: string | undefined, rootId: string | undefined, zipOnly: boolean,
+  config: ServerConfig, inputPath: string | undefined, rootId: string | undefined, zipOnly: boolean, research = false,
 ): WorkspacePathCandidate {
   const workspaceRoot = resolveWorkspaceRoot(config, rootId);
   const rawPath = normalizeUserPath(inputPath);
   const candidate = path.resolve(workspaceRoot.path, rawPath);
   assertWithinRoot(workspaceRoot.path, candidate, "Path is outside the configured workspace root.");
-  const denial = denialReason(config, workspaceRoot, candidate, zipOnly);
+  const denial = denialReason(config, workspaceRoot, candidate, zipOnly, research);
   if (denial) throw new WorkspaceAccessError(denial);
   return {
     rootId: workspaceRoot.id,
@@ -153,13 +158,13 @@ export function assertNotDenied(
 export function getDenialReason(
   config: ServerConfig,
   workspaceRoot: WorkspaceRootConfig,
-  target: string,
+  target: string, research = false,
 ): string | undefined {
-  return denialReason(config, workspaceRoot, target, false);
+  return denialReason(config, workspaceRoot, target, false, research);
 }
 
 function denialReason(
-  config: ServerConfig, workspaceRoot: WorkspaceRootConfig, target: string, zipOnly: boolean,
+  config: ServerConfig, workspaceRoot: WorkspaceRootConfig, target: string, zipOnly: boolean, research = false,
 ): string | undefined {
   const relative = path.relative(workspaceRoot.path, target);
   if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
@@ -169,6 +174,7 @@ function denialReason(
   const segments = relative.split(/[\\/]+/).filter(Boolean);
   for (const segment of segments) {
     const lower = segment.toLowerCase();
+    if (research && lower === ".git") return undefined;
     if (workspaceRoot.denyDirs.has(lower)) {
       return `Path includes denied directory: ${segment}`;
     }
@@ -180,6 +186,7 @@ function denialReason(
   }
 
   const extension = path.extname(basename).toLowerCase();
+  if (research && [".db", ".sqlite", ".sqlite3", ".mdb", ".accdb", ".bin"].includes(extension)) return undefined;
   if (extension && config.denyExtensions.has(extension) && !(zipOnly && extension === ".zip")) {
     return `Path includes denied file extension: ${extension}`;
   }

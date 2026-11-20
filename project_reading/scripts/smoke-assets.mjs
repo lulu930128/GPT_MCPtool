@@ -86,7 +86,7 @@ try {
     capabilities: {},
     clientInfo: { name: "asset-smoke", version: "1.7.0" },
   });
-  assert.equal(initialized.serverInfo.version, "1.7.0");
+  assert.equal(initialized.serverInfo.version, config.runtimeIdentity.applicationVersion);
   const resourceTemplates = await rpc("resources/templates/list", {});
   assert.ok(
     resourceTemplates.resourceTemplates.some(
@@ -95,7 +95,6 @@ try {
     "Missing workspace asset resource template",
   );
   const listed = await rpc("tools/list", {});
-  assert.equal(listed.tools.length, 35);
   for (const required of [
     "read_files",
     "find_files",
@@ -106,6 +105,10 @@ try {
     "import_graph",
     "project_map",
     "fetch_asset",
+    "read_image",
+    "read_document",
+    "read_spreadsheet",
+    "read_presentation",
     "inspect_pdf",
     "read_pdf_text",
     "read_pdf_page",

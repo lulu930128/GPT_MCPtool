@@ -22,7 +22,8 @@ import {
   searchWorkspaceText,
   type SearchTextArgs,
 } from "./search-tools.js";
-import { assertTextSource, readTextWindow } from "./text-reader.js";
+import { readWorkspaceWindow, inlineTextBytes } from "./text-reader.js";
+import { resolveResearchPath } from "./path-guard.js";
 import { writeCapabilities } from "./write-policy.js";
 import { DIAGNOSTIC_LIMITS } from "./diagnostic-inputs.js";
 
@@ -43,14 +44,16 @@ export interface ReadFileArgs extends RootScopedArgs {
   startLine?: number;
   maxLines?: number;
   includeSha256?: boolean;
+  format?: "auto" | "text" | "binary";
+  delivery?: "auto" | "inline" | "resource";
+  snapshotId?: string;
+  offset?: number;
+  length?: number;
 }
 
 export interface ReadFilesArgs extends RootScopedArgs {
-  files: Array<{
-    path: string;
-    startLine?: number;
-    maxLines?: number;
-  }>;
+  files: ReadFileArgs[];
+  fileIndex?: number;
 }
 
 export interface FindFilesArgs extends RootScopedArgs {
@@ -173,6 +176,7 @@ export async function getWorkspaceInfo(config: ServerConfig): Promise<unknown> {
         timeoutMs: config.pdfTimeoutMs,
       },
     },
+    researchReadPolicy: { gitInternals: "raw_in_configured_root", rawDatabase: ["db","sqlite","sqlite3","mdb","accdb"], rawBinary: ["bin"], worktreeEnv: "denied" },
     denyPolicy: {
       directories: Array.from(config.denyDirs).sort(),
       extensions: Array.from(config.denyExtensions).sort(),
@@ -249,7 +253,7 @@ export async function listProjects(
 export async function listDirectory(config: ServerConfig, args: ListDirArgs): Promise<unknown> {
   const depth = clampInt(args.depth ?? 1, 0, 3);
   const maxEntries = clampInt(args.maxEntries ?? config.maxDirEntries, 1, config.maxDirEntries);
-  const base = await resolveWorkspacePath(config, args.path, "directory", args.root);
+  const base = await resolveResearchPath(config, args.path, "directory", args.root);
   const workspaceRoot = resolveWorkspaceRoot(config, base.rootId);
   const entries: unknown[] = [];
   const counters = { skipped: 0, truncated: false };
@@ -266,19 +270,8 @@ export async function listDirectory(config: ServerConfig, args: ListDirArgs): Pr
 }
 
 export async function readWorkspaceFile(config: ServerConfig, args: ReadFileArgs): Promise<unknown> {
-  const resolved = await resolveWorkspacePath(config, args.path, "file", args.root);
-  const window = await readTextWindow(resolved.absolute, resolved.stat.size, {
-    startLine: args.startLine ?? 1,
-    maxLines: clampInt(args.maxLines ?? config.maxReadLines, 1, config.maxReadLines),
-    maxSourceBytes: config.maxFileBytes,
-    maxReturnedBytes: config.maxReturnedBytes,
-    includeSha256: args.includeSha256,
-  });
-  return {
-    root: resolved.rootId,
-    path: resolved.relative,
-    ...window,
-  };
+  return readWorkspaceWindow(config, args, args.maxLines ?? Math.min(600, config.maxReadLines),
+    Math.min(inlineTextBytes, config.maxReturnedBytes));
 }
 
 export async function readWorkspaceFiles(config: ServerConfig, args: ReadFilesArgs): Promise<unknown> {
@@ -291,6 +284,8 @@ export async function readWorkspaceFiles(config: ServerConfig, args: ReadFilesAr
       throw new WorkspaceAccessError(`maxLines must be an integer between 1 and ${config.maxReadLines}.`);
     }
   }
+  const firstIndex = args.fileIndex ?? 0;
+  if (firstIndex > args.files.length) throw new WorkspaceAccessError("Batch cursor exceeds file count.");
   const requestedLines = args.files.reduce((total, file) => total + (file.maxLines ?? 0), 0);
   if (requestedLines > config.maxBatchTotalLines) {
     throw new WorkspaceAccessError(
@@ -305,29 +300,29 @@ export async function readWorkspaceFiles(config: ServerConfig, args: ReadFilesAr
   const lineBudgets = args.files.map((file) => file.maxLines ?? defaultLines[defaultIndex++]);
   const preflight = [];
   for (const file of args.files) {
-    const resolved = await resolveWorkspacePath(config, file.path, "file", args.root);
-    await assertTextSource(resolved.absolute, resolved.stat.size, config.maxFileBytes);
+    const resolved = await resolveResearchPath(config, file.path, "file", args.root);
+    if (resolved.stat.size > config.maxFileBytes) throw new WorkspaceAccessError("File is too large.");
     preflight.push({ file, resolved });
   }
 
   const files = [];
-  let remainingBytes = config.maxBatchTotalBytes;
+  const remainingBytes = Math.min(inlineTextBytes, config.maxBatchTotalBytes);
   let totalReturnedBytes = 0;
   let totalReturnedLines = 0;
   let truncated = false;
   const byteDemands = preflight.map((item, index) =>
     lineBudgets[index] === 0 ? 0 : Math.min(config.maxReturnedBytes, item.resolved.stat.size));
-  for (const [index, item] of preflight.entries()) {
-    // Reserve a bounded fair share for every remaining file. Source sizes cap
-    // small-file demand; unused earlier shares are released to later files.
-    const maxReturnedBytes = distributeBudget(byteDemands.slice(index), remainingBytes)[0];
+  const shares = distributeBudget(byteDemands.slice(firstIndex),remainingBytes);
+  let released = 0, serializedBytes = 0, nextFileIndex: number | null = null;
+  for (let index = firstIndex; index < preflight.length; index++) {
+    const item = preflight[index];
+    // Reserve envelope/manifest metadata before starting a capture whose ID must reach the caller.
+    const available = 10 * 1024 * 1024 - 65536 - serializedBytes - 8 * Buffer.byteLength(JSON.stringify(item.resolved.relative));
+    if (available < 65536 && files.length) { nextFileIndex = index; break; }
+    const allocated = shares[index-firstIndex] + released;
+    const maxReturnedBytes = Math.max(0, Math.min(allocated,byteDemands[index],Math.floor(available / 6)));
     const maxLines = lineBudgets[index];
-    const window = await readTextWindow(item.resolved.absolute, item.resolved.stat.size, {
-      startLine: item.file.startLine ?? 1,
-      maxLines,
-      maxSourceBytes: config.maxFileBytes,
-      maxReturnedBytes,
-    });
+    const window = await readWorkspaceWindow(config, { ...item.file, root: args.root }, maxLines, maxReturnedBytes);
     if (window.truncationReasons.includes("max_lines") && item.file.maxLines === undefined && maxLines < config.maxReadLines) {
       window.truncationReasons.push("batch_total_lines");
     }
@@ -335,14 +330,13 @@ export async function readWorkspaceFiles(config: ServerConfig, args: ReadFilesAr
       window.truncationReasons.push("batch_total_bytes");
     }
     files.push({
-      root: item.resolved.rootId,
-      path: item.resolved.relative,
       ...window,
       appliedLimits: { maxLines, maxReturnedBytes },
     });
     totalReturnedBytes += window.returnedBytes;
     totalReturnedLines += window.returnedLines;
-    remainingBytes -= window.returnedBytes;
+    serializedBytes += Buffer.byteLength(JSON.stringify(files[files.length-1])) + 1;
+    released = allocated - window.returnedBytes;
     truncated ||= window.truncated;
   }
   return {
@@ -350,7 +344,8 @@ export async function readWorkspaceFiles(config: ServerConfig, args: ReadFilesAr
     count: files.length,
     totalReturnedBytes,
     totalReturnedLines,
-    truncated,
+    nextFileIndex,
+    truncated: truncated || nextFileIndex !== null,
     files,
   };
 }
@@ -409,7 +404,7 @@ export async function readProjectContext(config: ServerConfig, args: ProjectCont
 }
 
 export async function findFiles(config: ServerConfig, args: FindFilesArgs): Promise<unknown> {
-  const scope = await resolveWorkspacePath(config, args.path, "directory", args.root);
+  const scope = await resolveResearchPath(config, args.path, "directory", args.root);
   const workspaceRoot = resolveWorkspaceRoot(config, scope.rootId);
   const pattern = args.pattern.trim();
   if (!pattern) throw new WorkspaceAccessError("File pattern must not be empty.");
@@ -441,13 +436,13 @@ export async function findFiles(config: ServerConfig, args: FindFilesArgs): Prom
         return;
       }
       const absolute = path.join(current, entry.name);
-      if (getDenialReason(config, workspaceRoot, absolute) || entry.isSymbolicLink()) {
+      if (getDenialReason(config, workspaceRoot, absolute, true) || entry.isSymbolicLink()) {
         skipped += 1;
         continue;
       }
       if (entry.isDirectory()) {
         const real = await fs.realpath(absolute).catch(() => undefined);
-        if (!real || !isWithinRoot(workspaceRoot.path, real)) {
+        if (!real || !isWithinRoot(workspaceRoot.path, real) || getDenialReason(config, workspaceRoot, real, true)) {
           skipped += 1;
           continue;
         }
@@ -510,7 +505,7 @@ async function visitDirectory(
       return;
     }
     const childPath = path.join(absolute, child.name);
-    if (getDenialReason(config, workspaceRoot, childPath)) {
+    if (getDenialReason(config, workspaceRoot, childPath, true)) {
       counters.skipped += 1;
       continue;
     }
@@ -519,7 +514,7 @@ async function visitDirectory(
     if (type === "symlink") {
       try {
         const real = await fs.realpath(childPath);
-        if (!isWithinRoot(workspaceRoot.path, real) || getDenialReason(config, workspaceRoot, real)) {
+        if (!isWithinRoot(workspaceRoot.path, real) || getDenialReason(config, workspaceRoot, real, true)) {
           counters.skipped += 1;
           continue;
         }
@@ -536,7 +531,7 @@ async function visitDirectory(
     });
     if (type === "directory" && depth > 0) {
       const real = await fs.realpath(childPath);
-      if (!isWithinRoot(workspaceRoot.path, real) || getDenialReason(config, workspaceRoot, real)) {
+      if (!isWithinRoot(workspaceRoot.path, real) || getDenialReason(config, workspaceRoot, real, true)) {
         counters.skipped += 1;
         continue;
       }

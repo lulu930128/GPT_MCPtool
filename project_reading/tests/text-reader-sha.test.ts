@@ -30,7 +30,7 @@ test("SHA snapshot: 1200 lines reproduce the real reader failure and paginate in
     const ordinary = await readWorkspaceFile(f.config, args) as TextWindowResult;
     const { sha256, ...hashed } = await readWorkspaceFile(f.config, { ...args, includeSha256: true }) as TextWindowResult;
     assert.equal(sha256, rawHash(bytes));
-    assert.deepEqual(hashed, ordinary);
+    assert.deepEqual({ ...hashed, metrics: null }, { ...ordinary, metrics: null });
     assert.equal(hashed.text, rows.slice(startLine - 1, startLine + 599).join("\n"));
     assert.equal(hashed.totalLines, 1200);
     assert.equal(hashed.nextStartLine, startLine === 1 ? 601 : null);
@@ -89,12 +89,13 @@ test("SHA and ordinary byte truncation preserve partial code points and truthful
 
 test("SHA snapshot handles dense lines and the configured source limit without relaxing either cap", async t => {
   const f = await fixture(t), file = path.join(f.root, "limit.txt");
+  f.config.maxFileBytes = 200_000;
   for (const text of ["x\n".repeat(40_000), "x".repeat(f.config.maxFileBytes - 1) + "\n"]) {
     const bytes = Buffer.from(text); await fs.writeFile(file, bytes);
     const args = { path: "limit.txt", maxLines: 600 };
     const ordinary = await readWorkspaceFile(f.config, args) as TextWindowResult;
     const { sha256, ...hashed } = await readWorkspaceFile(f.config, { ...args, includeSha256: true }) as TextWindowResult;
-    assert.deepEqual(hashed, ordinary); assert.equal(sha256, rawHash(bytes));
+    assert.deepEqual({ ...hashed, metrics: null }, { ...ordinary, metrics: null }); assert.equal(sha256, rawHash(bytes));
     assert.ok(hashed.returnedBytes <= f.config.maxReturnedBytes);
   }
   await fs.appendFile(file, "x");
@@ -146,6 +147,6 @@ test("real local HTTP MCP read_file with SHA returns both pages and rejects over
     assert.equal(body.returnedLines, 600);
     assert.equal(body.nextStartLine, startLine === 1 ? 601 : null);
   }
-  const invalid = await client.callTool({ name: "read_file", arguments: { path: "rows.txt", includeSha256: true, maxLines: 601 } });
+  const invalid = await client.callTool({ name: "read_file", arguments: { path: "rows.txt", includeSha256: true, maxLines: 20001 } });
   assert.equal(invalid.isError, true);
 });

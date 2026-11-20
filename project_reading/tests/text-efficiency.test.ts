@@ -50,8 +50,8 @@ test("four omitted maxLines succeed under the original 300/1000 limits; explicit
   }), /Requested line budget 1200 exceeds 1000/);
 });
 
-test("default limits allow 600 single lines and 12 files within 2400 lines and 512 KiB", async (t) => {
-  const f = await fixture(t);
+test("configured legacy limits allow 600 single lines and 12 files within 2400 lines and 512 KiB", async (t) => {
+  const f = await fixture(t, { WORKSPACE_MCP_MAX_READ_LINES:"600", WORKSPACE_MCP_MAX_BATCH_FILES:"12", WORKSPACE_MCP_MAX_BATCH_TOTAL_LINES:"2400", WORKSPACE_MCP_MAX_BATCH_TOTAL_BYTES:"524288" });
   assert.deepEqual([f.config.maxReadLines, f.config.maxBatchFiles, f.config.maxBatchTotalLines,
     f.config.maxReturnedBytes, f.config.maxBatchTotalBytes, f.config.maxSearchResults, f.config.maxSearchReturnedBytes],
   [600, 12, 2400, 262144, 524288, 120, 524288]);
@@ -187,7 +187,7 @@ test("the default single-file byte cap preserves UTF-8 and signals an oversized 
   assert.equal(Buffer.byteLength(partial.text), 262144);
   assert.ok(source.startsWith(partial.text));
   assert.equal(partial.nextStartLine, 1);
-  assert.equal(partial.requiredBytesForNextLine, 280000);
+  assert.ok((partial as any).transfer.taskId);
   assert.equal(partial.continuationRequiresMoreBytes, true);
   assert.equal(partial.eof, false);
 });
@@ -204,7 +204,7 @@ test("read_files preserves all-or-nothing path and text-source preflight before 
   let streams = 0;
   const native = nativeFs.createReadStream;
   t.mock.method(nativeFs, "createReadStream", (...args: Parameters<typeof native>) => { streams++; return native(...args); });
-  for (const bad of [".env", "missing.txt", "../outside.txt", "escape/outside.txt", "binary.txt", path.join(f.root, "ok.txt")]) {
+  for (const bad of [".env", "missing.txt", "../outside.txt", "escape/outside.txt", path.join(f.root, "ok.txt")]) {
     await assert.rejects(() => readWorkspaceFiles(f.config, { files: [{ path: "ok.txt" }, { path: bad }] }));
     assert.equal(streams, 0, bad);
   }
@@ -321,6 +321,8 @@ test("MCP schemas derive caps from config and preserve duplicated text/structure
   assert.equal((read.inputSchema.properties!.maxLines as { maximum: number }).maximum, 7);
   assert.equal((batch.inputSchema.properties!.files as { maxItems: number }).maxItems, 4);
   assert.equal((search.inputSchema.properties!.maxResults as { maximum: number }).maximum, 9);
+  assert.match(tools.find(tool => tool.name === "workspace_info")!.description!, /researchReadPolicy/);
+  assert.match(tools.find(tool => tool.name === "find_files")!.description!, /\.git internals/);
   assert.match(batch.description!, /4 text files, 10 total lines and 1234 total text bytes/);
   assert.deepEqual((search.inputSchema.properties!.contextMode as { enum: string[] }).enum, ["per_match", "merged"]);
   for (const [name, args] of [

@@ -130,8 +130,19 @@ test("both tools are discoverable with strict schemas/readOnlyHint and wire call
   const [ct, st] = InMemoryTransport.createLinkedPair(); await server.connect(st); await client.connect(ct);
   try {
     const { tools } = await client.listTools();
-    assert.deepEqual(tools.map(t => t.name), ["workspace_runtime_status", "mcp_component_diagnostics"]);
-    for (const t of tools) { assert.equal(t.annotations?.readOnlyHint, true); assert.equal(t.inputSchema.additionalProperties, false); assert.equal(t.outputSchema?.additionalProperties, false); }
+    assert.deepEqual(tools.map(t => t.name), ["workspace_runtime_status", "mcp_component_diagnostics","inspect_runtime"]);
+    for (const t of tools.slice(0,2)) { assert.equal(t.annotations?.readOnlyHint, true); assert.equal(t.inputSchema.additionalProperties, false); assert.equal(t.outputSchema?.additionalProperties, false); }
+    const sample = await client.callTool({name:"inspect_runtime",arguments:{target:"project_reading",profile:"performance",include:["performance","logs"],windowMinutes:5}});
+    assert.equal(sample.isError,undefined);
+    const observations = sample.structuredContent as {performance:{rssBytes:{value:number};gc:{conclusion:string}}; coverage:string};
+    assert.ok(observations.performance.rssBytes.value > 0);
+    assert.equal(observations.performance.gc.conclusion,"NOT_INSTRUMENTED");
+    assert.equal(observations.coverage,"point_sample");
+    const full = await client.callTool({name:"inspect_runtime",arguments:{target:"project_reading",profile:"full",include:["build","logs"]}});
+    const {build: builds} = full.structuredContent as {build:{source:{value:unknown}; installed:{value:unknown}; running:{value:unknown}}};
+    assert.equal(builds.source.value,null);
+    assert.equal(builds.installed.value,null);
+    assert.ok(builds.running.value);
     assert.deepEqual((tools[1].inputSchema.properties!.componentId as { enum: string[] }).enum, [...COMPONENT_IDS]);
     assert.equal((await client.callTool({ name: tools[1].name, arguments: { componentId: "codex_bridge" } })).isError, false);
     assert.equal((await client.callTool({ name: tools[0].name, arguments: {} })).isError, false);

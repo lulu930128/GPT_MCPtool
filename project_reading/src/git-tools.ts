@@ -1,3 +1,4 @@
+import { z } from "zod";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { ServerConfig } from "./config.js";
@@ -5,6 +6,7 @@ import {
   WorkspaceAccessError,
   assertWithinRoot,
   resolveWorkspacePath,
+  resolveResearchPath,
   resolveWorkspacePathCandidate,
   resolveWorkspaceRoot,
   toWorkspaceRelative,
@@ -121,6 +123,7 @@ export async function gitStatusSummary(config: ServerConfig, args: GitScopedArgs
     allowed.push(change);
   }
   const branch = await readBranch(config, project.absolute);
+  const head = await runGit(config, project.absolute, ["rev-parse","--verify","HEAD"]);
 
   return {
     root: project.rootId,
@@ -128,6 +131,7 @@ export async function gitStatusSummary(config: ServerConfig, args: GitScopedArgs
     isGitRepo: true,
     git: publicGitContext(context),
     branch,
+    head: head.code === 0 ? head.stdout.trim() : null, dirty: parsed.length > 0,
     changedFiles: allowed.map((change) => change.path),
     changes: allowed.map(publicGitChange),
     omitted: { denied: omittedDenied },
@@ -268,6 +272,13 @@ export async function discoverGitContext(
     repoRootAbsolute,
     "Git repository root is outside the selected workspace root.",
   );
+  const dirs = await runGit(config, project.absolute, ["rev-parse","--path-format=absolute","--git-dir","--git-common-dir"]);
+  assertGitSuccess(dirs, "git rev-parse");
+  for (const value of dirs.stdout.trim().split(/\r?\n/)) {
+    const real = await fs.realpath(value);
+    assertWithinRoot(workspaceRoot.path, real, "Linked gitdir is outside the selected workspace root.");
+    await resolveResearchPath(config, toWorkspaceRelative(workspaceRoot.path, real), "directory", project.rootId);
+  }
   const scope = normalizeGitPath(path.relative(repoRootAbsolute, project.absolute)) || ".";
   const tracked = await runGit(config, project.absolute, ["ls-files", "-z", "--", "."], {
     maxStdoutBytes: 65_536,
@@ -610,18 +621,86 @@ async function runGit(
   config: ServerConfig,
   cwd: string,
   args: readonly string[],
-  overrides: { maxStdoutBytes?: number } = {},
+  overrides: { maxStdoutBytes?: number; byteRange?: { offset: number; length: number } } = {},
 ): Promise<BoundedProcessResult> {
   return runBoundedProcess(
     "git",
-    ["--no-optional-locks", "-c", "core.fsmonitor=false", "-C", cwd, ...args],
+    ["--no-pager", "--literal-pathspecs", "--no-optional-locks", "-c", "core.fsmonitor=false", "-C", cwd, ...args],
     {
+      byteRange: overrides.byteRange,
       timeoutMs: config.gitTimeoutMs,
       maxStdoutBytes: overrides.maxStdoutBytes ?? Math.max(config.maxGitDiffBytes, 262_144),
       maxStderrBytes: 131_072,
-      env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_EXTERNAL_DIFF: "" },
+      env: { ...process.env, GIT_NO_LAZY_FETCH: "1", GIT_OPTIONAL_LOCKS: "0", GIT_EXTERNAL_DIFF: "" },
     },
   );
+}
+
+export const gitInspectInput = {
+  root: z.string().optional(), project: z.string().optional(), path: z.string().optional(),
+  operation: z.enum(["status","log","history","show","blame","diff","refs"]),
+  revision: z.string().optional(), branch: z.string().optional(), tag: z.string().optional(), commit: z.string().optional(),
+  offset: z.number().int().nonnegative().optional(), length: z.number().int().positive().optional(),
+  followRenames: z.boolean().optional(), mode: z.enum(["unstaged","staged","all"]).optional(),
+};
+export async function inspectGit(config: ServerConfig, args: z.infer<z.ZodObject<typeof gitInspectInput>>) {
+  if (args.operation === "status") return gitStatusSummary(config,args);
+  const ref = args.revision ?? args.commit ?? args.branch ?? args.tag;
+  if (args.operation === "diff" && !ref) return gitDiff(config,args);
+  const project = await resolveWorkspacePath(config,args.project,"directory",args.root);
+  const ctx = await discoverGitContext(config,project);
+  if (!ctx) throw new WorkspaceAccessError("Git repository unavailable.");
+  if (args.path) assertWithinRoot(project.absolute,path.resolve(project.absolute,args.path),"Path escapes project.");
+  const cwd = project.absolute;
+  const run = async (argv: string[]) => {
+    const result = await runGit(config,cwd,argv);
+    assertGitSuccess(result,argv[0]); return result.stdout;
+  };
+  const page = async (argv: string[], binary = false) => {
+    const offset = args.offset ?? 0;
+    // JSON text can expand sixfold, base64 uses four bytes per three input bytes.
+    const wireBudget = 10 * 1024 * 1024 - 65536;
+    const length = Math.min(args.length ?? Infinity, Math.floor(wireBudget / (binary ? 4/3 : 6)));
+    const result = await runGit(config, cwd, argv, { byteRange: {offset,length} });
+    const more = result.terminationReason === "caller_stop";
+    if (!more) assertGitSuccess(result,argv[0]);
+    const bytes = result.raw!;
+    let value: { text: string } | { base64: string };
+    try {
+      if (binary) value = {base64:bytes.toString("base64")};
+      else value = {text:new TextDecoder("utf-8",{fatal:true}).decode(bytes)};
+    } catch { value = {base64:bytes.toString("base64")}; }
+    return { ...value, offset, length: bytes.length, eof: !more, nextOffset: more ? offset+bytes.length : null };
+  };
+  if (args.operation === "refs") return { source: "git for-each-ref", ...await page(["for-each-ref","--format=%(objectname) %(refname)"]) };
+  // A caller can also inspect a packed blob or tree directly by object ID.
+  // Resolve the expression before passing the fixed hexadecimal ID to cat-file.
+  if (args.operation === "show" && !args.path && ref) {
+    const objectId = (await run(["rev-parse","--verify","--end-of-options",ref])).trim();
+    const objectType = (await run(["cat-file","-t",objectId])).trim();
+    if (objectType !== "commit") {
+      const binary = objectType === "blob";
+      return { objectId, objectType, source: "git cat-file", representation: binary ? "decoded_blob" : "git_object_listing",
+        ...await page(["cat-file",binary ? "blob" : "-p",objectId],binary) };
+    }
+  }
+  const commit = (await run(["rev-parse","--verify","--end-of-options",(ref ?? "HEAD") + "^{commit}"])).trim();
+  const paths = ["--",args.path ?? "."];
+  let argv: string[];
+  switch (args.operation) {
+    case "blame":
+      if (!args.path) throw new Error("blame requires a path.");
+      argv = ["blame","--no-textconv",commit,...paths]; break;
+    case "show":
+      argv = args.path ? ["cat-file","blob",commit + ":" + path.posix.join(ctx.scope,args.path.replaceAll("\\","/"))] :
+        ["show","--no-ext-diff","--no-textconv","--format=fuller",commit,...paths]; break;
+    case "diff": argv = ["show","--format=","--no-ext-diff","--no-textconv",commit,...paths]; break;
+    default: argv = ["log","--format=%H %aI %an %s",...(args.path && args.followRenames ? ["--follow"] : []),commit,...paths];
+  }
+  if (args.operation === "show" && args.path) {
+    return { commit, representation: "decoded_blob", encoding: "base64", ...await page(argv,true) };
+  }
+  return { commit, source: "git " + argv[0], representation: "git_text", ...await page(argv) };
 }
 
 function assertGitSuccess(result: BoundedProcessResult, operation: string): void {

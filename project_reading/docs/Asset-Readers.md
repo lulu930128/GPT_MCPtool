@@ -1,6 +1,6 @@
 # 圖片、Office、PDF 與 ZIP 檔案讀取
 
-目前提供八個 bounded reader tools，另提供原始檔案與音訊回傳 tools：
+專用 reader 提供下列格式解析、原始檔案與音訊回傳工具：
 
 - `inspect_asset`：查看圖片、`.xlsx`、`.docx`、`.pptx` 的基本資訊與容器安全結果。
 - `read_image`：回傳 JPEG、PNG、WebP 或 GIF 的安全預覽；GIF 固定轉為靜態 PNG。
@@ -15,7 +15,7 @@
 
 ## ZIP 壓縮傳輸與受限讀取
 
-Source 1.9.0 的大檔背景分段傳輸另外見 [Segmented-Transfer.md](Segmented-Transfer.md)。
+`start_segmented_transfer` 自 1.9.0 提供，沿用 asset/file-return scope。V2 的 `read_file`、`read_files` 使用 workspace root，可讀 `.git` 與 raw DB/binary，並透過同一 Owner 分段。下表的格式與限制適用於專用 Asset/ZIP 工具。舊 8–12 MiB part 的同 taskId range、原 URI 相容性、SHA-256 與接收端驗證見 [分段傳輸](Segmented-Transfer.md)。
 以下 1.8.0 小 ZIP 工具、限制、single-use URI 與 return contract 均保持不變。
 
 Source `1.8.0` / contract `2026-11-08.1` 新增下列工具，所有 input/output 都有宣告 schema：
@@ -94,7 +94,7 @@ SDK 沒有瀏覽器下載完成 ACK。這裡保證的是 **resource callback 完
 ### 安裝與後續採用
 
 全新 checkout 在 `project_reading` 執行 `npm ci`、`npm run build`、`npm test`。
-本次僅將既有 `jszip@3.10.1` 明確列為 runtime dependency，未升級套件；現有安裝已可完成 build。
+1.8.0 的 ZIP 工具將既有 `jszip@3.10.1` 列為 runtime dependency。
 
 正式更新須另行確認允許中斷目前 runtime 請求，再沿
 [既有 CC source-update owner](LocalComponentManagement.md#2026-10-28-phase-2source-update-v2)：
@@ -102,9 +102,7 @@ SDK 沒有瀏覽器下載完成 ACK。這裡保證的是 **resource callback 完
 及新 immutable `versionId` 呼叫 `mcp_component_update_preview`；保留 preview 的
 `expectedSourceDigest` 與同一 UUID `requestId` 提交 update，使用必要的
 `confirmation=interrupt_current_requests`，並查原 receipt。
-更新後核對 loaded `1.8.0`／contract `2026-11-08.1`、新 buildId、Ready、五個工具 schema，
-再刷新 ChatGPT connector 並驗收 ZIP 下載與 single-use 行為。
-本次工程驗證未執行更新、restart 或 ChatGPT E2E。
+核對該次 Owner 收據的 prepared/observed buildId、Ready、正式 MCP 的 applicationVersion、toolContractVersion 與 `tools/list`。ZIP 工具最初在 1.8.0 驗收；Host 的下載與 single-use 行為須在對應版本另行實測。
 
 ## Asset scope
 

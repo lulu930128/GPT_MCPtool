@@ -11,7 +11,7 @@ export const PREVIEW_ACTIONS = Object.freeze([
   "ensure_running", "repair_connectivity", "restart_core", "reload_runtime", "shutdown_runtime",
 ] as const);
 type ComponentId = typeof COMPONENT_IDS[number];
-const ports: Readonly<Record<ComponentId, number>> = Object.freeze({
+export const componentPorts: Readonly<Record<ComponentId, number>> = Object.freeze({
   codex_bridge: 18828, omi_search: 18797, japanese_study: 18790, memory_core: 18818,
   personal_asset_os: 18876, english_study: 18886, listening_audio: 18810,
 });
@@ -53,7 +53,7 @@ export async function componentStatus(input: unknown, probe: typeof checkTcpPort
       let code: string | null = null;
       const startedAt = new Date().toISOString();
       try {
-        const sample = await probe({ host: "127.0.0.1", port: ports[id], timeoutMs: RECOVERY_LIMITS.timeoutMs });
+        const sample = await probe({ host: "127.0.0.1", port: componentPorts[id], timeoutMs: RECOVERY_LIMITS.timeoutMs });
         if (sample.ok === true && typeof sample.connected === "boolean") {
           state = sample.connected ? "TCP_CONNECTED" : "TCP_NOT_CONNECTED";
           if (!sample.connected) {
@@ -66,7 +66,7 @@ export async function componentStatus(input: unknown, probe: typeof checkTcpPort
         componentId: id, status: "UNVERIFIED",
         localObservation: {
           source: "SOURCE_FIXED_LOOPBACK_TCP", mappingVersion: "2026-10-13.1",
-          host: "127.0.0.1", port: ports[id], scope: "primary_mcp_port_only",
+          host: "127.0.0.1", port: componentPorts[id], scope: "primary_mcp_port_only",
           state, code, startedAt, observedAt: new Date().toISOString(),
           serviceIdentity: "UNVERIFIED", health: "UNVERIFIED",
         },

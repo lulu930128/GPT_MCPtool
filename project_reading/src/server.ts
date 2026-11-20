@@ -3,6 +3,8 @@ import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { readAudioAsset } from "./audio.js";
 import { registerArchiveTools } from "./archive-server.js";
+import { sqliteInput, inspectSqlite, type SqliteSessions } from "./sqlite-reader.js";
+import { inspectGit, gitInspectInput } from "./git-tools.js";
 import { registerSegmentedTransferTools } from "./segmented-transfer-server.js";
 import {
   inspectAsset,
@@ -123,7 +125,7 @@ export function createWorkspaceMcpServer(config: ServerConfig, options: Workspac
     {
       title: "Workspace Info",
       outputSchema: objectOutputSchema,
-      description: "Show configured roots, actual read-only or operate mode, write capabilities, limits, and deny policy.",
+      description: "Show configured roots, mode, write capabilities and limits. denyPolicy describes general exclusions; researchReadPolicy lists root-scoped Git internals and raw database/binary exceptions for discovery and reads. Asset and write tools retain their own policies.",
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -199,7 +201,7 @@ export function createWorkspaceMcpServer(config: ServerConfig, options: Workspac
       title: "Read File",
       outputSchema: objectOutputSchema,
       description:
-        `Read up to ${config.maxReadLines} lines and ${config.maxReturnedBytes} text bytes under the workspace root. Use nextStartLine to continue; partialLine requires rereading that line with a larger byte budget (see requiredBytesForNextLine). Secrets, local databases, archives, dependencies, caches, and model weights are denied.`,
+        `Read root-scoped text (default ${Math.min(600, config.maxReadLines)} lines, maximum ${config.maxReadLines}) or raw binary ranges, including Git internals and databases. Source limit: ${config.maxFileBytes} bytes. Inline windows fit the 10 MiB serialized message budget. Resume with snapshotId, startLine=nextStartLine and offset=nextOffset. For a complete original, request delivery=resource, poll get_segmented_transfer, follow list_segmented_transfer and read each resource. Verify SHA-256 before finish. Use inspect_sqlite for a read-only statement snapshot.`,
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -210,7 +212,8 @@ export function createWorkspaceMcpServer(config: ServerConfig, options: Workspac
         path: z.string().min(1).describe("File path relative to the workspace root."),
         startLine: z.number().int().min(1).optional().describe("1-based starting line. Defaults to 1."),
         maxLines: z.number().int().min(1).max(config.maxReadLines).optional().describe("Maximum lines to return."),
-        includeSha256: z.boolean().optional().describe("Read one bounded UTF-8 snapshot and return its full raw-byte SHA-256 for a subsequent guarded write."),
+        ...researchInputs,
+        includeSha256: z.boolean().optional().describe("Hash the complete source bytes using bounded buffers. For a background capture, obtain archiveSha256 from the ready transfer."),
       },
     },
     async (args) => safeResult(() => readWorkspaceFile(config, args)),
@@ -222,7 +225,7 @@ export function createWorkspaceMcpServer(config: ServerConfig, options: Workspac
       title: "Read Files",
       outputSchema: objectOutputSchema,
       description:
-        `Read up to ${config.maxBatchFiles} text files, ${config.maxBatchTotalLines} total lines and ${config.maxBatchTotalBytes} total text bytes. Omitted maxLines shares the remaining line budget fairly; explicit budgets above the aggregate cap are rejected. Bytes are fairly reserved for remaining files. Every path is preflighted before content is returned. Follow nextStartLine and truncationReasons; a partial first line may need read_file or a higher operator byte limit.`,
+        config.maxBatchFiles === Number.MAX_SAFE_INTEGER ? "Read a batch of root-scoped text or binary files. Each entry accepts read_file options. Poll returned transfer IDs for complete snapshots. Resume with the same files array and fileIndex=nextFileIndex. Resume individual windows with their snapshotId and offset." : `Read up to ${config.maxBatchFiles} text files, ${config.maxBatchTotalLines} total lines and ${config.maxBatchTotalBytes} total text bytes. Omitted maxLines shares the remaining line budget fairly; explicit budgets above the aggregate cap are rejected. Bytes are fairly reserved for remaining files. Raw binary and automatic segmented manifests are also supported. Every path is preflighted before content is returned. Continue the same files array with fileIndex=nextFileIndex. Follow nextStartLine and truncationReasons; a partial first line may need read_file or a higher operator byte limit.`,
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -230,10 +233,13 @@ export function createWorkspaceMcpServer(config: ServerConfig, options: Workspac
       },
       inputSchema: {
         root: rootInput,
+        fileIndex: z.number().int().nonnegative().optional(),
         files: z
           .array(
             z.object({
               path: z.string().min(1).describe("File path relative to the workspace root."),
+              ...researchInputs,
+              includeSha256: z.boolean().optional().describe("Request the full source SHA-256; background captures publish archiveSha256 when ready."),
               startLine: z.number().int().min(1).optional(),
               maxLines: z.number().int().min(1).max(config.maxReadLines).optional().describe("Omit to share the remaining batch line budget fairly."),
             }),
@@ -251,7 +257,7 @@ export function createWorkspaceMcpServer(config: ServerConfig, options: Workspac
       title: "Find Files",
       outputSchema: objectOutputSchema,
       description:
-        "Find allowed files recursively by relative glob pattern and optional extension filters without exposing absolute paths.",
+        "Find files recursively within a configured root using the research read policy, including .git internals, raw databases and .bin files. Patterns with a slash match scope-relative paths; other patterns match basenames at any depth. Results are scope-relative. Traversal skips symlink entries.",
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -277,7 +283,7 @@ export function createWorkspaceMcpServer(config: ServerConfig, options: Workspac
     {
       title: "Search Text",
       outputSchema: objectOutputSchema,
-      description: `Search text within the workspace root, capped at ${config.maxSearchResults} hits and ${config.maxSearchReturnedBytes} output bytes. Uses rg when available and a bounded JavaScript fallback otherwise.`,
+      description: `Search text within the workspace root, capped at ${config.maxSearchResults} hits and ${config.maxSearchReturnedBytes} output bytes. Filter scope-relative paths with includeGlobs/excludeGlobs and fileKinds. Ranked results return nextCursor for the same query. Explicit .git paths, the git kind or includeGitInternals include Git internals. Uses rg when available and a bounded JavaScript fallback otherwise.`,
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -287,6 +293,11 @@ export function createWorkspaceMcpServer(config: ServerConfig, options: Workspac
         root: rootInput,
         query: z.string().min(1).describe("Search query."),
         path: z.string().optional().describe("Directory path relative to the workspace root. Defaults to the root."),
+        includeGlobs: z.array(z.string()).optional().describe("Match any of these scope-relative globs in addition to glob."),
+        excludeGlobs: z.array(z.string()).optional().describe("Omit paths matching any of these scope-relative globs."),
+        fileKinds: z.array(z.enum(["source","tests","translations","docs","git"])).optional().describe("Include matches in the selected file categories."),
+        cursor: z.string().optional().describe("Pass nextCursor from the preceding results page with the same query and filters."),
+        includeGitInternals: z.boolean().optional().describe("Include files under .git when searching a broader directory."),
         glob: z.string().optional().describe("Optional include glob, for example **/*.ts."),
         maxResults: z.number().int().min(1).max(config.maxSearchResults).optional().describe("Maximum matches to return."),
         caseSensitive: z.boolean().optional().describe("Use case-sensitive search. Defaults to false."),
@@ -785,6 +796,17 @@ export function createWorkspaceMcpServer(config: ServerConfig, options: Workspac
   );
 
   registerArchiveTools(server, config);
+  const sqliteSessions: SqliteSessions = new Map();
+  const previousClose = server.server.onclose;
+  server.server.onclose = () => {
+    previousClose?.();
+    for (const session of sqliteSessions.values()) session.worker.kill();
+    sqliteSessions.clear();
+  };
+  server.registerTool("inspect_sqlite", { description: "Read SQLite catalog or one parameterized read-only statement. Resume or close the same statement with cursor and path.", inputSchema: sqliteInput,
+    annotations: { readOnlyHint: true, destructiveHint: false } }, args => safeResult(() => inspectSqlite(config, args, sqliteSessions)));
+  server.registerTool("inspect_git", { description: "Inspect repository state or committed history. show with path returns the decoded Git blob. read_file provides physical object/pack bytes.", inputSchema: gitInspectInput,
+    annotations: { readOnlyHint: true, destructiveHint: false } }, args => safeResult(() => inspectGit(config, args)));
   registerSegmentedTransferTools(server, config);
   registerDiagnosticTools(server);
   registerComponentRecoveryTools(server, createReadOnlyRecovery(undefined, options.authenticatedMaintenance === true));
@@ -795,20 +817,30 @@ export function createWorkspaceMcpServer(config: ServerConfig, options: Workspac
 
 async function safeResult(read: () => Promise<unknown>) {
   try {
-    return toTextResult(await read());
+    const started = performance.now();
+    return toTextResult(await read(), started);
   } catch (error) {
     return toErrorResult(error);
   }
 }
 
-function toTextResult(value: unknown) {
+const researchInputs = {
+  format: z.enum(["auto", "text", "binary"]).optional(), delivery: z.enum(["auto", "inline", "resource"]).optional(),
+  offset: z.number().int().nonnegative().optional(), length: z.number().int().nonnegative().optional(), snapshotId: z.string().optional(),
+};
+function toTextResult(value: unknown, started = performance.now()) {
+  const beforeEncoding = performance.now();
+  const encoded = typeof value === "string" ? value : JSON.stringify(value);
+  const payloadBytes = Buffer.byteLength(encoded);
   const structuredContent = toStructuredContent(value);
   return {
+    _meta: { serverExecMs: beforeEncoding - started, serializationMs: performance.now() - beforeEncoding,
+      payloadBytes, payloadScope: "tool value before MCP framing", queueMs:"UNKNOWN", hostMs:"UNKNOWN", tunnelMs:"UNKNOWN" },
     structuredContent,
     content: [
       {
         type: "text" as const,
-        text: typeof value === "string" ? value : JSON.stringify(value, null, 2),
+        text: payloadBytes <= 262144 ? encoded : "Payload in structuredContent.",
       },
     ],
   };

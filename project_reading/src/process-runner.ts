@@ -3,6 +3,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 export type ProcessTerminationReason = "timeout" | "output_limit" | "caller_stop";
 
 export interface BoundedProcessOptions {
+  streamLines?: boolean;
+  byteRange?: { offset: number; length: number };
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   timeoutMs: number;
@@ -15,6 +17,7 @@ export interface BoundedProcessOptions {
 }
 
 export interface BoundedProcessResult {
+  raw?: Buffer;
   code: number | null;
   stdout: string;
   stderr: string;
@@ -37,6 +40,8 @@ export function runBoundedProcess(
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    const decoder = new TextDecoder();
+    const raw: Buffer[] = [];
     let stdout = "";
     let stderr = "";
     let stdoutBytes = 0;
@@ -61,16 +66,23 @@ export function runBoundedProcess(
       }
     });
     child.stdout.on("data", (chunk: Buffer) => {
-      if (terminationReason === "output_limit") {
+      if (terminationReason) return;
+      const range = options.byteRange;
+      if (range) {
+        const start = Math.max(0, range.offset - stdoutBytes);
+        const end = Math.min(chunk.length, range.offset + range.length - stdoutBytes);
+        if (end > start) raw.push(chunk.subarray(start, end));
+        stdoutBytes += chunk.length;
+        if (stdoutBytes > range.offset + range.length) terminate("caller_stop");
         return;
       }
       stdoutBytes += chunk.byteLength;
-      if (stdoutBytes > maxStdoutBytes) {
+      if ((options.streamLines ? Buffer.byteLength(stdoutBuffer) + chunk.byteLength : stdoutBytes) > maxStdoutBytes) {
         terminate("output_limit");
         return;
       }
-      const text = chunk.toString("utf8");
-      stdout += text;
+      const text = decoder.decode(chunk, { stream: true });
+      if (!options.streamLines) stdout += text;
       if (!options.onStdoutLine) {
         return;
       }
@@ -104,7 +116,7 @@ export function runBoundedProcess(
         options.onStdoutLine(stdoutBuffer, child);
       }
       settled = true;
-      resolve({ code, stdout, stderr, terminationReason });
+      resolve({ code, stdout, stderr, terminationReason, ...(options.byteRange ? { raw: Buffer.concat(raw) } : {}) });
     });
   });
 }

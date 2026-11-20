@@ -1,7 +1,14 @@
 # Runtime 唯讀診斷
 
-Source tool contract：`2026-10-14.2`；application release 保持 `1.7.0`。
-兩個新增工具皆有嚴格 input/output schema、`readOnlyHint=true`，不建立維護請求。
+## V2 的 inspect_runtime
+
+`inspect_runtime(target, profile, windowMinutes?, include?)` 使用 Control Center 更新目標 registry，包含 `project_reading`、`mcp_control_center` 與已登記的其他元件。預設 `health` 讀取 health、process、dependencies、build；`performance` 讀取 process 與 performance；`full` 包含全部六節及 logs。`include` 可直接選取所需段落。
+
+回應的 `coverage=point_sample` 表示本次取樣。`windowMinutes` 記在 `requestedWindowMinutes`，目前沒有歷史序列。每項量測標出 source、observedAt、identity、scope、conclusion。Workspace 可回報本程序 CPU 累積時間、RSS、V8 heap 與 event-loop utilization；其他程序依其 Owner 證據回傳。HTTP 耗時涵蓋單次 loopback 探測。來源缺少時請保留 `UNVERIFIED` 或 `NOT_INSTRUMENTED`。GC、瀏覽器 navigation、React 與 main-thread trace 未儀表化，使用者體感延遲仍未知。核對 installed build 時另讀部署 Owner 的收據與建置紀錄。
+
+## 既有診斷工具
+
+下列兩個唯讀工具於歷史版本 `1.7.0`、契約 `2026-10-14.2` 引入，V2 持續提供。
 
 `workspace_runtime_status()` 不接受參數。identity 使用已載入 config 的 runtimeIdentity，
 不重新讀取磁碟 build，避免把目前 source build 當成執行版本。權限沿用
@@ -60,6 +67,6 @@ cd C:\GPT_MCPtool\mcp_control_center
 & C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -File tests\test-workspace-local.ps1
 ```
 
-本次不 restart、切換 Tray 或部署。採用必須另行授權：先依既有 owner／maintenance
+1.7.0 的歷史驗收未 restart、切換 Tray 或部署。當時採用流程為依既有 owner／maintenance
 流程安全更新 CC 與 Workspace，再由 ChatGPT tools/list 確認兩工具、比對 boot
 buildId/runtimeStartedAt 與契約版號，並查詢唯讀診斷；不以測試 UUID 提交 reload。

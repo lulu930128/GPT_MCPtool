@@ -14,7 +14,7 @@ import { loadConfig } from "../src/config.js";
 import { digest } from "../src/archives.js";
 import { SegmentedTransferStore, type TransferOptions } from "../src/segmented-transfer.js";
 import { registerSegmentedTransferTools } from "../src/segmented-transfer-server.js";
-import { addBytes, StreamingZip64, TRANSFER_LIMITS, writeAll, zip64End } from "../src/transfer-streams.js";
+import { addBytes, identity, StreamingZip64, TRANSFER_LIMITS, writeAll, zip64End } from "../src/transfer-streams.js";
 
 const MiB = 1024 * 1024;
 async function fixture(t: TestContext, options: TransferOptions = {}) {
@@ -238,6 +238,49 @@ test("MCP strict schemas, paged resource_links, retry after SDK failure and expl
   assert.equal(metadata.transmittedBytes, Number(metadata.archiveBytes) * 2);
   const finished = await client.callTool({ name: "finish_segmented_transfer", arguments: { taskId: id, action: "complete", archiveSha256: metadata.archiveSha256 } });
   assert.notEqual(finished.isError, true); await f.store.waitForIdle();
+});
+
+test("more than four ready workspace captures recover with their original IDs and bytes",async t=>{
+  const f=await fixture(t);
+  const jobs=[];
+  for(let i=0;i<6;i++) {
+    const name="source/"+i+".txt", file=path.join(f.root,name);
+    await fs.writeFile(file,String(i));
+    jobs.push(await f.store.start(f.config,{scope:"projects",path:name,kind:"file"},identity(await fs.stat(file))));
+  }
+  await f.store.waitForIdle();
+  await f.restart();
+  for (const [index,job] of jobs.entries()) {
+    const page=await f.store.page(f.config,job.taskId,"parts");
+    assert.equal((await f.store.read(f.config,String(page.records[0].resourceUri))).toString(),String(index));
+  }
+});
+
+test("legacy eight MiB parts retain their URI and reassemble through same-task tunnel ranges",async t=>{
+  const f = await fixture(t);
+  const expected = await patternedFile(path.join(f.source,"legacy.dat"),8*MiB);
+  const started = await f.start("file","source/legacy.dat",8*MiB);
+  await f.ready(started.taskId);
+  await f.restart();
+  const server = new McpServer({name:"range",version:"1"});
+  registerSegmentedTransferTools(server,f.config,f.store);
+  const client = new Client({name:"range-client",version:"1"});
+  const [ct,st] = InMemoryTransport.createLinkedPair();
+  await server.connect(st); await client.connect(ct);
+  t.after(async()=>{await client.close();await server.close();});
+  const page = await client.callTool({name:"list_segmented_transfer",arguments:{taskId:started.taskId}});
+  const links = (page.content as {type:string;uri:string}[]).filter(x=>x.type==="resource_link");
+  assert.equal(links.length,2);
+  const hash = createHash("sha256");
+  for(const {uri} of links) {
+    const part = await client.readResource({uri});
+    assert.ok(Buffer.byteLength(JSON.stringify({jsonrpc:"2.0",id:10,result:part})) < 10*MiB);
+    const content = part.contents[0];
+    assert.ok("blob" in content);
+    hash.update(Buffer.from(content.blob,"base64"));
+  }
+  assert.equal(hash.digest("hex"),expected);
+  assert.equal((await f.store.status(f.config,started.taskId)).transmittedBytes,8*MiB);
 });
 
 test("one directory with 4097 audio files has no unrelated fanout cap", async (t) => {

@@ -38,7 +38,8 @@ Copy-Item -LiteralPath (Join-Path $componentRoot 'node_modules\typescript') -Des
 Copy-Item -LiteralPath (Join-Path $componentRoot 'node_modules\.bin\tsc.cmd') -Destination (Join-Path $root 'node_modules\.bin\tsc.cmd')
 . (Join-Path $componentRoot 'scripts\component-update-common.ps1')
 $script:realProcess=${function:Invoke-ComponentUpdateProcess}
-$node=(Get-Command node.exe -CommandType Application -ErrorAction Stop).Source
+# Match the first application on PATH even when Codex also carries a Node runtime.
+$node=(Get-Command node.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
 $ps=Join-Path $PSHOME 'powershell.exe'
 $script:buildCalls=0;$script:statusCalls=0
 $script:statusReply=$null
@@ -70,7 +71,7 @@ $stagedIdentity=& $identity $stage
 $package=Read-ComponentUpdateJson (Join-Path $root 'package.json')
 Assert-Adapter ($stagedIdentity.version -ceq $package.version -and $stagedIdentity.contractVersion -ceq $package.toolContractVersion) 'real identity callback preserves application and tool contract versions'
 Assert-Adapter ($stagedIdentity.buildId -cmatch '^[a-f0-9]{20}$') 'staged identity has generated build id'
-$npm=(Get-Command npm.cmd -CommandType Application -ErrorAction Stop).Source
+$npm=(Get-Command npm.cmd -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
 $npmCli=Join-Path (Split-Path -Parent $npm) 'node_modules\npm\bin\npm-cli.js'
 if(-not (Test-Path -LiteralPath $npmCli -PathType Leaf)){throw 'NPM_CLI_NOT_FOUND'}
 & $script:realProcess -Executable $node -Arguments ('"'+$npmCli+'" run build') -WorkingDirectory $root -ChildJournalRoot (Join-Path $fixtureBase 'children-normal') | Out-Null

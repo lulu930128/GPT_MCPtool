@@ -6,6 +6,7 @@ import type { ServerConfig, WorkspaceRootConfig } from "./config.js";
 import {
   WorkspaceAccessError,
   getDenialReason,
+  resolveResearchPath,
   isWithinRoot,
   resolveWorkspacePath,
   resolveWorkspaceRoot,
@@ -14,7 +15,32 @@ import {
 import { runBoundedProcess } from "./process-runner.js";
 import { assertTextSource, collectLineWindows, truncateUtf8 } from "./text-reader.js";
 
+export const searchKinds = ["source","tests","docs","translations","git"] as const;
+type FileKind = typeof searchKinds[number];
+function fileKind(file: string): FileKind {
+  if (/(^|\/)\.git(\/|$)/i.test(file)) return "git";
+  if (/(^|\/)(locales?|i18n|translations?)(\/|$)/i.test(file)) return "translations";
+  if (/(^|\/)(__tests__|tests?|fixtures?)(\/|$)|\.(test|spec)\./i.test(file)) return "tests";
+  if (/\.(md|rst|adoc)$/i.test(file) || /(^|\/)docs\//i.test(file)) return "docs";
+  return "source";
+}
+function sortKey(match: SearchMatch) {
+  return searchKinds.indexOf(fileKind(match.path)) + "/" + match.path + "\0" + String(match.line).padStart(16,"0");
+}
+function collect(matches: SearchMatch[], match: SearchMatch, options: SearchOptions) {
+  if (!options.globMatches(match.path) || (options.cursor && sortKey(match) <= options.cursor)) return false;
+  let low = 0, high = matches.length;
+  const key = sortKey(match);
+  while (low < high) {
+    const mid = (low + high) >>> 1;
+    if (sortKey(matches[mid]) < key) low = mid + 1; else high = mid;
+  }
+  if (low < options.maxResults) matches.splice(low, 0, match);
+  if (matches.length > options.maxResults) matches.pop();
+  return true;
+}
 export interface SearchTextArgs {
+  includeGlobs?: string[]; excludeGlobs?: string[]; fileKinds?: FileKind[]; includeGitInternals?: boolean; cursor?: string;
   root?: string;
   query: string;
   path?: string;
@@ -44,6 +70,7 @@ interface SearchCollection {
 }
 
 interface SearchOptions {
+  cursor?: string; includeGit: boolean; sourceOnly: boolean;
   query: string;
   glob?: string;
   globMatches: (relative: string) => boolean;
@@ -63,13 +90,22 @@ export async function searchWorkspaceText(
   if (!query) {
     throw new WorkspaceAccessError("Search query must not be empty.");
   }
-  const scope = await resolveWorkspacePath(config, args.path, "directory", args.root);
+  const begin = performance.now();
+  const includeGit = !!args.includeGitInternals || /(^|[\\/])\.git([\\/]|$)/i.test(args.path ?? "") || !!args.fileKinds?.includes("git");
+  const scope = await (includeGit ? resolveResearchPath : resolveWorkspacePath)(config, args.path, "directory", args.root);
   const workspaceRoot = resolveWorkspaceRoot(config, scope.rootId);
   const glob = normalizeGlob(args.glob);
+  const includes = args.includeGlobs?.map(compileGlobMatcher), excludes = args.excludeGlobs?.map(compileGlobMatcher);
+  const legacy = compileGlobMatcher(glob);
   const options: SearchOptions = {
+    includeGit, cursor: args.cursor, sourceOnly: args.fileKinds?.length === 1 && args.fileKinds[0] === "source",
     query,
     glob,
-    globMatches: compileGlobMatcher(glob),
+    globMatches: file => {
+      const relative = normalizeRelative(path.posix.relative(scope.relative, file));
+      return legacy(relative) && (!includes?.length || includes.some(test => test(relative))) &&
+        !excludes?.some(test => test(relative)) && (!args.fileKinds?.length || args.fileKinds.includes(fileKind(file)));
+    },
     maxResults: clampInt(args.maxResults ?? config.maxSearchResults, 1, config.maxSearchResults),
     caseSensitive: args.caseSensitive === true,
     fixedString: args.fixedString !== false,
@@ -109,6 +145,7 @@ export async function searchWorkspaceText(
     collection = await searchWithJavaScript(config, workspaceRoot, scope.absolute, options);
   }
 
+  const scanMs = performance.now() - begin;
   const bounded = await addContext(config, collection.matches, options, workspaceRoot.id);
   return {
     engine: collection.engine,
@@ -124,6 +161,9 @@ export async function searchWorkspaceText(
     truncated: collection.truncated || bounded.truncated,
     limitReason: bounded.limitReason ?? collection.limitReason,
     results: bounded.results,
+    fileKinds: Object.fromEntries(collection.matches.slice(0,bounded.results.length).map(m => [m.path,fileKind(m.path)])),
+    nextCursor: (collection.truncated || bounded.truncated) && bounded.results.length ? sortKey(collection.matches[bounded.results.length-1]) : null,
+    metrics: { scanMs, serverExecMs: performance.now()-begin, hostMs: "UNKNOWN", tunnelMs: "UNKNOWN", queueMs: "UNKNOWN" },
     ...(options.contextMode === "merged" ? { contextMode: "merged", contexts: bounded.contexts } : {}),
   };
 }
@@ -137,6 +177,7 @@ async function searchWithRipgrep(
 ): Promise<SearchCollection> {
   const args = [
     "--json",
+    ...(options.includeGit ? ["--glob","**/*"] : []),
     "--line-number",
     "--max-columns",
     "240",
@@ -158,7 +199,7 @@ async function searchWithRipgrep(
     "!**/id_ed25519",
   ];
   for (const directory of workspaceRoot.denyDirs) {
-    args.push("--glob", `!**/${escapeRgGlob(directory)}/**`);
+    if (!options.includeGit || directory !== ".git") args.push("--glob", `!**/${escapeRgGlob(directory)}/**`);
   }
   for (const extension of config.denyExtensions) {
     args.push("--glob", `!**/*${extension}`);
@@ -166,14 +207,20 @@ async function searchWithRipgrep(
   if (!options.caseSensitive) args.push("--ignore-case");
   if (options.fixedString) args.push("--fixed-strings");
   if (options.glob) args.push("--glob", options.glob);
-  args.push(options.query, scope);
+  if (options.includeGit) args.push("--hidden", "--no-ignore", "--glob", "**/.git/**");
+  if (options.sourceOnly) {
+    args.push("--iglob","!**/{locale,locales,i18n,translation,translations,test,tests,__tests__,fixture,fixtures,docs}/**",
+      "--iglob","!**/*.{test,spec}.*","--iglob","!**/*.{md,rst,adoc}");
+  }
+  args.push("--", options.query, scope);
 
   const rawMatches: Array<Omit<SearchMatch, "absolute"> & { absolute: string }> = [];
-  let stoppedForResults = false;
+  let seen = 0;
   const result = await runBoundedProcess(command, args, {
     timeoutMs: config.searchTimeoutMs,
     maxStdoutBytes: 4_194_304,
     maxStderrBytes: 131_072,
+    streamLines: true,
     onStdoutLine: (line) => {
       if (!line.trim()) return;
       try {
@@ -191,20 +238,16 @@ async function searchWithRipgrep(
         const absolute = path.resolve(event.data.path.text);
         if (
           !isWithinRoot(workspaceRoot.path, absolute) ||
-          getDenialReason(config, workspaceRoot, absolute)
+          searchDenied(config, workspaceRoot, absolute, options.includeGit)
         ) {
           return;
         }
-        rawMatches.push({
+        if (collect(rawMatches, {
           path: toWorkspaceRelative(workspaceRoot.path, absolute),
           absolute,
           line: event.data.line_number,
           matchText: truncateUtf8((event.data.lines?.text ?? "").replace(/\r?\n$/, ""), 500).text,
-        });
-        if (rawMatches.length >= options.maxResults) {
-          stoppedForResults = true;
-          return "stop";
-        }
+        }, options)) seen++;
       } catch {
         // Ignore malformed JSON events but keep the bounded process running.
       }
@@ -213,7 +256,7 @@ async function searchWithRipgrep(
   if (result.terminationReason === "timeout") {
     return {
       engine: "ripgrep",
-      matches: await validateMatches(config, workspaceRoot, rawMatches),
+      matches: await validateMatches(config, workspaceRoot, rawMatches, options.includeGit),
       skipped: 0,
       truncated: true,
       limitReason: "timeout",
@@ -222,27 +265,30 @@ async function searchWithRipgrep(
   if (result.terminationReason === "output_limit") {
     throw new WorkspaceAccessError("ripgrep exceeded its bounded output limit.");
   }
-  if (result.code !== 0 && result.code !== 1 && !stoppedForResults) {
+  if (result.code !== 0 && result.code !== 1) {
     throw new WorkspaceAccessError(result.stderr.trim() || `ripgrep exited with ${result.code}`);
   }
   return {
     engine: "ripgrep",
-    matches: await validateMatches(config, workspaceRoot, rawMatches),
+    matches: await validateMatches(config, workspaceRoot, rawMatches, options.includeGit),
     skipped: 0,
-    truncated: stoppedForResults,
-    limitReason: stoppedForResults ? "results" : undefined,
+    truncated: seen > options.maxResults,
+    limitReason: seen > options.maxResults ? "results" : undefined,
   };
 }
 
+function searchDenied(config: ServerConfig, root: WorkspaceRootConfig, file: string, includeGit: boolean) {
+  return getDenialReason(config, root, file, includeGit);
+}
 async function validateMatches(
   config: ServerConfig,
   workspaceRoot: WorkspaceRootConfig,
-  matches: SearchMatch[],
+  matches: SearchMatch[], includeGit: boolean,
 ): Promise<SearchMatch[]> {
   const validated: SearchMatch[] = [];
   for (const match of matches) {
     try {
-      const resolved = await resolveWorkspacePath(config, match.path, "file", workspaceRoot.id);
+      const resolved = await (includeGit ? resolveResearchPath : resolveWorkspacePath)(config, match.path, "file", workspaceRoot.id);
       validated.push({ ...match, absolute: resolved.absolute, path: resolved.relative });
     } catch {
       // A race or symlink change after rg discovery fails closed for this result.
@@ -264,7 +310,7 @@ async function searchWithJavaScript(
     : new RegExp(options.query, options.caseSensitive ? "" : "i");
   const needle = options.caseSensitive ? options.query : options.query.toLowerCase();
   let skipped = 0;
-  let visited = 0;
+  let visited = 0, seen = 0;
   let limitReason: SearchCollection["limitReason"];
 
   async function visit(current: string): Promise<void> {
@@ -293,7 +339,7 @@ async function searchWithJavaScript(
         return;
       }
       const absolute = path.join(current, child.name);
-      if (getDenialReason(config, workspaceRoot, absolute)) {
+      if (searchDenied(config, workspaceRoot, absolute, options.includeGit)) {
         skipped += 1;
         continue;
       }
@@ -314,8 +360,7 @@ async function searchWithJavaScript(
         skipped += 1;
         continue;
       }
-      const relativeToScope = normalizeRelative(path.relative(scope, absolute));
-      if (!options.globMatches(relativeToScope)) {
+      if (!options.globMatches(toWorkspaceRelative(workspaceRoot.path, absolute))) {
         continue;
       }
       const stat = await fsp.stat(absolute).catch(() => undefined);
@@ -343,16 +388,12 @@ async function searchWithJavaScript(
           const haystack = options.caseSensitive ? line : line.toLowerCase();
           const matched = options.fixedString ? haystack.includes(needle) : matcher?.test(line) === true;
           if (!matched) continue;
-          matches.push({
+          if (collect(matches, {
             path: toWorkspaceRelative(workspaceRoot.path, absolute),
             absolute,
             line: lineNumber,
             matchText: truncateUtf8(line, 500).text,
-          });
-          if (matches.length >= options.maxResults) {
-            limitReason = "results";
-            break;
-          }
+          },options)) seen++;
         }
       } finally {
         reader.close();
@@ -362,6 +403,7 @@ async function searchWithJavaScript(
   }
 
   await visit(scope);
+  if (!limitReason && seen > options.maxResults) limitReason = "results";
   return {
     engine: "javascript",
     matches,
@@ -399,7 +441,7 @@ async function addContext(
       timedOut = true;
       break;
     }
-    const resolved = await resolveWorkspacePath(config, fileMatches[0].path, "file", rootId);
+    const resolved = await (options.includeGit ? resolveResearchPath : resolveWorkspacePath)(config, fileMatches[0].path, "file", rootId);
     const ordered = options.contextMode === "merged"
       ? [...fileMatches].sort((left, right) => left.line - right.line)
       : fileMatches;

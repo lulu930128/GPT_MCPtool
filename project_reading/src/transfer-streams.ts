@@ -8,8 +8,10 @@ import { createDeflateRaw } from "node:zlib";
 import { archiveName, resolveArchiveSource } from "./archives.js";
 import type { AssetArgs } from "./assets.js";
 import type { ServerConfig } from "./config.js";
-import { getDenialReason, resolveWorkspaceRoot, WorkspaceAccessError } from "./path-guard.js";
+import { getDenialReason, resolveResearchPath, resolveWorkspaceRoot, WorkspaceAccessError } from "./path-guard.js";
 
+// Base64 expands 3:4. Reserve 64 KiB for MCP and JSON-RPC framing.
+export const tunnelPartBytes = Math.floor((10 * 1024 * 1024 - 65536) / 4) * 3;
 export const TRANSFER_LIMITS = Object.freeze({
   bytes: 100_000_000_000, inputBytes: 100_000_000_000, stagingBytes: 100_000_000_000,
   chunkBytes: 8 * 1024 * 1024, minChunkBytes: 1024 * 1024, page: 100,
@@ -45,8 +47,14 @@ export interface CaptureContext {
   record(value: Record<string, unknown>): Promise<void>;
   remember(value: Record<string, unknown>): Promise<void>;
 }
-export async function* sourceBytes(ctx: CaptureContext, args: AssetArgs, kind: "file" | "zip", expected?: ReturnType<typeof identity>) {
-  const source = await resolveArchiveSource(ctx.config, args, kind);
+export async function resolveTransferFile(config: ServerConfig, args: AssetArgs, kind: "file" | "zip" | "directory", workspace = false) {
+  if (!workspace) return resolveArchiveSource(config, args, kind);
+  if (kind !== "file") fail("Workspace capture requires a regular file.");
+  const resolved = await resolveResearchPath(config, args.path, "file", args.scope);
+  return { ...resolved, scope: resolved.rootId, scopeRelative: resolved.relative };
+}
+export async function* sourceBytes(ctx: CaptureContext, args: AssetArgs, kind: "file" | "zip", expected?: ReturnType<typeof identity>, workspace = false) {
+  const source = await resolveTransferFile(ctx.config, args, kind, workspace);
   const original = identity(source.stat);
   if (expected && !sameIdentity(expected, original)) fail("SOURCE_CHANGED: before capture.");
   if (original.size > TRANSFER_LIMITS.inputBytes) fail("TRANSFER_LIMIT: input size exceeded.");
@@ -54,8 +62,8 @@ export async function* sourceBytes(ctx: CaptureContext, args: AssetArgs, kind: "
   const hash = createHash("sha256");
   let position = 0;
   try {
-    if (!sameIdentity(original, identity(await handle.stat())) || original.nlink !== 1) fail("SOURCE_CHANGED: opened identity.");
-    const again = await resolveArchiveSource(ctx.config, args, kind);
+    if (!sameIdentity(original, identity(await handle.stat())) || (!workspace && original.nlink !== 1)) fail("SOURCE_CHANGED: opened identity.");
+    const again = await resolveTransferFile(ctx.config, args, kind, workspace);
     if (!sameIdentity(original, identity(again.stat))) fail("SOURCE_CHANGED: path identity.");
     while (position < original.size) {
       ctx.check();
@@ -67,7 +75,7 @@ export async function* sourceBytes(ctx: CaptureContext, args: AssetArgs, kind: "
       yield bytes;
     }
     if (!sameIdentity(original, identity(await handle.stat())) ||
-        !sameIdentity(original, identity((await resolveArchiveSource(ctx.config, args, kind)).stat))) fail("SOURCE_CHANGED: during capture.");
+        !sameIdentity(original, identity((await resolveTransferFile(ctx.config, args, kind, workspace)).stat))) fail("SOURCE_CHANGED: during capture.");
     await ctx.record({ path: args.path, kind: "file", bytes: position, sha256: hash.digest("hex"), disposition: "included" });
     await ctx.remember({ args, kind, identity: original });
   } finally { await handle.close(); }
