@@ -101,17 +101,23 @@ export function fillView(data: UnknownRecord, scope: "today" | "history", select
 // bridge. No order ledger or persisted business state. Remount/list refresh
 // must not forget an uncertain cancel. Once dispatched, this session never
 // sends it again; exact reads can establish the resulting terminal state.
-type CancelLatch = { busy: boolean; attempted: boolean; listeners: Set<() => void> };
+type CancelLatch = { busy: boolean; attempted: boolean; data: UnknownRecord | null; listeners: Set<() => void> };
 const sessions = new WeakMap<CandidateBridge, Map<string, CancelLatch>>();
 export function deskCancelLatch(bridge: CandidateBridge, id: string, market: string): CancelLatch {
   let session = sessions.get(bridge);
   if (!session) { session = new Map(); sessions.set(bridge, session); }
   const key = JSON.stringify([market, id]);
   let latch = session.get(key);
-  if (!latch) { latch = { busy: false, attempted: false, listeners: new Set() }; session.set(key, latch); }
+  if (!latch) { latch = { busy: false, attempted: false, data: null, listeners: new Set() }; session.set(key, latch); }
   return latch;
 }
 const publish = (latch: CancelLatch) => latch.listeners.forEach(listener => listener());
+
+export function rememberDeskOrder(bridge: CandidateBridge, id: string, market: string, value: unknown, pin?: BrokerCancelPin): UnknownRecord {
+  const data = exactBrokerOrder(value, id, market, pin), latch = deskCancelLatch(bridge, id, market);
+  latch.data = data; publish(latch);
+  return data;
+}
 
 export function exactBrokerOrder(value: unknown, id: string, market: string, pin?: BrokerCancelPin): UnknownRecord {
   const data = deskOrderRead(value, id, market), execution = record(data.execution), command = record(data.command);
@@ -136,13 +142,13 @@ export async function cancelDeskOrder(bridge: CandidateBridge, id: string, marke
   if (latch.busy || latch.attempted) throw Error("撤單已鎖定；請精確讀回結果，不會重複撤單。");
   latch.busy = true; publish(latch);
   try {
-    const current = exactBrokerOrder(await deskCall(bridge, "omi_read_desk_order", { id, market }), id, market, pin);
+    const current = rememberDeskOrder(bridge, id, market, await deskCall(bridge, "omi_read_desk_order", { id, market }), pin);
     if (!deskOrderCancellable(current)) throw Error("此單已結案、撤銷處理中或狀態尚未核對；未發出撤單，請讀回更新。");
     const execution = record(current.execution), command = record(current.command);
     const exactPin = pin ?? { id, market, accountId: command.account_id as string, tradeDate: execution.trade_date as string, brokerOrderId: execution.broker_order_id as string };
     // Latch before dispatch, including timeout, rejection or malformed receipt.
     latch.attempted = true; publish(latch);
-    const result = exactBrokerOrder(await deskCall(bridge, "omi_cancel_desk_order", { id, market }), id, market, exactPin);
+    const result = rememberDeskOrder(bridge, id, market, await deskCall(bridge, "omi_cancel_desk_order", { id, market }), exactPin);
     // Only this exact command response can release the latch. A later read may
     // be stale and cannot prove that a timed-out invocation was not dispatched.
     if (record(result.execution).cancel_stage === "NOT_SENT") { latch.attempted = false; publish(latch); }

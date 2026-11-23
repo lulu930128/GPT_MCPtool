@@ -51,3 +51,9 @@ test("local refusal and terminal deletion recovery require typed errors for the 
   assert.equal(deletedResearchRead(new CallError("deleted", false, 410, { error: { code: "PROPOSAL_DELETED" } }, "omi_read_research_proposal")), true);
   assert.equal(deletedResearchRead(new CallError("deleted", false, 410, {}, "omi_read_research_proposal")), false);
 });
+
+
+test("program nomination and neutral observation do not invalidate a whole research page", () => {
+  const row = { ...fixtureResearch(), workflow_origin: "PROGRAM_NOMINATION", direction: "neutral", stage_supported: false, revise_supported: false };
+  assert.equal(researchList(fixtureResearchList([row]), "TW", 0).items[0].workflow_origin, "PROGRAM_NOMINATION");
+});

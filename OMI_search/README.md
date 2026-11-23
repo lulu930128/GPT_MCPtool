@@ -33,7 +33,7 @@ MCP client
 
 ## 文件導覽
 
-- [公開 MCP 契約](docs/PublicContract.md)：責任邊界、47 個公開 tools、schema owner、
+- [公開 MCP 契約](docs/PublicContract.md)：責任邊界、各 consumer 的工具與路由、schema owner、
   refresh 與錯誤語意。
 - [故障排除](docs/Troubleshooting.md)：adapter／backend／tunnel／ChatGPT action cache 的
   分層診斷。
@@ -62,7 +62,9 @@ Adapter 不負責：
 
 因此，像 `TSM intraday live quote` 這類問題會完整不變地送到 backend。是否屬於 intraday、資料是否 stale、是否需要 refresh、能否執行 external fetch，以及如何產出 evidence/answer，都由 OMI backend 決定。
 
-## 公開 tools
+## 公開工具與常用入口
+
+在本目錄執行 `.\.venv\Scripts\python.exe -B tool_inventory.py` 可取得當次 discovery 的完整清單。每列列出 method、route、模型／App 可見性、annotations、schema 來源及相容狀態。新 Workspace 使用 `omi_open_tw_workspace_v4`。
 
 - `omi_ask`：canonical `omi.decision.v4` read-only 入口。
 - `omi_read_refresh_status`：依正整數 `job_id` 讀取 redacted refresh operation/evidence 狀態與 cache-only resume template。
@@ -93,7 +95,7 @@ Adapter 不負責：
 專用 token 與 OS-pinned 同使用者 Launcher 驗證後不另跳本機 Windows 確認框。
 Accepted／202 不代表完成；unknown 只查原 UUID receipt，不重送。Source／fixture 通過不代表 Loaded Runtime 或遠端 E2E。
 
-六個 runtime 工具是市場 read-only 邊界的窄例外；公開 catalog 現為 47 個（原 17 個市場／render、新增 1 個 workspace v2 opener、6 個 runtime、12 個 Candidate CRUD、11 個 Pending／Desk 接線工具）。一般單加入掛單先存本地 manual_stage；只有掛單頁唯一 modal 確認後才進 Native，詳見 [手動倉契約](docs/McpUserTradingContract.md)。
+六個 runtime 工具是市場 read-only 邊界的窄例外。一般單加入掛單先存本地 manual_stage；只有掛單頁唯一 modal 確認後才進 Native，詳見 [手動倉契約](docs/McpUserTradingContract.md)。
 `launcher_transport.py` 驗證 Win32 pipe owner PID、creation、retained process handle、OS executable、
 固定 repo Launcher argv 與同帳號身分，再送固定命令；不接受任意 pipe／path，不走 Backend HTTP fallback。
 Mutation token 只來自 adapter Process 環境 `OMI_SEARCH_RUNTIME_CONTROL_TOKEN`，必須為 64 個小寫 hex 字元；
@@ -255,7 +257,12 @@ uv sync --frozen
 
 ### 台股 dashboard widget
 
-React/TypeScript source 位於 `ui/tw-market-dashboard/`。UI 不直接連 backend 或 provider；所有更新、搜尋與個股詳情都走 MCP Apps bridge `tools/call`，完全不經 LLM。`omi_open_tw_market_dashboard` 保留 `ui://omi/tw-market-dashboard/v2.html`；`omi_open_tw_workspace` 保留 `ui://omi/tw-workspace/v1.html`，新增 `omi_open_tw_workspace_v2` 的 `ui.resourceUri` 與 `openai/outputTemplate` 都指向 `ui://omi/tw-workspace/v2.html`。三個 resource 共用同一份最新 production bundle，兩個 workspace URI 都注入 `data-omi-workspace="true"`，MIME 為 `text/html;profile=mcp-app`，CSP network allowlist 為空。獨立 v2 入口用於避開舊 resource／嵌入實例的重用；Source／隔離 SDK 驗證不代表部署或 Host 採用，也未證明 Host cache 根因。
+`omi_open_tw_workspace_v4` 的 `ui.resourceUri` 與 `openai/outputTemplate` 共用 `ui://omi/tw-workspace/v4/<完整 Widget SHA-256>.html`，由正式 `dist/index.html` 原始 bytes 決定。`resources/list` 列出同一 URI；`resources/read` 驗證 digest，過期或錯誤 digest 不會讀到另一版內容。v4 HTML envelope 帶有 `data-omi-widget-sha`，供 Host 核對；原 `ui://omi/tw-workspace/v4.html` 保留為目前 bundle 的讀回別名，v1–v3 名稱及行為保留。不新增工具或服務。
+
+Source snapshot 尚無 dist 時仍可 import／列工具，暫用舊 v4 別名；資源讀取保持 fail closed。Owner 完成 Build／Publish 後，工具與資源清單依當下已發布 bytes 取得相同內容位址，不沿用 import 時的 fallback UI identity。正式驗收須讀回工具實際 URI、比對 envelope fingerprint 與 publish bytes；health／UPDATE_ACCEPTED 不代表 ChatGPT iframe 已採用。
+
+React/TypeScript source 位於 `ui/tw-market-dashboard/`。UI 不直接連 backend 或 provider；所有更新、搜尋與個股詳情都走 MCP Apps bridge `tools/call`，完全不經 LLM。`omi_open_tw_market_dashboard` 保留 `ui://omi/tw-market-dashboard/v2.html`。新 Workspace 使用 v4；v1–v3 opener 與 URI 保留供既有 consumer 使用。
+
 
 新版 shell 使用頂齊三欄：左側搜尋／分類／群組樹與成員分區，中欄窄大盤摘要→K 線→技術分析，右側交易工作台。大盤僅與中欄同寬；熱門與 OMI 研究持股留在左側，不能當正式券商庫存。各 pane 獨立載入、失敗與重試；header/watchlist/chart 約 30 秒、hot groups/research 約 120 秒；保留舊圖、pending identity 與 late-response guards，不是 atomic snapshot。
 

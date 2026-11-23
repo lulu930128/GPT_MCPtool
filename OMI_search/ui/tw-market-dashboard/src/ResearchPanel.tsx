@@ -6,7 +6,7 @@ import { TradeDetails, TradeError } from "./TradeFeedback";
 import { isRecord, type UnknownRecord } from "./state";
 
 const record = (value: unknown): UnknownRecord => isRecord(value) ? value : {};
-const originName = (value: unknown) => value === "AI_NOMINATION" ? "AI 提名" : value === "OMI_SCREEN" ? "盤後自動" : "來源未提供";
+const originName = (value: unknown) => value === "AI_NOMINATION" ? "AI 提名" : value === "PROGRAM_NOMINATION" ? "程式提名" : value === "OMI_SCREEN" ? "盤後自動" : "來源未提供";
 
 function StrategyFields({ json, update }: { json: string; update(value: string): void }) {
   let value: UnknownRecord;
@@ -35,6 +35,7 @@ export function ResearchPanel({ bridge, active, onStaged }: { bridge: CandidateB
   const [nomination, setNomination] = useState<unknown>(), [uncertain, setUncertain] = useState(false);
   const generation = useRef(0), flights = useRef(new Set<string>()), reads = useRef(new Map<string, Promise<void>>());
   const pendingStage = useRef<{ id: string; revision: string; intent: string; market: string; symbol: string } | null>(null);
+  const stagedVersions = useRef(new Map<string, { stageId: string; origin: "research"; lifecycle: string }>());
   const unresolved = useRef(new Map<string, ResearchSummary>());
   const queryKey = JSON.stringify([market, origin, direction, offset]);
   const queryRef = useRef(queryKey); queryRef.current = queryKey;
@@ -130,12 +131,16 @@ export function ResearchPanel({ bridge, active, onStaged }: { bridge: CandidateB
     } catch (err) { if (!localRejection(err, tool)) markUnknown(row); throw err; }
   };
   const stage = async (row: ResearchSummary) => {
+    const existing = stagedVersions.current.get(row.revision_id);
+    if (existing) { onStaged(existing); return; }
     if (pendingStage.current) throw Error("上一筆待送單結果尚待讀回");
     const intent = { id: row.creation_id, revision: row.revision_id, intent: crypto.randomUUID(), market: row.market, symbol: row.symbol };
     pendingStage.current = intent;
     try {
       const result = researchStaged(await deskCall(bridge, "omi_stage_research_order", { id: intent.id, data: { expected_revision_id: intent.revision, client_intent_id: intent.intent } }), intent);
-      pendingStage.current = null; setNotice("已讀回原待送單。"); onStaged({ stageId: String(result.id), origin: "research", lifecycle: String(result.lifecycle) });
+      const target = { stageId: String(result.id), origin: "research" as const, lifecycle: String(result.lifecycle) };
+      stagedVersions.current.set(row.revision_id, target);
+      pendingStage.current = null; setNotice("已讀回原待送單。"); onStaged(target);
     } catch (err) {
       if (localRejection(err, "omi_stage_research_order")) pendingStage.current = null;
       else setUncertain(true);
@@ -148,7 +153,9 @@ export function ResearchPanel({ bridge, active, onStaged }: { bridge: CandidateB
     const matches = (await readStaged(bridge)).filter(row => record(row.raw).client_intent_id === original.intent);
     if (matches.length !== 1) { setNotice("原意圖尚未取得唯一待送單，請稍後重新讀取。"); return; }
     researchStaged(matches[0], original);
-    pendingStage.current = null; setUncertain(false); onStaged({ stageId: String(matches[0].id), origin: "research", lifecycle: String(matches[0].lifecycle) });
+    const target = { stageId: String(matches[0].id), origin: "research" as const, lifecycle: String(matches[0].lifecycle) };
+    stagedVersions.current.set(original.revision, target);
+    pendingStage.current = null; setUncertain(false); onStaged(target);
   };
   const change = (value: string, setter: (value: string) => void) => {
     generation.current++; setter(value); setOffset(0); setEdit(null); setDeleting(null); setSelected([]); setNotice(""); setError("");
@@ -159,7 +166,7 @@ export function ResearchPanel({ bridge, active, onStaged }: { bridge: CandidateB
     <div className="candidate-heading"><h3>研究預選</h3><button disabled={loading} onClick={() => void load()}>{loading ? "讀取中…" : "重新讀取"}</button></div>
     <div className="workspace-order-fields workspace-research-filters">
       <label>市場<select value={market} onChange={e => change(e.target.value, setMarket)}><option value="TW">台股</option><option value="US">美股</option></select></label>
-      <label>來源<select value={origin} onChange={e => change(e.target.value, setOrigin)}><option value="">全部</option><option value="AI_NOMINATION">AI 提名</option><option value="OMI_SCREEN">盤後自動</option></select></label>
+      <label>來源<select value={origin} onChange={e => change(e.target.value, setOrigin)}><option value="">全部</option><option value="AI_NOMINATION">AI 提名</option><option value="PROGRAM_NOMINATION">程式提名</option><option value="OMI_SCREEN">盤後自動</option></select></label>
       <label>方向<select value={direction} onChange={e => change(e.target.value, setDirection)}><option value="">多空</option><option value="long">做多</option><option value="short">做空</option></select></label>
     </div>
     <details className="workspace-order-details"><summary>新增研究提名</summary><form onSubmit={e => { e.preventDefault(); void run(["nomination"], async () => {
@@ -171,20 +178,27 @@ export function ResearchPanel({ bridge, active, onStaged }: { bridge: CandidateB
     <TradeError error={error}/>
     {chosen.length > 0 && current && <div className="workspace-order-pair"><button disabled={chosen.some(row => blocked(row.creation_id))} onClick={() => void run(chosen.map(row => row.creation_id), () => organize(chosen, "AI_NOMINATION"))}>移至 AI 提名（{chosen.length}）</button><button disabled={chosen.some(row => blocked(row.creation_id))} onClick={() => setDeleting(chosen)}>刪除所選研究</button></div>}
     {deleting && <div className="workspace-delete-confirm" role="group" aria-label="確認刪除研究"><p>刪除 {deleting.map(row => row.symbol).join("、")} 的 {deleting.length} 筆研究？歷史會保留，已建立的委託不受影響。</p><button onClick={() => void run(deleting.map(row => row.creation_id), () => organize(deleting))}>確認刪除研究</button><button onClick={() => setDeleting(null)}>保留研究</button></div>}
-    {current && rows.map(row => <article className="workspace-staged-order" key={row.creation_id} aria-label={`${row.symbol} 研究預選`} aria-busy={busyIds.includes(row.creation_id)}>
-      <header className="workspace-order-card-heading"><label className="workspace-research-select"><input type="checkbox" disabled={blocked(row.creation_id)} checked={selected.includes(row.creation_id)} onChange={e => setSelected(previous => e.target.checked ? [...previous, row.creation_id] : previous.filter(v => v !== row.creation_id))}/><strong>{row.symbol}</strong><span>{String(row.stock_name ?? "")}</span></label><span>{row.direction === "long" ? "做多" : "做空"}</span></header>
+    {current && rows.map(row => {
+      const canStage = row.workflow_origin === "AI_NOMINATION" && row.stage_supported !== false;
+      // Matches the Backend's research-to-order projection. Neutral research has no order side.
+      const side = row.direction === "long" ? "Buy" : row.direction === "short" ? "Sell" : undefined;
+      return <article className="workspace-staged-order workspace-order-card" key={row.creation_id} aria-label={`${row.symbol} 研究預選`} aria-busy={busyIds.includes(row.creation_id)}>
+      <header className="workspace-order-card-heading"><label className="workspace-research-select"><input type="checkbox" disabled={blocked(row.creation_id)} checked={selected.includes(row.creation_id)} onChange={e => setSelected(previous => e.target.checked ? [...previous, row.creation_id] : previous.filter(v => v !== row.creation_id))}/><strong>{row.symbol}</strong><span>{String(row.stock_name ?? "")}</span></label><span className={canStage ? "workspace-order-direction" : undefined} data-side={canStage ? side : undefined}>{row.direction === "long" ? (canStage ? "做多 · 買進" : "做多") : row.direction === "short" ? (canStage ? "做空 · 賣出" : "做空") : "中性觀察"}</span></header>
       <p className="workspace-ticket-note">{originName(row.workflow_origin)} · {row.market === "US" ? "美股" : "台股"} · 研究日 {String(row.as_of_trade_date ?? "未提供")}{row.status === "scheduled" ? " · 尚未生效" : ""}</p>
       {row.market === "US" && row.direction === "short" && <p>美股賣出使用現股；目前介面沒有融券放空參數。</p>}
-      <div className="workspace-order-actions"><button disabled={blocked(row.creation_id)} onClick={() => void run([row.creation_id], () => openEdit(row))}>修改</button><button disabled={blocked(row.creation_id)} onClick={() => void run([row.creation_id], () => organize([row], row.workflow_origin === "AI_NOMINATION" ? "OMI_SCREEN" : "AI_NOMINATION"))}>{row.workflow_origin === "AI_NOMINATION" ? "移回盤後自動" : "移至 AI 提名"}</button><button disabled={blocked(row.creation_id)} onClick={() => setDeleting([row])}>刪除</button>
-      {row.workflow_origin === "AI_NOMINATION" && <button disabled={blocked(row.creation_id) || uncertain || busyIds.includes("stage")} onClick={() => void run([row.creation_id, "stage"], () => stage(row))}>加入待送單</button>}</div>
+      {canStage && <button className="candidate-primary workspace-order-action" data-side={side} disabled={blocked(row.creation_id) || uncertain || busyIds.includes("stage")} onClick={() => void run([row.creation_id, "stage"], () => stage(row))}>加入待送單</button>}
+      <details className="workspace-secondary-actions"><summary>研究管理</summary><div className="workspace-order-actions"><button disabled={blocked(row.creation_id)} onClick={() => void run([row.creation_id], () => openEdit(row))}>{row.revise_supported === false ? "檢視研究" : "修改"}</button><button disabled={blocked(row.creation_id)} onClick={() => void run([row.creation_id], () => organize([row], row.workflow_origin === "AI_NOMINATION" ? "OMI_SCREEN" : "AI_NOMINATION"))}>{row.workflow_origin === "AI_NOMINATION" ? "移回盤後自動" : "移至 AI 提名"}</button><button disabled={blocked(row.creation_id)} onClick={() => setDeleting([row])}>刪除</button></div></details>
+      {(blocked(row.creation_id) || uncertain || busyIds.includes("stage")) && <p className="workspace-ticket-note">{unknownIds.includes(row.creation_id) || uncertain ? "操作結果待確認，請讀回原紀錄。" : "資料讀取或操作處理中，請稍候。"}</p>}
+      {(row.workflow_origin !== "AI_NOMINATION" || row.stage_supported === false) && <p className="workspace-ticket-note">{row.stage_supported === false ? "此研究尚不支援建立待送單，可展開研究管理檢視。" : "先在研究管理移至 AI 提名，才能加入待送單。"}</p>}
       {busyIds.includes(row.creation_id) && <p role="status">處理中…</p>}
       {unknownIds.includes(row.creation_id) && <div><p role="status">這筆研究的操作結果待確認，不會自動重做。</p><button disabled={busyIds.includes(row.creation_id)} onClick={() => void run([row.creation_id], () => readOriginal(row))}>讀回此筆研究</button></div>}
-    </article>)}
+    </article>;
+    })}
     {!loading && current && !rows.length && !error && <p>目前沒有符合條件的研究候選。</p>}
     {[...unresolved.current.values()].filter(row => !current || !rows.some(item => item.creation_id === row.creation_id)).map(row => <div className="workspace-operation-error" key={row.creation_id}><p role="status">{row.symbol} 的操作結果仍待確認；清單更新不代表該次操作已完成。</p><button disabled={busyIds.includes(row.creation_id)} onClick={() => void run([row.creation_id], () => readOriginal(row))}>讀回此筆研究</button></div>)}
     <div className="workspace-research-pagination"><button disabled={loading || offset === 0} onClick={() => setOffset(v => Math.max(0, v - 25))}>上一頁</button><span>第 {Math.floor(offset / 25) + 1} 頁</span><button disabled={loading || !current || !more} onClick={() => setOffset(v => v + 25)}>下一頁</button></div>
     {edit && <form className="workspace-stage-edit" aria-label="修改研究" onSubmit={e => { e.preventDefault(); void run([edit.row.creation_id], save); }}>
-      <h4>修改 {edit.row.symbol}</h4><fieldset disabled={blocked(edit.row.creation_id)}><StrategyFields json={strategy} update={setStrategy}/>
+      <h4>研究 {edit.row.symbol}</h4>{edit.row.revise_supported === false && <p>此為凍結研究，原始證據保留。已建立的待送單可另行調整價量與出場規則。</p>}<fieldset disabled={blocked(edit.row.creation_id) || edit.row.revise_supported === false}><StrategyFields json={strategy} update={setStrategy}/>
       <details className="workspace-order-details"><summary>成本假設</summary><div className="workspace-order-fields">{[["commission_rate", "手續費率"], ["minimum_commission", "最低手續費"], ["sell_tax_rate", "賣出稅率"], ["slippage_per_share", "每股滑價"], ["short_borrow_per_share_session", "每股每日借券成本"], ["other_cost", "其他成本"]].map(([key, label]) => <label key={key}>{label}<input type="number" min="0" step="any" value={String(record(JSON.parse(costs))[key] ?? "")} onChange={e => setCosts(JSON.stringify({ ...record(JSON.parse(costs)), [key]: e.target.value === "" ? null : Number(e.target.value) }))}/></label>)}</div></details>
       <label>修改原因<input required value={reason} onChange={e => setReason(e.target.value)}/></label><button disabled={blocked(edit.row.creation_id)}>儲存研究</button></fieldset><button type="button" onClick={() => setEdit(null)}>關閉</button><TradeDetails value={edit.detail} label="研究原始證據"/>
     </form>}

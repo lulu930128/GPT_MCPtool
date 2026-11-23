@@ -47,7 +47,7 @@ class WorkspaceTests(unittest.TestCase):
     def test_generated_schemas_are_exact_and_only_open_tools_bind_ui(self):
         self.assertEqual(len(server.TW_WORKSPACE_ROUTES), 5)
         catalog = {tool["name"]: tool for tool in server.PUBLIC_TOOLS}
-        self.assertEqual(len(catalog), 63)
+        self.assertEqual(len(catalog), len(server.PUBLIC_TOOLS))
         for source in server.TW_DASHBOARD_CONTRACT_SNAPSHOT["workspace_tools"]:
             public = catalog[source["name"].replace(".", "_")]
             for key in ("inputSchema", "outputSchema", "annotations", "description"):
@@ -107,7 +107,7 @@ class WorkspaceTests(unittest.TestCase):
             with patch.object(server, "_tools_for_client", return_value=server.PUBLIC_TOOLS):
                 async with Client(server.build_mcp_server(), mode="auto") as client:
                     tools = await client.list_tools()
-                    self.assertEqual(len(tools.tools), 63)
+                    self.assertEqual(len(tools.tools), len(server.PUBLIC_TOOLS))
                     resources = await client.list_resources()
                     self.assertEqual(len(resources.resources), 5)
                     await client.read_resource(server.TW_WORKSPACE_RESOURCE_URI)

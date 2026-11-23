@@ -167,9 +167,9 @@ export function CandidatePanel({ bridge, symbol, active, space = "USER_SPACE", o
     </>}
     {state.view === "detail" && detail && <div className="candidate-detail">
       <dl className="candidate-facts">
-        <div><dt>方向</dt><dd>{text(detail.raw.direction)} · {text(detail.raw.action)} / {text(detail.raw.condition)}</dd></div>
-        <div><dt>數量</dt><dd>{text(detail.raw.quantity)} 股 · {text(detail.raw.lot)}</dd></div>
-        <div><dt>提議限價</dt><dd>{text(detail.raw.proposed_limit)} <small>{text(detail.raw.price_basis)}</small></dd></div>
+        <div><dt>方向</dt><dd><span className="workspace-order-direction" data-side={text(detail.raw.action)}>{detail.raw.action === "Buy" ? "買進" : detail.raw.action === "Sell" ? "賣出" : "方向待確認"}</span> · {text(detail.raw.direction)} · {text(detail.raw.action)} / {text(detail.raw.condition)}</dd></div>
+        <div><dt>數量</dt><dd className="workspace-order-tint" data-side={text(detail.raw.action)}>{text(detail.raw.quantity)} 股 · {text(detail.raw.lot)}</dd></div>
+        <div><dt>提議限價</dt><dd className="workspace-order-tint" data-side={text(detail.raw.action)}>{text(detail.raw.proposed_limit)} <small>{text(detail.raw.price_basis)}</small></dd></div>
         <div><dt>有效期間</dt><dd>{text(detail.raw.valid_from_date)} — {text(detail.raw.valid_until_date)}</dd></div>
       </dl>
       <section className="candidate-detail-section"><h3>觸發條件</h3><ConditionSummary value={detail.raw.conditions}/></section>
@@ -185,7 +185,7 @@ export function CandidatePanel({ bridge, symbol, active, space = "USER_SPACE", o
     {formView && <form onSubmit={(event) => { event.preventDefault(); if (!rawError) void session.save(); }}>
       <fieldset disabled={locked}><legend>基本資料</legend>
         <div className="candidate-grid"><label>股票代碼<input aria-label="候選股票代碼" required value={raw.symbol == null ? "" : String(raw.symbol)} onChange={(event) => edit("symbol", event.target.value)}/>{fieldError("symbol")}</label>
-          <label>方向<select aria-label="候選方向" value={text(raw.direction)} onChange={(event) => { const direction = event.target.value; session.edit({ ...raw, direction, action: direction === "long" ? "Buy" : "Sell", condition: direction === "long" ? "CASH" : "SHORT_SELLING" }); }}><option value="long">做多 · Buy / CASH</option><option value="short">放空 · Sell / SHORT_SELLING</option></select>{fieldError("direction")}</label>
+          <label>方向<select aria-label="候選方向" className="workspace-order-side-field" data-side={raw.direction === "long" ? "Buy" : raw.direction === "short" ? "Sell" : undefined} value={text(raw.direction)} onChange={(event) => { const direction = event.target.value; session.edit({ ...raw, direction, action: direction === "long" ? "Buy" : "Sell", condition: direction === "long" ? "CASH" : "SHORT_SELLING" }); }}><option value="long">做多 · 買進 (Buy / CASH)</option><option value="short">放空 · 賣出 (Sell / SHORT_SELLING)</option></select>{fieldError("direction")}</label>
           <label>交易單位<select value={text(raw.lot)} onChange={(event) => edit("lot", event.target.value)}><option value="Odd">Odd · 零股</option><option value="Common">Common · 整股</option></select>{fieldError("lot")}</label>
           <label>數量（股）<input aria-label="候選股數" type="number" step="1" value={raw.quantity == null ? "" : String(raw.quantity)} onChange={(event) => edit("quantity", numeric(event.target.value))}/>{fieldError("quantity")}</label>
           </div>
@@ -205,7 +205,7 @@ export function CandidatePanel({ bridge, symbol, active, space = "USER_SPACE", o
         <label className="candidate-owner-field">owner_id<input aria-label="候選 owner_id" readOnly value={detail ? state.owner : "MCP"}/></label>
       </details>
       <details className="candidate-disclosure"><summary>進階設定</summary><fieldset disabled={locked}><div className="candidate-grid">
-        <label>買賣 action<select value={text(raw.action)} onChange={(event) => edit("action", event.target.value)}><option>Buy</option><option>Sell</option></select>{fieldError("action")}</label>
+        <label>買賣 action<select className="workspace-order-side-field" data-side={text(raw.action)} value={text(raw.action)} onChange={(event) => edit("action", event.target.value)}><option value="Buy">買進 (Buy)</option><option value="Sell">賣出 (Sell)</option></select>{fieldError("action")}</label>
         <label>交易 condition<select value={text(raw.condition)} onChange={(event) => edit("condition", event.target.value)}><option>CASH</option><option>SHORT_SELLING</option></select>{fieldError("condition")}</label>
       </div>
         {!detail && <details><summary>載入範例</summary><div className="candidate-actions"><button type="button" onClick={() => { session.edit(candidateExample()); setRawError(""); }}>2330 條件例</button><button type="button" onClick={() => { session.edit(candidateExample(true)); setRawError(""); }}>3481 放空草稿</button></div></details>}
@@ -214,7 +214,7 @@ export function CandidatePanel({ bridge, symbol, active, space = "USER_SPACE", o
           catch (error) { session.edit(raw); setRawError(String(error)); }
         }}/>{rawError && <p className="candidate-field-error" role="alert">{rawError}</p>}</details>
       </fieldset></details>
-      <div className="candidate-form-actions"><span>{state.dirty ? "未保存" : ""}</span><button type="button" disabled={locked} onClick={back}>取消</button><button className="candidate-primary" type="submit" disabled={locked || !!rawError}>{state.busy ? "保存中…" : detail ? "保存修改" : "建立候選"}</button></div>
+      <div className="candidate-form-actions"><span>{state.dirty ? "未保存" : ""}</span><button type="button" disabled={locked} onClick={back}>取消</button><button className="candidate-primary workspace-order-action" type="submit" data-side={text(raw.action)} aria-busy={state.busy} disabled={locked || !!rawError}>{state.busy ? "保存中…" : detail ? "保存修改" : "建立候選"}</button></div>
     </form>}
     <details className="candidate-reminders"><summary>提醒 {reminders.length} 項</summary>{reminders.length > 0 ? <ul>{reminders.map((reminder, index) => <li key={index}>{reminder}</li>)}</ul> : <p>目前沒有額外提醒。</p>}
       <JsonDetails title="Monitor 狀態" value={state.monitor}/><p>研究候選取消僅取消研究邏輯；正式送單僅從掛單頁確認。</p></details>

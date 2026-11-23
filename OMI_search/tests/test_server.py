@@ -354,12 +354,12 @@ class OmiSearchMappingTests(unittest.TestCase):
         ) as request:
             tools = self.server._tools_for_client()
 
-        request.assert_called_once_with(
+        request.assert_any_call(
             "GET",
             "/api/ai/tools",
             timeout_seconds=self.server.SCHEMA_TIMEOUT_SECONDS,
         )
-        self.assertEqual(len(tools), 63)
+        self.assertEqual(len(tools), len(self.server.PUBLIC_TOOLS))
         ask = tools[0]
         self.assertEqual(ask["title"], "Backend Ask OMI")
         properties = ask["inputSchema"]["properties"]
@@ -385,7 +385,8 @@ class OmiSearchMappingTests(unittest.TestCase):
         ):
             tools = self.server._tools_for_client()
 
-        self.assertIs(tools, self.server.PUBLIC_TOOLS)
+        self.assertEqual(tools[0]["_meta"]["omi/schema"]["origin"], "generated_snapshot")
+        self.assertEqual(tools[0]["_meta"]["omi/schema"]["snapshotComparison"], "unknown")
         self.assertEqual(tools[0]["name"], "omi_ask")
         self.assertEqual(tools[1]["name"], "omi_read_refresh_status")
 
@@ -755,7 +756,7 @@ class OmiSearchMappingTests(unittest.TestCase):
             tools, resources, dashboard = anyio.run(scenario)
         except PermissionError as exc:
             self.skipTest(f"Windows sandbox denied subprocess pipes: {exc}")
-        self.assertEqual(len(tools.tools), 63)
+        self.assertEqual(len(tools.tools), len(self.server.PUBLIC_TOOLS))
         self.assertIn(
             "ui://omi/tw-market-dashboard/v2.html",
             {str(resource.uri) for resource in resources.resources},

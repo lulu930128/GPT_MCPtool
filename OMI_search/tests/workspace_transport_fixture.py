@@ -5,6 +5,7 @@ stand in for importing the application or for the MCP SDK protocol suite.
 """
 import ast
 from copy import deepcopy
+from hashlib import sha256
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,19 +22,19 @@ def load_core():
     names = {
         "_read_tw_workspace", "_api_request", "_tool_result", "_json_default",
         "_replace_surrogates", "_sanitize_json_value", "_build_tw_workspace_tools",
-        "_read_only_annotations",
+        "_read_only_annotations", "_tw_workspace_v4_resource_uri",
         "_workspace_response_constants", "BackendHTTPError",
     }
     source = ast.parse((ROOT / "server.py").read_text(encoding="utf-8"))
     functions = [node for node in source.body if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in names]
     assert {node.name for node in functions} == names
     namespace = dict(globals())
+    namespace["__file__"] = str(ROOT / "server.py")
     # Constants are evaluated from source, never copied into a replacement adapter.
-    wanted = {"SERVER_NAME", "SERVER_VERSION", "TW_WORKSPACE_RESOURCE_URI", "TW_WORKSPACE_V2_RESOURCE_URI", "TW_WORKSPACE_V3_RESOURCE_URI", "TW_WORKSPACE_V4_RESOURCE_URI"}
+    wanted = {"SERVER_NAME", "SERVER_VERSION", "TW_WORKSPACE_RESOURCE_URI", "TW_WORKSPACE_V2_RESOURCE_URI", "TW_WORKSPACE_V3_RESOURCE_URI", "TW_WORKSPACE_V4_RESOURCE_URI", "TW_DASHBOARD_WIDGET_PATH"}
     for node in source.body:
         if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id in wanted for t in node.targets):
-            for target in node.targets:
-                namespace[target.id] = ast.literal_eval(node.value)
+            exec(compile(ast.Module(body=[node], type_ignores=[]), str(ROOT / "server.py"), "exec"), namespace)
     namespace.update(
         API_BASE_URL="http://127.0.0.1:8400", AI_TRUST_TOKEN="",
         AI_TRUST_TOKEN_HEADER="X-OMI-AI-Trust-Token", API_TIMEOUT_SECONDS=90,

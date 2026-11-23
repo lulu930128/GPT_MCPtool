@@ -10,7 +10,7 @@ import type { CandidateBridge } from "./candidate-state";
 // Real handlers/effects with controlled hooks; browser geometry is checked by
 // the offline iframe fixture, not inferred from this harness.
 const output = await build({
-  stdin: { contents: 'export { ManualOrderForm, WorkspaceContext } from "./WorkspaceContext"; export { DeskOrders } from "./DeskOrders";', resolveDir: fileURLToPath(new URL(".", import.meta.url)), loader: "tsx" },
+  stdin: { contents: 'export { ManualOrderForm, WorkspaceContext } from "./WorkspaceContext"; export { DeskOrders } from "./DeskOrders"; export { ResearchPanel } from "./ResearchPanel";', resolveDir: fileURLToPath(new URL(".", import.meta.url)), loader: "tsx" },
   bundle: true, write: false, format: "cjs", platform: "node", jsx: "automatic",
   plugins: [{ name: "controlled-trade", setup(builder) {
     builder.onResolve({ filter: /^react(?:\/jsx-runtime)?$/ }, (args) => ({ path: args.path, namespace: "controlled" }));
@@ -20,7 +20,7 @@ const output = await build({
   } }],
 });
 
-function harness(component: "ManualOrderForm" | "WorkspaceContext" | "DeskOrders", suppliedBridge?: CandidateBridge, candidateId?: string, properties: Record<string, any> = {}) {
+function harness(component: "ManualOrderForm" | "WorkspaceContext" | "DeskOrders" | "ResearchPanel", suppliedBridge?: CandidateBridge, candidateId?: string, properties: Record<string, any> = {}) {
   let cursor = 0, dirty = false, symbol = "2330", tree: any, refreshKey = 0;
   const slots: any[] = [];
   let effects: (() => void)[] = [];
@@ -40,7 +40,7 @@ function harness(component: "ManualOrderForm" | "WorkspaceContext" | "DeskOrders
   };
   const module = { exports: {} as any };
   const noIO = () => { throw Error("Unexpected broker or storage IO"); };
-  vm.runInNewContext(output.outputFiles[0].text, { module, exports: module.exports, hooks,
+  vm.runInNewContext(output.outputFiles[0].text, { module, exports: module.exports, hooks, AbortController,
     document: { hidden: false, addEventListener() {}, removeEventListener() {} }, setTimeout: () => 1, clearTimeout() {},
     setInterval: () => 1, clearInterval: () => {}, crypto: { randomUUID: properties.uuid ?? (() => "83771cec-bd72-4dd9-bb65-132ea523997b") }, fetch: noIO, localStorage: { setItem: noIO } });
   const bridge = suppliedBridge ?? { callTool: noIO };
@@ -258,7 +258,12 @@ for (const operation of ["revise", "cancel"]) test(`late list cannot overwrite $
   }
   await h.settle(); resolveOld({ structuredContent: { result: [original, other] } }); await h.settle();
   if (operation === "revise") assert.match(h.text(h.find(node => node.props?.id === `stage-${original.id}`)), /88/);
-  else { assert.equal(h.all(node => node.props?.id === `stage-${original.id}`).length, 0); assert.equal(h.all(node => node.props?.id === `stage-${other.id}`).length, 1); }
+  else {
+    const inactive = h.find(node => node.props?.["aria-label"] === "當日草稿紀錄");
+    const today = h.find(node => node.props?.["aria-label"] === "本地目前委託");
+    assert.match(h.text(inactive), /2330/); assert.doesNotMatch(h.text(today), /2330/);
+    assert.match(h.text(today), /1101/);
+  }
 });
 
 for (const delay of [1000, 5000, 20000]) test(`local view renders independently during ${delay}ms Native read and shares that read`, async () => {
@@ -410,7 +415,7 @@ test("2409 reopened Pending remains returned and uncertain; exact Native readbac
   assert.equal(h.button("讀回").props.disabled, false);
   f.review.execution = { ...f.review.execution, state: "ACCEPTED", broker_order_id: "fixture-order-2409", reconcile_required: false };
   h.click("讀回"); await h.settle();
-  assert.match(h.text(), /券商階段讀回：已受理/);
+  assert.match(h.text(), /委託讀回：已受理/);
   assert.match(h.text(), /券商結果待確認/);
   assert.equal(JSON.stringify(f.row), before, "Native state never overwrites Candidate lifecycle/receipt");
   assert.deepEqual(calls.slice(-2).map(call => call.name).sort(), ["omi_read_desk_orders", "omi_read_desk_stage"]);
@@ -645,4 +650,78 @@ test("concurrent windows: a NOT_ATTEMPTED receipt cannot unlock a stage another 
   assert.equal(sends, 2); assert.match(a.text(), /正在送出|送單進度待確認/);
   assert.equal(a.button("讀回").props.disabled, false);
   assert.ok(!a.text().includes("同一掛單讀回一致"));
+});
+
+
+test("accepted local UNKNOWN card renders inline broker cancellation, and missing proof explains why in place", async () => {
+  const { fixtureSubmittedOrder, fixtureBrokerOrders } = await import("../scripts/desk-fixture");
+  const f: any = fixtureSubmittedOrder("3702", "ACCEPTED", "2026-11-16", { lot: "Odd", quantity_shares: 800, price: "82.5" });
+  f.row.lifecycle = f.row.manual_stage.state = "SUBMISSION_UNKNOWN";
+  f.row.manual_stage.submission.receipt.execution.state = "UNKNOWN";
+  let missing = false;
+  const h = harness("DeskOrders", { async callTool(name) {
+    if (name === "omi_read_desk_staged") return { structuredContent: { result: [f.row] } };
+    assert.equal(name, "omi_read_desk_orders", "render performs no broker mutation");
+    return { structuredContent: { ...fixtureBrokerOrders(), trade_date: "2026-11-16", reviews: [f.review], broker_orders: missing ? [] : [f.broker] } };
+  } });
+  await h.settle();
+  const card = () => h.find(node => node.props.id === `stage-${f.row.id}`);
+  assert.match(h.text(card()), /已受理/);
+  assert.match(h.text(card()), /零股 800 股/);
+  assert.ok(!h.text(card()).includes("前往此筆券商委託"));
+  const controls = h.all(node => typeof node.type === "function" && node.type.name === "BrokerOrderControls");
+  assert.equal(controls.length, 2, "local and broker cards reuse the same controls");
+  assert.equal(controls[0].props.order.pin.id, controls[1].props.order.pin.id);
+  assert.equal(controls[0].props.order.pin.brokerOrderId, f.broker.broker_key.order_id);
+  missing = true; h.click("更新委託"); await h.settle();
+  assert.match(h.text(card()), /缺少唯一的當日券商紀錄/);
+  assert.match(h.text(card()), /撤銷剩餘委託.*讀回/s);
+});
+
+test("neutral research uses its backend capabilities without claiming a short trade or editable plan", async () => {
+  const { fixtureResearch, fixtureResearchList } = await import("../scripts/research-fixture");
+  const row = { ...fixtureResearch(), direction: "neutral", stage_supported: false, revise_supported: false };
+  const h = harness("ResearchPanel", { async callTool(name) {
+    assert.equal(name, "omi_list_research_proposals");
+    return { structuredContent: fixtureResearchList([row]) };
+  } });
+  await h.settle();
+  const card = h.find(node => node.type === "article");
+  assert.match(h.text(card), /中性觀察/);
+  assert.ok(!h.text(card).includes("做空"));
+  assert.equal(h.hasEnabledButton("檢視研究"), true);
+  assert.equal(h.hasEnabledButton("加入待送單"), false);
+  assert.equal(h.hasEnabledButton("修改"), false);
+});
+
+test("research stage releases busy after 422, 5xx, transport and unknown; recovers only original intent", async () => {
+  const { fixtureResearch, fixtureResearchList } = await import("../scripts/research-fixture");
+  for (const failure of [422, 503, "transport", "unknown"]) {
+    const row = fixtureResearch();
+    let stageCalls = 0, staged: any, navigated: any;
+    const bridge = { async callTool(name: string, args: any) {
+      if (name === "omi_list_research_proposals") return { structuredContent: fixtureResearchList([row]) };
+      if (name === "omi_stage_research_order") {
+        stageCalls++;
+        staged = fixtureStage({ symbol: row.symbol, client_intent_id: args.data.client_intent_id,
+          research_proposal: { creation_id: row.creation_id, revision_id: row.revision_id, workflow_origin: "AI_NOMINATION", market: "TW" } });
+        if (typeof failure === "number") return { isError: true, structuredContent: { error: "fixture failure", http_status: failure, tool: name } };
+        if (failure === "transport") throw Error("MCP transport timeout");
+        return { structuredContent: {} };
+      }
+      if (name === "omi_read_desk_staged") return { structuredContent: { result: [staged] } };
+      throw Error(`Unexpected mutation ${name}`);
+    } };
+    const h = harness("ResearchPanel", bridge, undefined, { onStaged: (value: any) => navigated = value });
+    await h.settle(); assert.ok(h.hasEnabledButton("加入待送單"), h.text()); h.click("加入待送單"); await h.settle();
+    assert.equal(stageCalls, 1); assert.equal(navigated, undefined);
+    assert.ok(!h.text().includes("處理中…"));
+    if (failure === 422) assert.equal(h.button("加入待送單").props.disabled, false);
+    else {
+      assert.equal(h.button("加入待送單").props.disabled, true);
+      h.click("讀回原待送單"); await h.settle();
+      assert.equal((navigated as any).stageId, staged.id); assert.equal(stageCalls, 1);
+      h.click("加入待送單"); await h.settle(); assert.equal(stageCalls, 1, "same version navigates to its existing stage");
+    }
+  }
 });

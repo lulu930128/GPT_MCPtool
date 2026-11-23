@@ -18,7 +18,11 @@ export function fixtureConnection(patch: UnknownRecord = {}): UnknownRecord {
 }
 export function fixtureStage(body: UnknownRecord = {}): UnknownRecord {
   const raw = { client_intent_id: fixtureIntent, market: "TW", symbol: "2330", action: "Buy", condition: "CASH", lot: "Common", quantity_shares: 1000, price: "100.25", ...body };
+  const created = new Date();
+  const localDay = new Intl.DateTimeFormat("sv-SE", { timeZone: raw.market === "US" ? "America/New_York" : "Asia/Taipei" }).format(created);
   return { id: `stage-${raw.client_intent_id}`, revision: 1, digest: "b".repeat(64), event: "CREATE", kind: "manual_stage", owner_id: "MCP", raw, state: "ACTIVE", lifecycle: "STAGED",
+    stage_validity: { state: "CURRENT", reason: "STAGE_SAME_TRADING_DAY", created_at: created.toISOString(),
+      decision_date: localDay, market_date: localDay, expires_at: new Date(created.getTime() + 3_600_000).toISOString() },
     manual_stage: { client_intent_id: raw.client_intent_id, original_digest: "c".repeat(64), space_id: "USER_SPACE", source: "MANUAL", state: "STAGED", submission: null } };
 }
 export function fixtureReview(body: UnknownRecord = {}): UnknownRecord {

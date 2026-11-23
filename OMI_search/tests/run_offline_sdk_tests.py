@@ -13,10 +13,20 @@ import sys
 import types
 import unittest
 from unittest.mock import patch
+from urllib.error import URLError
+from urllib.parse import urlsplit
 
 
 def blocked(*args, **kwargs):
     raise AssertionError("Live network / Windows process IO forbidden in offline SDK tests")
+
+
+def offline_discovery(request, **kwargs):
+    if request.get_method() == "GET" and urlsplit(request.full_url).path in {
+        "/api/ai/tools", "/api/research/trade-proposals/ai/schema",
+    }:
+        raise URLError("Offline schema fixture")
+    blocked()
 
 
 def main():
@@ -45,7 +55,7 @@ def main():
         # Do not block socketpair: Windows asyncio uses it for its wakeup pipe.
         stack.enter_context(patch.object(socket, "create_connection", blocked))
         stack.enter_context(patch("anyio.connect_tcp", blocked))
-        stack.enter_context(patch("urllib.request.urlopen", blocked))
+        stack.enter_context(patch("urllib.request.urlopen", offline_discovery))
         stack.enter_context(patch("urllib.request.build_opener", blocked))
         import launcher_transport
         stack.enter_context(patch.object(launcher_transport, "request", blocked))

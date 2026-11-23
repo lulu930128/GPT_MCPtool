@@ -38,13 +38,14 @@ assert research["outputSchema"]["type"] == "object"
 variants = load_core()._workspace_response_constants(research["outputSchema"])
 assert {item["version"] for item in variants} == {"omi.tw_stock_research.v1", "omi.tw_stock_research.workspace.v1", "omi.tw_stock_research.technical.v2"}
 assert next(item for item in variants if item["version"].endswith("workspace.v1"))["max_bytes"] == 131072
-server_ast = ast.parse((ROOT / "server.py").read_text(encoding="utf-8"))
-functions = {node.name: node for node in server_ast.body if isinstance(node, ast.FunctionDef)}
-resources = next(node.value for node in ast.walk(functions["_tw_dashboard_resources_for_client"]) if isinstance(node, ast.Return))
-assert isinstance(resources, ast.List) and len(resources.elts) == 5
-legacy = next(node.value for node in ast.walk(functions["_build_tw_dashboard_tools"]) if isinstance(node, ast.Return) and isinstance(node.value, ast.List) and node.value.elts)
-assert len(legacy.elts) == 4
-public = next(node.value for node in ast.walk(functions["_build_public_tools"]) if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "tools" for target in node.targets))
-assert len(public.elts) + len(legacy.elts) + len(expected) + 4 == 20
-assert len(load_source().PUBLIC_TOOLS) == 63
-print(f"AST OK; generated workspace contracts OK; static tool/resource counts 63/5; digest {digest}; byte parity OK")
+server = load_source()
+rows = server.public_inventory(server.PUBLIC_TOOLS)
+listed = [row for row in rows if row["listed"]]
+assert len({row["name"] for row in listed}) == len(listed)
+assert {row["route"] for row in listed if row["method"] == "RENDER"} == {
+    resource["uri"] for resource in server._tw_dashboard_resources_for_client()
+}
+assert {row["name"] for row in listed if "model" not in row["visibility"]} == {
+    name for name, (method, _, _) in server.CANDIDATE_ROUTES.items() if method != "GET"
+}
+print(f"Generated workspace contracts, visibility and bindings OK; digest {digest}; byte parity OK")

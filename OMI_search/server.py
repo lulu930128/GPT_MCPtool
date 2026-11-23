@@ -45,8 +45,8 @@ SERVER_NAME = "omi-search-mcp"
 SERVER_VERSION = "1.2.0"
 SERVER_TITLE = "OMI_search MCP Adapter"
 SERVER_INSTRUCTIONS = (
-    "Use omi.ask as the canonical read-only OMI entry point. "
-    "Use omi.read_refresh_status for a returned background refresh job. "
+    "Use omi_ask as the canonical read-only OMI entry point. "
+    "Use omi_read_refresh_status for a returned background refresh job. "
     "The adapter maps MCP fields to POST /api/ai/ask, fixes "
     "allow_llm=false and allow_write=false, and returns the unchanged "
     "omi.decision.v4 envelope. OMI backend owns all market and answer "
@@ -65,9 +65,9 @@ SERVER_INSTRUCTIONS = (
     "unfetched cache from provider unavailable or indicative match unavailable; "
     "a cache miss alone does not prove no market data. A follow-up refresh "
     "requires the same live intent, user authorization and policy permission. "
-    "The adapter never rephrases the response. For the Taiwan "
-    "dashboard, call omi.read_tw_market_dashboard before "
-    "omi.open_tw_market_dashboard. Alternatively, omi_open_tw_workspace opens "
+    "Use daily.ohlcv for official daily bars and quote.snapshot for intraday observations. After job completion reread evidence using the cache-only resume template. For the Taiwan "
+    "dashboard, call omi_read_tw_market_dashboard before "
+    "omi_open_tw_market_dashboard. For a new workspace use omi_open_tw_workspace_v4, which opens "
     "an immediate shell with optional initial selection and independent cache-only panes. "
     "Its trading workspace creates USER_SPACE/MANUAL records owned by MCP, and preserves legacy AGENT records through "
     "the fixed candidate tools. This is separate from market allow_write=false and SYNTHETIC rehearsal. "
@@ -114,6 +114,18 @@ TW_DASHBOARD_WIDGET_PATH = (
 )
 
 
+def _tw_workspace_v4_resource_uri(widget_bytes: bytes | None = None) -> str:
+    """Address the published bytes, not an application or adapter version."""
+    if widget_bytes is None:
+        try:
+            widget_bytes = TW_DASHBOARD_WIDGET_PATH.read_bytes()
+        except OSError:
+            # Source snapshots do not contain dist until the Owner builds it.
+            # Import/discovery remains available; resource reads still fail closed.
+            return TW_WORKSPACE_V4_RESOURCE_URI
+    return f"ui://omi/tw-workspace/v4/{sha256(widget_bytes).hexdigest()}.html"
+
+
 def _env_int(name: str, default: int) -> int:
     try:
         return int(os.environ.get(name, str(default)))
@@ -149,6 +161,11 @@ FORWARDED_FIELDS = (
 )
 
 
+def _has_input_field(schema: Any, name: str) -> bool:
+    return (isinstance(schema, dict) and schema.get("type") == "object"
+            and isinstance(schema.get("properties"), dict) and name in schema["properties"])
+
+
 def _load_public_contract_snapshot() -> dict[str, Any]:
     snapshot_path = Path(__file__).with_name("public_contract_snapshot.json")
     try:
@@ -159,7 +176,7 @@ def _load_public_contract_snapshot() -> dict[str, Any]:
         not isinstance(payload, dict)
         or payload.get("schema_version")
         != "omi.mcp.public_contract_snapshot.v1"
-        or not isinstance(payload.get("ask_input_schema"), dict)
+        or not _has_input_field(payload.get("ask_input_schema"), "question")
     ):
         return {}
     return payload
@@ -204,25 +221,10 @@ def _load_tw_dashboard_contract_snapshot() -> dict[str, Any]:
 TW_DASHBOARD_CONTRACT_SNAPSHOT = _load_tw_dashboard_contract_snapshot()
 
 
-def _fallback_ask_source() -> dict[str, Any]:
+def _fallback_ask_source() -> dict[str, Any] | None:
     schema = PUBLIC_CONTRACT_SNAPSHOT.get("ask_input_schema")
     if not isinstance(schema, dict):
-        schema = {
-            "type": "object",
-            "properties": {
-                "question": {"type": "string"},
-                "target": {
-                    "type": "object",
-                    "properties": {
-                        "type": {"type": "string", "default": "auto"},
-                        "id": {"type": "string"},
-                        "market": {"type": "string"},
-                    },
-                },
-            },
-            "required": ["question"],
-            "additionalProperties": False,
-        }
+        return None
     return {
         "name": "omi.ask",
         "title": "Ask OMI",
@@ -238,7 +240,7 @@ def _fallback_refresh_status_source() -> dict[str, Any]:
         "description": (
             "Read one redacted ai.tool_refresh background job. Operation "
             "completion never implies fresh evidence; completed jobs return a "
-            "cache-only omi.ask resume template."
+            "cache-only omi_ask resume template."
         ),
         "input_schema": {
             "type": "object",
@@ -257,7 +259,7 @@ def _fallback_refresh_status_source() -> dict[str, Any]:
 def _adapter_ask_schema(source_schema: Any) -> dict[str, Any]:
     schema = deepcopy(source_schema) if isinstance(source_schema, dict) else {}
     if schema.get("type") != "object":
-        schema = deepcopy(_fallback_ask_source()["input_schema"])
+        raise ValueError("Invalid omi.ask schema")
 
     properties = schema.setdefault("properties", {})
     if not isinstance(properties, dict):
@@ -371,6 +373,13 @@ def _shortcut_input_schema(
         for name in common_names
         if name in ask_properties
     }
+    # Existing callers can still forward every selection. The canonical tool
+    # advertises the complete registry and Backend validates the selection.
+    if "selection" in properties:
+        properties["selection"] = {
+            "type": "object",
+            "description": "Optional Backend selection. Use omi_ask for the full capability and parameter schema.",
+        }
     properties.update(deepcopy(specific_properties))
     schema: dict[str, Any] = {
         "type": "object",
@@ -441,7 +450,7 @@ def _build_tw_dashboard_tools() -> list[dict[str, Any]]:
             "name": "omi_open_tw_market_dashboard",
             "title": "Open OMI Taiwan Market Dashboard",
             "description": (
-                "Render a dashboard returned by omi.read_tw_market_dashboard. "
+                "Render a dashboard returned by omi_read_tw_market_dashboard. "
                 "Call the data tool first, then pass its complete structured "
                 "content unchanged as this tool's arguments."
             ),
@@ -578,13 +587,15 @@ def _build_tw_workspace_tools() -> list[dict[str, Any]]:
             "openai/outputTemplate": TW_WORKSPACE_V3_RESOURCE_URI,
         },
     })
+    v4_resource_uri = _tw_workspace_v4_resource_uri()
     tools.append({
         **deepcopy(tools[-1]),
         "name": "omi_open_tw_workspace_v4",
         "title": "Open OMI Taiwan Workspace v4",
+        "description": "Open the current Taiwan workspace for new tasks, with optional initial selection and independent cache-only panes.",
         "_meta": {
-            "ui": {"resourceUri": TW_WORKSPACE_V4_RESOURCE_URI},
-            "openai/outputTemplate": TW_WORKSPACE_V4_RESOURCE_URI,
+            "ui": {"resourceUri": v4_resource_uri},
+            "openai/outputTemplate": v4_resource_uri,
         },
     })
     return tools
@@ -776,6 +787,43 @@ CANDIDATE_ROUTES = {
 }
 
 
+BROKER_TOOLS = {
+    "omi_approve_candidate_pending", "omi_confirm_desk_staged", "omi_confirm_desk_review",
+    "omi_read_desk_orders", "omi_read_desk_order", "omi_read_desk_inventory", "omi_read_desk_fills",
+    "omi_read_desk_status", "omi_cancel_desk_order", "omi_revise_order_protection",
+}
+
+
+CANDIDATE_DESCRIPTIONS = {
+    "omi_list_candidates": "List conditional candidates by cursor. Read a candidate by its returned ID.",
+    "omi_read_candidate": "Read one conditional candidate and its current revision.",
+    "omi_read_candidate_revisions": "Read the revision history of one conditional candidate.",
+    "omi_read_candidate_pending": "Read unsent research pending intents for a candidate.",
+    "omi_read_candidate_monitor_status": "Read conditional-candidate monitor status.",
+    "omi_create_candidate": "Create a USER_SPACE/MANUAL conditional candidate with MCP provenance.",
+    "omi_revise_candidate": "Append a candidate revision using the observed revision and replacement raw intent.",
+    "omi_pause_candidate": "Pause monitoring for the specified candidate revision.",
+    "omi_resume_candidate": "Resume monitoring for the specified candidate revision.",
+    "omi_cancel_candidate": "Cancel this conditional candidate. Broker orders have separate identities.",
+    "omi_revise_candidate_pending": "Change price and quantity of an unsent pending intent.",
+    "omi_cancel_candidate_pending": "Cancel an unsent pending intent.",
+    "omi_prepare_candidate_pending": "Prepare an unsent pending intent and read its revision and digest for review.",
+    "omi_approve_candidate_pending": "The single Orders confirmation may submit the prepared pending ID, revision and digest to Native.",
+    "omi_create_desk_draft": "Save a local unsent manual stage. Retain client_intent_id for readback.",
+    "omi_read_desk_staged": "List local unsent manual stages.",
+    "omi_read_desk_stage": "Read a single local stage, current revision and available review information.",
+    "omi_confirm_desk_staged": "The single Orders confirmation may submit this stage to Native using its exact revision and digest.",
+    "omi_read_desk_orders": "Read Native broker order reports. Use omi_read_desk_order for one execution.",
+    "omi_read_desk_fills": "Read broker fill evidence. Preserve partial and unknown observations.",
+    "omi_read_desk_inventory": "Read broker account inventory and its completeness by account and position type.",
+    "omi_read_desk_status": "Read Native desk readiness and reported availability.",
+    "omi_confirm_desk_review": "The single Orders confirmation may submit this Native review ID with its exact revision and digest.",
+    "omi_read_desk_order": "Read one broker execution by its original market and ID, including cancellation readback.",
+    "omi_cancel_desk_order": "Request broker cancellation once for the exact market and execution ID. Read omi_read_desk_order for the broker outcome.",
+    "omi_revise_order_protection": "Replace protection rules for one execution using its market, request ID and observed revision. Read back that execution.",
+}
+
+
 def _build_candidate_tools() -> list[dict[str, Any]]:
     fields = {
         "market": {"type": "string", "enum": ["TW", "US"]},
@@ -804,13 +852,8 @@ def _build_candidate_tools() -> list[dict[str, Any]]:
         names = (["id"] if "{id}" in suffix else []) + list(body_fields)
         tools.append({
             "name": name,
-            "description": (
-                f"Mechanically forward {method} {CANDIDATE_BASE_PATH}{suffix}. "
-                "Backend/Native is the only order/journal owner. New MCP records use USER_SPACE/MANUAL/owner MCP. "
-                "desk/draft stores a local manual_stage Candidate without Native IO. Staged GETs read local Candidates. "
-                "prepare and desk/draft never send; approve, staged confirm and review confirm may send and require explicit user confirmation. "
-                "Never retry mutations or infer success from a missing route; UNKNOWN requires readback, not resend. "
-                "Research/stage cancellation is not broker cancellation. Broker Desk GETs return Native/Broker evidence only."
+            "description": CANDIDATE_DESCRIPTIONS[name] + (
+                " UNKNOWN requires original-identity readback. Never resend." if method != "GET" else ""
             ),
             "inputSchema": {
                 "type": "object", "properties": {key: deepcopy(fields[key]) for key in names},
@@ -818,8 +861,10 @@ def _build_candidate_tools() -> list[dict[str, Any]]:
                 "additionalProperties": False,
             },
             "annotations": {
-                "readOnlyHint": method == "GET", "destructiveHint": suffix.endswith(("/cancel", "/approve", "/confirm")),
-                "idempotentHint": method == "GET", "openWorldHint": False,
+                "readOnlyHint": method == "GET", "destructiveHint": method != "GET" and name not in {
+                    "omi_create_candidate", "omi_create_desk_draft", "omi_prepare_candidate_pending",
+                },
+                "idempotentHint": method == "GET", "openWorldHint": name in BROKER_TOOLS,
             },
             **({"_meta": {"ui": {"visibility": ["app"]}}} if method != "GET" else {}),
         })
@@ -829,7 +874,7 @@ def _build_candidate_tools() -> list[dict[str, Any]]:
 RESEARCH_BASE_PATH = "/api/research/trade-proposals/ai"
 RESEARCH_ROUTES = {
     "omi_read_research_schema": ("GET", "/schema", ()),
-    "omi_list_research_proposals": ("GET", "", ("market", "origin", "direction", "limit", "offset", "view")),
+    "omi_list_research_proposals": ("GET", "", ("market", "origin", "direction", "limit", "offset", "view", "screening_family", "research_category", "event_subtype", "latest_events")),
     "omi_read_research_proposal": ("GET", "/{id}", ()),
     "omi_read_research_revisions": ("GET", "/{id}/revisions", ()),
     "omi_create_research_proposal": ("POST", "", ("data",)),
@@ -842,29 +887,53 @@ RESEARCH_ROUTES = {
 }
 
 
+RESEARCH_DESCRIPTIONS = {
+    "omi_read_research_schema": "Read the Backend request schemas for creation, nomination, revision, classification and unsent staging.",
+    "omi_list_research_proposals": "List Backend research summaries by market, origin and screening filters. Read a proposal ID for full evidence.",
+    "omi_read_research_proposal": "Read one research proposal with its evidence, strategy and current revision ID.",
+    "omi_read_research_revisions": "Read the revision history of one research proposal.",
+    "omi_create_research_proposal": "Create a research proposal with market, symbol, evidence, strategy and costs. The AI route accepts AI_NOMINATION or OMI_SCREEN workflow origin.",
+    "omi_nominate_research_stocks": "Request Backend research nominations for the supplied market, symbols and trade date. Inspect per-symbol outcomes.",
+    "omi_revise_research_proposal": "Revise the selected research proposal using its current revision ID and proposed strategy and costs.",
+    "omi_move_research_proposal": "Change workflow classification while preserving original evidence.",
+    "omi_delete_research_proposal": "Delete the selected research proposal using its current revision ID.",
+    "omi_revise_research_order": "Revise an unsent research-linked stage with raw and the exact revisions. Omitting raw or passing null cancels the stage.",
+    "omi_stage_research_order": "Create an unsent stage from an AI nomination. Retain its client intent ID for readback.",
+}
+
+
 def _build_research_tools():
     fields = {
         "view": {"type": "string", "enum": ["summary", "full"], "description": "Backend defaults to versioned list summaries. Use full for frozen evidence or read one proposal by ID. Summary is not execution evidence."},
         "id": {"type": "string", "minLength": 1},
         "market": {"type": "string", "enum": ["TW", "US"]},
         "origin": {"type": "string", "enum": ["AI_NOMINATION", "OMI_SCREEN"]},
-        "direction": {"type": "string", "enum": ["long", "short"]},
+        "direction": {"type": "string", "enum": ["long", "short", "neutral"]},
+        "screening_family": {"type": "string", "enum": ["reversal", "trend", "range", "volume"]},
+        "event_subtype": {"type": "string", "enum": ["volume_anomaly", "accumulation_launch"]},
+        "research_category": {"type": "string", "enum": ["LEFT_LONG", "LEFT_SHORT", "RIGHT_LONG", "RIGHT_SHORT", "CONSOLIDATION_LONG", "CONSOLIDATION_SHORT", "CONSOLIDATION_UNDECIDED"]},
+        "latest_events": {"type": "boolean"},
         "limit": {"type": "integer", "minimum": 1, "maximum": 100},
         "offset": {"type": "integer", "minimum": 0},
         "expected_revision_id": {"type": "string", "minLength": 1},
-        "data": {"type": "object", "description": "Backend research input. Revision: expected_revision_id, strategy, costs, change_reason. Stage: expected_revision_id, client_intent_id, optional order overrides. Create: market,symbol,evidence,strategy,costs,change_reason. Nominate: market,stock_ids,direction,as_of_trade_date,requested_at,quantity. Preserve returned strategy/costs fields when editing."},
+        "data": {"type": "object", "description": "Use the corresponding request body from omi_read_research_schema."},
     }
     result = []
     for name, (method, suffix, body_fields) in RESEARCH_ROUTES.items():
         names = (["id"] if "{id}" in suffix else []) + list(body_fields)
-        result.append({"name": name, "description": (
-            "Manage TW/US AI_NOMINATION and OMI_SCREEN research through the Backend Journal. "
-            "Move changes workflow classification, preserving original evidence. Stage creates an unsent draft only, "
-            "and requires AI_NOMINATION. No research tool sends, cancels, amends broker orders or changes active protection. "
-            "Use returned revision IDs; mutations have no automatic retry. Outside-scope manual nominations remain user-managed."),
-            "inputSchema": {"type": "object", "properties": {k: deepcopy(fields[k]) for k in names},
+        properties = {k: deepcopy(fields[k]) for k in names}
+        if name == "omi_list_research_proposals":
+            properties["origin"]["enum"].append("PROGRAM_NOMINATION")
+        result.append({"name": name, "description": RESEARCH_DESCRIPTIONS[name] + (
+            " Read back the Backend journal after UNKNOWN. Never resend or submit a broker order."
+            if method != "GET" else ""
+        ),
+            "inputSchema": {"type": "object", "properties": properties,
                 "required": names if method != "GET" or "{id}" in suffix else [], "additionalProperties": False},
-            "annotations": {"readOnlyHint": method == "GET", "destructiveHint": method == "DELETE",
+            "annotations": {"readOnlyHint": method == "GET", "destructiveHint": name in {
+                "omi_delete_research_proposal", "omi_move_research_proposal", "omi_revise_research_order",
+                "omi_revise_research_proposal",
+            },
                 "idempotentHint": method == "GET", "openWorldHint": False}})
     return result
 
@@ -927,27 +996,15 @@ def _call_candidate_tool(name: str, arguments: dict[str, Any]) -> Any:
             path += "?" + urlencode(body)
         return _api_request("GET", path)
     # One write, no retry/fallback. Return Backend objects and validation reasons unchanged.
-    return _api_request("POST", path, **({"payload": body} if body else {}))
+    return _api_request(method, path, **({"payload": body} if body else {}))
 
 
-def _build_public_tools(
-    ask_source: dict[str, Any],
-    refresh_status_source: dict[str, Any] | None = None,
-) -> list[dict[str, Any]]:
-    source_schema = ask_source.get("input_schema")
-    if not isinstance(source_schema, dict):
-        source_schema = ask_source.get("inputSchema")
-    ask_schema = _adapter_ask_schema(source_schema)
-    ask_tool = {
-        "name": "omi_ask",
-        "title": str(ask_source.get("title") or "Ask OMI"),
-        "description": (
-            "Map a read-only MCP request to OMI POST /api/ai/ask and return the "
-            "unchanged omi.decision.v4 envelope. OMI backend owns target resolution, "
-            "question understanding, freshness, refresh policy, evidence, and answers."
-        ),
-        "inputSchema": ask_schema,
-    }
+def _schema_digest(schema: dict[str, Any]) -> str:
+    encoded = json.dumps(schema, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _refresh_status_tool(refresh_status_source):
     status_source = refresh_status_source or _fallback_refresh_status_source()
     status_schema = status_source.get("input_schema")
     if not isinstance(status_schema, dict):
@@ -963,18 +1020,39 @@ def _build_public_tools(
         ),
         "inputSchema": deepcopy(status_schema),
     }
+    refresh_status_tool["annotations"] = _read_only_annotations()
+    refresh_status_tool["_meta"] = {"omi/schema": {
+        "origin": "backend_live" if refresh_status_source else "adapter_status_compatibility",
+        "sourceSchemaSha256": _schema_digest(status_schema),
+    }}
+    return refresh_status_tool
 
+
+def _decision_tools(ask_source, origin, fallback_reason):
+    source_schema = ask_source.get("input_schema")
+    if not isinstance(source_schema, dict):
+        source_schema = ask_source.get("inputSchema")
+    ask_schema = _adapter_ask_schema(source_schema)
+    ask_tool = {
+        "name": "omi_ask",
+        "title": str(ask_source.get("title") or "Ask OMI"),
+        "description": (
+            "Use for market questions, explicit capability selection and authorized bounded refresh. Return the "
+            "unchanged omi.decision.v4 envelope. OMI backend owns target resolution, "
+            "question understanding, freshness, refresh policy, evidence, and answers."
+        ),
+        "inputSchema": ask_schema,
+    }
     market_schema = {
         "type": "string",
         "description": "Market identifier such as tw, us, jp, kr, or crypto.",
     }
     tools = [
         ask_tool,
-        refresh_status_tool,
         {
             "name": "omi_read_market_overview",
             "title": "Read OMI Market Overview",
-            "description": "Map a market-overview shortcut to canonical OMI ask.",
+            "description": "Read a market-wide overview for one market. Use omi_ask for custom capability selection.",
             "inputSchema": _shortcut_input_schema(
                 ask_schema,
                 {"market": {**market_schema, "default": "tw"}},
@@ -983,7 +1061,7 @@ def _build_public_tools(
         {
             "name": "omi_read_stock_context",
             "title": "Read OMI Stock Context",
-            "description": "Map an explicit market and symbol to canonical OMI ask.",
+            "description": "Read Backend stock context for one known symbol and market. Use omi_ask for custom capability selection.",
             "inputSchema": _shortcut_input_schema(
                 ask_schema,
                 {
@@ -1012,7 +1090,7 @@ def _build_public_tools(
         {
             "name": "omi_read_source_health",
             "title": "Read OMI Source Health",
-            "description": "Map source-health filters to canonical OMI ask.",
+            "description": "Inspect provider incidents with diagnostics.source_health. source.health is a deprecated capability alias.",
             "inputSchema": _shortcut_input_schema(
                 ask_schema,
                 {
@@ -1045,7 +1123,7 @@ def _build_public_tools(
         {
             "name": "omi_read_capability_status",
             "title": "Read OMI Capability Status",
-            "description": "Map capability-status filters to canonical OMI ask.",
+            "description": "Inspect implementation coverage. capability_count counts filtered provider contracts; registry_capability_count counts capabilities and registry_resolution_count counts scope/capability pairs.",
             "inputSchema": _shortcut_input_schema(
                 ask_schema,
                 {
@@ -1072,7 +1150,36 @@ def _build_public_tools(
             ),
         },
     ]
-    return [*tools, *deepcopy(TW_DASHBOARD_TOOLS), *_build_tw_workspace_tools(), *_build_runtime_tools(), *_build_candidate_tools(), *_build_research_tools()]
+    snapshot_schema = PUBLIC_CONTRACT_SNAPSHOT.get("ask_input_schema")
+    live = origin == "backend_live"
+    schema_info = {
+        "origin": origin,
+        "contractVersion": source_schema.get("properties", {}).get("contract_version", {}).get("default"),
+        "registryVersion": source_schema.get("x-omi-capability-registry-version"),
+        "registryDigest": source_schema.get("x-omi-capability-registry-digest"),
+        "contractDigest": source_schema.get("x-omi-public-contract-digest"),
+        "selectionVersion": source_schema.get("x-omi-capability-selection-version"),
+        "snapshotVersion": PUBLIC_CONTRACT_SNAPSHOT.get("schema_version"),
+        "sourceSchemaSha256": _schema_digest(source_schema),
+        "snapshotSchemaSha256": _schema_digest(snapshot_schema) if snapshot_schema else None,
+        "snapshotComparison": ("match" if source_schema == snapshot_schema else "drift") if live and snapshot_schema else "unknown",
+        "fallbackReason": fallback_reason,
+    }
+    for tool in tools:
+        # A caller can authorize bounded provider IO and a background job.
+        tool["annotations"] = {"readOnlyHint": False, "destructiveHint": False,
+                               "idempotentHint": False, "openWorldHint": True}
+        tool["_meta"] = {"omi/schema": dict(schema_info)}
+    return tools
+
+
+def _build_public_tools(ask_source, refresh_status_source=None, *, origin="generated_snapshot", fallback_reason=None):
+    tools = _decision_tools(ask_source, origin, fallback_reason) if ask_source else []
+    tools.insert(1, _refresh_status_tool(refresh_status_source if origin == "backend_live" else None))
+    return [
+        *tools, *deepcopy(TW_DASHBOARD_TOOLS), *_build_tw_workspace_tools(),
+        *_build_runtime_tools(), *_build_candidate_tools(), *_build_research_tools(),
+    ]
 
 
 PUBLIC_TOOLS = _build_public_tools(
@@ -1080,7 +1187,7 @@ PUBLIC_TOOLS = _build_public_tools(
     _fallback_refresh_status_source(),
 )
 TOOLS = PUBLIC_TOOLS
-ASK_TOOL = PUBLIC_TOOLS[0]
+ASK_TOOL = next((tool for tool in PUBLIC_TOOLS if tool["name"] == "omi_ask"), None)
 LEGACY_TOOL_ALIASES = {"omi.search": "omi.ask"}
 
 
@@ -1219,14 +1326,61 @@ def _backend_public_tools() -> list[dict[str, Any]]:
         ),
         None,
     )
-    return _build_public_tools(ask_source, refresh_status_source)
+    if not _has_input_field(ask_source.get("input_schema") or ask_source.get("inputSchema"), "question"):
+        raise ValueError("Invalid backend omi.ask schema")
+    if refresh_status_source and not _has_input_field(
+        refresh_status_source.get("input_schema") or refresh_status_source.get("inputSchema"), "job_id"
+    ):
+        refresh_status_source = None
+    return _build_public_tools(ask_source, refresh_status_source, origin="backend_live")
+
+
+RESEARCH_BODY_SCHEMAS = {
+    "omi_create_research_proposal": "create", "omi_nominate_research_stocks": "nominate",
+    "omi_revise_research_proposal": "revise", "omi_move_research_proposal": "move",
+    "omi_stage_research_order": "stage", "omi_revise_research_order": "stage_revision",
+}
+
+
+def _backend_research_schemas():
+    return _api_request("GET", RESEARCH_BASE_PATH + "/schema", timeout_seconds=SCHEMA_TIMEOUT_SECONDS)
 
 
 def _tools_for_client() -> list[dict[str, Any]]:
     try:
-        return _backend_public_tools()
-    except Exception:
-        return PUBLIC_TOOLS
+        tools = _backend_public_tools()
+    except (RuntimeError, OSError, ValueError) as exc:
+        tools = _build_public_tools(_fallback_ask_source(), fallback_reason=type(exc).__name__)
+
+    try:
+        schemas = _backend_research_schemas()
+    except (RuntimeError, OSError, ValueError) as exc:
+        schemas = {}
+        research_error = type(exc).__name__
+    else:
+        research_error = "schema_missing_or_invalid"
+    for tool in tools:
+        key = RESEARCH_BODY_SCHEMAS.get(tool["name"])
+        if not key:
+            continue
+        body = schemas.get(key) if isinstance(schemas, dict) else None
+        info = {"origin": "adapter_envelope", "backendSchema": key}
+        if isinstance(body, dict) and body.get("type") == "object" and isinstance(body.get("properties"), dict):
+            body = deepcopy(body)
+            info.update(origin="backend_research_live", sourceSchemaSha256=_schema_digest(body))
+            envelope = tool["inputSchema"]
+            if "data" in envelope["properties"]:
+                if "$defs" in body:
+                    envelope["$defs"] = body.pop("$defs")
+                envelope["properties"]["data"] = body
+            else:
+                # Move uses flat arguments with the route ID outside the HTTP body.
+                envelope.update(body, properties={"id": envelope["properties"]["id"], **body["properties"]},
+                                required=["id", *body.get("required", [])])
+        else:
+            info["fallbackReason"] = research_error
+        tool.setdefault("_meta", {})["omi/schema"] = info
+    return tools
 
 
 def _tw_dashboard_resources_for_client() -> list[dict[str, Any]]:
@@ -1259,7 +1413,7 @@ def _tw_dashboard_resources_for_client() -> list[dict[str, Any]]:
             "mimeType": TW_DASHBOARD_RESOURCE_MIME_TYPE,
         },
         {
-            "uri": TW_WORKSPACE_V4_RESOURCE_URI,
+            "uri": _tw_workspace_v4_resource_uri(),
             "name": "omi-tw-workspace-v4",
             "title": "OMI Taiwan Workspace v4",
             "mimeType": TW_DASHBOARD_RESOURCE_MIME_TYPE,
@@ -1268,16 +1422,25 @@ def _tw_dashboard_resources_for_client() -> list[dict[str, Any]]:
 
 
 def _read_tw_dashboard_resource(uri: str) -> dict[str, Any]:
-    if uri not in {TW_DASHBOARD_RESOURCE_URI, TW_WORKSPACE_RESOURCE_URI, TW_WORKSPACE_V2_RESOURCE_URI, TW_WORKSPACE_V3_RESOURCE_URI, TW_WORKSPACE_V4_RESOURCE_URI}:
+    addressed = re.fullmatch(r"ui://omi/tw-workspace/v4/([0-9a-f]{64})\.html", uri)
+    if uri not in {TW_DASHBOARD_RESOURCE_URI, TW_WORKSPACE_RESOURCE_URI, TW_WORKSPACE_V2_RESOURCE_URI, TW_WORKSPACE_V3_RESOURCE_URI, TW_WORKSPACE_V4_RESOURCE_URI} and not addressed:
         raise KeyError(f"Unknown resource: {uri}")
     try:
-        widget_html = TW_DASHBOARD_WIDGET_PATH.read_text(encoding="utf-8")
+        widget_bytes = TW_DASHBOARD_WIDGET_PATH.read_bytes()
     except OSError as exc:
         raise RuntimeError(
             "Taiwan dashboard widget bundle is unavailable. Run its production build."
         ) from exc
-    if uri in {TW_WORKSPACE_RESOURCE_URI, TW_WORKSPACE_V2_RESOURCE_URI, TW_WORKSPACE_V3_RESOURCE_URI, TW_WORKSPACE_V4_RESOURCE_URI}:
-        widget_html = widget_html.replace('<html ', '<html data-omi-workspace="true" ', 1)
+    widget_sha = sha256(widget_bytes).hexdigest()
+    if addressed and addressed.group(1) != widget_sha:
+        # An old content address must never silently serve different bytes.
+        raise KeyError(f"Widget content is no longer published at resource: {uri}")
+    widget_html = widget_bytes.decode("utf-8")
+    if uri in {TW_WORKSPACE_RESOURCE_URI, TW_WORKSPACE_V2_RESOURCE_URI, TW_WORKSPACE_V3_RESOURCE_URI, TW_WORKSPACE_V4_RESOURCE_URI} or addressed:
+        attributes = 'data-omi-workspace="true"'
+        if uri == TW_WORKSPACE_V4_RESOURCE_URI or addressed:
+            attributes += f' data-omi-widget-sha="{widget_sha}"'
+        widget_html = widget_html.replace('<html ', f'<html {attributes} ', 1)
     return {
         "contents": [
             {
@@ -1326,6 +1489,15 @@ def _bounded_integer(
     return value
 
 
+DASHBOARD_GET_PATHS = {
+    "omi_read_tw_market_dashboard": "/api/market/tw-dashboard/snapshot",
+    "omi_search_tw_symbols": "/api/market/tw-dashboard/symbols/search",
+    "omi_read_tw_stock_dashboard_detail": "/api/market/tw-dashboard/stocks/{stock_id}",
+}
+ASK_PATH = "/api/ai/ask"
+REFRESH_STATUS_PATH = "/api/ai/refresh-status/{job_id}"
+
+
 def _read_tw_market_dashboard(arguments: dict[str, Any]) -> dict[str, Any]:
     group_id = arguments.get("watchlist_group_id")
     if group_id is not None and (
@@ -1358,7 +1530,7 @@ def _read_tw_market_dashboard(arguments: dict[str, Any]) -> dict[str, Any]:
         query["watchlist_group_id"] = group_id
     response = _api_request(
         "GET",
-        f"/api/market/tw-dashboard/snapshot?{urlencode(query)}",
+        DASHBOARD_GET_PATHS["omi_read_tw_market_dashboard"] + "?" + urlencode(query),
     )
     if (
         not isinstance(response, dict)
@@ -1384,7 +1556,7 @@ def _search_tw_symbols(arguments: dict[str, Any]) -> dict[str, Any]:
     )
     response = _api_request(
         "GET",
-        "/api/market/tw-dashboard/symbols/search?"
+        DASHBOARD_GET_PATHS["omi_search_tw_symbols"] + "?"
         + urlencode({"keyword": keyword, "limit": limit}),
     )
     if (
@@ -1418,7 +1590,7 @@ def _read_tw_stock_dashboard_detail(
     )
     response = _api_request(
         "GET",
-        f"/api/market/tw-dashboard/stocks/{quote(stock_id, safe='')}?"
+        DASHBOARD_GET_PATHS["omi_read_tw_stock_dashboard_detail"].format(stock_id=quote(stock_id, safe="")) + "?"
         + urlencode({"timeframe": timeframe, "bars": bars}),
     )
     if (
@@ -1438,7 +1610,7 @@ def _open_tw_market_dashboard(arguments: dict[str, Any]) -> dict[str, Any]:
         or arguments.get("version") != "omi.tw_market_dashboard.v1"
     ):
         raise ValueError(
-            "Pass the complete omi.read_tw_market_dashboard structuredContent unchanged."
+            "Pass the complete omi_read_tw_market_dashboard structuredContent unchanged."
         )
     return deepcopy(arguments)
 
@@ -1526,7 +1698,7 @@ def _search(
     payload = _search_payload(
         arguments, allow_legacy_aliases=allow_legacy_aliases
     )
-    response = _api_post("/api/ai/ask", payload)
+    response = _api_post(ASK_PATH, payload)
     if (
         not isinstance(response, dict)
         or response.get("contract_version") != "omi.decision.v4"
@@ -1539,7 +1711,7 @@ def _read_refresh_status(arguments: dict[str, Any]) -> dict[str, Any]:
     job_id = arguments.get("job_id")
     if isinstance(job_id, bool) or not isinstance(job_id, int) or job_id < 1:
         raise ValueError("job_id must be a positive integer")
-    response = _api_request("GET", f"/api/ai/refresh-status/{job_id}")
+    response = _api_request("GET", REFRESH_STATUS_PATH.format(job_id=job_id))
     if not isinstance(response, dict):
         raise RuntimeError("OMI backend returned a malformed refresh-status response.")
     return response
@@ -1754,6 +1926,44 @@ def _call_runtime_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     return _runtime_request(action, request_id=request_id, expected_owner_id=owner_id)
 
 
+ASK_SHORTCUTS = {
+    "omi_read_market_overview": _market_overview_arguments,
+    "omi_read_stock_context": _stock_context_arguments,
+    "omi_read_data_freshness": _data_freshness_arguments,
+    "omi_read_source_health": _source_health_arguments,
+    "omi_read_capability_status": _capability_status_arguments,
+}
+
+
+def public_inventory(tools):
+    """Describe each advertised binding and the retained unlisted alias."""
+    routes = {name: ("POST", ASK_PATH, "ask_projection") for name in ("omi_ask", *ASK_SHORTCUTS)}
+    routes["omi_read_refresh_status"] = ("GET", REFRESH_STATUS_PATH, "adapter_status_compatibility")
+    for group, base in ((CANDIDATE_ROUTES, CANDIDATE_BASE_PATH), (RESEARCH_ROUTES, RESEARCH_BASE_PATH)):
+        routes.update({name: (method, base + path, "adapter_envelope") for name, (method, path, _) in group.items()})
+    routes.update({name: ("GET", path, "adapter_input_generated_output") for name, path in DASHBOARD_GET_PATHS.items()})
+    routes.update({name: (v["method"], v["path"], "generated_workspace_snapshot") for name, v in TW_WORKSPACE_ROUTES.items()})
+    for name, action in (("omi_read_runtime_status", "Status"), ("omi_read_runtime_operation", "ReadOperation"),
+                         *((name, value[0]) for name, value in RUNTIME_MUTATIONS.items())):
+        routes[name] = ("PIPE", action, "adapter_launcher_contract")
+    rows = []
+    for tool in tools:
+        name = tool["name"]
+        meta = tool.get("_meta", {})
+        ui = meta.get("ui", {})
+        method, route, origin = (("RENDER", ui["resourceUri"], "render_binding") if "resourceUri" in ui else routes[name])
+        compatibility = "shortcut" if name in ASK_SHORTCUTS else "current"
+        if name in {"omi_open_tw_workspace", "omi_open_tw_workspace_v2", "omi_open_tw_workspace_v3"}:
+            compatibility = "retained_opener"
+        rows.append(dict(name=name, method=method, route=route, listed=True, visibility=ui.get("visibility", ["model", "app"]),
+                         annotations=tool["annotations"], schema=meta.get("omi/schema", {"origin": origin}),
+                         compatibility=compatibility))
+    for alias in LEGACY_TOOL_ALIASES:
+        rows.append(dict(name=alias, method="POST", route=ASK_PATH, listed=False, visibility=[],
+                         annotations=None, schema={"origin": "ask_compatibility"}, compatibility="call_only_alias"))
+    return rows
+
+
 def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
     if name in RESEARCH_ROUTES:
         return _call_research_tool(name, arguments)
@@ -1781,16 +1991,8 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
         return _read_refresh_status(arguments)
     if name in LEGACY_TOOL_ALIASES:
         return _search(arguments, allow_legacy_aliases=True)
-    if name == "omi_read_market_overview":
-        return _search(_market_overview_arguments(arguments))
-    if name == "omi_read_stock_context":
-        return _search(_stock_context_arguments(arguments))
-    if name == "omi_read_data_freshness":
-        return _search(_data_freshness_arguments(arguments))
-    if name == "omi_read_source_health":
-        return _search(_source_health_arguments(arguments))
-    if name == "omi_read_capability_status":
-        return _search(_capability_status_arguments(arguments))
+    if name in ASK_SHORTCUTS:
+        return _search(ASK_SHORTCUTS[name](arguments))
     raise KeyError(f"Unknown tool: {name}")
 
 

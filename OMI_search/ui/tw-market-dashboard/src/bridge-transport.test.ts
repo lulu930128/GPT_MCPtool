@@ -198,3 +198,16 @@ for (const name of ["omi_read_tw_workspace_header", "omi_read_tw_stock_chart", "
     }, name);
   });
 }
+
+
+test("legacy fallback timeout settles once, ignores late result and never retries", async () => {
+  await harness(async ({ bridge, calls, reply, expire }) => {
+    let late!: (value: unknown) => void;
+    window.openai!.callTool = async () => { calls.push("legacy"); return new Promise(resolve => late = resolve); };
+    const pending = bridge.callTool("omi_read_tw_stock_research", args);
+    const rejected = assert.rejects(pending, /legacy timed out/);
+    await tick(); reply({ error: { code: -32601 } }); await tick();
+    expire(); await rejected; late({ late: true }); await tick();
+    assert.deepEqual(calls, ["bridge", "legacy"]);
+  });
+});

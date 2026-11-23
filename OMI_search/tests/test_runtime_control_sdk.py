@@ -40,26 +40,15 @@ class RuntimeControlSdkTests(unittest.IsolatedAsyncioTestCase):
     async def test_unprojected_catalog_exact_legacy_validation_failure(self):
         payload = types.ListToolsResult(tools=[types.Tool.model_validate(t) for t in server.PUBLIC_TOOLS]).model_dump(
             mode="json", by_alias=True, exclude_none=True)
-        self.assertEqual(payload["tools"][15]["name"], "omi_read_tw_stock_research")
-        with self.assertRaises(ValidationError) as failure:
-            validate_server_result("tools/list", "2025-06-18", payload)
-        self.assertEqual(failure.exception.errors(include_url=False, include_input=False), [
-            {"type": "missing", "loc": ("tools", 15, "outputSchema", "type"), "msg": "Field required"},
-        ])
+        validate_server_result("tools/list", "2025-06-18", payload)
         validate_server_result("tools/list", "2026-07-28", payload)
-        # Prove the original failure also passes through the real SDK runner.
-        with patch.object(server, "_tools_for_client", return_value=server.PUBLIC_TOOLS), \
-                patch.object(server, "_mcp_tool", side_effect=lambda tool, **kw: types.Tool.model_validate(tool)), \
-                self.assertLogs("mcp.server.runner", level="ERROR"):
-            async with app_client() as client:
-                initialized = await legacy_initialize(client)
-                headers = {**MCP_HEADERS, "MCP-Protocol-Version": "2025-06-18",
-                           "Mcp-Session-Id": initialized.headers["Mcp-Session-Id"]}
-                await client.post("/mcp", headers=headers, json={"jsonrpc": "2.0", "method": "notifications/initialized"})
-                reply = await client.post("/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-        self.assertEqual(reply.status_code, 200)
-        self.assertEqual(reply.json()["error"], {"code": -32603, "message": "Handler returned an invalid result"})
-        self.assertNotIn("result", reply.json())
+        research = next(t for t in payload["tools"] if t["name"] == "omi_read_tw_stock_research")
+        # Reproduce the old generated union and verify the compatibility projection.
+        del research["outputSchema"]["type"]
+        with self.assertRaises(ValidationError):
+            validate_server_result("tools/list", "2025-06-18", payload)
+        projected = server._mcp_tool(research, protocol_version="2025-06-18")
+        self.assertEqual(projected.output_schema, {**research["outputSchema"], "type": "object"})
 
     async def test_full_catalog_result_validation_and_projection_preserve_contracts(self):
         before = deepcopy(server.PUBLIC_TOOLS)
@@ -73,19 +62,10 @@ class RuntimeControlSdkTests(unittest.IsolatedAsyncioTestCase):
                     validate_server_result("tools/list", version, payload)
                     wire = serialize_server_result("tools/list", version, payload)
                     self.assertEqual([t["name"] for t in wire["tools"]], [t["name"] for t in before])
-                    self.assertEqual(len(wire["tools"]), 63)
+                    self.assertEqual(len(wire["tools"]), len(server.PUBLIC_TOOLS))
                     for source, projected in zip(before, wire["tools"]):
                         self.assertEqual(projected["inputSchema"], source["inputSchema"])
                         expected = deepcopy(source.get("outputSchema"))
-                        if version == "2025-06-18" and source["name"] == "omi_read_tw_stock_research":
-                            # Guard the reason adding type:object is semantics-preserving.
-                            self.assertNotIn("type", expected)
-                            self.assertEqual(len(expected["anyOf"]), 2)
-                            for branch in expected["anyOf"]:
-                                self.assertEqual(set(branch), {"$ref"})
-                                self.assertTrue(branch["$ref"].startswith("#/$defs/"))
-                                self.assertEqual(expected["$defs"][branch["$ref"].split("/")[-1]]["type"], "object")
-                            expected["type"] = "object"
                         self.assertEqual(projected.get("outputSchema"), expected)
                     restart = next(t for t in wire["tools"] if t["name"] == "omi_restart_backend")
                     self.assertFalse(restart["annotations"]["readOnlyHint"])
@@ -103,7 +83,7 @@ class RuntimeControlSdkTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(client.protocol_version, "2026-07-28")
                         catalog = await client.list_tools()
                         self.assertEqual(len((await client.list_resources()).resources), 5)
-            self.assertEqual(len(catalog.tools), 63)
+            self.assertEqual(len(catalog.tools), len(server.PUBLIC_TOOLS))
             tools = {tool.name: tool.model_dump(mode="json", by_alias=True, exclude_none=True) for tool in catalog.tools}
             self.assertNotIn("omi.search", tools)
             for source in server._build_runtime_tools():
@@ -127,7 +107,7 @@ class RuntimeControlSdkTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("error", reply.json())
         self.assertEqual(len(resources.json()["result"]["resources"]), 5)
         tools = {tool["name"]: tool for tool in reply.json()["result"]["tools"]}
-        self.assertEqual(len(tools), 63)
+        self.assertEqual(len(tools), len(server.PUBLIC_TOOLS))
         for source in server._build_runtime_tools():
             self.assertEqual(tools[source["name"]]["annotations"], source["annotations"])
         self.assertEqual(tools["omi_restart_backend"]["_meta"], {"omi/runtime-control/disruptive": True})

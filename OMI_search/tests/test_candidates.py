@@ -47,7 +47,9 @@ class CandidateToolsTests(unittest.TestCase):
                 self.assertEqual(item["_meta"]["ui"]["visibility"], ["app"])
             self.assertNotIn("outputSchema", item)
             self.assertEqual(item["annotations"]["readOnlyHint"], method == "GET")
-            self.assertEqual(item["annotations"]["destructiveHint"], name in {"omi_cancel_candidate", "omi_cancel_candidate_pending", "omi_approve_candidate_pending", "omi_confirm_desk_review", "omi_confirm_desk_staged"})
+            self.assertEqual(item["annotations"]["destructiveHint"], method != "GET" and name not in {
+                "omi_create_candidate", "omi_create_desk_draft", "omi_prepare_candidate_pending",
+            })
             self.assertEqual(item["annotations"]["idempotentHint"], method == "GET")
             self.assertFalse(item["inputSchema"]["additionalProperties"])
         self.assertIn("omi_prepare_candidate_pending", tools)

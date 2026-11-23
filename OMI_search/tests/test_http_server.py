@@ -8,6 +8,7 @@ from unittest.mock import patch
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 import httpx2
+import server
 
 from http_server import (
     MAX_BODY_BYTES,
@@ -81,7 +82,7 @@ class OmiSearchHttpServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertRegex(body["buildId"], r"^[0-9a-f]{16}$")
         self.assertEqual(body["mcpSdk"], MCP_SDK_VERSION)
         self.assertEqual(body["mcpArchitecture"], MCP_ARCHITECTURE)
-        self.assertEqual(body["toolCount"], 63)
+        self.assertEqual(body["toolCount"], len(server.PUBLIC_TOOLS))
         self.assertIn("/mcp", body["mcp_url"])
 
     async def test_upstream_health_ready_contract(self) -> None:
@@ -172,7 +173,7 @@ class OmiSearchHttpServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(acknowledged.status_code, {200, 202})
         self.assertEqual(tools.status_code, 200)
         names = [tool["name"] for tool in tools.json()["result"]["tools"]]
-        self.assertEqual(len(names), 63)
+        self.assertEqual(len(names), len(server.PUBLIC_TOOLS))
         self.assertNotIn("omi.search", names)
         self.assertEqual(read.status_code, 200)
         self.assertEqual(
@@ -191,7 +192,7 @@ class OmiSearchHttpServerTests(unittest.IsolatedAsyncioTestCase):
                 protocol_version = client.protocol_version
 
         self.assertEqual(protocol_version, "2026-07-28")
-        self.assertEqual(len(tools.tools), 63)
+        self.assertEqual(len(tools.tools), len(server.PUBLIC_TOOLS))
         self.assertEqual(len(resources.resources), 5)
 
     async def test_refresh_status_result_semantics(self) -> None:

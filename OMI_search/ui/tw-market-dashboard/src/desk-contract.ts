@@ -85,6 +85,7 @@ export function pendingSelection(value: unknown, candidate: UnknownRecord): Desk
 }
 
 export async function confirmDeskSelection(bridge: CandidateBridge, selection: DeskSelection) {
+  if (selection.kind === "staged") stageSelection(selection.snapshot);
   return deskCall(bridge, selection.kind === "staged" ? "omi_confirm_desk_staged" : selection.kind === "review" ? "omi_confirm_desk_review" : "omi_approve_candidate_pending",
     { id: selection.id, expected_revision: selection.revision, expected_digest: selection.digest });
 }
@@ -178,9 +179,20 @@ export function stageRecord(value: unknown, expected?: UnknownRecord): UnknownRe
   return row;
 }
 
+// Only the Backend determines the exchange session. A cached decision cannot
+// outlive its absolute Backend deadline while a modal or tab stays open.
+export function currentStageDecision(row: UnknownRecord, now = Date.now()): boolean {
+  const validity = record(row.stage_validity);
+  const instant = (value: unknown) => typeof value === "string" && /(?:Z|[+-]\d{2}:\d{2})$/.test(value) ? Date.parse(value) : NaN;
+  const day = (value: unknown) => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
+  return validity.state === "CURRENT" && day(validity.decision_date) && day(validity.market_date)
+    && (validity.reason === "STAGE_ENTRY_WINDOW" || (validity.reason === "STAGE_SAME_TRADING_DAY" && validity.decision_date === validity.market_date))
+    && instant(validity.created_at) <= now && now < instant(validity.expires_at);
+}
+
 export function stageSelection(value: unknown): DeskSelection {
   const row = stageRecord(value), stage = record(row.manual_stage), raw = record(row.raw);
-  if (stage.state !== "STAGED" || stage.submission !== null || row.lifecycle !== "STAGED") throw Error("此筆本地待送單已鎖定或取消，不可送出");
+  if (!currentStageDecision(row) || row.state !== "ACTIVE" || stage.state !== "STAGED" || stage.submission !== null || row.lifecycle !== "STAGED") throw Error("此筆本地待送單已鎖定或取消，不可送出");
   return { kind: "staged", id: String(row.id), revision: Number(row.revision), digest: String(row.digest), snapshot: row,
     command: { ...raw, quantity: raw.quantity_shares, space_id: stage.space_id }, owner: "MCP", source: "MANUAL" };
 }
@@ -213,27 +225,30 @@ export function stageNativeReview(value: UnknownRecord, readback: UnknownRecord 
     return pins.length && pins.every(value => typeof value === "string" && !!value && value === pins[0]) ? pins[0] as string : null;
   };
   const reviewId = consistent([native.review_id, receipt.review_id]);
-  const executionId = consistent([receipt.execution_id, execution.execution_id]);
+  const executionId = consistent([native.execution_id, receipt.execution_id, execution.execution_id]);
   const intentId = consistent([submission.native_intent_id, command.intent_id, receiptCommand.intent_id, execution.intent_id]);
   const tradeDate = consistent([command.trade_date, receiptCommand.trade_date, execution.trade_date]);
   // The envelope date is the query/session day and may include historical
   // reviews. Join on the original order's dated identity, never the query day.
-  if (!tradeDate || !/^\d{4}-\d{2}-\d{2}$/.test(tradeDate)
+  const localDates = [command.trade_date, receiptCommand.trade_date, execution.trade_date].filter(value => value != null);
+  if ((localDates.length > 0 && (!tradeDate || !/^\d{4}-\d{2}-\d{2}$/.test(tradeDate)))
     || (!reviewId && !executionId && !intentId)
     || ([native.review_id, receipt.review_id].some(value => value != null) && !reviewId)
-    || ([receipt.execution_id, execution.execution_id].some(value => value != null) && !executionId)
+    || ([native.execution_id, receipt.execution_id, execution.execution_id].some(value => value != null) && !executionId)
     || ([submission.native_intent_id, command.intent_id, receiptCommand.intent_id, execution.intent_id].some(value => value != null) && !intentId)) return null;
   const candidates = deskReviews(readback).filter(review => {
     const draftCommand = record(record(review.draft).command);
     return (reviewId && review.review_id === reviewId)
       || (executionId && (review.execution_id === executionId || record(review.execution).execution_id === executionId))
-      || (intentId && draftCommand.intent_id === intentId && draftCommand.trade_date === tradeDate);
+      || (intentId && draftCommand.intent_id === intentId && (!tradeDate || draftCommand.trade_date === tradeDate));
   });
   if (candidates.length !== 1) return null;
   const matches = candidates.filter(review => {
     const draftCommand = record(record(review.draft).command), current = record(review.execution), snapshot = record(review.snapshot);
-    return positive(review.review_revision) && (!reviewId || review.review_id === reviewId) && (!executionId || review.execution_id === executionId)
-      && (!intentId || draftCommand.intent_id === intentId) && draftCommand.trade_date === tradeDate
+    const originalDate = tradeDate ?? draftCommand.trade_date;
+    return typeof originalDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(originalDate)
+      && positive(review.review_revision) && (!reviewId || review.review_id === reviewId) && (!executionId || review.execution_id === executionId)
+      && (!intentId || draftCommand.intent_id === intentId) && draftCommand.trade_date === originalDate
       && (native.review_revision === undefined || review.review_revision === native.review_revision)
       && (native.digest === undefined || snapshot.digest === native.digest)
       && (receipt.review_revision === undefined || review.review_revision === receipt.review_revision)
@@ -241,20 +256,44 @@ export function stageNativeReview(value: UnknownRecord, readback: UnknownRecord 
       && (snapshot.review_id === undefined || snapshot.review_id === review.review_id)
       && (snapshot.review_revision === undefined || snapshot.review_revision === review.review_revision)
       && (review.execution_id == null || (current.execution_id === review.execution_id
-        && current.intent_id === draftCommand.intent_id && current.trade_date === tradeDate))
+        && current.intent_id === draftCommand.intent_id && current.trade_date === originalDate))
       && (current.execution_id === undefined || current.execution_id === review.execution_id)
       && (current.intent_id === undefined || current.intent_id === draftCommand.intent_id)
-      && (current.trade_date === undefined || current.trade_date === tradeDate);
+      && (current.trade_date === undefined || current.trade_date === originalDate);
   });
   return matches.length === 1 ? matches[0] : null;
 }
 
+// The aggregate order report may be PARTIAL even when this execution's
+// durable Native status is available. Require the unique review AND the exact
+// execution detail before presenting a settled result on the staged card.
+export async function readStageExecution(bridge: CandidateBridge, row: UnknownRecord, readback: UnknownRecord, signal?: AbortSignal): Promise<UnknownRecord> {
+  const linked = stageNativeReview(row, readback), listed = record(linked?.execution);
+  const id = linked?.execution_id, market = record(row.raw).market ?? "TW";
+  const draft = record(record(linked?.draft).command);
+  const hasId = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.trim() === value;
+  if (!["KNOWN", "PARTIAL"].includes(String(readback.quality)) || !hasId(id)
+    || !hasId(draft.intent_id) || !hasId(draft.account_id) || (market !== "TW" && market !== "US"))
+    throw Error("Native 委託身分尚未核對");
+  const detail = deskOrderRead(await deskCall(bridge, "omi_read_desk_order", { id, market }, signal), id, market);
+  const execution = record(detail.execution), command = record(detail.command);
+  const original = record(record(record(record(row.manual_stage).submission).receipt).execution);
+  if (execution.intent_id !== draft.intent_id || command.intent_id !== draft.intent_id
+    || execution.trade_date !== draft.trade_date || command.trade_date !== draft.trade_date || command.account_id !== draft.account_id
+    || [listed.broker_order_id, original.broker_order_id].some(value => value != null && value !== execution.broker_order_id)
+    || (detail.quality != null && detail.quality !== "KNOWN")
+    || !["OPEN", "ACCEPTED", "PARTIALLY_FILLED", "FILLED", "CANCELLED", "REJECTED"].includes(String(execution.state))
+    || (execution.state !== "REJECTED" && !hasId(execution.broker_order_id)))
+    throw Error("原委託尚無一致的 Native 結果");
+  return execution;
+}
+
 // Fixed, bounded pagination. An incomplete/ambiguous scan never proves absence.
-export async function readStaged(bridge: CandidateBridge): Promise<UnknownRecord[]> {
+export async function readStaged(bridge: CandidateBridge, signal?: AbortSignal): Promise<UnknownRecord[]> {
   const rows: UnknownRecord[] = [], seen = new Set<string>();
   let after = "";
   for (let page = 0; page < 100; page++) {
-    const value = await deskCall(bridge, "omi_read_desk_staged", { after, limit: 100 });
+    const value = await deskCall(bridge, "omi_read_desk_staged", { after, limit: 100 }, signal);
     if (!Array.isArray(value)) throw Error("本地待送清單格式不符；不推定為空");
     for (const item of value) {
       const row = stageRecord(item);

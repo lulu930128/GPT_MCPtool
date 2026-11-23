@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { brokerOrderViews, cancelDeskOrder, deskCancelLatch, deskOrderCancellable, exactBrokerOrder } from "./broker-orders";
-import { fixtureBrokerOrder, fixtureBrokerOrders, fixtureDeskOrder } from "../scripts/desk-fixture";
+import { brokerOrderViews, stageOrderView, cancelDeskOrder, deskCancelLatch, deskOrderCancellable, exactBrokerOrder } from "./broker-orders";
+import { fixtureBrokerOrder, fixtureBrokerOrders, fixtureDeskOrder, fixtureSubmittedOrder } from "../scripts/desk-fixture";
 import type { UnknownRecord } from "./state";
 
 const view = (row = fixtureBrokerOrder(), patch: UnknownRecord = {}) => brokerOrderViews({ ...fixtureBrokerOrders(), broker_orders: [row], ...patch })[0];
@@ -9,6 +9,24 @@ const fake = (respond: (name: string, args: UnknownRecord) => unknown | Promise<
   const calls: { name: string; args: UnknownRecord }[] = [];
   return { calls, async callTool(name: string, args: UnknownRecord) { calls.push({ name, args }); return { structuredContent: await respond(name, args) }; } };
 };
+
+test("current accepted 800-share Native order remains cancellable when local receipt is UNKNOWN", () => {
+  const f: any = fixtureSubmittedOrder("3702", "ACCEPTED", "2026-11-16", { lot: "Odd", quantity_shares: 800, price: "82.5" });
+  f.row.lifecycle = f.row.manual_stage.state = "SUBMISSION_UNKNOWN";
+  f.row.manual_stage.submission.receipt.execution.state = "UNKNOWN";
+  const data = { ...fixtureBrokerOrders(), trade_date: "2026-11-16", reviews: [f.review], broker_orders: [f.broker] };
+  const read = () => stageOrderView(f.row, data, brokerOrderViews(data));
+  assert.equal(read().state, "ACCEPTED");
+  assert.equal(read().cancelOrder?.pin?.id, f.review.execution_id);
+  // A protected submission can time out before saving its dated receipt. The
+  // unique original Native intent still joins its exact dated execution.
+  delete f.row.manual_stage.submission.receipt;
+  delete f.row.manual_stage.submission.draft;
+  assert.equal(read().cancelOrder?.pin?.brokerOrderId, f.broker.broker_key.order_id);
+  data.reviews.push(structuredClone(f.review));
+  assert.equal(read().cancelOrder, undefined, "ambiguous intent never guesses by symbol/price");
+  assert.match(read().reason, /未確認/);
+});
 
 test("only exact direct NOT_SENT response releases cancel latch for another explicit click", async () => {
   const row = fixtureBrokerOrder(), pin = view(row).pin!;
@@ -69,6 +87,7 @@ test("cancel re-reads exact account/date/execution/broker identity and only call
   const bridge = fake(name => fixtureDeskOrder(row, name === "omi_cancel_desk_order" ? { state: "CANCEL_PENDING", cancel_stage: "RETURNED" } : {}));
   const result = await cancelDeskOrder(bridge, pin.id, pin.market, pin);
   assert.equal((result.execution as UnknownRecord).state, "CANCEL_PENDING");
+  assert.equal(deskCancelLatch(bridge, pin.id, pin.market).data, result, "both card instances share the exact result");
   assert.deepEqual(bridge.calls, ["omi_read_desk_order", "omi_cancel_desk_order"].map(name => ({ name, args: { id: pin.id, market: "TW" } })));
   await assert.rejects(cancelDeskOrder(bridge, pin.id, pin.market, pin));
   assert.equal(bridge.calls.length, 2);

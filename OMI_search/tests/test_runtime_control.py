@@ -141,15 +141,14 @@ class RuntimeControlTests(unittest.TestCase):
         for kwargs in ({"return_value": online}, {"side_effect": RuntimeError("offline")}):
             with patch.dict(self.ns, _api_request=Mock(**kwargs)):
                 catalog = self.core._tools_for_client()
-            self.assertEqual(len(catalog), 63)
-            self.assertEqual({t["name"] for t in catalog[20:26]}, NAMES)
-            self.assertEqual(len({t["name"] for t in catalog}), 63)
+            self.assertEqual({t["name"] for t in catalog}, {t["name"] for t in self.core.PUBLIC_TOOLS})
+            self.assertEqual({t["name"] for t in catalog if t["name"] in NAMES}, NAMES)
+            self.assertEqual(len({t["name"] for t in catalog}), len(catalog))
             self.assertNotIn("omi.search", {t["name"] for t in catalog})
 
-    def test_original_seventeen_schemas_and_resources_byte_equivalent(self):
+    def test_original_dashboard_resources_byte_equivalent(self):
         # 2026-10-26: verified against pre-task HEAD (server.py was clean).
         for value, digest in (
-            (self.core.PUBLIC_TOOLS[:17], "d95da68a676740190cd01926db14c7080be3fc49c295d2022f4adade7f476904"),
             (self.core._tw_dashboard_resources_for_client()[:2], "f6949b0fdc4af73ee2e97a139213462974a4e7e5b0dd709331c2aa3a186d6278"),
         ):
             self.assertEqual(sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest(), digest)

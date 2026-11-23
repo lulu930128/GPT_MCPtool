@@ -3,7 +3,7 @@ import { CallError, type CandidateBridge } from "./candidate-state";
 import { deskCall, deskError, deskOrderRead, protectionRequestObserved } from "./desk-contract";
 import { TradeDetails, TradeError } from "./TradeFeedback";
 import { isRecord, type UnknownRecord } from "./state";
-import { brokerTerminal, cancelDeskOrder, deskCancelLatch, deskOrderCancellable, exactBrokerOrder, type BrokerOrderView } from "./broker-orders";
+import { brokerTerminal, cancelDeskOrder, deskCancelLatch, deskOrderCancellable, rememberDeskOrder, type BrokerOrderView } from "./broker-orders";
 
 const record = (value: unknown): UnknownRecord => isRecord(value) ? value : {};
 function useCancelLatch(bridge: CandidateBridge, id: string, market: string) {
@@ -15,15 +15,15 @@ function useCancelLatch(bridge: CandidateBridge, id: string, market: string) {
 export function BrokerOrderControls({ bridge, order, onRead }: { bridge: CandidateBridge; order: BrokerOrderView; onRead(): Promise<void> }) {
   const id = String(order.row.execution_id), market = "TW";
   const latch = useCancelLatch(bridge, id, market), lock = useRef(false);
-  const [busy, setBusy] = useState(false), [data, setData] = useState<UnknownRecord | null>(null), [notice, setNotice] = useState("");
+  const [busy, setBusy] = useState(false), [notice, setNotice] = useState("");
+  const data = latch.data;
   const execution = record(data?.execution), terminal = brokerTerminal(execution.state) || brokerTerminal(order.state);
   const run = async (cancel: boolean) => {
     if (lock.current || latch.busy || (cancel && (!order.pin || latch.attempted))) return;
     lock.current = true; setBusy(true); setNotice("");
     try {
       const result = cancel ? await cancelDeskOrder(bridge, id, market, order.pin)
-        : exactBrokerOrder(await deskCall(bridge, "omi_read_desk_order", { id, market }), id, market, order.pin);
-      setData(result);
+        : rememberDeskOrder(bridge, id, market, await deskCall(bridge, "omi_read_desk_order", { id, market }), order.pin);
       setNotice(record(result.execution).cancel_stage === "NOT_SENT" ? "撤單前檢查未通過，未送交券商；核對後可再次手動撤單。" : brokerTerminal(record(result.execution).state) ? "此單已結案，正在更新委託清單。" : cancel ? "撤單已有回應；請核對此單的券商結果。" : "已精確讀回此單；請以更新後的清單與券商狀態為準。");
     } catch (err) { setNotice(`${latch.attempted ? "撤單結果待核對；不會重複撤單。" : "未發出撤單。"}${deskError(err)}`); }
     finally {
@@ -36,6 +36,7 @@ export function BrokerOrderControls({ bridge, order, onRead }: { bridge: Candida
       {order.pin && <button type="button" className="candidate-primary" disabled={busy || latch.busy || latch.attempted || terminal || (!!data && !deskOrderCancellable(data))} onClick={() => void run(true)}>{busy && latch.busy ? "核對／撤銷中…" : "撤銷剩餘委託"}</button>}
       <button type="button" disabled={busy || latch.busy} onClick={() => void run(false)}>核對此單</button>
     </div>
+    {(busy || latch.busy || terminal || (!!data && !deskOrderCancellable(data))) && <p role="status" className="workspace-ticket-note">{busy || latch.busy ? "正在核對此單，請稍候。" : terminal ? "此單已結案，不能撤銷。" : "此單尚無可撤的剩餘委託證據，請核對此單。"}</p>}
     {latch.attempted && !terminal && <p role="status" className="workspace-ticket-note">撤單已提出，僅能精確讀回確認結果；不會重複撤單。</p>}
     {notice && <p role="status" className="workspace-ticket-note">{notice}</p>}
     {data && <TradeDetails value={data}/>}
@@ -45,6 +46,9 @@ export function BrokerOrderControls({ bridge, order, onRead }: { bridge: Candida
 export function ProtectionFields({ value, onChange, disabled }: { value: UnknownRecord; onChange(value: UnknownRecord): void; disabled?: boolean }) {
   const targets = Array.isArray(value.targets) ? value.targets as UnknownRecord[] : [];
   return <fieldset disabled={disabled} className="workspace-order-inputs"><legend>此單停損停利</legend>
+    {isRecord(value.research_management) && <p>中波段研究窗 {String(value.research_management.holding_sessions)} 個交易日。{value.research_management.contract === "omi.screening-management.v2"
+      ? "保留完成日 K 管理規則：第一段後保本／追蹤停損依原設定執行。Native 尚未支援此契約時，只保存本地待送單，不會省略規則送出。"
+      : "實際成交後沿原停損停利規則管理。"}觀察窗口結束不會強制清倉；只有策略明訂時間出場才適用。研究結構監看與實際持倉分開記錄。</p>}
     <label><input type="checkbox" checked={value.enabled === true} onChange={e => onChange({ ...value, enabled: e.target.checked })}/>啟用出場規則</label>
     <div className="workspace-order-fields">{[["stop_loss", "停損觸發價"], ["stop_limit_price", "停損委託限價"]].map(([key, label]) => <label key={key}>{label}<input type="number" min="0" step="any" value={String(value[key] ?? "")} onChange={e => onChange({ ...value, [key]: e.target.value || null, ...(key === "stop_limit_price" ? { exit_limit_price: e.target.value } : {}) })}/></label>)}</div>
     {targets.map((target, index) => <div className="workspace-order-fields" key={index}>
@@ -76,6 +80,9 @@ export function LiveOrderControls({ bridge, id, market, cancelAllowed = true }: 
   return <details className="workspace-order-details"><summary>券商委託與停損停利</summary>
     <button disabled={busy} onClick={() => void run(read)}>{busy ? "處理中…" : "讀取此單"}</button>
     {data && <><p>委託狀態：{state} · 成交 {String(execution.filled_shares ?? "待回報")} 股</p>
+      {isRecord(protection.daily_management) && <p role="status">日線管理：{record(protection.daily_management.management_state).effective_from
+        ? `已讀取 ${String(record(record(protection.daily_management.management_state).bar).trade_date)} 完成日 K，${String(record(protection.daily_management.management_state).effective_from)} 起適用；目前停損 ${String(record(protection.effective_rules).stop_loss)}。`
+        : protection.daily_management.daily_state === "WAITING_FILL" ? "等待實際成交。" : "等待合格完成日 K；原停損停利仍保留。"}</p>}
       {cancelAllowed && <button disabled={busy || cancelLatch.busy || cancelLatch.attempted || terminal || !deskOrderCancellable(data)} onClick={() => {
         void run(() => cancelDeskOrder(bridge, id, market));
       }}>撤銷券商委託</button>}

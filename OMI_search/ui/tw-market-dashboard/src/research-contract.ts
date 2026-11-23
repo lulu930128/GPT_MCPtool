@@ -4,7 +4,7 @@ import { isRecord, type UnknownRecord } from "./state";
 
 export type ResearchSummary = UnknownRecord & {
   creation_id: string; revision_id: string; revision: number; market: "TW" | "US";
-  symbol: string; direction: "long" | "short"; workflow_origin: string | null;
+  symbol: string; direction: "long" | "short" | "neutral"; workflow_origin: string | null;
 };
 export type ResearchDetail = UnknownRecord & { proposal: ResearchSummary & { strategy: UnknownRecord; costs: UnknownRecord } };
 const nonempty = (value: unknown): value is string => typeof value === "string" && value.length > 0;
@@ -17,8 +17,8 @@ export function researchList(value: unknown, market: string, offset: number) {
   const ids = new Set<string>();
   const items = value.items.map(item => {
     if (!isRecord(item) || !nonempty(item.creation_id) || !nonempty(item.revision_id) || !Number.isSafeInteger(item.revision)
-      || Number(item.revision) < 1 || item.market !== market || !nonempty(item.symbol) || !["long", "short"].includes(String(item.direction))
-      || !["AI_NOMINATION", "OMI_SCREEN", null].includes(item.workflow_origin as string | null) || ids.has(item.creation_id))
+      || Number(item.revision) < 1 || item.market !== market || !nonempty(item.symbol) || !["long", "short", "neutral"].includes(String(item.direction))
+      || !["AI_NOMINATION", "PROGRAM_NOMINATION", "OMI_SCREEN", null].includes(item.workflow_origin as string | null) || ids.has(item.creation_id))
       throw Error("研究清單含缺少身分、版本或市場不符的資料，暫停操作。");
     ids.add(item.creation_id);
     return item as ResearchSummary;

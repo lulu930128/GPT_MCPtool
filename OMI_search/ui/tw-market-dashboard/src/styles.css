@@ -16,6 +16,13 @@
   --faint: #6f8094;
   --up: #ef535c;
   --down: #17a28d;
+  --order-buy-accent: #e1818a;
+  --order-buy-soft: #32232b;
+  --order-buy-solid: #a94352;
+  --order-sell-accent: #59b89a;
+  --order-sell-soft: #1d3334;
+  --order-sell-solid: #24795f;
+  --order-solid-text: #fff;
   --blue: #6aa8f8;
   --cyan: #76a8d8;
   --yellow: #e0ad36;
@@ -170,26 +177,65 @@
 .workspace-desk-orders h3, .workspace-broker-readback h3 { margin: 0; font-size: 13px; }
 .workspace-desk-row { border-top: 1px solid var(--border); padding: 12px 0; min-width: 0; overflow-wrap: anywhere; }
 .workspace-local-orders { min-width: 0; }
-.workspace-order-card { margin-top: 12px; padding: 16px 0; border: 0; border-top: 1px solid var(--border); border-radius: 0; background: transparent; }
+.workspace-order-card { margin: 16px 0; padding: 18px; border: 1px solid var(--border-strong); border-left: 3px solid var(--border-strong); border-radius: 10px; background: var(--panel-2); min-width: 0; overflow-wrap: anywhere; }
+.workspace-order-card[data-highlighted="true"] { border-left-color: var(--blue); }
+.workspace-readback-card .workspace-order-card-heading { flex-wrap: wrap; align-items: baseline; }
+.workspace-readback-card .workspace-order-card-heading > span { font-size: 12px; color: var(--muted); }
+.workspace-readback-entries { display: grid; gap: 10px; margin-top: 14px; }
+.workspace-readback-entry { min-width: 0; padding: 12px; border-radius: 6px; background: var(--surface); }
+.workspace-readback-entry-heading { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 12px; font-size: 12px; }
+.workspace-readback-entry-heading > span { color: var(--muted); font-variant-numeric: tabular-nums; }
+.workspace-readback-entry .workspace-order-facts { grid-template-columns: repeat(auto-fit, minmax(min(100%, 120px), 1fr)); margin: 12px 0 0; }
+.workspace-readback-entry .workspace-order-facts > div { min-width: 0; }
+.workspace-readback-entry .workspace-ticket-note { margin-bottom: 0; }
+.workspace-zero-inventory summary { color: var(--text); }
+.workspace-inventory-status { display: grid; gap: 12px; margin-top: 16px; overflow-wrap: anywhere; }
+.workspace-inventory-status h4 { margin: 0; font-size: 12px; }
+.workspace-inventory-status p { margin: 6px 0; color: var(--muted); }
 .workspace-order-card-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
 .workspace-order-card-heading > div { display: grid; gap: 5px; min-width: 0; }
-.workspace-order-symbol { color: var(--text); font: 700 23px/1.2 var(--font-data); font-variant-numeric: tabular-nums; }
+.workspace-order-symbol { color: var(--text); font: 700 21px/1.4 var(--font-data); font-variant-numeric: tabular-nums; }
+.workspace-stock-name { font-family: var(--font-ui); font-weight: 600; }
+.workspace-stock-name small { font-size: 12px; font-weight: 400; color: var(--muted); }
+.workspace-order-form .workspace-ticket-identity { font-size: 18px; color: var(--text); font-weight: 600; }
+.workspace-trade-heading > div { flex-wrap: wrap; }
 .workspace-order-direction { font-size: 13px; }
-.workspace-order-direction[data-side="Buy"] { color: var(--up); }
-.workspace-order-direction[data-side="Sell"] { color: var(--down); }
 .workspace-order-status { padding: 3px 0; color: var(--text); font-size: 12px; text-align: right; }
 .workspace-order-facts { display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); gap: 12px; margin: 18px 0; }
 .workspace-order-facts dt { color: var(--muted); font-size: 12px; margin-bottom: 5px; }
 .workspace-order-facts dd { margin: 0; color: var(--text); font-size: 14px; line-height: 1.6; font-variant-numeric: tabular-nums; }
 .workspace-order-facts > div:first-child dd { font: 600 21px/1.4 var(--font-data); }
-.workspace-order-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.workspace-order-actions button { flex: 1 1 64px; min-height: 36px; }
-.workspace-order-details { min-width: 0; margin-top: 10px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; }
-.workspace-order-details summary { padding: 4px 0; }
+.workspace-order-actions { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; }
+.workspace-order-actions button { flex: 0 1 auto; min-height: 44px; }
+.workspace-order-actions > .candidate-primary { flex: 1 1 140px; }
+.workspace-order-details { min-width: 0; margin-top: 8px; border: 0; color: var(--muted); font-size: 12px; }
+.workspace-order-details summary { padding: 12px 4px; min-height: 44px; cursor: pointer; }
+.workspace-order-details[open] { padding-bottom: 8px; }
+.workspace-order-card > .workspace-order-details[open] { padding-inline: 8px; background: var(--surface); border-radius: 4px; }
+.workspace-secondary-actions { margin-top: 8px; color: var(--muted); font-size: 13px; }
+.workspace-order-actions > .workspace-secondary-actions { margin: 0; flex: 1 1 120px; }
+.workspace-secondary-actions summary { min-height: 44px; padding: 12px 8px; cursor: pointer; }
+.workspace-secondary-actions .workspace-order-actions { margin-top: 8px; }
+.workspace-linked-order { padding-left: 12px; border-left: 2px solid var(--border); }
+.workspace-context button, .workspace-context select, .workspace-context input:not([type="checkbox"]), .workspace-send-modal button { min-height: 44px; touch-action: manipulation; }
+.workspace-context :is(button, input, select, textarea, summary):focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+.workspace-context button:disabled { cursor: not-allowed; }
+.workspace-context .candidate-primary { background: #294657; border-color: #7794a6; font-weight: 600; }
+.workspace-context button:not(:disabled):hover { border-color: var(--blue); }
+.workspace-context button:not(:disabled):active { background: var(--panel-3); }
+.workspace-context .workspace-name-retry { margin-left: 4px; padding-inline: 8px; font-size: 12px; background: transparent; }
+.workspace-context .workspace-order-pair, .workspace-context .workspace-order-fields, .workspace-context .workspace-order-modes { gap: 8px; }
+.workspace-context .workspace-staged-order.workspace-order-card { padding: 18px; border: 1px solid var(--border-strong); background: var(--panel-2); border-radius: 10px; }
+@media (max-width: 440px) {
+  .workspace-order-card { padding: 14px; }
+  .workspace-order-card-heading { flex-wrap: wrap; gap: 8px; }
+  .workspace-order-card-heading > div { flex: 1 1 180px; }
+  .workspace-order-facts { column-gap: 8px; }
+}
 .workspace-order-details pre { color: var(--muted); }
 .workspace-stage-edit { display: grid; gap: 12px; padding: 16px 0; min-width: 0; }
 .workspace-stage-edit label { display: grid; gap: 6px; }
-.workspace-stage-edit input { min-width: 0; width: 100%; }
+.workspace-stage-edit input { min-width: 0; width: 100%; padding: 10px; background: var(--bg); color: var(--text); border: 1px solid var(--border-strong); border-radius: 4px; }
 .workspace-order-actions button:focus-visible, .workspace-order-details summary:focus-visible, .workspace-stage-edit input:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
 .workspace-context pre { max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 var(--font-data); }
 .workspace-send-modal { width: min(480px, calc(100% - 24px)); max-height: min(700px, calc(100% - 24px)); padding: 20px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface); color: var(--text); overflow: auto; }
@@ -208,7 +254,7 @@
 .workspace-ticket-retained { padding: 8px; border: 1px solid var(--border-strong); line-height: 1.6; }
 .workspace-ticket-retained button { margin-top: 6px; }
 .workspace-order-review { display: grid; gap: 5px; border-top: 1px solid var(--border); padding-top: 12px; font-variant-numeric: tabular-nums; }
-.tw-workspace .workspace-order-submit { min-height: 42px; background: #354c58; }
+.tw-workspace .workspace-order-submit { min-height: 44px; }
 .workspace-order-form button:disabled { cursor: not-allowed; }
 .workspace-candidate-boundary { margin-bottom: 12px; }
 .workspace-broker-empty { padding: 24px 4px; }
@@ -1887,7 +1933,7 @@ button:active:not(:disabled) { filter: brightness(1.08); }
 .workspace-stage-edit { padding: 16px 0; border-block: 1px solid var(--border-strong); }
 .workspace-research-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .workspace-research .workspace-order-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.workspace-research .workspace-order-actions button { min-height: 40px; }
+.workspace-research .workspace-order-actions button { min-height: 44px; }
 .workspace-research-pagination { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 12px; }
 @media (max-width: 650px) {
   .workspace-context { padding: 12px; }
@@ -1895,3 +1941,100 @@ button:active:not(:disabled) { filter: brightness(1.08); }
   .workspace-context summary { align-content: center; }
   .workspace-order-actions { flex-wrap: wrap; }
 }
+/* Order actions have their own palette. Market moves and lifecycle warnings use their existing tokens. */
+[data-side="Buy"] {
+  --order-side-accent: var(--order-buy-accent);
+  --order-side-soft: var(--order-buy-soft);
+  --order-side-solid: var(--order-buy-solid);
+  --order-side-icon-display: inline-block;
+}
+
+[data-side="Sell"] {
+  --order-side-accent: var(--order-sell-accent);
+  --order-side-soft: var(--order-sell-soft);
+  --order-side-solid: var(--order-sell-solid);
+  --order-side-icon-display: inline-block;
+  --order-side-icon-direction: -1;
+}
+
+.workspace-order-direction, .tw-workspace .workspace-order-tint {
+  color: var(--order-side-accent, var(--text));
+}
+
+.workspace-order-direction {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+  font-weight: 650;
+}
+
+.workspace-order-direction::before,
+:is(.workspace-order-action, .workspace-order-submit)::before,
+.workspace-order-side-toggle::before {
+  content: "";
+  display: var(--order-side-icon-display, none);
+  width: 0.95em;
+  height: 0.95em;
+  flex: none;
+  clip-path: polygon(0 41%, 64% 41%, 43% 20%, 55% 8%, 96% 50%, 55% 92%, 43% 80%, 64% 59%, 0 59%);
+  transform: scaleX(var(--order-side-icon-direction, 1));
+  background: currentColor;
+  vertical-align: -0.1em;
+}
+
+:is(.workspace-order-action, .workspace-order-submit)::before,
+.workspace-order-side-toggle::before { margin-inline-end: 0.4em; }
+
+.workspace-order-card-heading .workspace-order-direction:is([data-side="Buy"], [data-side="Sell"]) {
+  justify-self: start;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--order-side-soft);
+}
+
+.tw-workspace :is(.workspace-order-review, .workspace-order-confirm-facts) {
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-inline-start: 3px solid var(--order-side-accent, var(--border-strong));
+  border-radius: 6px;
+  background: var(--order-side-soft, var(--panel));
+}
+
+.tw-workspace :is(button.workspace-order-side-toggle, select.workspace-order-side-field):is([data-side="Buy"], [data-side="Sell"]) {
+  background: var(--order-side-soft);
+  color: var(--order-side-accent);
+  border-color: var(--order-side-accent);
+}
+
+.tw-workspace button:is(.workspace-order-action, .workspace-order-submit, .workspace-order-side-toggle[aria-pressed="true"]):is([data-side="Buy"], [data-side="Sell"]) {
+  background: var(--order-side-solid);
+  color: var(--order-solid-text);
+  border-color: var(--order-side-accent);
+  font-weight: 650;
+}
+
+.tw-workspace button:is(.workspace-order-action, .workspace-order-submit, .workspace-order-side-toggle[aria-pressed="true"]):is([data-side="Buy"], [data-side="Sell"]):enabled:hover {
+  background: color-mix(in srgb, var(--order-side-solid) 88%, black);
+  border-color: var(--order-side-accent);
+}
+
+.tw-workspace button.workspace-order-side-toggle[aria-pressed="false"]:enabled:hover {
+  background: color-mix(in srgb, var(--order-side-soft) 95%, var(--order-side-accent));
+  border-color: var(--order-side-accent);
+}
+
+.tw-workspace :is(.workspace-order-action, .workspace-order-submit, .workspace-order-side-toggle, .workspace-order-side-field):is([data-side="Buy"], [data-side="Sell"]):focus-visible {
+  outline: 2px solid var(--order-side-accent);
+  outline-offset: 3px;
+}
+
+.tw-workspace :is(.workspace-order-action, .workspace-order-submit, .workspace-order-side-toggle, .workspace-order-side-field):is([data-side="Buy"], [data-side="Sell"]):disabled {
+  background: var(--order-side-soft);
+  color: var(--order-side-accent);
+  border-color: var(--order-side-accent);
+  border-style: dashed;
+  opacity: 1;
+  cursor: not-allowed;
+}
+
+.tw-workspace button:is(.workspace-order-action, .workspace-order-submit)[aria-busy="true"]:disabled { cursor: wait; }

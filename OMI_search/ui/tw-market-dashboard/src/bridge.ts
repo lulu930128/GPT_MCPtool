@@ -234,10 +234,33 @@ export class McpAppsBridge {
       // Only an explicit unsupported method proves it is safe to use legacy transport.
       if (typeof error === "object" && error !== null && "code" in error
         && error.code === -32601 && window.openai?.callTool) {
-        return window.openai.callTool(name, arguments_);
+        // An unsupported method permits one compatibility dispatch. It must
+        // have the same bounded lifetime as the primary transport; late results
+        // never resolve a new intent or trigger another dispatch.
+        return this.legacyCall(name, arguments_, signal);
       }
       throw error;
     }
+  }
+
+  private legacyCall(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      const finish = (error: unknown, value?: unknown) => {
+        const pending = this.pending.get(id);
+        if (!pending) return;
+        this.pending.delete(id);
+        window.clearTimeout(pending.timeout);
+        signal?.removeEventListener("abort", abort);
+        if (error) reject(error); else resolve(value);
+      };
+      const abort = () => finish(new DOMException("Aborted", "AbortError"));
+      const timeout = window.setTimeout(() => finish(new Error("tools/call legacy timed out")), NATIVE_DESK_TOOLS.has(name) ? 75_000 : 20_000);
+      this.pending.set(id, { resolve, reject: error => { signal?.removeEventListener("abort", abort); reject(error); }, timeout });
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) { abort(); return; }
+      Promise.resolve().then(() => window.openai!.callTool!(name, args)).then(value => finish(null, value), error => finish(error));
+    });
   }
 
   private async initializeHost(): Promise<void> {

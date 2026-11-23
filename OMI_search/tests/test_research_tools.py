@@ -5,6 +5,36 @@ import server
 
 
 class ResearchToolsTests(unittest.TestCase):
+    def test_volume_event_subtype_and_history_forward_unchanged(self):
+        properties = next(t for t in server._build_research_tools() if t["name"] == "omi_list_research_proposals")["inputSchema"]["properties"]
+        self.assertEqual(properties["event_subtype"]["enum"], ["volume_anomaly", "accumulation_launch"])
+        payload = {"screening": {"event_subtype": "accumulation_launch", "event_history": {
+            "status": "insufficient_samples", "warnings": ["HISTORICAL_GIVEBACK_RISK_5D"]}}, "execution_ready": False}
+        with patch.object(server, "_api_request", return_value=payload) as api:
+            self.assertIs(server._call_research_tool("omi_list_research_proposals", {
+                "event_subtype": "accumulation_launch", "latest_events": True}), payload)
+            self.assertIn("event_subtype=accumulation_launch", api.call_args.args[1])
+
+    def test_seven_direction_filters_forward_without_market_judgment(self):
+        properties = next(t for t in server._build_research_tools() if t["name"] == "omi_list_research_proposals")["inputSchema"]["properties"]
+        self.assertIn("neutral", properties["direction"]["enum"])
+        self.assertIn("trend", properties["screening_family"]["enum"])
+        for category in properties["research_category"]["enum"]:
+            payload = {"screening": {"research_category": category}, "execution_ready": False}
+            with patch.object(server, "_api_request", return_value=payload) as api:
+                self.assertIs(server._call_research_tool("omi_list_research_proposals", {
+                    "research_category": category, "latest_events": True}), payload)
+                self.assertIn("research_category=" + category, api.call_args.args[1])
+                self.assertIn("latest_events=True", api.call_args.args[1])
+
+    def test_program_origin_is_readable_but_not_a_mutation_target(self):
+        tools = {t["name"]: t for t in server._build_research_tools()}
+        self.assertIn("PROGRAM_NOMINATION", tools["omi_list_research_proposals"]["inputSchema"]["properties"]["origin"]["enum"])
+        self.assertNotIn("PROGRAM_NOMINATION", tools["omi_move_research_proposal"]["inputSchema"]["properties"]["origin"]["enum"])
+        with patch.object(server, "_api_request", return_value={}) as api:
+            server._call_research_tool("omi_list_research_proposals", {"origin": "PROGRAM_NOMINATION"})
+            api.assert_called_once_with("GET", server.RESEARCH_BASE_PATH + "?origin=PROGRAM_NOMINATION")
+
     def test_list_projection_is_backend_owned_and_forwarded_unchanged(self):
         for args, query in [({}, ""), ({"view": "summary"}, "?view=summary"), ({"view": "full"}, "?view=full")]:
             payload = {"projection": "research.proposal_list.summary.v1", "items": []}

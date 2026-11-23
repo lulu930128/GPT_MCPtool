@@ -1,4 +1,7 @@
 import { ProtectionFields, LiveOrderControls, BrokerOrderControls } from "./OrderProtection";
+import { StockName } from "./StockName";
+import { inventoryPresentation, inventoryTypes, stockGroups, type InventoryEntry } from "./readback-presentation";
+import { stagedSection, stageCreatedDay, workspaceDay, nextWorkspaceDayAt, associatedStages, remainingShares, todayOrderPresentation, orderCreatedLabel } from "./order-presentation";
 import { brokerOrderViews, stageOrderView, fillView, type BrokerOrderView } from "./broker-orders";
 import { useEffect, useRef, useState } from "react";
 import { isRecord, type UnknownRecord } from "./state";
@@ -7,10 +10,11 @@ import { localRejection } from "./research-contract";
 import { TradeDetails } from "./TradeFeedback";
 import { OrderTechnicalSummary, type OrderResearchCache } from "./OrderTechnicalSummary";
 import { localStageResult, type LocalStageChange } from "./desk-contract";
-import { brokerReadback, confirmDeskSelection, deskCall, deskConnection, deskError, deskOrderRead, deskReviews, pendingSelection, reviewSelection, readStaged, sameStagedSelection, stageNotAttempted, stageRecord, stageSelection, stageNativeReview, type DeskSelection } from "./desk-contract";
+import { brokerReadback, confirmDeskSelection, currentStageDecision, deskCall, deskConnection, deskError, deskOrderRead, deskReviews, pendingSelection, reviewSelection, readStaged, readStageExecution, sameStagedSelection, stageNotAttempted, stageRecord, stageSelection, stageNativeReview, type DeskSelection } from "./desk-contract";
 
 const record = (value: unknown): UnknownRecord => isRecord(value) ? value : {};
 const text = (value: unknown) => value === null || value === undefined ? "未提供" : String(value);
+const orderSideText = (action: unknown) => action === "Buy" ? "買進" : action === "Sell" ? "賣出" : undefined;
 
 // Display only. Identity, validation and submission remain in desk-contract.
 export function orderPrice(value: unknown): string {
@@ -32,8 +36,10 @@ export function orderQuantity(lot: unknown, value: unknown): string {
 
 export function orderDirection(command: UnknownRecord): string {
   const condition = { CASH: "現股", CASH_SELLING: "現先賣", MARGIN: "融資", SHORT_SELLING: "融券" }[String(command.condition)];
-  const side = { Buy: "買進", Sell: "賣出" }[String(command.action)];
-  return condition && side ? command.condition === "CASH_SELLING" ? `${condition}（${side}）` : `${condition}${side}` : "交易類別待確認";
+  const side = orderSideText(command.action);
+  if (!side) return "交易類別待確認";
+  if (!condition) return `${side} · 交易類別待確認`;
+  return command.condition === "CASH_SELLING" ? `${condition}（${side}）` : `${condition}${side}`;
 }
 
 export function orderStatus(value: unknown, local = false): string {
@@ -56,20 +62,31 @@ export function executionStatus(value: UnknownRecord): string {
   return value.submit_stage === "NOT_SENT" ? "未送出" : orderStatus(value.state);
 }
 
+const unresolvedSubmission = (row: UnknownRecord) => ["SUBMITTING", "SUBMISSION_UNKNOWN", "SUBMISSION_PENDING"].includes(String(row.lifecycle));
+
 export function SendOrderModal({ selection, busy, notice, cancel, confirm }: {
   selection: DeskSelection; busy: boolean; notice: string; cancel(): void; confirm(): void;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const cancelButton = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     const element = dialog.current, previous = document.activeElement as HTMLElement | null;
     element?.showModal();
+    cancelButton.current?.focus({ preventScroll: true });
     return () => { element?.close(); previous?.focus({ preventScroll: true }); };
   }, []);
   const command = selection.command;
+  const side = orderSideText(command.action);
   return <dialog ref={dialog} className="workspace-send-modal" aria-labelledby="workspace-send-title" onCancel={event => { event.preventDefault(); if (!busy) cancel(); }}>
     <h2 id="workspace-send-title">確認送出此筆委託</h2>
     <p>請核對股票、方向、限價與數量。確認後送交券商；已送出不代表成交。</p>
-    <dl>{[["股票", command.symbol], ["交易類別", orderDirection(command)], ["限價", orderPrice(command.price)], ["數量", orderQuantity(command.lot, command.quantity)], ...(command.trade_date ? [["交易日", command.trade_date]] : [])].map(([label, value]) => <div key={String(label)}><dt>{text(label)}</dt><dd>{text(value)}</dd></div>)}</dl>
+    <dl className="workspace-order-confirm-facts workspace-order-tint" data-side={text(command.action)}>
+      <div><dt>交易類別</dt><dd><strong className="workspace-order-direction">{orderDirection(command)}</strong></dd></div>
+      <div><dt>股票</dt><dd className="workspace-order-tint">{text(command.symbol)}</dd></div>
+      <div><dt>限價</dt><dd className="workspace-order-tint">{orderPrice(command.price)}</dd></div>
+      <div><dt>數量</dt><dd className="workspace-order-tint">{orderQuantity(command.lot, command.quantity)}</dd></div>
+      {command.trade_date ? <div><dt>交易日</dt><dd>{text(command.trade_date)}</dd></div> : null}
+    </dl>
     <p>{command.market === "US" ? "美股 · USD" : "台股 · TWD"}</p>
     {command.market === "US" && <p>交割：{command.settlement_mode === "TWD" ? "台幣" : "外幣"}</p>}
     {isRecord(command.protection) && <div><p>停損 {orderPrice(command.protection.stop_loss)} · 停利 {orderPrice(command.protection.take_profit)}</p>
@@ -78,7 +95,7 @@ export function SendOrderModal({ selection, busy, notice, cancel, confirm }: {
     {selection.conditions !== undefined && <details><summary>觸發條件</summary><pre>{JSON.stringify(selection.conditions, null, 2)}</pre></details>}
     <details className="workspace-order-details"><summary>開發診斷</summary><pre>{JSON.stringify({ id: selection.id, revision: selection.revision, digest: selection.digest, owner: selection.owner, source: selection.source, snapshot: selection.snapshot }, null, 2)}</pre></details>
     {notice && <p role="alert">{notice}</p>}
-    <div className="workspace-order-pair"><button type="button" autoFocus disabled={busy} onClick={cancel}>取消</button><button type="button" className="candidate-primary" disabled={busy || !!notice} onClick={confirm}>{busy ? "送出中…" : "確認送單"}</button></div>
+    <div className="workspace-order-pair"><button type="button" ref={cancelButton} disabled={busy} onClick={cancel}>取消</button><button type="button" className="workspace-order-action" data-side={text(command.action)} aria-busy={busy} disabled={busy || !!notice} onClick={confirm}>{busy ? "送出中…" : "確認送單"}{side && ` · ${side}`}</button></div>
   </dialog>;
 }
 
@@ -88,6 +105,25 @@ export function DeskOrders({ bridge, active, candidateId, focusStageId, brokerTa
   const [selection, setSelection] = useState<DeskSelection | null>(null), [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false), [unknown, setUnknown] = useState<string[]>([]);
   const [stages, setStages] = useState<UnknownRecord[]>([]), [stageError, setStageError] = useState("");
+  const [, updateClock] = useState(0);
+  const [stageScope, setStageScope] = useState<"today" | "history">("today");
+  const now = Date.now(), today = workspaceDay(now);
+  useEffect(() => { if (!active || view !== "staged") setStageScope("today"); }, [active, view]);
+  const nextDeadline = stages.reduce((next, row) => {
+    const deadline = Date.parse(String(record(row.stage_validity).expires_at));
+    return currentStageDecision(row, now) ? Math.min(next, deadline) : next;
+  }, view === "staged" ? nextWorkspaceDayAt(today) : Infinity);
+  useEffect(() => {
+    if (!active || !Number.isFinite(nextDeadline)) return;
+    const schedule = () => setTimeout(() => updateClock(value => value + 1), Math.max(0, nextDeadline - Date.now()));
+    let timer = schedule();
+    const resume = () => {
+      if (document.hidden) return;
+      clearTimeout(timer); updateClock(value => value + 1); timer = schedule();
+    };
+    document.addEventListener("visibilitychange", resume);
+    return () => { clearTimeout(timer); document.removeEventListener("visibilitychange", resume); };
+  }, [active, nextDeadline]);
   const [edit, setEdit] = useState<{ row: UnknownRecord; raw: UnknownRecord } | null>(null);
   const [showCancelled, setShowCancelled] = useState(false), [reading, setReading] = useState(false), [localBusyIds, setLocalBusyIds] = useState<string[]>([]);
   const inFlight = useRef(false), selectedRef = useRef<DeskSelection | null>(null), generation = useRef(0);
@@ -95,6 +131,13 @@ export function DeskOrders({ bridge, active, candidateId, focusStageId, brokerTa
   const refreshToken = useRef(-1), refreshView = useRef("");
   const brokerFlight = useRef<Promise<unknown> | null>(null);
   const localFlights = useRef(new Set<string>()), localReads = useRef(new Map<string, number>());
+  useEffect(() => {
+    if (view === "staged" && selection?.kind === "staged" && !inFlight.current
+      && stageCreatedDay(selection.snapshot, Date.now()) !== today) {
+      selectedRef.current = null;
+      setSelection(null);
+    }
+  }, [view, today, selection]);
   const focused = useRef<string>();
   const researchCache = useRef<OrderResearchCache>(new Map());
   const [brokerFocusNotice, setBrokerFocusNotice] = useState("");
@@ -116,28 +159,76 @@ export function DeskOrders({ bridge, active, candidateId, focusStageId, brokerTa
   useEffect(() => {
     if (!active || !focusStageId || focused.current === focusStageId || !stages.some(row => row.id === focusStageId)) return;
     const card = document.getElementById(`stage-${focusStageId}`);
-    if (card) { card.focus({ preventScroll: true }); card.scrollIntoView({ block: "nearest" }); focused.current = focusStageId; }
-  }, [active, view, focusStageId, stages]);
+    if (card && (view !== "staged" || !card.closest("details:not([open])"))) { card.closest("details")?.setAttribute("open", ""); card.focus({ preventScroll: true }); card.scrollIntoView({ block: "nearest" }); focused.current = focusStageId; }
+  }, [active, view, focusStageId, stages, stageScope]);
   // Only this await's terminal NOT_ATTEMPTED receipt can permit an exact local
   // read to release its latch. Actual/uncertain submissions retain the ID latch.
   const attemptedStages = useRef(new Map<string, DeskSelection & { notAttempted?: boolean }>());
-  const refresh = (): Promise<void> => {
+  const latestStages = useRef(stages);
+  latestStages.current = stages;
+  const stageExecutions = useRef(new Map<string, { revision: unknown; digest: unknown; execution: UnknownRecord }>());
+  const stageReadSignal = useRef<AbortSignal>();
+  const stageReads = useRef(new Map<string, number>());
+  const observedExecution = (row: UnknownRecord) => {
+    const observed = stageExecutions.current.get(String(row.id));
+    return observed?.revision === row.revision && observed?.digest === row.digest ? observed?.execution : undefined;
+  };
+  const readSubmission = async (expected: UnknownRecord, token: number, orders: () => Promise<UnknownRecord>, signal?: AbortSignal) => {
+    const id = String(expected.id), pin = attemptedStages.current.get(id);
+    if (token !== generation.current || signal?.aborted || inFlight.current || stageReads.current.get(id) === token) return;
+    stageReads.current.set(id, token);
+    const current = () => token === generation.current && !signal?.aborted && attemptedStages.current.get(id) === pin;
+    let row: UnknownRecord | undefined;
+    let execution: UnknownRecord | undefined;
+    try {
+      const observed = stageRecord(await deskCall(bridge, "omi_read_desk_stage", { id }, signal), record(expected.raw));
+      const bound = record(record(record(observed.manual_stage).submission).pin);
+      const originalPin = record(record(record(expected.manual_stage).submission).pin);
+      if (observed.id !== id || Number(observed.revision) < Number(expected.revision)
+        || (observed.revision === expected.revision && observed.digest !== expected.digest)
+        || record(observed.manual_stage).original_digest !== record(expected.manual_stage).original_digest
+        || (originalPin.revision != null && (bound.revision !== originalPin.revision || bound.digest !== originalPin.digest))
+        || (pin && (Number(observed.revision) <= pin.revision || bound.revision !== pin.revision || bound.digest !== pin.digest)))
+        throw Error("本地待送單讀回 ID／版號／意圖不符");
+      if (!current()) return;
+      row = observed;
+      setStages(previous => previous.map(item => item.id === id && Number(item.revision) <= Number(observed.revision) ? observed : item));
+      const readback = await orders();
+      if (!current()) return;
+      execution = await readStageExecution(bridge, observed, readback, signal);
+    } catch { /* Incomplete evidence leaves the original submission pending. */ }
+    finally {
+      if (stageReads.current.get(id) === token) stageReads.current.delete(id);
+    }
+    if (!current()) return;
+    if (row && execution) {
+      const revision = row.revision;
+      if (latestStages.current.some(item => item.id === id && Number(item.revision) > Number(revision))) return;
+      stageExecutions.current.set(id, { revision: row.revision, digest: row.digest, execution });
+      setUnknown(previous => previous.filter(value => value !== id));
+    } else {
+      stageExecutions.current.delete(id);
+      setUnknown(previous => previous.includes(id) ? previous : [...previous, id]);
+    }
+  };
+  const refresh = (signal = stageReadSignal.current): Promise<void> => {
+    if (inFlight.current || (view === "staged" && [...stageReads.current.values()].includes(generation.current))) return Promise.resolve();
     const key = `${view}:${candidateId ?? ""}`;
     if (refreshFlight.current && refreshToken.current === generation.current && refreshView.current === key) return refreshFlight.current;
-    const task = performRefresh().finally(() => { if (refreshFlight.current === task) { refreshFlight.current = null; setReading(false); } });
+    const task = performRefresh(signal).finally(() => { if (refreshFlight.current === task) { refreshFlight.current = null; setReading(false); } });
     refreshToken.current = generation.current; refreshView.current = key;
     refreshFlight.current = task; return task;
   };
-  const performRefresh = async () => {
+  const performRefresh = async (signal?: AbortSignal) => {
     setReading(true);
     const token = ++generation.current;
     // Local storage reads must render even while Native is slow/offline.
-    const local = readStaged(bridge).then(rows => { if (token === generation.current) { setStages(previous => {
+    const local = readStaged(bridge, signal).then(rows => { if (token === generation.current) { setStages(previous => {
       const merged = rows.map(row => { const current = previous.find(item => item.id === row.id);
         return current && (Number(current.revision) > Number(row.revision) || localChanges.current.has(String(row.id))) ? current : row; });
       return [...merged, ...previous.filter(row => !rows.some(item => item.id === row.id))];
-    }); setStageError(""); } })
-      .catch(err => { if (token === generation.current) setStageError(deskError(err)); });
+    }); setStageError(""); } return rows; })
+      .catch(err => { if (token === generation.current) setStageError(deskError(err)); return []; });
     const candidateRead = async () => {
       if (!candidateId) { setCandidate(null); setPending([]); return; }
       try {
@@ -147,9 +238,23 @@ export function DeskOrders({ bridge, active, candidateId, focusStageId, brokerTa
       } catch (err) { if (token === generation.current) { setPending([]); setCandidate(null); setPendingError(deskError(err)); } }
     };
     const candidates = candidateRead();
-    // Local drafts do not require an expensive Native orders read. Submitted
-    // rows are read explicitly or on the broker tab; status remains independent.
-    if (view === "staged") { await Promise.all([local, candidates]); return; }
+    if (view === "staged") {
+      const rows = new Map((await local).map(row => [String(row.id), row]));
+      for (const row of latestStages.current) {
+        const id = String(row.id), listed = rows.get(id);
+        if (!listed || Number(row.revision) > Number(listed.revision)) rows.set(id, row);
+      }
+      for (const [id, pin] of attemptedStages.current) if (!rows.has(id)) rows.set(id, pin.snapshot);
+      // Share one orders report across unresolved originals in this refresh.
+      let report: Promise<UnknownRecord> | undefined;
+      const orders = () => report ??= deskCall(bridge, "omi_read_desk_orders", {}, signal).then(value => brokerReadback(value, "orders"));
+      await Promise.all([candidates, ...[...rows].map(([id, row]) => {
+        const pin = attemptedStages.current.get(id);
+        if (!pin?.notAttempted && !observedExecution(row) && (unresolvedSubmission(row) || pin))
+          return readSubmission(row, token, orders, signal);
+      })]);
+      return;
+    }
     try {
       if (!brokerFlight.current) { const flight = deskCall(bridge, "omi_read_desk_orders").finally(() => { if (brokerFlight.current === flight) brokerFlight.current = null; }); brokerFlight.current = flight; }
       const value = brokerReadback(await brokerFlight.current, "orders"), reviews = deskReviews(value);
@@ -166,24 +271,36 @@ export function DeskOrders({ bridge, active, candidateId, focusStageId, brokerTa
   };
   useEffect(() => {
     if (!active) return;
+    const controller = new AbortController();
+    stageReadSignal.current = controller.signal;
     let disposed = false, running = false, timer: ReturnType<typeof setTimeout> | undefined;
     const run = async () => {
       if (disposed || document.hidden || running) return;
       running = true;
       // An old view's read may finish, but must not overwrite the new view.
       if (disposed || document.hidden) { running = false; return; }
-      if (!inFlight.current) await refresh();
+      if (!inFlight.current) await refresh(controller.signal);
       running = false;
       if (!disposed && !document.hidden) timer = setTimeout(() => void run(), 30_000);
     };
     const visible = () => { clearTimeout(timer); if (!document.hidden) void run(); };
     document.addEventListener("visibilitychange", visible); void run();
-    return () => { disposed = true; generation.current++; clearTimeout(timer); document.removeEventListener("visibilitychange", visible); };
+    return () => { disposed = true; generation.current++; controller.abort(); clearTimeout(timer); document.removeEventListener("visibilitychange", visible); };
   }, [bridge, active, candidateId, refreshKey, view]);
   const open = (value: DeskSelection) => { if (inFlight.current || selectedRef.current || localChanges.current.has(value.id) || unknown.includes(value.id) || attemptedStages.current.has(value.id)) return; selectedRef.current = value; setSelection(value); setNotice(""); };
   const send = async (expected: DeskSelection) => {
     const pin = selectedRef.current;
     if (!pin || pin !== expected || inFlight.current || localChanges.current.has(pin.id) || unknown.includes(pin.id) || attemptedStages.current.has(pin.id)) return;
+    if (pin.kind === "staged") {
+      try {
+        const current = stageSelection(latestStages.current.find(row => row.id === pin.id));
+        const checkedAt = Date.now();
+        if (view === "staged" && (stageScope !== "today" || stageCreatedDay(current.snapshot, checkedAt) !== workspaceDay(checkedAt))) throw Error();
+        if (current.revision !== pin.revision || current.digest !== pin.digest || stageError) throw Error();
+      } catch {
+        selectedRef.current = null; setSelection(null); setNotice("草稿有效期或版本已變更，請讀回原紀錄。"); return;
+      }
+    }
     const token = ++generation.current; // Discard reads begun before this pinned mutation.
     const attempt = { ...pin, notAttempted: false }; // Object identity is this local attempt ID.
     inFlight.current = true; selectedRef.current = null; setBusy(true);
@@ -217,6 +334,7 @@ export function DeskOrders({ bridge, active, candidateId, focusStageId, brokerTa
     }
   };
   const readStage = async (expected: UnknownRecord) => {
+    if (inFlight.current) return;
     const id = String(expected.id);
     const retry = attemptedStages.current.get(id);
     if (!retry && record(expected.manual_stage).state === "STAGED" && record(expected.manual_stage).submission === null) {
@@ -237,6 +355,7 @@ export function DeskOrders({ bridge, active, candidateId, focusStageId, brokerTa
       } catch (err) { if (localReads.current.get(id) === localToken) setNotice(`本地操作結果待確認：${deskError(err)}`); }
       return;
     }
+    if (view === "staged" && stageReads.current.get(id) === generation.current) return;
     const token = ++generation.current;
     if (retry?.notAttempted) {
       // Native never started for this request. Its absence must not prevent the
@@ -265,6 +384,11 @@ export function DeskOrders({ bridge, active, candidateId, focusStageId, brokerTa
         setNotice("本次請求確定未送出；掛單讀回尚未確認，請再讀回，不會自動重送。");
       }
       return;
+    }
+    if (view === "staged" && (retry || unresolvedSubmission(expected))) {
+      const signal = stageReadSignal.current;
+      return readSubmission(expected, token,
+        async () => brokerReadback(await deskCall(bridge, "omi_read_desk_orders", {}, signal), "orders"), signal);
     }
     const localRead = deskCall(bridge, "omi_read_desk_stage", { id }).then(value => {
       const row = stageRecord(value, record(expected.raw));
@@ -328,77 +452,155 @@ export function DeskOrders({ bridge, active, candidateId, focusStageId, brokerTa
   const rows = data ? deskReviews(data) : [];
   const brokerRows = data ? brokerOrderViews(data, !!error) : [];
   const currentOrders = brokerRows.filter(row => !row.history), checkOrders = brokerRows.filter(row => row.history && row.needsCheck), historicalOrders = brokerRows.filter(row => row.history && !row.needsCheck);
-  const brokerCard = (order: BrokerOrderView, index: number) => {
+  const brokerCard = (order: BrokerOrderView, index: number, createdAt?: string | null, source?: UnknownRecord) => {
     const row = order.row;
     return <article id={row.execution_id ? `broker-${row.execution_id}` : undefined} tabIndex={-1} key={JSON.stringify([row.execution_id, row.broker_key, index])} className="workspace-desk-row workspace-order-card" aria-label={`${text(row.symbol)} 券商委託`}>
-      <header className="workspace-order-card-heading"><div><strong className="workspace-order-symbol">{text(row.symbol)}</strong><span className="workspace-order-direction" data-side={text(row.action)}>{orderDirection(row)}</span></div><span className="workspace-order-status">{order.needsCheck ? "待核對" : orderStatus(order.state)}</span></header>
-      <dl className="workspace-order-facts"><div><dt>限價</dt><dd>{orderPrice(row.price)}</dd></div><div><dt>數量</dt><dd>{orderQuantity(row.lot, row.quantity_shares)}</dd></div><div><dt>交易日</dt><dd>{text(record(row.broker_key).trade_date)}</dd></div></dl>
-      <p className="workspace-ticket-note">已知成交 {text(row.known_filled_shares)} 股{row.fill_history_complete === true ? "" : " · 部分回報"}</p>
+      <header className="workspace-order-card-heading"><div><strong className="workspace-order-symbol">{text(row.symbol)}<StockName bridge={bridge} symbol={String(row.symbol ?? "")}/></strong><span className="workspace-order-direction" data-side={text(row.action)}>{orderDirection(row)}</span></div><span className="workspace-order-status">{order.needsCheck ? createdAt !== undefined ? `${orderStatus(order.state)} · 待核對` : "待核對" : orderStatus(order.state)}</span></header>
+      <dl className="workspace-order-facts" data-side={text(row.action)}><div><dt>限價</dt><dd className="workspace-order-tint">{orderPrice(row.price)}</dd></div><div><dt>數量</dt><dd className="workspace-order-tint">{orderQuantity(row.lot, row.quantity_shares)}</dd></div><div><dt>交易日</dt><dd>{text(record(row.broker_key).trade_date)}</dd></div></dl>
+      {createdAt !== undefined && <p className="workspace-ticket-note">委託建立：{orderCreatedLabel(createdAt)}{createdAt ? "（台北）" : " · 列於已知時間之後"}</p>}
+      <p className="workspace-ticket-note">已知成交 {text(row.known_filled_shares)} 股{row.fill_history_complete === true ? "" : " · 部分回報"} · 剩餘 {remainingShares(row)}</p>
+      {order.note && <p className="workspace-ticket-note">{order.note}</p>}
       {order.needsCheck && <p className="workspace-ticket-note">待核對 · 請讀回</p>}
       {row.ownership === "MANAGED" && typeof row.execution_id === "string" && row.execution_id.trim() === row.execution_id && row.execution_id.length > 0
         && <><BrokerOrderControls bridge={bridge} order={order} onRead={refresh}/><LiveOrderControls bridge={bridge} id={row.execution_id} market="TW" cancelAllowed={false}/></>}
       <OrderTechnicalSummary bridge={bridge} symbol={String(row.symbol ?? "")} market="TW" cache={researchCache.current}/>
       <TradeDetails value={{ row, note: order.note }}/>
+      {source && <details className="workspace-order-details"><summary>本地來源與讀回</summary><button type="button" disabled={busy || localBusyIds.includes(String(source.id))} onClick={() => void readStage(source)}>讀回本地來源</button><TradeDetails value={source}/>{unknown.includes(String(source.id)) && <p role="status">本地操作結果待確認，請讀回原紀錄。</p>}</details>}
     </article>;
   };
-  const visibleStages = stages.filter(row => (showCancelled || row.id === focusStageId || row.lifecycle !== "CANCELLED" || unknown.includes(String(row.id)))
-    && (view === "all" || unknown.includes(String(row.id)) || (view === "orders" ? record(row.manual_stage).submission !== null : record(row.manual_stage).submission === null)));
+  const presentBrokerCard = (order: BrokerOrderView, index: number) => {
+    const sources = associatedStages(stages, data, order.row);
+    return sources.length === 1 ? <details className="workspace-order-details workspace-linked-order" key={String(order.row.execution_id)}><summary>{text(order.row.symbol)} · 同筆券商回報（已列於本地來源）</summary><p>依 execution、帳戶、交易日與券商編號關聯；不同委託不合併。</p>{brokerCard(order, index)}</details> : brokerCard(order, index);
+  };
+  const visibleStages = view === "staged" ? stages : stages.filter(row =>
+    (showCancelled || row.id === focusStageId || row.lifecycle !== "CANCELLED" || unknown.includes(String(row.id)))
+    && (view === "all" || record(row.manual_stage).submission !== null || unknown.includes(String(row.id))));
   const stageViews = visibleStages.map(row => ({ row, ...stageOrderView(row, data, brokerRows, !!error || !!stageError) }));
-  const mainStages = stageViews.filter(item => view === "staged" || !item.history || item.historicalUnknown || item.row.id === focusStageId), historyStages = stageViews.filter(item => view !== "staged" && item.history && !item.historicalUnknown && item.row.id !== focusStageId);
-  const stageCard = (item: typeof stageViews[number]) => {
+  const stageObservation = (row: UnknownRecord) => {
+    const readback = record(row.native_readback);
+    return (readback.status === "OBSERVED" && isRecord(readback.execution) ? readback.execution : observedExecution(row));
+  };
+  const section = (item: typeof stageViews[number]) => {
+    const row = item.row, submission = record(record(row.manual_stage).submission);
+    const receiptExecution = unresolvedSubmission(row) ? {} : record(record(submission.receipt).execution);
+    const execution = stageObservation(row) ?? (item.linked ? item.execution : receiptExecution);
+    const uncertain = !!stageError || unknown.includes(String(row.id)) || (!item.submitted && attemptedStages.current.has(String(row.id)));
+    return stagedSection(row, execution, uncertain, now);
+  };
+  const groups = { undated: [] as typeof stageViews, inactive: [] as typeof stageViews, historyReview: [] as typeof stageViews, current: [] as typeof stageViews, history: [] as typeof stageViews, review: [] as typeof stageViews, submitted: [] as typeof stageViews };
+  for (const item of stageViews) {
+    const group = view === "staged" ? section(item)
+      : !item.history || item.historicalUnknown || item.row.id === focusStageId ? "current" : "history";
+    groups[group].push(item);
+  }
+  const { current: mainStages, history: historyStages, review: reviewStages, submitted: submittedStages } = groups;
+  const historyCount = historyStages.length + groups.historyReview.length + groups.undated.length;
+  const historySelected = view === "staged" && stageScope === "history";
+  const stageCard = (item: typeof stageViews[number], createdAt?: string | null, readOnly = false) => {
         const { row, linked, execution, cancelOrder } = item;
-        const raw = record(row.raw); let pin: DeskSelection | null = null;
-        try { pin = stageSelection(row); } catch { /* Backend state stays visible; only STAGED is actionable. */ }
+        const raw = record(row.raw), validity = record(row.stage_validity);
+        let pin: DeskSelection | null = null;
+        if (!readOnly) { try { pin = stageSelection(row); } catch { /* Read-only until a current decision is attested. */ } }
         const locked = localBusyIds.includes(String(row.id)) || unknown.includes(String(row.id)) || attemptedStages.current.has(String(row.id));
         const needsRead = unknown.includes(String(row.id)) || !!stageError || attemptedStages.current.has(String(row.id)) || String(row.lifecycle).startsWith("SUBMISSION_") || ["SUBMITTING", "SUBMITTED"].includes(String(row.lifecycle));
         const status = stageStatus(row);
-        const label = item.historicalUnknown ? "歷史待核對" : item.submitted && item.needsCheck ? "待核對" : linked ? executionStatus(execution) : status.label;
         const receiptExecution = record(record(record(record(row.manual_stage).submission).receipt).execution);
+        const observed = view === "staged" ? stageObservation(row) : undefined;
+        const awaitingSubmission = view === "staged" && (unresolvedSubmission(row) || (item.submitted && attemptedStages.current.has(String(row.id))));
+        const deadlinePassed = validity.state === "CURRENT" && Date.parse(String(validity.expires_at)) <= now;
+        const label = readOnly && row.lifecycle === "STAGED" && deadlinePassed ? "本次確認期限已過" : view === "staged" && validity.state === "EXPIRED" && row.lifecycle === "STAGED" ? "草稿已到期"
+          : readOnly && row.lifecycle === "STAGED" && currentStageDecision(row, now) ? "待送出"
+          : readOnly && row.lifecycle === "STAGED" ? (validity.reason === "STAGE_OUTSIDE_ENTRY_WINDOW" ? "研究進場窗口外" : "有效期待核對")
+          : observed ? executionStatus(observed) : awaitingSubmission ? "待核對" : readOnly && receiptExecution.state ? executionStatus(receiptExecution) : createdAt !== undefined
+          ? `${linked ? executionStatus(execution) : receiptExecution.state ? executionStatus(receiptExecution) : status.label}${item.needsCheck ? " · 待核對" : ""}`
+          : item.historicalUnknown ? "歷史待核對" : item.submitted && item.needsCheck ? "待核對" : linked ? executionStatus(execution) : status.label;
         const executionId = String(execution.execution_id ?? receiptExecution.execution_id ?? "");
-        const nativeChanged = !!linked && JSON.stringify(execution) !== JSON.stringify(receiptExecution);
         return <article id={`stage-${row.id}`} tabIndex={-1} data-highlighted={row.id === focusStageId} className="workspace-desk-row workspace-order-card" key={String(row.id)} aria-label={`${text(raw.symbol)} 本地掛單`}>
-          <header className="workspace-order-card-heading"><div><strong className="workspace-order-symbol">{text(raw.symbol)}</strong><span className="workspace-order-direction" data-side={text(raw.action)}>{orderDirection(raw)}</span></div><span className="workspace-order-status">{label}</span></header>
-          <dl className="workspace-order-facts"><div><dt>委託限價 · {raw.market === "US" ? "USD" : "TWD"}</dt><dd>{orderPrice(raw.price)}</dd></div><div><dt>委託數量</dt><dd>{orderQuantity(raw.lot, raw.quantity_shares)}</dd></div>{item.submitted && <div><dt>原委託日</dt><dd>{item.date ?? "待核對"}</dd></div>}{linked && <div><dt>已成交</dt><dd>{text(execution.filled_shares)} 股</dd></div>}</dl>
-          {item.needsCheck && item.submitted && <p className="workspace-ticket-note">待核對 · 請讀回</p>}
-          {executionId && <button type="button" onClick={() => onNavigateBroker?.({ id: executionId, market: item.market })}>前往此筆券商委託</button>}
-          {nativeChanged && <p className="workspace-ticket-note">委託讀回：{executionStatus(execution)}。</p>}
+          <header className="workspace-order-card-heading"><div><strong className="workspace-order-symbol">{text(raw.symbol)}{!readOnly && <StockName bridge={bridge} symbol={String(raw.symbol ?? "")} market={item.market}/>}</strong><span className="workspace-order-direction" data-side={text(raw.action)}>{orderDirection(raw)}</span></div><span className="workspace-order-status">{label}</span></header>
+          <dl className="workspace-order-facts" data-side={text(raw.action)}><div><dt>委託限價 · {raw.market === "US" ? "USD" : "TWD"}</dt><dd className="workspace-order-tint">{orderPrice(raw.price)}</dd></div><div><dt>委託數量</dt><dd className="workspace-order-tint">{orderQuantity(raw.lot, raw.quantity_shares)}</dd></div>{item.submitted && <div><dt>原委託日</dt><dd>{item.date ?? "待核對"}</dd></div>}{linked && <div><dt>已成交</dt><dd>{text(execution.filled_shares)} 股</dd></div>}</dl>
+          {createdAt !== undefined && <p className="workspace-ticket-note">委託建立：{orderCreatedLabel(createdAt)}{createdAt ? "（台北）" : " · 列於已知時間之後"}</p>}
+          {createdAt !== undefined && !cancelOrder && <p className="workspace-ticket-note">已知成交 {text((linked ? execution : receiptExecution).filled_shares)} 股 · 剩餘待回報{!linked ? " · 依原送單回覆，請讀回核對" : ""}</p>}
+          {observed && typeof observed.broker_order_id === "string" && <p className="workspace-ticket-note">券商單號 {observed.broker_order_id}</p>}
+          {observed?.reconcile_required === true && <p className="workspace-ticket-note">成交與剩餘數量待核對</p>}
+          {!observed && item.needsCheck && item.submitted && <p className="workspace-ticket-note">待核對 · 請讀回</p>}
+          {readOnly && <p className="workspace-ticket-note" style={{ overflowWrap: "anywhere" }}>建立日（台北）{text(stageCreatedDay(row, now))} · 原 ID {text(row.id)} · {text(row.lifecycle)}</p>}
+          {!readOnly && !awaitingSubmission && <>{cancelOrder && <BrokerOrderControls bridge={bridge} order={cancelOrder} onRead={refresh}/>}
+          {item.submitted && !cancelOrder && <div><button type="button" disabled>撤銷剩餘委託</button><p role="status" className="workspace-ticket-note">{item.reason || "尚未取得可撤的券商剩餘委託，請讀回此單核對。"}</p></div>}
+          {executionId && <LiveOrderControls bridge={bridge} id={executionId} market={item.market} cancelAllowed={view === "orders" && item.market === "US"}/>}
+          {cancelOrder && <p className="workspace-ticket-note">券商剩餘 {remainingShares(cancelOrder.row)}</p>}</>}
           {unknown.includes(String(row.id)) && <p role="status">操作結果待確認 · 請讀回</p>}
           {attemptedStages.current.get(String(row.id))?.notAttempted && <p role="status">本次請求確定未送出；請讀回同一掛單後再手動確認。</p>}
           <div className="workspace-order-actions">
-            {pin && <><button type="button" disabled={locked || !!stageError || !!selection} onClick={() => setEdit({ row, raw: { ...raw } })}>修改</button>
+            {pin && <><button type="button" className="candidate-primary workspace-order-action" data-side={text(pin.command.action)} aria-label={`送單 · ${orderDirection(pin.command)}`} disabled={locked || !!stageError || edit?.row.id === row.id} onClick={() => open(pin!)}>送單</button><details className="workspace-secondary-actions"><summary>修改／刪除</summary><div className="workspace-order-actions"><button type="button" disabled={locked || !!stageError || !!selection} onClick={() => setEdit({ row, raw: { ...raw } })}>修改</button>
               <button type="button" disabled={locked || !!stageError || edit?.row.id === row.id || selection?.id === row.id} onClick={() => void changeStage(row)}>刪除</button>
-              <button type="button" className="candidate-primary" disabled={locked || !!stageError || edit?.row.id === row.id} onClick={() => open(pin!)}>送單</button></>}
+              </div></details></>}
+          {pin && (locked || !!stageError || edit?.row.id === row.id || !!selection) && <p role="status" className="workspace-ticket-note">{localBusyIds.includes(String(row.id)) ? "此單處理中，請稍候。" : edit?.row.id === row.id ? "請先儲存或關閉修改，再送單。" : selection ? "請先完成或取消目前的送單確認。" : "此單待讀回核對；確認原操作結果後才能繼續。"}</p>}
           {localBusyIds.includes(String(row.id)) && <span role="status">處理中…</span>}
-          {(needsRead || localChanges.current.has(String(row.id))) && <button type="button" disabled={busy || localBusyIds.includes(String(row.id))} onClick={() => void readStage(row)}>讀回</button>}
+          {(readOnly || needsRead || localChanges.current.has(String(row.id))) && <button type="button" disabled={busy || localBusyIds.includes(String(row.id))} onClick={() => void readStage(row)}>讀回</button>}
           </div>
-      {edit && edit.row.id === row.id && <form className="workspace-stage-edit" aria-label="修改本地待送單" onSubmit={event => { event.preventDefault(); void changeStage(edit.row, edit.raw); }}>
-        <h3>修改 {text(record(edit.row.raw).symbol)} 的本地掛單</h3><p>數量以股輸入；儲存後仍須按「送單」並確認才會送交券商。</p>
+      {pin && edit && edit.row.id === row.id && <form className="workspace-stage-edit" aria-label="修改本地待送單" onSubmit={event => { event.preventDefault(); void changeStage(edit.row, edit.raw); }}>
+        <h3>修改 {text(record(edit.row.raw).symbol)} 的本地掛單 · <span className="workspace-order-direction" data-side={text(edit.raw.action)}>{orderDirection(edit.raw)}</span></h3><p>數量以股輸入；儲存後仍須按「送單」並確認才會送交券商。</p>
         {[["symbol", "修改股票代碼"], ["price", "修改價格"], ["quantity_shares", "修改股數"]].map(([key, label]) => <label key={key}>{label}<input aria-label={label} value={text(edit.raw[key])} disabled={localBusyIds.includes(String(edit.row.id)) || unknown.includes(String(edit.row.id))} onChange={event => setEdit({ ...edit, raw: { ...edit.raw, [key]: key === "quantity_shares" ? Number(event.target.value) : event.target.value } })}/></label>)}
         {isRecord(edit.raw.protection) && <ProtectionFields value={edit.raw.protection} onChange={protection => setEdit({ ...edit, raw: { ...edit.raw, protection } })} disabled={localBusyIds.includes(String(edit.row.id))}/>}
         {edit.raw.market === "US" && <label>交割方式<select value={String(edit.raw.settlement_mode ?? "MUT")} disabled={localBusyIds.includes(String(edit.row.id))} onChange={e => setEdit({ ...edit, raw: { ...edit.raw, settlement_mode: e.target.value } })}><option value="MUT">外幣交割</option><option value="TWD">台幣交割</option></select></label>}
-        <div className="workspace-order-pair"><button type="submit" disabled={localBusyIds.includes(String(edit.row.id)) || unknown.includes(String(edit.row.id))}>儲存修改</button><button type="button" disabled={localBusyIds.includes(String(edit.row.id))} onClick={() => setEdit(null)}>關閉修改</button></div>
+        <div className="workspace-order-pair"><button type="submit" className="workspace-order-action" data-side={text(edit.raw.action)} disabled={localBusyIds.includes(String(edit.row.id)) || unknown.includes(String(edit.row.id))}>儲存修改</button><button type="button" disabled={localBusyIds.includes(String(edit.row.id))} onClick={() => setEdit(null)}>關閉修改</button></div>
       </form>}
-          <OrderTechnicalSummary bridge={bridge} symbol={String(raw.symbol ?? "")} market={item.market} cache={researchCache.current}/>
-          <TradeDetails value={{ local: row, reason: item.reason, ...(linked ? { readback: { trade_date: data?.trade_date, queried_at: data?.queried_at, quality: data?.quality, review: linked } } : {}) }}><p>本地紀錄：{status.label}。{status.note}</p></TradeDetails>
+          {!readOnly && <OrderTechnicalSummary bridge={bridge} symbol={String(raw.symbol ?? "")} market={item.market} cache={researchCache.current}/>}
+          <TradeDetails value={{ local: row, reason: awaitingSubmission ? undefined : item.reason, ...(observed ? { readback: observed } : linked ? { readback: { trade_date: data?.trade_date, queried_at: data?.queried_at, quality: data?.quality, review: linked } } : {}) }}><p>本地紀錄：{status.label}。{status.note}</p>{(observed || linked) && <p>委託讀回：{executionStatus(observed ?? execution)}。</p>}</TradeDetails>
         </article>;
   };
+  if (view === "orders") {
+    const today = todayOrderPresentation(stages, data, brokerRows, !!error || !!stageError);
+    const undatedCount = today.undatedStages.length + today.undatedBrokers.length;
+    return <section className="workspace-desk-orders" aria-label="券商委託">
+      <div className="candidate-heading"><h3>當日委託</h3><button type="button" disabled={reading || busy} onClick={() => void refresh()}>{reading ? "讀取中…" : "更新委託"}</button></div>
+      <p className="workspace-ticket-note">{today.date ? `交易日 ${today.date} · 依委託建立時間新到舊，包含已結案。` : "交易日尚未確認，請更新委託；尚未列出今日清單。"}</p>
+      {error && <p role="status">券商資料讀取失敗；{data ? "保留上次回覆的交易日與資料，可能已過期。" : "請更新委託。"}</p>}
+      {stageError && <p role="status">本地來源讀取失敗；券商回報仍獨立顯示。</p>}
+      {brokerFocusNotice && <p role="status">{brokerFocusNotice}</p>}
+      <section aria-label="當日委託清單">
+        {today.orders.map((item, index) => item.kind === "broker"
+          ? <div key={item.id} id={item.source ? `stage-${item.source.id}` : undefined} tabIndex={item.source ? -1 : undefined} data-order-entry={item.id}>{brokerCard(item.order, index, item.createdAt, item.source)}</div>
+          : <div key={item.id} data-order-entry={item.id}>{stageCard(item.stage, item.createdAt)}</div>)}
+        {today.date && today.orders.length === 0 && <p>{reading ? "正在讀取當日委託…" : "尚未讀到當日委託。"}</p>}
+      </section>
+      {today.date && undatedCount > 0 && <details className="workspace-order-details" aria-label="委託日期待確認"><summary>{undatedCount} 筆委託日期未確認，未列入今日清單</summary>
+        <p>僅讀回原紀錄核對日期；不推定為今日或已撤銷。</p>
+        {today.undatedStages.map(item => <div key={String(item.row.id)}><span>{text(record(item.row.raw).symbol)} · 本地來源日期待確認</span><button type="button" disabled={busy || localBusyIds.includes(String(item.row.id))} onClick={() => void readStage(item.row)}>讀回原紀錄</button></div>)}
+        {today.undatedBrokers.map((order, index) => <div key={index}><span>{text(order.row.symbol)} · 券商日期待確認</span>{order.row.ownership === "MANAGED" && typeof order.row.execution_id === "string" && order.row.execution_id.trim() ? <BrokerOrderControls bridge={bridge} order={order} onRead={refresh}/> : <p>請使用更新委託讀取券商回報。</p>}</div>)}
+      </details>}
+      {notice && <p role="status">{unknown.length ? "操作結果待確認，請讀回原紀錄。" : "已讀回資料，請核對此單狀態。"}</p>}
+      <TradeDetails value={{ trade_date: data?.trade_date, queried_at: data?.queried_at, quality: data?.quality, error: error || undefined, local_error: stageError || undefined }}/>
+    </section>;
+  }
   return <section className="workspace-desk-orders" aria-label="待送與已送委託">
     <section aria-label="本地待送單" className="workspace-local-orders">
-      <div className="candidate-heading"><h3>{view === "orders" ? "當日已送出／待核對" : "待送單"}</h3><button type="button" disabled={reading || busy} onClick={() => void refresh()}>{reading ? "讀取中…" : "更新清單"}</button></div>
-      {view !== "orders" && <label className="workspace-history-toggle"><input type="checkbox" checked={showCancelled} onChange={event => setShowCancelled(event.target.checked)}/>顯示已刪除紀錄</label>}
-      {view !== "orders" && <p className="workspace-ticket-note">修改／刪除僅限本地</p>}
+      <div className="candidate-heading"><h3>待送單</h3><button type="button" disabled={reading || busy} onClick={() => void refresh()}>{reading ? "讀取中…" : "更新清單"}</button></div>
+      {view !== "staged" && <label className="workspace-history-toggle"><input type="checkbox" checked={showCancelled} onChange={event => setShowCancelled(event.target.checked)}/>顯示已刪除紀錄</label>}
+      {view === "staged" && <div className="workspace-order-pair" role="group" aria-label="待送單範圍">
+        <button type="button" aria-pressed={!historySelected} onClick={() => setStageScope("today")}>當日（{stageViews.length - historyCount}）</button>
+        <button type="button" aria-pressed={historySelected} onClick={() => setStageScope("history")}>歷史（{historyCount}）</button>
+      </div>}
       {stageError && <p role="alert">本地清單讀取失敗 · 保留上次結果</p>}
-      <section aria-label="本地目前委託">{mainStages.map(stageCard)}
-        {mainStages.length === 0 && !stageError && <p>{reading ? "正在讀取清單…" : view === "orders" ? "目前沒有當日未完成或待核對的本地已送紀錄。" : "目前沒有待送單。"}</p>}
-      </section>
-      {historyStages.length > 0 && <details className="workspace-order-details" aria-label="本地已結案與歷史紀錄"><summary>已結案／歷史紀錄（{historyStages.length}）</summary>
-        {historyStages.map(stageCard)}
-      </details>}
+      {historySelected ? <section aria-label="本地歷史紀錄">
+        {groups.historyReview.length > 0 && <section aria-label="跨日待核對"><h4>跨日待核對（{groups.historyReview.length}）</h4><p>原委託尚無終態，請依原 ID 讀回核對。</p>{groups.historyReview.map(item => stageCard(item, undefined, true))}</section>}
+        {groups.undated.length > 0 && <details className="workspace-order-details"><summary>建立日期待核對（{groups.undated.length}）</summary>{groups.undated.map(item => stageCard(item, undefined, true))}</details>}
+        {historyStages.map(item => stageCard(item, undefined, true))}
+        {historyCount === 0 && !stageError && <p>{reading ? "正在讀取清單…" : "沒有歷史紀錄。"}</p>}
+      </section> : <>
+        <section aria-label="本地目前委託">{view === "staged" && <h4>今日待送單（{mainStages.length}）</h4>}{mainStages.map(item => stageCard(item))}
+          {mainStages.length === 0 && !stageError && <p>{reading ? "正在讀取清單…" : "目前沒有待送單。"}</p>}
+        </section>
+        {submittedStages.length > 0 && <section aria-label="當日已送委託"><h4>當日已送委託（{submittedStages.length}）</h4>{submittedStages.map(item => stageCard(item, undefined, true))}</section>}
+        {groups.inactive.length > 0 && <section aria-label="當日草稿紀錄"><h4>當日草稿紀錄（{groups.inactive.length}）</h4>{groups.inactive.map(item => stageCard(item, undefined, true))}</section>}
+        {reviewStages.length > 0 && <details className="workspace-order-details" aria-label="當日待核對"><summary>當日待核對（{reviewStages.length}）</summary>{reviewStages.map(item => stageCard(item, undefined, true))}</details>}
+        {view !== "staged" && historyStages.length > 0 && <details className="workspace-order-details" aria-label="本地已結案與歷史紀錄"><summary>已結案／歷史紀錄（{historyStages.length}）</summary>{historyStages.map(item => stageCard(item))}</details>}
+      </>}
 
       {stageError && <details className="workspace-order-details"><summary>開發診斷</summary><pre>{stageError}</pre></details>}
     </section>
     {notice && !selection && <div><p role="status">{unknown.length > 0 && /^(UNKNOWN|準備結果 UNKNOWN|本地操作結果待確認)/.test(notice) ? "操作結果待確認 · 請讀回" : /^本地操作未完成/.test(notice) ? "修改未完成 · 請核對或讀回" : /^(已刪除|修改已儲存|本地修改已確認|本地待送單已更新|本次請求確定未送出)/.test(notice) ? notice : "請核對清單狀態"}</p><TradeDetails value={notice}/></div>}
-    <section aria-label="券商委託" hidden={view === "staged"}>
+    {view !== "staged" && <section aria-label="券商委託">
       <div className="candidate-heading"><h3>券商委託</h3><button type="button" disabled={busy} onClick={() => void refresh()}>更新委託</button></div>
       {brokerFocusNotice && <p role="status">{brokerFocusNotice}</p>}
       {stageViews.filter(item => item.submitted && item.market === "US" && typeof item.execution.execution_id === "string").map(item => <article id={`broker-${item.execution.execution_id}`} tabIndex={-1} className="workspace-desk-row workspace-order-card" key={String(item.execution.execution_id)} aria-label={`${text(record(item.row.raw).symbol)} 美股委託`}><strong>{text(record(item.row.raw).symbol)} · 美股委託</strong><p>{orderStatus(item.execution.state)}</p><LiveOrderControls bridge={bridge} id={String(item.execution.execution_id)} market="US"/></article>)}
@@ -407,12 +609,12 @@ export function DeskOrders({ bridge, active, candidateId, focusStageId, brokerTa
       {data && <><p className="workspace-ticket-note">交易日 {text(data.trade_date)}；已送出不代表成交。</p>
         {Array.isArray(data.unparsed_reports) && data.unparsed_reports.length > 0 && <p className="workspace-ticket-note" role="status">{`有 ${data.unparsed_reports.length} 筆券商回報無法確認委託身分，請查看詳細資訊。`}</p>}
         <section aria-label="當日未完成與待核對委託"><h4>當日未完成／待核對委託（{currentOrders.length}）</h4>
-          {currentOrders.map(brokerCard)}
+          {currentOrders.map(presentBrokerCard)}
           {currentOrders.length === 0 && <p>尚未讀到當日未結委託</p>}
         </section>
-        {checkOrders.length > 0 && <section aria-label="跨日待核對委託"><h4>跨日待核對（{checkOrders.length}）</h4><p>保留原狀態；換日不代表已取消。</p>{checkOrders.map(brokerCard)}</section>}
+        {checkOrders.length > 0 && <section aria-label="跨日待核對委託"><h4>跨日待核對（{checkOrders.length}）</h4><p>保留原狀態；換日不代表已取消。</p>{checkOrders.map(presentBrokerCard)}</section>}
         <details className="workspace-order-details" aria-label="歷史委託"><summary>歷史委託（{historicalOrders.length}）</summary>
-          {historicalOrders.map(brokerCard)}
+          {historicalOrders.map(presentBrokerCard)}
           {historicalOrders.length === 0 && <p>本次沒有歷史紀錄。</p>}
         </details>
         {(data.broker_orders as unknown[]).length === 0 && <p>尚未讀到券商委託</p>}</>}
@@ -428,25 +630,68 @@ export function DeskOrders({ bridge, active, candidateId, focusStageId, brokerTa
             });
             try { if (row.state === "PREVIEW" && !stagedLink) pin = reviewSelection(row); } catch { /* Existing malformed/legacy reviews stay read-only. */ }
             const command = record(record(row.draft).command);
-            return <article className="workspace-desk-row" key={String(row.review_id)}><strong>{text(command.symbol)} · {orderDirection(command)}</strong>
-              <p>{row.execution_id ? executionStatus(record(row.execution)) : orderStatus(row.state)} · 限價 {orderPrice(command.price)} · {orderQuantity(command.lot, command.quantity)}</p>
+            return <article className="workspace-desk-row" key={String(row.review_id)}><strong>{text(command.symbol)} · <span className="workspace-order-direction" data-side={text(command.action)}>{orderDirection(command)}</span></strong>
+              <p>{row.execution_id ? executionStatus(record(row.execution)) : orderStatus(row.state)} · <span className="workspace-order-tint" data-side={text(command.action)}>限價 {orderPrice(command.price)} · {orderQuantity(command.lot, command.quantity)}</span></p>
               <pre>{JSON.stringify(row, null, 2)}</pre>
               {stagedLink && <p>此紀錄屬於本地掛單，請從該筆本地掛單讀回。</p>}
-              {unknown.includes(String(row.review_id)) ? <p role="status">此筆結果待確認，已鎖定重送；請核對原紀錄。</p> : pin && <button type="button" disabled={busy || !!error} onClick={() => open(pin!)}>送單</button>}
+              {unknown.includes(String(row.review_id)) ? <p role="status">此筆結果待確認，已鎖定重送；請核對原紀錄。</p> : pin && <button type="button" className="workspace-order-action" data-side={text(pin.command.action)} disabled={busy || !!error} onClick={() => open(pin!)}>送單</button>}
             </article>;
           })}<pre>{JSON.stringify(data, null, 2)}</pre></>}
       </details>
-    </section>
+    </section>}
     {candidateId && <section aria-label="研究 Pending 待送"><h3>條件交易待送</h3><p>僅列出這筆候選的待送項目，與券商委託分開。</p>{pendingError && <p role="alert">候選待送項目暫時無法讀取，請展開詳細資訊查看原因。</p>}{pending.map(item => {
       let pin: DeskSelection | null = null; try { if (candidate) pin = pendingSelection(item, candidate); } catch { /* Backend truth is shown below without inventing a snapshot. */ }
-      const manual = record(candidate?.raw).space_id === "USER_SPACE" && candidate?.owner_id === "MCP";
-      return <article key={String(item.id)} className="workspace-desk-row"><strong>{text(record(candidate?.raw).symbol)} · {orderStatus(item.state)}</strong><p>限價 {orderPrice(item.price)} · {orderQuantity(record(candidate?.raw).lot, item.quantity)}</p>
-        {unknown.includes(String(item.id)) ? <p>結果待確認，不會自動重送。</p> : pin ? <button type="button" disabled={busy || !!pendingError} onClick={() => open(pin!)}>送單</button>
-          : manual && !["SELECTED", "SELECTING", "SELECTION_UNKNOWN", "CANCELLED", "STALE"].includes(String(item.state)) ? <button type="button" disabled={busy} onClick={() => void prepare(item)}>建立待送快照</button> : <p>此候選尚無可送出的待送快照，僅供檢視。</p>}
+      const raw = record(candidate?.raw);
+      const manual = raw.space_id === "USER_SPACE" && candidate?.owner_id === "MCP";
+      const direction = pin?.command ?? raw;
+      return <article key={String(item.id)} className="workspace-desk-row"><strong>{text(raw.symbol)} · {orderStatus(item.state)}</strong><p className="workspace-order-tint" data-side={text(direction.action)}><strong className="workspace-order-direction">{orderDirection(direction)}</strong> · 限價 {orderPrice(item.price)} · {orderQuantity(raw.lot, item.quantity)}</p>
+        {unknown.includes(String(item.id)) ? <p>結果待確認，不會自動重送。</p> : pin ? <button type="button" className="workspace-order-action" data-side={text(direction.action)} disabled={busy || !!pendingError} onClick={() => open(pin!)}>送單</button>
+          : manual && !["SELECTED", "SELECTING", "SELECTION_UNKNOWN", "CANCELLED", "STALE"].includes(String(item.state)) ? <button type="button" className="workspace-order-action" data-side={text(direction.action)} disabled={busy} onClick={() => void prepare(item)}>建立待送快照</button> : <p>此候選尚無可送出的待送快照，僅供檢視。</p>}
         <details className="workspace-order-details"><summary>開發診斷</summary><pre>{JSON.stringify({ candidate, pending: item }, null, 2)}</pre></details></article>;
     })}{pendingError && <details><summary>開發診斷</summary><pre>{pendingError}</pre></details>}</section>}
-    {selection && <SendOrderModal selection={selection} busy={busy} notice="" cancel={() => { if (!inFlight.current && selectedRef.current === selection) { selectedRef.current = null; setSelection(null); } }} confirm={() => void send(selection)}/>}
+    {selection && <SendOrderModal selection={selection} busy={busy} notice={selection.kind === "staged" && (!currentStageDecision(selection.snapshot) || (view === "staged" && stageCreatedDay(selection.snapshot, now) !== today)) ? "草稿已超過本次確認期限，請關閉後讀回原紀錄。" : ""} cancel={() => { if (!inFlight.current && selectedRef.current === selection) { selectedRef.current = null; setSelection(null); } }} confirm={() => void send(selection)}/>}
   </section>;
+}
+
+export function FillCapsules({ rows, bridge }: { rows: UnknownRecord[]; bridge?: CandidateBridge }) {
+  return <>{stockGroups(rows.map(row => ({ symbol: row.symbol, row }))).map(group => <article className="workspace-order-card workspace-readback-card" key={group.key} aria-label={`${group.symbol} 成交`}>
+    <header className="workspace-order-card-heading"><strong className="workspace-order-symbol">{group.symbol}<StockName bridge={bridge} symbol={group.symbol === "代號未提供" ? "" : group.symbol}/></strong><span>{group.rows.length} 筆成交</span></header>
+    <div className="workspace-readback-entries">{group.rows.map(({ row }, index) => <section className="workspace-readback-entry" key={JSON.stringify([row.broker_key, row.fill_id, index])} aria-label={`${text(record(row.broker_key).trade_date)} ${orderDirection(row)}`}>
+      <div className="workspace-readback-entry-heading"><strong className="workspace-order-direction" data-side={text(row.action)}>{orderDirection(row)}</strong><span>{text(record(row.broker_key).trade_date)}</span></div>
+      <dl className="workspace-order-facts" data-side={text(row.action)}><div><dt>成交價</dt><dd className="workspace-order-tint">{orderPrice(row.price)}</dd></div><div><dt>成交數量</dt><dd className="workspace-order-tint">{orderQuantity(row.lot, row.quantity_shares)}</dd></div></dl>
+    </section>)}</div>
+  </article>)}</>;
+}
+
+export function InventoryCapsules({ inventory, bridge }: { inventory: UnknownRecord; bridge?: CandidateBridge }) {
+  const groups = inventoryPresentation(inventory);
+  const entry = ({ type, name, row, balance }: InventoryEntry, index: number) => <section className="workspace-readback-entry" key={`${type}-${index}`} aria-label={`${name} ${text(row.symbol)} 庫存`}>
+    <div className="workspace-readback-entry-heading"><strong>{name}</strong>{balance === "unknown" && <span>餘額待確認</span>}</div>
+    <dl className="workspace-order-facts"><div><dt>{type === "short_selling" ? "融券餘額（待回補）" : "今日餘額"}</dt><dd>{text(row.reported_total_shares)} 股</dd></div><div><dt>券商可出清 / 可下單</dt><dd>可出清 {text(row.closeable_shares)} 股<br/>可下單 {text(row.orderable_shares)} 股</dd></div></dl>
+    {type === "cash" && <p className="workspace-ticket-note">零股欄位 {text(row.odd_shares)} 股（不另加總） · 零股可出清 {text(row.odd_closeable_shares)} 股</p>}
+  </section>;
+  const cards = (stocks: typeof groups.nonzero) => stocks.map(group => {
+    const visible = group.rows.filter(row => row.balance !== "zero"), zeros = group.rows.filter(row => row.balance === "zero");
+    return <article className="workspace-order-card workspace-readback-card" key={group.key} aria-label={`${group.symbol} 券商庫存`}>
+      <header className="workspace-order-card-heading"><strong className="workspace-order-symbol">{group.symbol}<StockName bridge={bridge} symbol={group.symbol === "代號未提供" ? "" : group.symbol}/></strong></header>
+      <div className="workspace-readback-entries">{(visible.length ? visible : zeros).map(entry)}</div>
+      {visible.length > 0 && zeros.length > 0 && <details className="workspace-order-details"><summary>零餘額紀錄 · {zeros.length} 筆</summary><div className="workspace-readback-entries">{zeros.map(entry)}</div></details>}
+    </article>;
+  });
+  return <>
+    {cards(groups.nonzero)}
+    {groups.unknown.length > 0 && <section aria-label="庫存餘額待確認"><h4>餘額待確認</h4><p className="workspace-ticket-note">欄位缺漏或未知，不視為零。</p>{cards(groups.unknown)}</section>}
+    {groups.zero.length > 0 && <section className="workspace-zero-inventory" aria-label="零餘額紀錄"><TradeDetails label={`零餘額紀錄 · ${groups.zero.length} 檔`}><p>僅列出本次已回報為零的欄位；零值不代表已確認空手。</p>{cards(groups.zero)}</TradeDetails></section>}
+    <div className="workspace-inventory-status">{inventoryTypes.map(([key, name]) => {
+      const part = record(inventory[key]);
+      return <section key={key} aria-label={`${name}券商庫存`}><h4>{name}回報 · {part.quality === "KNOWN" ? "已回報" : part.quality === "UNKNOWN" ? "未知" : "部分回報"}</h4>
+        {part.complete !== true && <p>資料不全，零值不代表已確認空手。</p>}
+        <p>查詢時間 {text(part.queried_at)} · 券商資料時間 {text(part.source_as_of)}</p>
+        {!Array.isArray(part.items) ? <p>庫存未知，不視為零</p> : part.items.length === 0 && <p>{part.complete === true && part.empty_confirmed === true ? "已確認此類無持倉" : "本次未回傳庫存列，尚不能確認空手。"}</p>}
+        <p>券商回報數量不等同交易授權；下單仍由既有風控驗證。</p>
+      </section>;
+    })}</div>
+  </>;
 }
 
 export function BrokerReadback({ bridge, kind, active }: { bridge: CandidateBridge; kind: "fills" | "inventory"; active: boolean }) {
@@ -469,18 +714,12 @@ export function BrokerReadback({ bridge, kind, active }: { bridge: CandidateBrid
     return () => { disposed = true; };
   }, [bridge, active, kind, retry]);
   const fills = data ? fillView(data, fillScope, fillDate) : { dated: [], undated: [] };
-  const fillCard = (row: UnknownRecord, index: number) => <article className="workspace-desk-row" key={JSON.stringify([row.broker_key, row.fill_id, index])}><strong>{text(row.symbol)} · {orderDirection(row)}</strong><p>{orderQuantity(row.lot, row.quantity_shares)} · 成交價 {orderPrice(row.price)} · {text(record(row.broker_key).trade_date)}</p></article>;
   return <section className="workspace-broker-readback" aria-label={kind === "fills" ? "券商成交" : "券商庫存"}><div className="candidate-heading"><h3>{kind === "fills" ? "券商成交" : "券商庫存"}</h3><button type="button" disabled={loading} onClick={() => setRetry(value => value + 1)}>{loading ? "讀取中…" : "更新資料"}</button></div>
     {error && <p role="alert">券商資料暫時無法讀取。{data ? "保留上次資料，可能已過期。" : "請稍後更新資料。"}</p>}
     {!data && !error && <p>正在讀取券商資料…</p>}
     {data && <><p>交易日 {text(data.trade_date)}{data.quality === "KNOWN" ? "" : "；部分回報"}</p>
-      {kind === "fills" ? <><div className="workspace-order-pair" role="group" aria-label="成交範圍"><button aria-pressed={fillScope === "today"} onClick={() => setFillScope("today")}>當日成交</button><button aria-pressed={fillScope === "history"} onClick={() => setFillScope("history")}>歷史成交</button></div>{fillScope === "history" && <label>已讀回歷史日期<input aria-label="成交日期" type="date" value={fillDate} onChange={event => setFillDate(event.target.value)}/></label>}<p>{data.fill_history_complete === true ? "完整回報" : "歷史資料不全"}</p>{fills.dated.map(fillCard)}{fills.dated.length === 0 && <p>此範圍尚未讀到成交。</p>}{fills.undated.length > 0 && <section aria-label="成交日期待核對"><h4>日期待核對</h4>{fills.undated.map(fillCard)}</section>}</>
-        : [["cash", "現股"], ["margin", "融資"], ["short_selling", "融券"]].map(([key, name]) => {
-          const part = record(record(data.inventory)[key]);
-          return <section key={key} aria-label={`${name}券商庫存`}><h3>{name}</h3>
-            {part.complete !== true && <p>資料不全</p>}
-            {Array.isArray(part.items) ? part.items.map((row, index) => <article key={index}><strong>{text(record(row).symbol)}</strong><p>回報總數 {text(record(row).reported_total_shares)} 股 · 零股 {text(record(row).odd_shares)} 股 · 可賣 {text(record(row).sellable_shares)}</p></article>) : <p>庫存未知，不視為零</p>}</section>;
-        })}</>}
+      {kind === "fills" ? <><div className="workspace-order-pair" role="group" aria-label="成交範圍"><button aria-pressed={fillScope === "today"} onClick={() => setFillScope("today")}>當日成交</button><button aria-pressed={fillScope === "history"} onClick={() => setFillScope("history")}>歷史成交</button></div>{fillScope === "history" && <label>已讀回歷史日期<input aria-label="成交日期" type="date" value={fillDate} onChange={event => setFillDate(event.target.value)}/></label>}<p>{data.fill_history_complete === true ? "完整回報" : "歷史資料不全"}</p><FillCapsules rows={fills.dated} bridge={bridge}/>{fills.dated.length === 0 && <p>此範圍尚未讀到成交。</p>}{fills.undated.length > 0 && <section aria-label="成交日期待核對"><h4>日期待核對</h4><FillCapsules rows={fills.undated} bridge={bridge}/></section>}</>
+        : <InventoryCapsules inventory={record(data.inventory)} bridge={bridge}/>}</>}
     <TradeDetails value={{ error: error || undefined, data }}/>
   </section>;
 }

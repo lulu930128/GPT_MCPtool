@@ -28,7 +28,7 @@ class WorkspaceG2bSdkTests(unittest.IsolatedAsyncioTestCase):
                     for resource in resources.resources:
                         await client.read_resource(resource.uri)
                     tools = await client.list_tools()
-                    self.assertEqual(len(tools.tools), 63)
+                    self.assertEqual(len(tools.tools), len(server.PUBLIC_TOOLS))
                     research = next(t for t in tools.tools if t.name == "omi_read_tw_stock_research")
                     self.assertEqual(research.output_schema, server.TW_WORKSPACE_ROUTES[research.name]["outputSchema"])
                     for projection in (None, "full", "workspace"):
@@ -70,7 +70,7 @@ class WorkspaceG2bSdkTests(unittest.IsolatedAsyncioTestCase):
                 for resource in resources["resources"]:
                     await rpc("resources/read", {"uri": resource["uri"]})
                 tools = (await rpc("tools/list"))["tools"]
-                self.assertEqual(len(tools), 63)
+                self.assertEqual(len(tools), len(server.PUBLIC_TOOLS))
                 for name, route in server.TW_WORKSPACE_ROUTES.items():
                     tool = next(t for t in tools if t["name"] == name)
                     self.assertEqual(tool["inputSchema"], route["inputSchema"])

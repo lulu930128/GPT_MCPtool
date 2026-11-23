@@ -21,46 +21,11 @@ budget enforcement, and response shaping. The adapter must not duplicate or rein
 
 ## Public tools
 
-`tools/list` exposes 47 tools: the original seventeen market/render tools, one additive workspace v2 opener, six runtime tools and 23 Candidate/Pending/Desk tools, both online and in offline fallback.
+Run `.\.venv\Scripts\python.exe -B tool_inventory.py` from OMI_search for the complete native list and derived model/App visibility, HTTP/Launcher/render bindings, annotations, schema origins and call-only aliases. Candidate/Desk writes are App-only. Research tools manage Backend journal entries and unsent stages. Broker submission requires the existing single user confirmation. On UNKNOWN, read back the original identity.
 
-| Tool | Mechanical mapping |
-| --- | --- |
-| `omi_ask` | Canonical caller-supplied question and target |
-| `omi_read_refresh_status` | Positive `job_id` to the dedicated redacted refresh-status endpoint |
-| `omi_read_market_overview` | `target.type=market` and `mode=data_only` |
-| `omi_read_stock_context` | Market-specific stock target and `mode=data_only` |
-| `omi_read_data_freshness` | `target.type=data_freshness` and optional market |
-| `omi_read_source_health` | `target.type=source_health` plus explicit filters |
-| `omi_read_capability_status` | `target.type=capability_status` plus explicit filters |
-| `omi_read_tw_market_dashboard` | Cache-only `GET /api/market/tw-dashboard/snapshot` |
-| `omi_open_tw_market_dashboard` | Render the complete prepared `omi.tw_market_dashboard.v1` snapshot without backend IO |
-| `omi_search_tw_symbols` | Bounded local `GET /api/market/tw-dashboard/symbols/search` |
-| `omi_read_tw_stock_dashboard_detail` | Cache-only focused OHLC, backend MA, and technical detail |
-| `omi_read_tw_workspace_header` | Generated cache-only workspace header GET route |
-| `omi_read_tw_workspace_watchlist` | Generated cache-only selected watchlist GET route |
-| `omi_read_tw_workspace_hot_groups` | Generated cache-only hot groups GET route |
-| `omi_read_tw_stock_chart` | Generated cache-only stock chart GET route |
-| `omi_read_tw_stock_research` | Generated cache-only stock research GET route |
-| `omi_open_tw_workspace` | Render-only shell with empty or optional initial selection; no backend IO |
-| `omi_open_tw_workspace_v2` | Independent workspace v2 URI; same selection-only behavior, no backend IO |
-| `omi_read_runtime_status` | Fixed direct Launcher `Status`; no arguments |
-| `omi_restart_backend` | Fixed direct Launcher `RestartBackend`; exactly two UUIDs and literal `restart_backend` |
-| `omi_read_runtime_operation` | Fixed direct Launcher `ReadOperation`; UUID only |
-| `omi_start_backend` | Fixed direct Launcher `StartBackend`; two UUIDs and literal `start_backend` |
-| `omi_recover_failed_start` | Fixed direct Launcher `RecoverFailedStart`; two UUIDs and literal `recover_failed_start` |
-| `omi_upgrade_db_schema` | Fixed direct Launcher `SchemaUpgrade`; two UUIDs and literal `upgrade_schema` |
-| `omi_list_candidates` | `GET /api/research/conditional-candidates` with optional `after`, `limit` |
-| `omi_read_candidate` | `GET /api/research/conditional-candidates/{id}` |
-| `omi_read_candidate_revisions` | `GET /api/research/conditional-candidates/{id}/revisions` |
-| `omi_read_candidate_pending` | `GET /api/research/conditional-candidates/{id}/pending` |
-| `omi_read_candidate_monitor_status` | `GET /api/research/conditional-candidates/monitor-status` |
-| `omi_create_candidate` | `POST /api/research/conditional-candidates` body `{owner_id,raw}` |
-| `omi_revise_candidate` | `POST /api/research/conditional-candidates/{id}/revisions` body `{expected_revision,raw}` |
-| `omi_pause_candidate` | `POST /api/research/conditional-candidates/{id}/pause` body `{expected_revision}` |
-| `omi_resume_candidate` | `POST /api/research/conditional-candidates/{id}/resume` body `{expected_revision}` |
-| `omi_cancel_candidate` | `POST /api/research/conditional-candidates/{id}/cancel` body `{expected_revision}` |
-| `omi_revise_candidate_pending` | `POST /api/research/conditional-candidates/pending/{id}/revise` body `{expected_revision,price,quantity}` |
-| `omi_cancel_candidate_pending` | `POST /api/research/conditional-candidates/pending/{id}/cancel` body `{expected_revision}` |
+Use `omi_ask` for market questions, freshness and bounded fill. A shortcut forwards to the same decision v4 endpoint. The full selection schema is advertised on `omi_ask`. Only boolean true in `refresh_if_missing` authorizes external fetching. After a completed job use the cache-only resume and inspect evidence and refresh reconciliation. Dashboard, chart and technical panes are cache-only.
+
+Ask tools expose the schema source, contract version, upstream schema SHA-256 and snapshot comparison in `_meta["omi/schema"]`. Offline discovery reports a generated snapshot with unknown drift. Research body schemas come from GET `/api/research/trade-proposals/ai/schema`; unavailable definitions retain the adapter envelope. Provider contract count, registry capability count and scope/capability resolution count measure distinct sets.
 
 The runtime exception is specified in [RuntimeControl.md](RuntimeControl.md). Only explicit chat user intent for the selected operation
 may invoke a disruptive tool. No local Windows human approval is required: authorization uses that
@@ -184,11 +149,9 @@ The local Streamable HTTP endpoint is `/mcp`, implemented by the official Python
 owns initialization, protocol negotiation, JSON-RPC framing, request validation, and transport
 lifecycle. The adapter does not maintain a second handwritten dispatcher.
 
-The negotiated legacy wire projection adds only `type: "object"` to
-`omi_read_tw_stock_research.outputSchema`: both generated `anyOf` branches already
-require objects, but the SDK's legacy result validator requires an explicit root
-type. All `$defs`/`$ref`/union constraints, the generated snapshots, and the original
-catalog remain unchanged. Modern `2026-07-28` receives the exact generated schema.
+The current generated research union includes its root object type and validates on both wires.
+For older generated unions without an explicit root type, the legacy projection adds the object
+type and retains the union branches and references. Modern clients receive the generated schema.
 The SDK still owns version sieving; restart annotations and its disruptive `_meta`
 survive both tested versions. See [the offline reproduction](RuntimeControl.md#toolslist-協定修復驗證2026-10-14).
 
@@ -201,10 +164,8 @@ survive both tested versions. See [the offline reproduction](RuntimeControl.md#t
 
 - URI: `ui://omi/tw-market-dashboard/v2.html`
 - MIME: `text/html;profile=mcp-app`
-- workspace URIs: retained `ui://omi/tw-workspace/v1.html` and additive `ui://omi/tw-workspace/v2.html`;
-- only `omi_open_tw_market_dashboard`, `omi_open_tw_workspace` and `omi_open_tw_workspace_v2` declare `_meta.ui.resourceUri` and `openai/outputTemplate`, each binding its corresponding URI;
-- all three resources read the same latest `ui/tw-market-dashboard/dist/index.html`; both workspace versions inject `data-omi-workspace="true"`, while the dashboard is unchanged;
-- the v2 identity avoids reuse of the v1 resource/embedded instance; source/isolated SDK verification does not prove deployment, Host adoption or the Host cache root cause;
+- new tasks use `omi_open_tw_workspace_v4`. Its tool metadata points to the SHA-addressed published bundle, with v1–v3 openers and the v4 read alias retained;
+- render bindings and current resource URIs are discoverable via the inventory and `resources/list`;
 - data/search/detail tools remain independently useful without UI;
 - the resource has no direct network allowlist and calls backend-owned tools through the MCP Apps bridge;
 - `tw_market_dashboard_contract_snapshot.json` is generated from OMI backend Pydantic models and supplies exact tool `outputSchema` values.
@@ -234,7 +195,7 @@ Workspace additionally offers the research candidate surface below. SYNTHETIC or
 
 ## Research Candidate/Pending V1
 
-The fixed routes mechanically forward commands to the existing Backend owner. New MCP candidates use USER_SPACE / MANUAL and creation owner_id is injected as MCP; existing AGENT records retain their provenance. Backend alone owns CandidateSpec validation, conditions, qualification, lifecycle and persistence. Desk draft stores a local manual_stage Candidate; staged list/detail remain local reads and staged confirm enters Native only after the existing single modal confirmation. The eleven additive Pending/Desk tools, exact bodies, immutable selections and real broker readback contracts are specified in [MCP user trading contract](McpUserTradingContract.md). The public catalog contains 47 tools; generated market snapshots are unchanged.
+The fixed routes mechanically forward commands to the existing Backend owner. New MCP candidates use USER_SPACE / MANUAL and creation owner_id is injected as MCP; existing AGENT records retain their provenance. Backend alone owns CandidateSpec validation, conditions, qualification, lifecycle and persistence. Desk draft stores a local manual_stage Candidate; staged list/detail remain local reads and staged confirm enters Native only after the existing single modal confirmation. The Pending/Desk tools, exact bodies, immutable selections and real broker readback contracts are specified in [MCP user trading contract](McpUserTradingContract.md).
 
 GET arrays use the existing MCP `structuredContent={"result":[...]}` envelope and text JSON fallback; objects are returned unchanged. HTTP validation/revision/database errors retain Backend detail inside an MCP `isError=true` error, while saved research objects with `validation_reasons` remain `isError=false`. No invented fallback rows or fill receipts. Failed reads retain the previous data with an explicit stale/error label.
 

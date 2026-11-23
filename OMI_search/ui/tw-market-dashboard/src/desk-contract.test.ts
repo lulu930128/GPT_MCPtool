@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { brokerReadback, confirmDeskSelection, deskReviews, intentReview, pendingSelection, reviewSelection, stageRecord, stageSelection, intentStage, readStaged } from "./desk-contract";
+import { brokerReadback, confirmDeskSelection, currentStageDecision, deskReviews, intentReview, pendingSelection, reviewSelection, stageRecord, stageSelection, intentStage, readStaged } from "./desk-contract";
 import { fixtureIntent, fixtureReadback, fixtureReview, fixtureStage } from "../scripts/desk-fixture";
 import { CandidateSession, newCandidate, visibleCandidates, type Candidate } from "./candidate-state";
 
@@ -21,6 +21,22 @@ test("local stage pins raw identity/provenance/revision/digest and routes confir
   assert.throws(() => stageSelection({ ...row, lifecycle: "CANCELLED" }));
   await confirmDeskSelection({ async callTool(name, args) { calls.push({ name, args }); return {}; } }, stageSelection(row));
   assert.deepEqual(calls, [{ name: "omi_confirm_desk_staged", args: { id: row.id, expected_revision: 1, expected_digest: row.digest } }]);
+});
+
+test("a stage requires a Backend decision window even with the original ID and a matching digest", async () => {
+  const row = fixtureStage(), pin = stageSelection(row);
+  const closed = { state: "CURRENT", reason: "STAGE_SAME_TRADING_DAY", decision_date: "2026-11-23", market_date: "2026-11-23",
+    created_at: "2026-11-23T09:00:00+08:00", expires_at: "2026-11-23T13:30:00+08:00" };
+  assert.equal(currentStageDecision({ ...row, stage_validity: closed }, Date.parse("2026-11-23T05:29:59Z")), true);
+  assert.equal(currentStageDecision({ ...row, stage_validity: closed }, Date.parse("2026-11-23T05:30:00Z")), false);
+  for (const validity of [undefined, {}, { ...closed, state: "REVIEW" }, { ...closed, state: "EXPIRED" },
+    { ...(row.stage_validity as object), created_at: null }, { ...(row.stage_validity as object), decision_date: "2026-11-19", market_date: "2026-11-23" }]) {
+    const snapshot = { ...row, stage_validity: validity };
+    assert.throws(() => stageSelection(snapshot));
+    let calls = 0;
+    await assert.rejects(confirmDeskSelection({ async callTool() { calls++; return {}; } }, { ...pin, snapshot }));
+    assert.equal(calls, 0);
+  }
 });
 
 test("local intent price compares exact decimal value without floating point rounding", () => {
