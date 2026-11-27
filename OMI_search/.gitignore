@@ -25,3 +25,6 @@ build/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Timestamped local copies of the OMI runtime script
+/scripts/omi-search-runtime.psm1.bak-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]
