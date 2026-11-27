@@ -1,4 +1,4 @@
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
@@ -83,7 +83,7 @@ export async function startBridgeHttpServer(
       sendJsonRpcError(res, 405, -32000, "Method not allowed.");
     } catch (error) {
       options.onError?.(error);
-      options.log?.(`MCP HTTP error: ${error instanceof Error ? error.message : String(error)}`);
+      options.log?.("MCP HTTP error. See the runtime diagnostic record.");
       if (!res.headersSent) sendJsonRpcError(res, 500, -32603, "Internal server error.");
     }
     } finally { activeRequests--; if (counted && runtime.activity) runtime.activity.http--; }
@@ -152,7 +152,7 @@ export async function startBridgeHttpServer(
 }
 
 export function healthPayload(runtime: BridgeRuntime) {
-  const jobs = runtime.store.listAll();
+  const counts = runtime.store.jobCounts();
   return {
     ok: true,
     service: "codex-handoff-bridge",
@@ -165,11 +165,11 @@ export function healthPayload(runtime: BridgeRuntime) {
     controller: runtime.controller.status,
     projectIds: Array.from(runtime.config.projects.keys()),
     jobs: {
-      totalVisible: Math.min(jobs.length, runtime.config.maxRecentJobs),
-      total: jobs.length,
+      totalVisible: Math.min(counts.total, runtime.config.maxRecentJobs),
+      total: counts.total,
       scope: "all",
-      active: jobs.filter((job) => ["queued", "preparing", "running", "awaiting_approval"].includes(job.status)).length,
-      awaitingApproval: jobs.filter((job) => job.status === "awaiting_approval" || job.pendingApprovalCount > 0).length,
+      active: counts.active,
+      awaitingApproval: counts.awaitingApproval,
     },
   };
 }
@@ -192,13 +192,28 @@ async function handlePost(
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (initializedSessionId) => {
         if (transport) transports.set(initializedSessionId, transport);
+        runtime.diagnostics?.observe("http_session","connected",{session:createHash("sha256").update(initializedSessionId).digest("hex").slice(0,16)});
       },
     });
     transport.onclose = () => {
+      runtime.diagnostics?.observe("http_session","closed",{session:transport?.sessionId ? createHash("sha256").update(transport.sessionId).digest("hex").slice(0,16) : undefined});
       if (transport?.sessionId) transports.delete(transport.sessionId);
     };
     const server = createCodexBridgeMcpServer(runtime);
     await server.connect(transport);
+  }
+  if (runtime.diagnostics && body && typeof body === "object" && "params" in body) {
+    const params = body.params as {name?:unknown; arguments?:{poll?:{id?:unknown; connection?:unknown}; jobId?:unknown}} | null;
+    if (params?.name === "codex_job_get" || params?.name === "codex_unified_conversation_get") {
+      const args = params.arguments;
+      const uuid = (v:unknown) => typeof v === "string" && /^[0-9a-f-]{36}$/i.test(v) ? v : undefined;
+      const sample = {poll:uuid(args?.poll?.id), connection:uuid(args?.poll?.connection),jobId:uuid(args?.jobId),
+        rpc:"id" in body && typeof body.id === "number" ? body.id : undefined};
+      const started = performance.now(), socket = req.socket, before = socket.bytesWritten;
+      runtime.diagnostics.observe("http_poll","received",sample);
+      res.once("close", () => runtime.diagnostics?.observe("http_poll", res.writableFinished ? "response_finished" : "disconnected",
+        {...sample, bytes:socket.bytesWritten-before,elapsedMs:performance.now()-started}, !res.writableFinished));
+    }
   }
   await transport.handleRequest(req, res, body);
 }

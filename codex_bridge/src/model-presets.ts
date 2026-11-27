@@ -2,9 +2,9 @@ import type { CodexModelOption, ReasoningEffort } from "./types.js";
 
 // Bridge choices, not a provider catalog. Never merge these into model/list.
 export const MODEL_PRESETS = [
-  { id: "gpt-6-astra/xhigh", model: "gpt-6-astra", effort: "xhigh", reason: "複雜、跨模組或高風險工程工作" },
-  { id: "gpt-6.1-sol/xhigh", model: "gpt-6.1-sol", effort: "xhigh", reason: "需要深入推理的聚焦實作或除錯" },
-  { id: "gpt-6.1-sol/medium", model: "gpt-6.1-sol", effort: "medium", reason: "範圍明確的一般修改、查詢或整理" },
+  { id: "gpt-6.2-astra/high", model: "gpt-6.2-astra", effort: "high", reason: "複雜、跨模組或高風險工程工作" },
+  { id: "gpt-6.2-sol/high", model: "gpt-6.2-sol", effort: "high", reason: "需要深入推理的聚焦實作或除錯" },
+  { id: "gpt-6.2-sol/medium", model: "gpt-6.2-sol", effort: "medium", reason: "範圍明確的一般修改、查詢或整理" },
 ] as const;
 
 export const MODEL_PRESET_IDS = MODEL_PRESETS.map(({ id }) => id) as [
@@ -13,7 +13,7 @@ export const MODEL_PRESET_IDS = MODEL_PRESETS.map(({ id }) => id) as [
 
 export const MODEL_SELECTION_GUIDANCE =
   `Choose one exact modelPreset deliberately: ${MODEL_PRESETS.map(({ id }) => id).join(", ")}. ` +
-  "Use Astra xhigh for complex cross-module/high-risk work, Sol xhigh for focused deep reasoning, Sol medium for bounded routine work; these are selection guidelines, not availability or performance claims. " +
+  "Use Astra high for complex cross-module/high-risk work, Sol high for focused deep reasoning, Sol medium for bounded routine work; these are selection guidelines, not availability or performance claims. " +
   "Never auto-default every task to Astra. Unlisted presets are NOT VERIFIED; native App Server decides availability. No fallback or automatic resend. " +
   "For direct conversation continuation or active steering omit all selection fields to inherit. " +
   "Advanced/manual compatibility only: modelSelection=custom with an explicit model ID; this is outside the fixed presets.";

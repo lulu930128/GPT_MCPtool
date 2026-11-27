@@ -45,6 +45,9 @@ function array(value: unknown): unknown[] {
   return value;
 }
 
+export const nativeSourceKinds = ["cli","vscode","exec","appServer","subAgent","subAgentReview","subAgentCompact","subAgentThreadSpawn","subAgentOther","unknown"];
+export type ThreadPageKind = "goal" | "queue" | "search" | "agents" | "messages";
+
 export class ControlPlaneReader {
   constructor(private readonly transport: AppServerTransport) {}
 
@@ -71,6 +74,10 @@ export class ControlPlaneReader {
     return { protocolVersion: this.transport.protocolVersion ?? null, fetchedAt: new Date().toISOString(), rateLimits, accountUsage };
   }
 
+  permissionProfiles(cwd:string) {
+    return this.page("permissionProfile/list",{cwd},profile);
+  }
+
   async runtime(cwd: string) {
     const [server, permissionProfiles, windowsSandbox, modelProvider, experimentalFeatures] = await Promise.all([
       this.read("server/diagnostics", {}, (raw) => {
@@ -81,14 +88,14 @@ export class ControlPlaneReader {
           gauges: gauges.slice(0, 100).map((row) => z.object({ name: text, value: z.number().finite() }).parse(row)),
         }, truncated: gauges.length > 100 };
       }),
-      this.page("permissionProfile/list", { cwd }, profile),
+      this.permissionProfiles(cwd),
       this.read("windowsSandbox/readiness", {}, (raw) => ({ data: z.object({ status: z.enum(["ready", "notConfigured", "updateRequired"]) }).parse(raw), truncated: false })),
       // 0.165 removed namespaceTools. Preserve older boolean evidence and report
       // unknown when absent; removal does not mean the provider lacks support.
       this.read("modelProvider/capabilities/read", {}, (raw) => ({ data: z.object({ namespaceTools: z.boolean().optional().transform((value) => value ?? null), imageGeneration: z.boolean(), webSearch: z.boolean() }).parse(raw), truncated: false })),
       this.page("experimentalFeature/list", {}, feature),
     ]);
-    return { protocolVersion: this.transport.protocolVersion ?? null, fetchedAt: new Date().toISOString(), server, permissionProfiles, windowsSandbox, modelProvider, experimentalFeatures };
+    return { protocolVersion: this.transport.protocolVersion ?? null, fetchedAt: new Date().toISOString(), server, permissionProfiles, windowsSandbox, modelProvider, experimentalFeatures, nativeIdentity:{serverVersion:this.transport.protocolVersion ?? null, source:"initialize.userAgent", wireProtocolVersion:null} };
   }
 
   async inventory(cwd: string, kind: "all" | "skills" | "hooks" | "mcp" = "all") {
@@ -98,6 +105,47 @@ export class ControlPlaneReader {
       kind === "all" || kind === "mcp" ? this.page("mcpServerStatus/list", { detail: "toolsAndAuthOnly" }, mcp) : undefined,
     ]);
     return { protocolVersion: this.transport.protocolVersion ?? null, fetchedAt: new Date().toISOString(), skills, hooks, mcpServers };
+  }
+
+  async threadPage(threadId: string, kind: ThreadPageKind, cursor?: string, searchTerm?: string) {
+    const paging = {limit:100,...(cursor ? {cursor} : {})};
+    if (kind === "agents") return this.read("thread/list",{...paging,parentThreadId:threadId,
+      sourceKinds:nativeSourceKinds}, raw => {
+      const value = z.object({data:z.array(z.object({id:z.string(), parentThreadId:z.literal(threadId),
+        agentRole:text.nullable(), agentNickname:text.nullable(),model:text.nullable(),reasoningEffort:text.nullable(),
+        status:z.object({type:text})})),nextCursor:z.string().nullable()}).parse(raw);
+      return {data:value,truncated:value.nextCursor !== null};
+    });
+    if (kind === "messages") return this.read("thread/items/list",{...paging,threadId,sortDirection:"desc",
+      deferOutput:{commandExecution:true,mcpToolCall:true}},raw => {
+      const value = object(raw);
+      const data = array(value.data).flatMap(entry => {
+        const row = object(entry), item = object(row.item);
+        if (item.type !== "agentMessage" && item.type !== "userMessage") return [];
+        const message = item.type === "agentMessage" ? z.string().parse(item.text) : array(item.content)
+          .map(part => object(part)).filter(part => part.type === "text").map(part => z.string().parse(part.text)).join("\n");
+        return [{id:z.string().parse(item.id),turnId:z.string().parse(row.turnId),role:item.type,snippet:redactString(message)}];
+      });
+      const nextCursor = z.string().nullable().parse(value.nextCursor);
+      return {data:{data,nextCursor},truncated:nextCursor !== null};
+    });
+    if (kind === "goal") return this.read("thread/goal/get", {threadId}, raw => {
+      const goal = z.object({threadId:z.literal(threadId), objective:z.string().transform(redactString), status:text,
+        tokenBudget:count.nullable(), tokensUsed:count, updatedAt:count}).nullable().parse(object(raw).goal);
+      return {data:{goal}, truncated:false};
+    });
+    const params = {threadId, limit:100, ...(cursor ? {cursor} : {})};
+    if (kind === "search") return this.read("thread/searchOccurrences", {...params, searchTerm}, raw => {
+      const value = z.object({data:z.array(z.object({turnId:text, itemId:text, snippet:z.string().transform(redactString), turnCursor:z.string()})),
+        nextCursor:z.string().nullable()}).parse(raw);
+      return {data:value, truncated:value.nextCursor !== null};
+    });
+    return this.read("thread/queue/list", params, raw => {
+      const value = z.object({data:z.array(z.object({id:z.string(), clientUserMessageId:z.string(),
+        input:z.array(z.object({type:z.string(),text:z.string().optional()}))})),nextCursor:z.string().nullable()}).parse(raw);
+      return {data:{...value, data:value.data.map(row => ({id:row.id,clientUserMessageId:row.clientUserMessageId,
+        text:redactString(row.input.map(item => item.type === "text" ? item.text ?? "" : "[" + item.type + "]").join("\n"))}))},truncated:value.nextCursor !== null};
+    });
   }
 
   private inventoryEntries<T>(method: "skills/list" | "hooks/list", cwd: string, field: "skills" | "hooks", schema: z.ZodType<T, z.ZodTypeDef, any>) {
@@ -112,14 +160,25 @@ export class ControlPlaneReader {
     });
   }
 
-  // A single bounded page is intentional: no opaque backend cursors leave the Bridge.
-  private page<T>(method: "permissionProfile/list" | "experimentalFeature/list" | "mcpServerStatus/list", params: Record<string, unknown>, schema: z.ZodType<T, z.ZodTypeDef, any>) {
-    return this.read(method, { ...params, limit: 100 }, (raw) => {
-      const value = object(raw);
-      const rows = array(value.data);
-      const cursor = z.string().nullable().parse(value.nextCursor);
-      return { data: rows.slice(0, 100).map((row) => schema.parse(row)), truncated: Boolean(cursor) || rows.length > 100 };
-    });
+  private async page<T>(method: "permissionProfile/list" | "experimentalFeature/list" | "mcpServerStatus/list", params: Record<string, unknown>, schema: z.ZodType<T, z.ZodTypeDef, any>): Promise<ControlPlaneRead<T[]>> {
+    const items: T[] = [];
+    const seen = new Set<string>();
+    let cursor: string | null = null;
+    do {
+      const page: ControlPlaneRead<{rows:T[]; next:string | null}> = await this.read(method,
+        { ...params, limit: 100, ...(cursor === null ? {} : { cursor }) }, raw => {
+          const value = object(raw);
+          return { data: { rows: array(value.data).map(row => schema.parse(row)), next: z.string().min(1).nullable().parse(value.nextCursor) }, truncated: false };
+        });
+      if (page.status !== "available") return page;
+      items.push(...page.data.rows);
+      cursor = page.data.next;
+      if (cursor !== null) {
+        if (seen.has(cursor)) return { status: "error", code: "INVALID_RESPONSE" };
+        seen.add(cursor);
+      }
+    } while (cursor !== null);
+    return { status: "available", data: items, truncated: false };
   }
 
   private async read<T>(method: string, params: Record<string, unknown>, normalize: (value: unknown) => { data: T; truncated: boolean }): Promise<ControlPlaneRead<T>> {

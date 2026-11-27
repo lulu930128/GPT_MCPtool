@@ -78,7 +78,8 @@ export async function loadBridgeConfig(env: NodeJS.ProcessEnv = process.env): Pr
     maxRecentJobs: parseBoundedInt(env.CODEX_BRIDGE_MAX_RECENT_JOBS, 20, 1, 100),
     buildId: await computeRuntimeBuildId(projectRoot),
     codexHome,
-    ...(installedBinding ? { installedBinding, codexEnvironment: installedCodexEnvironment(installedBinding) } : {}),
+    ...(installedBinding ? { installedBinding, codexEnvironment: installedCodexEnvironment(installedBinding) } :
+      codexLaunch.standalone ? { codexEnvironment: standaloneCodexEnvironment(env) } : {}),
   };
 }
 
@@ -222,7 +223,7 @@ async function resolveCodexLaunch(
   sharedWorkspaceRoots: string[],
   env: NodeJS.ProcessEnv,
   projectPaths: string[],
-): Promise<{ command: string; args: string[] }> {
+): Promise<{ command: string; args: string[]; standalone?: boolean }> {
   const configuredCommand = env.CODEX_BRIDGE_CODEX_COMMAND?.trim();
   const configuredArgs = parseCommandArgs(env.CODEX_BRIDGE_CODEX_ARGS);
   const args = withHandoffPermissionProfiles(configuredArgs ?? ["app-server"], {
@@ -231,14 +232,15 @@ async function resolveCodexLaunch(
     secretPath: configuredAbsolutePath(env.CODEX_BRIDGE_SECRET_PATH),
   });
   if (configuredCommand) {
-    return { command: configuredCommand, args };
+    return { command: configuredCommand, args,
+      standalone: await isPrivateWindowsCodex(configuredCommand, [configRoot, projectRoot]) };
   }
 
   const localLauncher = join(projectRoot, "node_modules", "@openai", "codex", "bin", "codex.js");
   try {
     const info = await stat(localLauncher);
     if (info.isFile()) {
-      return { command: process.execPath, args: [localLauncher, ...args] };
+      return { command: process.execPath, args: [localLauncher, ...args], standalone: true };
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -246,7 +248,40 @@ async function resolveCodexLaunch(
   return { command: "codex", args };
 }
 
-export function resolveInstalledCodexLaunch(binding: InstalledBridgeBinding, sharedWorkspaceRoots: string[], projectPaths: string[] = []): { command: string; args: string[] } {
+// This is a launch-mode boundary, not package authorization. The private npm CLI
+// has no MSIX identity; an ambient Desktop flag must not select its registered runner.
+// Unknown/custom commands retain their environment and require their own contract.
+async function isPrivateWindowsCodex(command: string, roots: string[]): Promise<boolean> {
+  if (process.platform !== "win32" || !isAbsolute(command)) return false;
+  const triple = process.arch === "x64" ? "x86_64-pc-windows-msvc" :
+    process.arch === "arm64" ? "aarch64-pc-windows-msvc" : undefined;
+  if (!triple) return false;
+  const existingPath = async (path: string) => realpath(path).then((value) => value.toLowerCase(), (error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return undefined;
+    throw error;
+  });
+  const actual = await existingPath(command);
+  if (!actual) return false;
+  for (const root of new Set(roots)) {
+    for (const name of [`codex-win32-${process.arch}`, "codex"]) {
+      const expected = join(root, "node_modules", "@openai", name, "vendor", triple, "bin", "codex.exe");
+      if (actual === await existingPath(expected)) return true;
+    }
+  }
+  return false;
+}
+
+function standaloneCodexEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const child = { ...env };
+  if (process.platform === "win32") {
+    for (const name of Object.keys(child)) {
+      if (name.toUpperCase() === "CODEX_WINDOWS_REGISTERED_CORE") delete child[name];
+    }
+  }
+  return child;
+}
+
+export function resolveInstalledCodexLaunch(binding: InstalledBridgeBinding, sharedWorkspaceRoots: string[], projectPaths: string[] = []): { command: string; args: string[]; standalone?: boolean } {
   return { command: binding.nodePath, args: [binding.codexLauncher, ...withHandoffPermissionProfiles(["app-server"], {
     projectRoot: binding.configRoot, handoffDir: binding.handoffDir, projectsFile: binding.projectsFile,
     dataDir: binding.dataDir, sharedWorkspaceRoots, authorityPaths: [binding.ownerRoot, binding.runtimeRoot],

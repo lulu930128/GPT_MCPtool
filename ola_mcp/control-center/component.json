@@ -1,0 +1,135 @@
+{
+  "schemaVersion": 1,
+  "id": "ola_mcp",
+  "displayName": "Open Intel Atlas MCP",
+  "runtimeMode": "component-controller",
+  "runtimeContract": "unified-lifecycle-v3",
+  "traits": [
+    "tunnel",
+    "external-dependency"
+  ],
+  "contractScript": "scripts\\runtime-control.ps1",
+  "capabilities": [
+    "ensure_running",
+    "repair_connectivity",
+    "reload_runtime",
+    "shutdown_runtime"
+  ],
+  "lifecycle": {
+    "controller": {
+      "kind": "powershell",
+      "path": "scripts\\runtime-control.ps1"
+    }
+  },
+  "probes": [
+    {
+      "id": "core",
+      "label": "Tunnel daemon",
+      "role": "core",
+      "kind": "text",
+      "url": "http://127.0.0.1:18949/healthz",
+      "port": 18949,
+      "required": true,
+      "expectedText": [
+        "ok",
+        "ready",
+        "healthy"
+      ],
+      "ownership": {
+        "managedPidFile": ".tmp\\tunnel-client.pid",
+        "managedCommandContains": [
+          "ola_mcp",
+          "tunnel-client"
+        ]
+      }
+    },
+    {
+      "id": "tunnel",
+      "label": "Secure MCP Tunnel",
+      "role": "connectivity",
+      "kind": "text",
+      "url": "http://127.0.0.1:18949/readyz",
+      "port": 18949,
+      "required": true,
+      "expectedText": [
+        "ok",
+        "ready",
+        "healthy"
+      ],
+      "ownership": {
+        "managedPidFile": ".tmp\\tunnel-client.pid",
+        "managedCommandContains": [
+          "ola_mcp",
+          "tunnel-client"
+        ]
+      }
+    },
+    {
+      "id": "atlas",
+      "label": "Open Intel Atlas",
+      "role": "dependency",
+      "kind": "json",
+      "url": "http://127.0.0.1:8790/api/v1/runtime",
+      "port": 8790,
+      "required": true,
+      "expected": {
+        "service": "open-intel-atlas",
+        "status": "running"
+      },
+      "publicSummaryFields": [
+        "service",
+        "status",
+        "version"
+      ]
+    }
+  ],
+  "navigation": [
+    {
+      "id": "health",
+      "label": "Open health",
+      "kind": "probe",
+      "target": "atlas"
+    }
+  ],
+  "ui": {
+    "menuContract": "component-menu-v1",
+    "actionEntrypoint": {
+      "kind": "powershell",
+      "path": "scripts\\control-center-ui.ps1"
+    },
+    "menuActions": [
+      {
+        "id": "copy_mcp_url",
+        "label": "Copy MCP URL",
+        "group": "connection",
+        "confirmation": "none"
+      },
+      {
+        "id": "copy_health_url",
+        "label": "Copy health URL",
+        "group": "connection",
+        "confirmation": "none"
+      },
+      {
+        "id": "open_mcp_health",
+        "label": "Open MCP health",
+        "group": "connection",
+        "confirmation": "none"
+      },
+      {
+        "id": "open_runtime_logs",
+        "label": "Open runtime logs",
+        "group": "connection",
+        "confirmation": "none"
+      }
+    ]
+  },
+  "safety": {
+    "managerDomainDataAccess": "none",
+    "managerSecretAccess": "none",
+    "shutdownConfirmation": "required"
+  },
+  "connectivityEvidence": {
+    "remoteEvidencePath": ".tmp\\remote-connectivity.json"
+  }
+}

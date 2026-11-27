@@ -33,10 +33,11 @@ test("preset and custom MCP preview, app/direct dispatch and follow-up reach onl
   const requests: Array<{ method: string; params?: Record<string, unknown> }> = [];
   let failModels = false;
   let rejectTurn = false;
+  const heads = new Map<string, string>();
   const settings = { activePermissionProfile: { id: "codex-bridge-read-only" }, sandbox: { type: "readOnly", networkAccess: true },
     approvalPolicy: "on-request", approvalsReviewer: "auto_review" };
   const native = Object.assign(new EventEmitter(), {
-    status: "idle" as const, ensureStarted: async () => {}, close: async () => {}, notify() {}, respond() {},
+    status: "ready" as const, ensureStarted: async () => {}, close: async () => {}, notify() {}, respond() {},
     request: async <T>(method: string, params?: Record<string, unknown>): Promise<T> => {
       requests.push({ method, params });
       if (method === "model/list") {
@@ -47,8 +48,12 @@ test("preset and custom MCP preview, app/direct dispatch and follow-up reach onl
           { id: "gpt-5.6-sol", supportedReasoningEfforts: [{ reasoningEffort: "medium" }] },
         ], nextCursor: null } as T;
       }
+      if (method === "thread/goal/get") return {goal:null} as T;
+      if (method === "thread/queue/list") return {data:[],nextCursor:null} as T;
       if (method === "permissionProfile/list") return { data: [{ id: "codex-bridge-read-only", allowed: true }], nextCursor: null } as T;
       if (method === "thread/start") return { thread: { id: randomUUID() }, ...settings } as T;
+      if (method === "thread/read") return {thread:{id:params?.threadId,status:{type:"idle"},canAcceptDirectInput:true}} as T;
+      if (method === "thread/turns/list") return {data:[{id:heads.get(String(params?.threadId)),status:"completed"}],nextCursor:null} as T;
       if (method === "thread/resume") return { thread: { id: params?.threadId, status: { type: "idle" } }, ...settings } as T;
       if (method === "thread/settings/update") {
         native.emit("notification", { method: "thread/settings/updated", params: { threadId: params?.threadId,
@@ -56,10 +61,12 @@ test("preset and custom MCP preview, app/direct dispatch and follow-up reach onl
         return {} as T;
       }
       if (method === "turn/start") {
-        if (rejectTurn) throw new Error("Model gpt-6.1-sol is not supported by this account");
-        return { turn: { id: randomUUID() } } as T;
+        if (rejectTurn) throw new Error(`Model ${params?.model} is not supported by this account`);
+        const id = randomUUID();
+        heads.set(String(params?.threadId), id);
+        return { turn: { id } } as T;
       }
-      if (method === "turn/steer") return {} as T;
+      if (method === "turn/steer") return {turnId:params?.expectedTurnId} as T;
       throw new Error(`Unexpected mock request: ${method}`);
     },
   });
@@ -85,15 +92,26 @@ test("preset and custom MCP preview, app/direct dispatch and follow-up reach onl
     for (const name of ["render_codex_console", "codex_job_preview", "codex_job_dispatch", "codex_direct_job_dispatch", "codex_conversation_send", "codex_direct_conversation_send", "codex_direct_job_steer"]) {
       const schema = tools.find((tool) => tool.name === name)!.inputSchema.properties!.model as any;
       assert.equal(schema.type, "string"); assert.equal(schema.enum, undefined); assert.equal(schema.maxLength, 120);
-      assert.deepEqual((tools.find((tool) => tool.name === name)!.inputSchema.properties!.modelPreset as any).enum, MODEL_PRESET_IDS);
+      const presetSchema = tools.find((tool) => tool.name === name)!.inputSchema.properties!.modelPreset as any;
+      assert.deepEqual(presetSchema.enum, ["gpt-6.2-astra/high", "gpt-6.2-sol/high", "gpt-6.2-sol/medium"]);
+      assert.deepEqual(presetSchema.enum, MODEL_PRESET_IDS);
+      assert.equal(presetSchema.default, undefined, "No schema-level model default");
+      for (const id of MODEL_PRESET_IDS) assert.ok(presetSchema.description.includes(id));
+      assert.doesNotMatch(presetSchema.description, /gpt-6-astra|gpt-6\.1-sol|Astra xhigh|Sol xhigh/);
     }
     const base = { projectId: "smoke", title: "Preset", objective: "Offline only", dataClassification: "personal" };
     const nativeList = await call("codex_model_list", { forceRefresh: true });
     assert.deepEqual(nativeList.structuredContent.models.map((m: any) => m.id), ["gpt-test", "gpt-6-astra", "gpt-5.6-sol"]);
     const status = await call("codex_bridge_status", {});
-    assert.deepEqual(status.structuredContent.modelPresets.map((p: any) => p.availability), ["NATIVE LISTED", "NOT VERIFIED", "NOT VERIFIED"]);
-    for (const invalid of [{}, { model: "gpt-6-astra" }, { model: "gpt-5.6-sol", effort: "medium" },
-      { model: "gpt-6-astra", effort: "medium" }, { modelPreset: "gpt-6.1-sol/medium", effort: "xhigh" }]) {
+    assert.deepEqual(status.structuredContent.modelPresets.map((p: any) => p.id), MODEL_PRESET_IDS);
+    assert.deepEqual(status.structuredContent.modelPresets.map((p: any) => p.availability), ["NOT VERIFIED", "NOT VERIFIED", "NOT VERIFIED"]);
+    const draft = await call("render_codex_console", { projectId: "smoke" });
+    assert.equal(draft.structuredContent.draft.model, undefined);
+    assert.equal(draft.structuredContent.draft.effort, undefined);
+    const retired = [{ model: "gpt-6-astra", effort: "xhigh" }, { model: "gpt-6.1-sol", effort: "xhigh" }, { model: "gpt-6.1-sol", effort: "medium" }];
+    for (const invalid of [{}, { model: "gpt-6.2-astra" }, { model: "gpt-5.6-sol", effort: "medium" },
+      { model: "gpt-6.2-astra", effort: "medium" }, { modelPreset: "gpt-6.2-sol/medium", effort: "high" },
+      ...retired, ...retired.map(({ model, effort }) => ({ modelPreset: `${model}/${effort}` }))]) {
       for (const name of ["codex_job_preview", "codex_direct_job_dispatch"]) {
         assert.equal((await call(name, { ...base, ...invalid, idempotencyKey: randomUUID() })).isError, true);
       }
@@ -134,7 +152,8 @@ test("preset and custom MCP preview, app/direct dispatch and follow-up reach onl
         await complete(id);
       }
     }
-    assert.equal(requests.filter((r) => r.method === "turn/start").some((r) => r.params?.model === "gpt-5.6-sol"), false);
+    assert.ok(requests.filter((r) => r.method === "thread/start" || r.method === "turn/start")
+      .every((r) => MODEL_PRESETS.some((p) => p.model === r.params?.model)), "Fixed presets never use a legacy/default model");
     const priorJobs = store.list().length;
     const input = { ...base, title: "Custom model", modelSelection: "custom", model: "  gpt-6.1-sol  ", effort: "max" };
     for (const model of ["", " ", "x".repeat(121)]) {
@@ -172,15 +191,17 @@ test("preset and custom MCP preview, app/direct dispatch and follow-up reach onl
     const listModels = controller.listModels.bind(controller);
     context.mock.method(controller, "listModels", () => listModels(true));
     assert.equal((await call("codex_model_list", { forceRefresh: true })).isError, true);
+    const unavailableStatus = await call("codex_bridge_status", {});
+    assert.ok(unavailableStatus.structuredContent.modelPresets.every((p: any) => p.availability === "NOT VERIFIED"));
     assert.equal((await call("codex_job_preview", input)).isError, undefined);
     rejectTurn = true;
-    for (const preset of MODEL_PRESETS.filter((p) => p.model === "gpt-6.1-sol")) {
+    for (const preset of MODEL_PRESETS) {
       const args = { ...base, modelPreset: preset.id, idempotencyKey: randomUUID() };
       const before = requests.filter((r) => r.method === "turn/start").length;
       const rejected = await call("codex_direct_job_dispatch", args);
       const id = rejected.structuredContent.job.id;
       await waitFor(() => store.get(id)?.status === "failed");
-      assert.match((await store.snapshot(id)).result!.message, /Model gpt-6.1-sol is not supported/);
+      assert.ok((await store.snapshot(id)).result!.message.includes(`Model ${preset.model} is not supported`));
       assert.equal(store.get(id)?.model, preset.model); assert.equal(store.get(id)?.effort, preset.effort);
       assert.equal((await call("codex_direct_job_dispatch", args)).structuredContent.created, false);
       assert.equal(requests.filter((r) => r.method === "turn/start").length, before + 1);

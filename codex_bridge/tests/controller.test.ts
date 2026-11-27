@@ -31,6 +31,8 @@ class FakeTransport extends EventEmitter implements AppServerTransport {
   failTurnStart = false;
   threadServiceTier = "fast";
   resumeThreadStatus = "idle";
+  joined = false;
+  headStatus = "completed";
   tiersByTurn = new Map<string, unknown>();
   failControlAction = false;
   wrongReviewThread = false;
@@ -66,6 +68,9 @@ class FakeTransport extends EventEmitter implements AppServerTransport {
       return { reviewThreadId: this.wrongReviewThread ? "other-thread" : params?.threadId, turn: { id, status: "inProgress", items: [] } } as T;
     }
     if (method === "turn/steer" && this.failSteer) throw new Error("Transport response lost");
+    if (method === "turn/steer") return {turnId:params?.expectedTurnId} as T;
+    if (method === "thread/goal/get") return {goal:null} as T;
+    if (method === "thread/queue/list") return {data:[],nextCursor:null} as T;
     if (method === "permissionProfile/list") {
       return {
         data: this.permissionProfiles,
@@ -98,13 +103,21 @@ class FakeTransport extends EventEmitter implements AppServerTransport {
         sandbox: { type: this.activeSandbox, networkAccess: true }, ...this.permissionStartOverride } as T;
     }
     // Native 0.154 rejoins a loaded session without changing its permissions.
-    if (method === "thread/resume") return {
+    if (method === "thread/resume") {
+      this.joined = true;
+      return {
       thread: { id: String(params?.threadId), status: { type: this.resumeThreadStatus } },
       activePermissionProfile: this.activePermissions ? { id: this.activePermissions } : null,
       sandbox: { type: this.activeSandbox, networkAccess: true },
       approvalPolicy: "on-request", approvalsReviewer: this.activeReviewer,
-      ...(params?.excludeTurns ? this.permissionReadbackOverride : {}),
+      ...(params?.excludeTurns && !params.cwd ? this.permissionReadbackOverride : {}),
     } as T;
+    }
+    if (method === "thread/turns/list" && params?.itemsView === "notLoaded") {
+      const thread = this.threadReadResponse?.thread as { turns?: Array<{ id: string; status: string }> } | undefined;
+      const head = this.turnCount === 0 && thread?.turns?.at(-1) || { id: `turn-${this.turnCount || 1}`, status: this.headStatus };
+      return {data: [head], nextCursor: null} as T;
+    }
     if (method === "thread/settings/update") {
       if (this.failPermissionUpdate) throw new Error("Settings update unavailable");
       const apply = () => {
@@ -140,6 +153,9 @@ class FakeTransport extends EventEmitter implements AppServerTransport {
       const response = structuredClone(this.threadReadResponse ?? {
         thread: { id: String(params?.threadId), status: { type: "notLoaded" }, turns: [] },
       });
+      const thread = response.thread as {status?:{type:string};canAcceptDirectInput?:boolean};
+      if (this.joined && thread.status?.type === "notLoaded") thread.status = {type:this.resumeThreadStatus};
+      if (this.joined) thread.canAcceptDirectInput = true;
       if (params?.includeTurns) { this.onHistoryRead?.(); await this.historyReadBarrier; }
       return response as T;
     }
@@ -275,6 +291,7 @@ test("native approval identity rechecks a request queued behind turn completion"
   // A follow-up on the same job/thread must not accept the prior turn via thread fallback.
   await controller.sendMessage({ jobId, clientMessageId: "next", content: "Continue", executionMode: "plan", approvalReviewer: "user", dataClassification: "personal" });
   await waitFor(() => store.get(jobId)?.turnId === "turn-2");
+  await waitFor(async () => (await store.snapshot(jobId)).conversation?.turns.some(turn => turn.turnId === "turn-2") === true);
   const before = await store.snapshot(jobId);
   fake.emitRequest({ id: "prior-turn", method: "item/fileChange/requestApproval", params: { threadId: "thread-1", turnId: "turn-1" } });
   await waitFor(() => fake.responses.length === 2);
@@ -412,7 +429,7 @@ test("controller suppresses lifecycle noise and bounds App Server diagnostics", 
   fake.emitStderr(errorLine);
   fake.emitStderr(errorLine);
 
-  await waitFor(() => (store.get(dispatched.record.id)?.lastEventSeq ?? 0) >= 8);
+  await waitFor(async () => (await store.snapshot(dispatched.record.id)).events.some(event => event.type === "codex.diagnostic.error" ) && (await store.snapshot(dispatched.record.id)).events.some(event => event.type === "codex.item.completed" && event.data?.type === "agentMessage"));
   const snapshot = await store.snapshot(dispatched.record.id, 0, 200);
   const itemTypes = snapshot.events
     .filter((event) => event.type.startsWith("codex.item."))
@@ -880,6 +897,7 @@ test("controller adopts and continues an operable local Codex thread on explicit
   assert.equal(turn?.params?.serviceTierForTurn, "fast");
   assert.equal(resume?.params?.serviceTier, undefined);
   assert.match(String((turn?.params?.input as Array<{ text: string }>)[0]?.text), /Continue implementing the agreed change/);
+  await waitFor(() => store.get(sent.record.id)?.status === "running");
   const snapshot = await store.snapshot(sent.record.id);
   assert.equal(snapshot.threadId, threadId);
   assert.equal(snapshot.projectId.startsWith("local:"), true);
@@ -1094,15 +1112,18 @@ test("direct speed retries survive reload and the next omitted speed starts stan
   assert.equal(fake.tiersByTurn.get("turn-2"), "fast");
   assert.equal((await controller.directMessage(input)).delivery, "duplicate");
   await assert.rejects(controller.directMessage({ ...input, speed: "standard" }), /DIRECT_REQUEST_CONFLICT/);
+  fake.emitNotification({method:"turn/completed",params:{threadId:"thread-1",turnId:"turn-2",status:"completed"}});
+  await waitFor(() => store.get(jobId)?.status === "completed");
   await controller.close();
   const reloaded = new JobStore(config.jobsDir, config.handoffDir); await reloaded.initialize();
   const native = new FakeTransport();
+  native.turnCount = fake.turnCount;
   const fresh = new CodexBridgeController(config, reloaded, bundles, native);
   assert.equal((await fresh.directMessage(input)).delivery, "duplicate");
   assert.equal(native.requests.length, 0);
   await fresh.directMessage({ ...input, clientMessageId: "direct-speed-default", speed: undefined });
   await waitFor(() => reloaded.get(jobId)?.status === "running");
-  assert.equal(native.tiersByTurn.get("turn-1"), "default");
+  assert.equal(native.tiersByTurn.get("turn-3"), "default");
   await fresh.close();
 });
 
@@ -1114,7 +1135,7 @@ test("a native active turn discovered on resume never silently receives new spee
   await controller.directMessage({ jobId, clientMessageId: "native-active-speed", content: "Continue", speed: "fast",
     executionMode: "plan", dataClassification: "personal" });
   await waitFor(() => store.get(jobId)?.status === "failed");
-  assert.match(store.get(jobId)?.result?.message ?? "", /resumed Codex thread is active/);
+  assert.match(store.get(jobId)?.result?.message ?? "", /NATIVE_THREAD_STATUS_UNSETTLED/);
   assert.equal(fake.requests.filter((request) => request.method === "turn/start").length, 1);
   assert.equal(fake.requests.some((request) => request.method === "turn/steer"), false);
 });
@@ -1129,7 +1150,7 @@ test("unsupported per-turn tier fails safely without fallback or resend", async 
   await controller.directMessage(input);
   await waitFor(() => store.get(jobId)?.status === "failed");
   assert.match(store.get(jobId)?.result?.message ?? "", /Unsupported field serviceTierForTurn/);
-  assert.equal((await controller.directMessage(input)).delivery, "duplicate");
+  assert.equal((await controller.directMessage(input)).delivery, "failed");
   assert.equal(fake.requests.filter((request) => request.method === "turn/start").length, 2);
 });
 
@@ -1248,7 +1269,7 @@ test("submitted model selection records explicit, inherited, default and same-tu
   assert.equal(defaultSnapshot.model, undefined, "Current explicit omission must not resurrect the first turn model.");
   assert.equal(defaultSnapshot.effort, undefined);
   fake.emitNotification({ method: "model/rerouted", params: { threadId: "thread-1", turnId: "turn-3", fromModel: "native-default", toModel: "routed", reason: "highRiskCyberActivity" } });
-  await waitForConversationRevision(store, jobId, defaultSnapshot.serverConversationRevision + 1);
+  await waitFor(async () => (await store.snapshot(jobId)).conversation?.modelRouting?.executedModel === "routed");
   assert.equal((await store.snapshot(jobId)).conversation?.modelRouting?.requestedModel, null, "Reroute must not attach the first turn's model to a later default submission.");
   assert.equal((await controller.directMessage(input)).delivery, "duplicate", "Omitted direct retry retains original inheritance after settings change.");
   await controller.directCancel(jobId, "selection-stop-default", "turn-3");
@@ -1349,7 +1370,7 @@ test("direct follow-up resumes once and an old cancel cannot stop the new turn",
   assert.equal((await controller.directCancel(jobId, "stop-first-turn", "turn-1")).delivery, "duplicate");
   await assert.rejects(controller.directCancel(jobId, "stale-other-stop", "turn-1"), /DIRECT_TURN_CHANGED/);
   assert.equal(store.get(jobId)?.status, "running");
-  assert.equal(fake.requests.filter((r) => r.method === "thread/resume").length, 2);
+  assert.equal(fake.requests.filter((r) => r.method === "thread/resume").length, 1);
   assert.equal(fake.requests.filter((r) => r.method === "turn/interrupt").length, 1);
   config.projects.delete("omi");
   await assert.rejects(controller.directMessage({ ...input, clientMessageId: "removed-project" }, "turn-2"), /DIRECT_PROJECT_NOT_ALLOWLISTED/);
@@ -1446,7 +1467,7 @@ for (const reviewer of ["user", "auto_review"] as const) {
     const followup = { ...input, clientMessageId: "inherit-followup" };
     assert.equal((await controller.directMessage(followup)).accepted, true);
     await waitFor(() => store.get(jobId)?.turnId === "turn-2");
-    for (const method of ["thread/resume", "thread/settings/update", "turn/start"]) {
+    for (const method of ["thread/resume", "turn/start"]) {
       const request = fake.requests.filter((r) => r.method === method && r.params?.approvalsReviewer).at(-1)!;
       assert.equal(request.params?.approvalsReviewer, reviewer);
       assert.equal(request.params?.approvalPolicy, "on-request");
@@ -1660,7 +1681,8 @@ for (const [failure, readback] of [
     const startedBefore = fake.requests.filter((call) => call.method === "turn/start").length;
     await controller.sendMessage({ jobId: input.jobId, clientMessageId: "unverified-plan", content: "Inspect", executionMode: "plan", approvalReviewer: "user", dataClassification: "personal" });
     await waitFor(() => store.get(input.jobId)?.status === "failed", 7_000);
-    assert.match(store.get(input.jobId)?.result?.message ?? "", /PERMISSION_PROFILE_UNVERIFIED/);
+    const code = failure.includes("thread") ? (failure === "busy thread" ? "NATIVE_THREAD_STATUS_UNSETTLED" : "NATIVE_THREAD_IDENTITY_MISMATCH") : "PERMISSION_PROFILE_UNVERIFIED";
+    assert.match(store.get(input.jobId)?.result?.message ?? "", new RegExp(code));
     assert.equal(fake.requests.filter((call) => call.method === "turn/start").length, startedBefore);
     assert.equal(fake.listenerCount("notification"), 1);
   });
@@ -1675,7 +1697,7 @@ test("unchanged Plan settings need no notification when native readback is exact
     executionMode: "plan", approvalReviewer: "user", dataClassification: "personal" });
   await waitFor(() => store.get(jobId)?.status === "running");
   assert.equal(settingsNotifications, 0);
-  assert.equal(fake.requests.filter(r => r.method === "thread/settings/update").length, 1);
+  assert.equal(fake.requests.filter(r => r.method === "thread/settings/update").length, 0);
   assert.equal(fake.requests.filter(r => r.method === "turn/start").length, 1);
 });
 
@@ -1706,10 +1728,13 @@ for (const executionMode of ["plan", "workspace_write"] as const) {
       const input = { jobId, clientMessageId: "no-notification", content: "Continue once", executionMode,
         speed: "fast" as const, dataClassification: "personal" as const };
       const receipts = await Promise.all([controller.directMessage(input), controller.directMessage(input)]);
-      assert.equal(receipts.filter(r => r.delivery === "duplicate").length, 1);
+      assert.deepEqual(receipts.map(r => r.delivery), ["accepted","unknown"]);
       await waitFor(() => store.get(jobId)?.status === "running");
+      assert.equal((await controller.directMessage(input)).delivery, "duplicate");
       const starts = fake.requests.filter(r => r.method === "turn/start");
       assert.equal(starts.length, 1);
+      const resume = fake.requests.find(r => r.method === "thread/resume" && r.params?.cwd);
+      assert.deepEqual(resume?.params?.config,{model_reasoning_effort:"high"});
       assert.equal(starts[0].params?.clientUserMessageId, input.clientMessageId);
       assert.equal(starts[0].params?.approvalsReviewer, approvalReviewer);
       assert.equal(starts[0].params?.model, "gpt-test");
@@ -1717,7 +1742,7 @@ for (const executionMode of ["plan", "workspace_write"] as const) {
       assert.equal(starts[0].params?.serviceTierForTurn, "fast");
       assert.equal(starts[0].params?.permissions, executionMode === "plan" ? "codex-bridge-read-only" : ":danger-full-access");
       const updates = fake.requests.filter(r => r.method === "thread/settings/update");
-      assert.equal(updates.length, executionMode === "plan" ? 1 : 2);
+      assert.equal(updates.length, 0, "exact initial settings need no mutation");
       assert.ok(fake.requests.some(r => r.method === "thread/resume" && r.params?.excludeTurns === true));
       assert.equal(fake.listenerCount("notification"), 1);
     });
@@ -1743,11 +1768,11 @@ for (const notification of [
 
 for (const method of ["thread/settings/update", "thread/resume"]) {
   test(`permission confirmation bounds a hanging ${method} and ignores its late success`, async (context) => {
-    const { controller, store, fake, jobId } = await idleControlFixture(context);
+    const { controller, store, fake, jobId } = await idleControlFixture(context, { executionMode: "workspace_write" });
     const request = fake.request.bind(fake);
     let release!: (value: unknown) => void;
     context.mock.method(fake, "request", async <T>(name: string, params?: Record<string, unknown>): Promise<T> => {
-      if (name === method && (name !== "thread/resume" || params?.excludeTurns)) {
+      if (name === method && (name !== "thread/resume" || (params?.excludeTurns && !params.cwd))) {
         fake.requests.push({ method: name, params });
         return new Promise<unknown>(resolve => { release = resolve; }) as Promise<T>;
       }
@@ -1768,11 +1793,11 @@ for (const method of ["thread/settings/update", "thread/resume"]) {
 }
 
 test("unavailable native permission readback fails closed with bounded diagnostics", async (context) => {
-  const { controller, store, fake, jobId } = await idleControlFixture(context);
+  const { controller, store, fake, jobId } = await idleControlFixture(context, { executionMode: "workspace_write" });
   fake.omitPermissionNotification = true;
   const request = fake.request.bind(fake);
   context.mock.method(fake, "request", async <T>(method: string, params?: Record<string, unknown>): Promise<T> => {
-    if (method === "thread/resume" && params?.excludeTurns) throw new Error("private-native-payload");
+    if (method === "thread/resume" && params?.excludeTurns && !params.cwd) throw new Error("private-native-payload");
     return request<T>(method, params);
   });
   fake.requests.length = 0;
@@ -1809,7 +1834,7 @@ test("thread actions fail closed on identity, busy native threads, changed proje
   await assert.rejects(controller.directThreadAction("fork", input), /Fork is blocked/);
   assert.equal(fake.requests.length, before, "Fork must never allocate an orphan native thread");
   fake.threadReadResponse!.thread = { id: "thread-1", cwd: config.projects.get("omi")!.path, status: { type: "active" } };
-  await assert.rejects(controller.directThreadAction("review", { ...input, requestId: "native-busy" }), /DIRECT_THREAD_BUSY/);
+  await assert.rejects(controller.directThreadAction("review", { ...input, requestId: "native-busy" }), /NATIVE_THREAD_STATUS_UNSETTLED/);
   fake.threadReadResponse!.thread = { id: "thread-1", cwd: config.dataDir, status: { type: "idle" } };
   await assert.rejects(controller.directThreadAction("review", { ...input, requestId: "wrong-project" }), /DIRECT_THREAD_PROJECT_MISMATCH/);
   config.projects.clear();
@@ -1888,9 +1913,9 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
+  while (!(await predicate())) {
     if (Date.now() > deadline) throw new Error("Timed out waiting for controller state.");
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
@@ -1908,3 +1933,203 @@ async function waitForConversationRevision(
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
+
+test("a synchronous notification burst preserves order through a terminal barrier", async context => {
+  const { controller, store, fake, jobId } = await activeRecoveryFixture(context);
+  const params = {threadId:"thread-1",turnId:"turn-1",itemId:"burst"};
+  const chunks = Array.from({length:4096},(_,n)=>String.fromCharCode(97+n%26).repeat(16));
+  for (const delta of chunks) fake.emitNotification({method:"item/agentMessage/delta",params:{...params,delta}});
+  const backlog = controller.pipelineWorkload();
+  assert.equal(backlog.waiting,4096);
+  assert.equal(backlog.estimatedQueuedTextBytes,131072);
+  fake.emitNotification({method:"turn/completed",params:{threadId:"thread-1",turnId:"turn-1",status:"completed"}});
+  await controller.close();
+  const snapshot = await store.snapshot(jobId);
+  assert.equal(snapshot.status,"completed");
+  assert.equal(snapshot.conversation?.turns.find(t=>t.turnId==="turn-1")?.items.find(i=>i.id==="burst")?.text,chunks.join(""));
+  assert.equal(controller.pipelineWorkload().waiting,0);
+});
+
+test("a restarted detached job reconciles only its original terminal turn", async context => {
+  const original = await activeRecoveryFixture(context);
+  await original.controller.close();
+  const store = new JobStore(original.config.jobsDir);
+  await store.initialize();
+  const jobId = original.jobId;
+  assert.equal(store.get(jobId)?.status,"interrupted");
+  const fake = new FakeTransport();
+  const controller = new CodexBridgeController(original.config,store,original.bundles,fake);
+  context.after(()=>controller.close());
+  fake.threadReadResponse = recoveryHistory("detached history");
+  assert.equal(await controller.recoverActiveConversation(jobId),false);
+  assert.equal(store.get(jobId)?.status,"interrupted");
+  const now = Date.now()+31000;
+  context.mock.method(Date,"now",()=>now);
+  const history = recoveryHistory("final");
+  history.thread.turns[0].status = "completed";
+  fake.threadReadResponse = history;
+  assert.equal(await controller.recoverActiveConversation(jobId),true);
+  assert.equal(store.get(jobId)?.result?.turnId,"turn-1");
+  assert.equal(store.get(jobId)?.result?.output,"final");
+  assert.ok(fake.requests.every(r=>["thread/read","thread/turns/list"].includes(r.method)));
+});
+
+
+test("native disconnect preserves uncertain turn identity after queued output and missing terminal identity", async context => {
+  const {controller,fake,store,jobId} = await activeRecoveryFixture(context);
+  fake.emitNotification({method:"item/agentMessage/delta",params:{threadId:"thread-1",turnId:"turn-1",itemId:"draft",delta:"before exit"}});
+  fake.emitNotification({method:"turn/completed",params:{threadId:"thread-1",status:"completed"}});
+  fake.emit("exit",new Error("fixture disconnect"));
+  await controller.close();
+  const job = store.get(jobId)!;
+  assert.equal(job.status,"interrupted");
+  assert.equal(job.restartInterruptedTurnId,"turn-1");
+  assert.equal(job.result,undefined);
+  const snapshot = await store.snapshot(jobId);
+  assert.ok(snapshot.conversation?.turns.some(t => t.items.some(i=>i.text==="before exit")));
+});
+
+test("pending native automatic work prevents resume before it can consume an entry", async t => {
+  const {store,controller,jobId,fake} = await idleControlFixture(t);
+  const request = fake.request.bind(fake);
+  t.mock.method(fake,"request",async <T>(method:string,params?:Record<string,unknown>):Promise<T> => {
+    if (method === "thread/queue/list") return {data:[{id:"persisted"}],nextCursor:null} as T;
+    return request<T>(method,params);
+  });
+  const resumes = fake.requests.filter(r=>r.method==="thread/resume").length;
+  await controller.sendMessage({jobId,clientMessageId:"fixture-resume",content:"Continue",executionMode:"plan",approvalReviewer:"user",dataClassification:"personal"});
+  await waitFor(()=>store.get(jobId)?.status==="failed");
+  assert.match(store.get(jobId)?.result?.message ?? "",/NATIVE_QUEUE_REQUIRES_RECONCILIATION/);
+  assert.equal(fake.requests.filter(r=>r.method==="thread/resume").length,resumes);
+});
+
+
+test("native question and enum elicitation use the live request and explicit operator choices", async t => {
+  const {controller,store,fake,jobId} = await activeRecoveryFixture(t);
+  const ids = {threadId:"thread-1",turnId:"turn-1"};
+  const question = {id:"language",question:"Choose a language",isSecret:false,options:[{label:"中文"},{label:"English"}]};
+  fake.emitRequest({id:801,method:"item/tool/requestUserInput",params:{...ids,questions:[question]}});
+  await waitFor(() => store.get(jobId)?.status === "awaiting_approval");
+  const first = store.get(jobId)!.approvals.at(-1)!;
+  await assert.rejects(controller.decideApproval(jobId,first.id,"accept",[2]),/NATIVE_INPUT_INVALID/);
+  await controller.decideApproval(jobId,first.id,"accept",[0]);
+  assert.deepEqual(fake.responses.at(-1),{id:801,result:{answers:{language:{answers:["中文"]}}}});
+  fake.emitRequest({id:802,method:"mcpServer/elicitation/request",params:{...ids,mode:"form",serverName:"fixture",message:"Choose",
+    requestedSchema:{type:"object",properties:{language:{type:"string",enum:["a","b"]}},required:["language"]}}});
+  await waitFor(() => store.get(jobId)?.status === "awaiting_approval");
+  await controller.decideApproval(jobId,store.get(jobId)!.approvals.at(-1)!.id,"accept",[1]);
+  assert.deepEqual(fake.responses.at(-1),{id:802,result:{action:"accept",content:{language:"b"},_meta:null}});
+  fake.emitRequest({id:803,method:"item/tool/requestUserInput",params:{...ids,questions:[{...question,isSecret:true}]}});
+  await waitFor(() => fake.responses.some(r => r.id === 803));
+  assert.deepEqual(fake.responses.at(-1),{id:803,result:{answers:{}}});
+  fake.emitRequest({id:804,method:"item/tool/requestUserInput",params:{...ids,questions:[question]}});
+  await waitFor(() => store.get(jobId)?.status === "awaiting_approval");
+  const expires = store.get(jobId)!.approvals.at(-1)!.id;
+  fake.emitNotification({method:"serverRequest/resolved",params:{threadId:"thread-1",requestId:804}});
+  await waitFor(() => store.get(jobId)?.approvals.at(-1)?.state === "expired");
+  await assert.rejects(controller.decideApproval(jobId,expires,"accept",[0]),/no longer attached/);
+});
+
+for (const scenario of [
+  { resume: "systemError", passive: "systemError", head: "failed", allowed: true },
+  { resume: "notLoaded", passive: "idle", head: "completed", allowed: true },
+  { resume: "notLoaded", passive: "notLoaded", head: "completed", code: "NATIVE_THREAD_STATUS_UNSETTLED" },
+  { resume: "idle", passive: "idle", head: "inProgress", code: "NATIVE_TURN_ACTIVE" },
+  { resume: "systemError", passive: "systemError", head: "completed", code: "NATIVE_THREAD_STATUS_UNSETTLED" },
+  { resume: "systemError", passive: "systemError", head: "failed", id: "other-turn", code: "NATIVE_THREAD_HEAD_CHANGED" },
+  { resume: "idle", passive: "idle", head: "completed", canInput: false, code: "NATIVE_OWNER_UNVERIFIED" },
+]) {
+  test(`continuation confirms ${JSON.stringify(scenario)} against passive native history`, async context => {
+    const {controller,store,fake,input} = await idleControlFixture(context);
+    fake.resumeThreadStatus = scenario.resume;
+    const request = fake.request.bind(fake);
+    context.mock.method(fake,"request",async <T>(method:string,params?:Record<string,unknown>):Promise<T> => {
+      if (method === "thread/turns/list" && params?.itemsView === "notLoaded")
+        return {data:[{id:scenario.id ?? input.expectedTurnId,status:scenario.head}],nextCursor:null} as T;
+      if (method === "thread/read" && fake.joined) return {thread:{id:input.expectedThreadId,
+        canAcceptDirectInput:scenario.canInput ?? true,status:{type:scenario.passive}}} as T;
+      return request<T>(method,params);
+    });
+    fake.requests.length=0;
+    await controller.directMessage({jobId:input.jobId,clientMessageId:"status-fixture",content:"Continue fixture",
+      executionMode:"plan",dataClassification:"personal"});
+    await waitFor(()=>store.get(input.jobId)?.status === (scenario.allowed ? "running" : "failed"));
+    const event = (await store.snapshot(input.jobId)).events.find(e=>e.type==="codex.resume.verification")!;
+    assert.equal(event.data?.threadId,input.expectedThreadId);
+    assert.equal(event.data?.requestId,"status-fixture");
+    assert.equal(event.data?.resumeStatus,scenario.resume);
+    assert.equal(event.data?.status,scenario.passive);
+    assert.equal(event.data?.headStatus,scenario.head);
+    assert.equal(event.data?.code,scenario.code);
+    assert.equal(fake.requests.filter(r=>r.method==="turn/start").length,scenario.allowed ? 1 : 0);
+    assert.equal(fake.requests.filter(r=>r.method==="turn/interrupt").length,0);
+  });
+}
+
+test("queued work arriving during settings transition blocks the readback rejoin", async context => {
+  const {controller,store,fake,input} = await idleControlFixture(context,{executionMode:"workspace_write"});
+  const request = fake.request.bind(fake);
+  let changed=false;
+  context.mock.method(fake,"request",async <T>(method:string,params?:Record<string,unknown>):Promise<T> => {
+    if (method==="thread/settings/update") changed=true;
+    if (changed && method==="thread/queue/list") return {data:[{id:"fixture-queue"}],nextCursor:null} as T;
+    return request<T>(method,params);
+  });
+  fake.requests.length=0;
+  await assert.rejects(controller.directThreadAction("review",input),/NATIVE_QUEUE_REQUIRES_RECONCILIATION/);
+  assert.equal(fake.requests.filter(r=>r.method==="thread/resume").length,1);
+  assert.equal(fake.requests.filter(r=>r.method==="review/start").length,0);
+  const event=(await store.snapshot(input.jobId)).events.at(-2);
+  assert.equal(event?.data?.outcome,"action_not_sent");
+});
+
+test("legacy history backend supplies exact terminal turn evidence", async context => {
+  const {controller,store,fake,input} = await idleControlFixture(context);
+  const request = fake.request.bind(fake);
+  context.mock.method(fake,"request",async <T>(method:string,params?:Record<string,unknown>):Promise<T> => {
+    if (method==="thread/turns/list") throw new Error("thread/turns/list failed: list_turns is not supported yet (-32601)");
+    if (method==="thread/read" && params?.includeTurns) return {thread:{id:input.expectedThreadId,
+      turns:[{id:input.expectedTurnId,status:"completed"}]}} as T;
+    return request<T>(method,params);
+  });
+  await controller.directMessage({jobId:input.jobId,clientMessageId:"legacy-head-fixture",content:"Continue",
+    executionMode:"plan",dataClassification:"personal"});
+  await waitFor(()=>store.get(input.jobId)?.status==="running");
+  assert.equal(store.get(input.jobId)?.turnId,"turn-2");
+});
+
+
+test("a matching notice can precede a stale settings snapshot without resending the update", async context => {
+  const {controller,store,fake,input} = await idleControlFixture(context,{executionMode:"workspace_write"});
+  const request = fake.request.bind(fake);
+  let reads=0;
+  context.mock.method(fake,"request",async <T>(method:string,params?:Record<string,unknown>):Promise<T> => {
+    const result = await request<Record<string, unknown>>(method,params);
+    if (method === "thread/resume" && !params?.cwd && ++reads===1) result.activePermissionProfile=null;
+    return result as T;
+  });
+  fake.requests.length=0;
+  await controller.sendMessage({jobId:input.jobId,clientMessageId:"lagged-readback",content:"Inspect",
+    executionMode:"plan",approvalReviewer:"user",dataClassification:"personal"});
+  await waitFor(()=>store.get(input.jobId)?.status==="running");
+  assert.equal(reads,2);
+  assert.equal(fake.requests.filter(r=>r.method==="thread/settings/update").length,1);
+  assert.equal(fake.requests.filter(r=>r.method==="turn/start").length,1);
+});
+
+test("native status changing during durable verification blocks turn delivery", async context => {
+  const {controller,store,fake,input} = await idleControlFixture(context);
+  const append = store.appendEvent.bind(store);
+  context.mock.method(store,"appendEvent", async (...args: Parameters<typeof append>) => {
+    const record = await append(...args);
+    if (args[1] === "codex.resume.verification" && args[3]?.outcome === "settings_verified")
+      fake.emitNotification({method:"thread/status/changed",params:{threadId:input.expectedThreadId,status:{type:"active",activeFlags:[]}}});
+    return record;
+  });
+  fake.requests.length=0;
+  await controller.sendMessage({jobId:input.jobId,clientMessageId:"active-during-receipt",content:"Continue",
+    executionMode:"plan",approvalReviewer:"user",dataClassification:"personal"});
+  await waitFor(()=>store.get(input.jobId)?.status==="failed");
+  assert.match(store.get(input.jobId)?.result?.message ?? "", /status_changed_during_check/);
+  assert.equal(fake.requests.filter(r=>r.method==="turn/start").length,0);
+});

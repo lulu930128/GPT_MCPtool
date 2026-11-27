@@ -1,7 +1,10 @@
+import { createReadStream, readFileSync } from "node:fs";
+import type { RuntimeDiagnostics } from "./runtime-diagnostics.js";
+import { jsonLines } from "./jsonl-reader.js";
 import { createHash, randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { MemoryMaintenanceError } from "./memory-maintenance.js";
-import { appendFile, copyFile, mkdir, open, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
+import { appendFile, copyFile, mkdir, open, readFile, readdir, stat, rename, unlink, writeFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 import type {
   BridgeProject,
@@ -108,15 +111,20 @@ interface ProjectionCandidate {
 
 interface ConversationJournalRead {
   exists: boolean;
-  patches: ConversationProjectionPatch[];
+  replayed: number;
   latestRevision?: number;
   diagnostics: ConversationPersistenceDiagnostic[];
 }
 
 export class JobStore {
+  private readonly summaries = new Map<string, JobSummary>();
+  private readonly threadOwners = new Map<string, Set<string>>();
+  private readonly withResultOutput = new Set<string>();
+  private readonly activeIds = new Set<string>();
+  private pendingApprovals = 0;
+  private awaitingApproval = 0;
   private readonly jobs = new Map<string, JobRecord>();
   private readonly idempotencyIndex = new Map<string, string>();
-  private readonly messageClientIds = new Map<string, Set<string>>();
   private readonly conversations = new Map<string, ConversationThreadProjection>();
   private readonly conversationDiagnostics = new Map<string, ConversationPersistenceDiagnostic[]>();
   private readonly conversationFailures = new Map<string, ConversationPersistenceError>();
@@ -129,6 +137,54 @@ export class JobStore {
   private readonly conversationInputCounts = new Map<string, number>();
   private readonly conversationCommitCounts = new Map<string, number>();
   private readonly conversationFlushFailures = new Set<string>();
+  private readonly loads = new Map<string, Promise<ConversationThreadProjection>>();
+  private readonly checkpointBytes = new Map<string, number>();
+  private readonly observedJournalBytes = new Map<string,number>();
+  private readonly replayBytes = new Map<string, number>();
+  private readonly eventCursors = new Map<string, { seq: number; offset: number }>();
+  private coldBytes = 0;
+  private mutations = 0;
+  private readonly writingManifests = new Set<string>();
+  private readonly uncertainManifests = new Set<string>();
+  private readonly detachedManifests = new Set<string>();
+  get pendingManifestRepairs() { return new Set([...this.uncertainManifests,...this.detachedManifests]).size; }
+
+  async reconcileManifestWrites() {
+    for (const id of new Set([...this.uncertainManifests,...this.detachedManifests])) {
+      await this.exclusive(async () => {
+        if (!this.uncertainManifests.has(id) && !this.detachedManifests.has(id)) return;
+        try {
+          const saved = JSON.parse(await readFile(this.manifestPath(id),"utf8")) as JobRecord;
+          if (saved.id !== id || saved.schemaVersion !== 1 || (this.uncertainManifests.has(id) && !await fileExists(this.manifestPath(id)+".pending")))
+            throw new Error("MANIFEST_EVENT_RECONCILIATION_REQUIRED");
+          const recovered = await this.recoverManifestEvent(saved);
+          this.uncertainManifests.delete(id);
+          if (this.detachedManifests.has(id) && ACTIVE_STATUSES.has(recovered.status)) {
+            await this.mutateUnlocked(id, record => {
+              record.restartInterruptedTurnId = record.turnId;
+              record.status = "interrupted";
+              settlePendingApprovals(record,"expired");
+              return {type:"job.interrupted",message:"Recovered local writes after restart. Native outcome requires readback."};
+            });
+          }
+          this.detachedManifests.delete(id);
+        } catch (error) {
+          this.diagnostics?.observe("manifest","reconciliation_failed",{jobId:id},true,error);
+        }
+      });
+    }
+  }
+  private readonly readers = new Map<string, number>();
+  private readonly artifactCache = new Map<string, {stamp:string; descriptor:JobArtifactDescriptor; anchors:Array<{chars:number;bytes:number}>}>();
+  private readonly coldReads = new Map<string, number>();
+  private readonly companyHistory = new Set<string>();
+  private readonly messageIndexBytes = new Map<string, number>();
+  private readonly messageTailBytes = new Map<string, number>();
+  private readonly messageOffsets = new Map<string, Map<string,{start:number;end:number}>>();
+  private readonly messageTails = new Map<string, ConversationMessage[]>();
+  private readonly messageLoads = new Map<string, Promise<void>>();
+  private readonly lastJournalRecord = new Map<string, {revision:number;offset:number}>();
+  private readonly journalAnchors = new Map<string, { revision: number; offset: number }>();
   private lock: Promise<void> = Promise.resolve();
   private selfReloadLease: { requestId: string; expiresAt: string } | undefined;
   private memoryAdmission?: () => unknown;
@@ -177,7 +233,28 @@ export class JobStore {
     private readonly jobsDir: string,
     private readonly handoffRoot: string = join(jobsDir, "codex-inbox"),
     private readonly conversationRename: ConversationFileRename = rename,
+    readonly diagnostics?: RuntimeDiagnostics,
   ) {}
+
+  workload() {
+    let estimatedProjectionBytes = 0;
+    for (const id of this.conversations.keys()) estimatedProjectionBytes += (this.checkpointBytes.get(id) ?? 0) + (this.replayBytes.get(id) ?? 0);
+    let entriesSampled = 0, sampledMetadataBytes = 0, messageIndexEntries = 0, messagePayloadBytes = 0;
+    for (const summary of this.summaries.values()) {
+      sampledMetadataBytes += Buffer.byteLength(JSON.stringify(summary));
+      if (++entriesSampled === 32) break;
+    }
+    for (const offsets of this.messageOffsets.values()) messageIndexEntries += offsets.size;
+    for (const bytes of this.messageTailBytes.values()) messagePayloadBytes += bytes;
+    return { metadataEntriesSampled:entriesSampled,
+      estimatedMetadataBytes:entriesSampled ? Math.round(sampledMetadataBytes*this.summaries.size/entriesSampled) : 0,
+      messageIndexEntries, estimatedMessageIndexBytes:[...this.messageIndexBytes.values()].reduce((sum,bytes)=>sum+bytes,0), messagePayloadBytes, artifactDescriptors:this.artifactCache.size, eventCursors:this.eventCursors.size,
+      observedJournalFiles:this.observedJournalBytes.size, observedJournalBytes:[...this.observedJournalBytes.values()].reduce((a,b)=>a+b,0),
+      estimatedColdBytes:this.coldBytes,manifestCount: this.summaries.size, hotManifests:this.jobs.size, projectionCount: this.conversations.size, estimatedProjectionBytes,
+      messageTailCount: this.messageTails.size, journalAnchors: this.journalAnchors.size,
+      pendingConversations: this.pendingConversations.size, pendingLocks: this.conversationLocks.size,
+      flushFailures: this.conversationFlushFailures.size, replayBufferBytes: this.recentConversationChanges.serializedBytes };
+  }
 
   async initialize(): Promise<void> {
     await mkdir(this.jobsDir, { recursive: true });
@@ -188,36 +265,34 @@ export class JobStore {
         continue;
       }
       try {
-        const record = JSON.parse(await readFile(this.manifestPath(entry.name), "utf8")) as JobRecord;
+        let record = JSON.parse(await readFile(this.manifestPath(entry.name), "utf8")) as JobRecord;
         if (record.schemaVersion !== 1 || record.id !== entry.name) {
           continue;
         }
-        this.jobs.set(record.id, record);
-        this.idempotencyIndex.set(record.idempotencyKey, record.id);
-        try {
-          await this.ensureMessagesFile(record);
-          const messages = await this.readMessages(record.id);
-          const recovered = await this.readConversation(record);
-          this.conversations.set(record.id, recovered.projection);
-          this.conversationDiagnostics.set(record.id, recovered.diagnostics);
-          this.messageClientIds.set(
-            record.id,
-            new Set(messages.flatMap((message) => message.clientMessageId ? [message.clientMessageId] : [])),
-          );
-        } catch (error) {
-          if (!(error instanceof ConversationPersistenceError)) throw error;
-          this.conversationFailures.set(record.id, error);
-          this.conversationDiagnostics.set(record.id, error.diagnostics);
-          this.messageClientIds.set(record.id, new Set());
+        try { record = await this.recoverManifestEvent(record); }
+        catch (error) {
+          this.uncertainManifests.add(record.id);
+          this.detachedManifests.add(record.id);
+          this.diagnostics?.observe("manifest","reconciliation_failed",{jobId:record.id,seq:record.lastEventSeq});
+          this.diagnostics?.record("pipeline_fault",{error});
         }
+        this.indexRecord(record);
+        this.idempotencyIndex.set(record.idempotencyKey, record.id);
       } catch {
-        // A malformed runtime job is isolated to its own directory and never blocks startup.
+        this.diagnostics?.observe("manifest", "unreadable", {jobId:entry.name}, true);
+        continue;
       }
     }
-    for (const record of this.jobs.values()) {
+    for (const summary of this.summaries.values()) {
+      if (this.uncertainManifests.has(summary.id)) continue;
+      if (!ACTIVE_STATUSES.has(summary.status) && !summary.pendingApprovalCount) continue;
+      const record = this.requireJob(summary.id);
       const approvalState: PendingApproval["state"] = record.status === "cancelled" ? "cancelled" : "expired";
+      this.jobs.set(record.id,record);
       const settledApprovals = settlePendingApprovals(record, approvalState);
       if (ACTIVE_STATUSES.has(record.status)) {
+        record.restartInterruptedTurnId = record.turnId;
+        if (record.nativeRequest) record.nativeRequest = {...record.nativeRequest,state:"unknown"};
         await this.transition(
           record.id,
           "interrupted",
@@ -231,6 +306,100 @@ export class JobStore {
         }));
       }
     }
+  }
+
+  private async loadProjection(jobId: string): Promise<ConversationThreadProjection> {
+    const failure = this.conversationFailures.get(jobId);
+    if (failure) throw failure;
+    const cached = this.conversations.get(jobId);
+    if (cached) return cached;
+    let loading = this.loads.get(jobId);
+    if (!loading) {
+      const started = performance.now();
+      loading = this.readConversation(this.requireJob(jobId)).then(({ projection, diagnostics }) => {
+        this.diagnostics?.observe("replay", "loaded", {jobId, revision:projection.revision, elapsedMs:performance.now()-started});
+        this.conversations.set(jobId, projection);
+        this.conversationDiagnostics.set(jobId, diagnostics);
+        return projection;
+      }).catch(error => {
+        this.diagnostics?.observe("replay", error instanceof ConversationPersistenceError ? error.code : "io_failed", {jobId}, true);
+        if (error instanceof ConversationPersistenceError) this.conversationFailures.set(jobId, error);
+        throw error;
+      }).finally(() => this.loads.delete(jobId));
+      this.loads.set(jobId, loading);
+    }
+    return loading;
+  }
+
+  private trimCold(jobId: string) {
+    this.coldBytes -= this.coldReads.get(jobId) ?? 0;
+    this.coldReads.delete(jobId);
+    if (!this.activeIds.has(jobId)) {
+      const projected = (this.checkpointBytes.get(jobId) ?? 0) + (this.replayBytes.get(jobId) ?? 0);
+      const messages = this.messageTailBytes.get(jobId) ?? 0;
+      const bytes = projected + messages + (this.messageIndexBytes.get(jobId) ?? 0);
+      this.coldReads.set(jobId, bytes);
+      this.coldBytes += bytes;
+    }
+    if (this.mutations) return;
+    for (const [id, bytes] of this.coldReads) {
+      if (this.coldBytes <= CONVERSATION_DELIVERY.totalHotBytes) break;
+      if (this.readers.has(id) || this.loads.has(id) || this.messageLoads.has(id) || this.pendingConversations.has(id)
+        || this.conversationLocks.has(id) || this.pendingConversationCheckpoints.has(id) || this.activeIds.has(id)) continue;
+      this.coldReads.delete(id);
+      this.coldBytes -= bytes;
+      this.messageTailBytes.delete(id);
+      this.conversations.delete(id);
+      this.messageTails.delete(id);
+      this.messageOffsets.delete(id);
+      this.messageIndexBytes.delete(id);
+      this.eventCursors.delete(id);
+      this.lastJournalRecord.delete(id);
+      this.journalAnchors.delete(id);
+      for (const path of [this.requestPath(id),this.responsePath(id),this.diffPath(id)]) this.artifactCache.delete(path);
+    }
+  }
+
+  private async loadMessages(jobId: string) {
+    if (this.messageTails.has(jobId)) return;
+    let loading = this.messageLoads.get(jobId);
+    if (!loading) {
+      loading = (async () => {
+        await this.ensureMessagesFile(this.requireJob(jobId));
+        const file = await open(this.messagesPath(jobId), "r");
+        const offsets = new Map<string,{start:number;end:number}>();
+        const tail: ConversationMessage[] = [];
+        try {
+          for await (const line of jsonLines(file)) {
+            if (!line.text.trim()) continue;
+            const msg = JSON.parse(line.text) as ConversationMessage;
+            if (msg.clientMessageId) offsets.set(msg.clientMessageId,{start:line.start,end:line.end});
+            if (msg.dataClassification === "company_approved") this.companyHistory.add(jobId);
+            tail.push(msg);
+            if (tail.length > 200) tail.shift();
+          }
+        } finally { await file.close(); }
+        this.messageTails.set(jobId, tail);
+        this.messageOffsets.set(jobId, offsets);
+        let indexBytes = 0;
+        for (const id of offsets.keys()) indexBytes += Buffer.byteLength(id) + 16;
+        this.messageIndexBytes.set(jobId,indexBytes);
+        this.messageTailBytes.set(jobId, Buffer.byteLength(JSON.stringify(tail)));
+      })().finally(() => this.messageLoads.delete(jobId));
+      this.messageLoads.set(jobId, loading);
+    }
+    await loading;
+  }
+
+  private cacheMessage(jobId: string, message: ConversationMessage) {
+    const tail = this.messageTails.get(jobId);
+    if (tail) {
+      tail.push(message);
+      const removed = tail.length > 200 ? tail.shift() : undefined;
+      this.messageTailBytes.set(jobId, (this.messageTailBytes.get(jobId) ?? 0) + Buffer.byteLength(JSON.stringify(message))
+        - (removed ? Buffer.byteLength(JSON.stringify(removed)) : 0));
+    }
+    if (message.dataClassification === "company_approved") this.companyHistory.add(jobId);
   }
 
   async create(input: CreateJobInput): Promise<{ record: JobRecord; created: boolean }> {
@@ -299,10 +468,9 @@ export class JobStore {
       const conversation = createConversationProjection(undefined, now);
       await this.writeInitialConversation(id, conversation);
       await this.writeManifest(record);
-      this.jobs.set(id, record);
       this.idempotencyIndex.set(input.idempotencyKey, id);
-      this.messageClientIds.set(id, new Set([initialMessage.clientMessageId!]));
       this.conversations.set(id, conversation);
+      this.trimCold(id);
       return { record: structuredClone(record), created: true };
     });
   }
@@ -310,7 +478,8 @@ export class JobStore {
   async importLocalThread(input: ImportLocalThreadInput): Promise<{ record: JobRecord; created: boolean }> {
     return this.exclusive(async () => {
       this.assertAdmissionOpen();
-      const existing = Array.from(this.jobs.values()).find((record) => record.threadId === input.threadId);
+      const owner = this.findByThreadId(input.threadId);
+      const existing = owner && this.requireJob(owner.id);
       if (existing) return { record: structuredClone(existing), created: false };
 
       const id = randomUUID();
@@ -355,41 +524,89 @@ export class JobStore {
       );
       await this.writeInitialConversation(id, conversation);
       await this.writeManifest(record);
-      this.jobs.set(id, record);
       this.idempotencyIndex.set(idempotencyKey, id);
-      this.messageClientIds.set(id, new Set());
       this.conversations.set(id, conversation);
+      this.trimCold(id);
       return { record: structuredClone(record), created: true };
     });
   }
 
   get(jobId: string): JobRecord | undefined {
-    const record = this.jobs.get(jobId);
-    return record ? structuredClone(record) : undefined;
+    return this.summaries.has(jobId) ? structuredClone(this.requireJob(jobId)) : undefined;
   }
 
   list(limit = 20): JobSummary[] {
     return this.listPage(limit).data;
   }
 
+  readonly reconciliationJobs = new Set<string>();
+
+  private indexRecord(record: JobRecord) {
+    if (record.restartInterruptedTurnId || record.nativeRequest) this.reconciliationJobs.add(record.id);
+    else this.reconciliationJobs.delete(record.id);
+    const old = this.summaries.get(record.id);
+    const summary = toSummary(record);
+    const awaiting = (s:JobSummary) => Number(s.status === "awaiting_approval" || s.pendingApprovalCount > 0);
+    this.pendingApprovals += summary.pendingApprovalCount - (old?.pendingApprovalCount ?? 0);
+    this.awaitingApproval += awaiting(summary) - (old ? awaiting(old) : 0);
+    if (old?.threadId && old.threadId !== summary.threadId) this.threadOwners.get(old.threadId)?.delete(record.id);
+    if (summary.threadId) {
+      const owners = this.threadOwners.get(summary.threadId) ?? new Set();
+      owners.add(record.id);
+      this.threadOwners.set(summary.threadId, owners);
+    }
+    if (summary.result?.output !== undefined) {
+      this.withResultOutput.add(record.id);
+      summary.result = {...summary.result, output:undefined};
+    } else this.withResultOutput.delete(record.id);
+    this.summaries.set(record.id, summary);
+    if (ACTIVE_STATUSES.has(record.status)) {
+      this.activeIds.add(record.id);
+      this.jobs.set(record.id, record);
+    } else {
+      this.activeIds.delete(record.id);
+      this.jobs.delete(record.id);
+      if (this.conversations.has(record.id)) this.trimCold(record.id);
+    }
+  }
+
+  notificationTarget(id: string) {
+    const record = this.jobs.get(id);
+    const indexed = this.summaries.get(id);
+    if (!indexed || this.uncertainManifests.has(id)) return;
+    return {status:indexed.status,threadId:indexed.threadId,turnId:indexed.turnId,priorTurnId:record?.controlAction?.priorTurnId};
+  }
+
+  jobCounts() {
+    return {total:this.summaries.size, active:this.activeIds.size, approvals:this.pendingApprovals, awaitingApproval:this.awaitingApproval};
+  }
+
+  summary(id: string): JobSummary {
+    const summary = structuredClone(this.summaries.get(id)!);
+    if (this.withResultOutput.has(id)) summary.result = structuredClone(this.requireJob(id).result);
+    return summary;
+  }
+
+  inventory(): JobSummary[] {
+    return Array.from(this.summaries.values())
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || right.id.localeCompare(left.id));
+  }
+
   listAll(): JobSummary[] {
-    return Array.from(this.jobs.values())
-      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || right.id.localeCompare(left.id))
-      .map(toSummary);
+    return this.inventory().map(s => this.summary(s.id));
   }
 
   findByThreadId(threadId: string): JobSummary | undefined {
-    const record = Array.from(this.jobs.values())
-      .filter((candidate) => candidate.threadId === threadId)
-      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || right.id.localeCompare(left.id))[0];
-    return record ? toSummary(record) : undefined;
+    const owners = Array.from(this.threadOwners.get(threadId) ?? [], id => this.summaries.get(id)!);
+    const owner = owners.sort((a,b) => b.updatedAt.localeCompare(a.updatedAt) || b.id.localeCompare(a.id))[0];
+    return owner && this.summary(owner.id);
   }
 
   listPage(limit = 50, cursor?: string, projectId?: string): ConversationListPage {
     const boundedLimit = Math.max(1, Math.min(limit, 100));
     const decodedCursor = cursor ? decodeConversationCursor(cursor) : undefined;
-    const records = Array.from(this.jobs.values())
-      .filter((record) => !projectId || record.project.id === projectId)
+    const records = Array.from(this.summaries.values())
+      .filter((record) => !projectId || record.projectId === projectId)
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id))
       .filter((record) => !decodedCursor || record.createdAt < decodedCursor.createdAt || (
         record.createdAt === decodedCursor.createdAt && record.id < decodedCursor.id
@@ -397,7 +614,7 @@ export class JobStore {
     const page = records.slice(0, boundedLimit);
     const last = page.at(-1);
     return {
-      data: page.map(toSummary),
+      data: page.map(record => this.summary(record.id)),
       nextCursor: records.length > page.length && last ? encodeConversationCursor(last.createdAt, last.id) : undefined,
     };
   }
@@ -409,14 +626,51 @@ export class JobStore {
     afterConversationRevision?: number,
     forceSnapshot = false,
   ): Promise<JobSnapshot> {
+    return this.committedRead(jobId, () => this.readSnapshot(jobId, afterSeq, maxEvents, afterConversationRevision, forceSnapshot));
+  }
+
+  private committedRead<T>(jobId: string, read: () => Promise<T>): Promise<T> {
+    return this.withReader(jobId, async () => {
+      const version = this.requireJob(jobId).stateVersion;
+      const unchanged = () => !this.writingManifests.has(jobId) && this.requireJob(jobId).stateVersion === version;
+      if (unchanged()) {
+        try {
+          const view = await read();
+          if (unchanged()) return view;
+        } catch (error) {
+          if (unchanged()) throw error;
+        }
+      }
+      return this.exclusive(read);
+    });
+  }
+
+  private async withReader<T>(jobId: string, read: () => Promise<T>): Promise<T> {
+    this.readers.set(jobId, (this.readers.get(jobId) ?? 0) + 1);
+    try { return await read(); }
+    finally {
+      const left = this.readers.get(jobId)! - 1;
+      if (left) this.readers.set(jobId,left); else this.readers.delete(jobId);
+      if (this.summaries.has(jobId)) this.trimCold(jobId);
+    }
+  }
+
+  private async readSnapshot(
+    jobId: string,
+    afterSeq = 0,
+    maxEvents = 80,
+    afterConversationRevision?: number,
+    forceSnapshot = false,
+  ): Promise<JobSnapshot> {
     const record = this.requireJob(jobId);
     const persistenceFailure = this.conversationFailures.get(jobId);
     if (persistenceFailure) throw persistenceFailure;
-    const events = await this.readEvents(jobId, afterSeq, maxEvents);
-    const allMessages = await this.readAllMessages(jobId);
-    const messages = allMessages.slice(-200);
-    const nextEventSeq = events.at(-1)?.seq ?? Math.max(0, afterSeq);
-    const storedConversation = this.conversations.get(jobId) ?? createConversationProjection(record.threadId, record.updatedAt);
+    const storedConversation = await this.loadProjection(jobId);
+    await this.loadMessages(jobId);
+    const events = await this.readEvents(jobId, afterSeq, maxEvents, record.lastEventSeq);
+    const messages = structuredClone(this.messageTails.get(jobId)!);
+    const nextEventSeq = events.at(-1)?.seq ?? Math.min(record.lastEventSeq, Math.max(0, afterSeq));
+
     let conversation = afterConversationRevision === undefined || forceSnapshot
       ? mergeConversationMessages(storedConversation, messages)
       : undefined;
@@ -439,7 +693,13 @@ export class JobStore {
       conversation = mergeConversationMessages(storedConversation, messages);
       nextConversationRevision = storedConversation.revision;
     }
-    const directActionHistoryEligible = !record.idempotencyKey.startsWith("local-thread:") && !(await this.hasCompanyHistory(jobId, allMessages));
+    const known = new Set(messages.map(m => m.clientMessageId));
+    const missing = new Set<string>();
+    for (const turn of conversation?.turns ?? conversationChanges.flatMap(p => p.turns)) {
+      for (const item of turn.items) if (item.clientMessageId && !known.has(item.clientMessageId)) missing.add(item.clientMessageId);
+    }
+    const allMessages = missing.size ? [...messages, ...await this.readMessagesById(jobId, missing)] : messages;
+    const directActionHistoryEligible = !record.idempotencyKey.startsWith("local-thread:") && !(await this.hasCompanyHistory(jobId));
     return {
       ...toSummary(record),
       directActionHistoryEligible,
@@ -473,15 +733,36 @@ export class JobStore {
       hasMore: nextEventSeq < record.lastEventSeq,
       approvals: structuredClone(record.approvals),
       hasDiff: await fileExists(this.diffPath(jobId)),
-      hasResult: await fileExists(this.resultPath(jobId)),
+      hasResult: Boolean(record.result),
       inputArtifacts: structuredClone(record.inputArtifacts ?? []),
-      artifacts: await this.listArtifacts(jobId),
+      artifacts: await this.artifactDescriptors(jobId),
     };
   }
 
+  async nativeMessageDelivery(jobId: string, clientMessageId: string): Promise<"duplicate" | "failed" | "unknown"> {
+    const committed = this.requireJob(jobId).lastEventSeq;
+    const file = await open(this.eventsPath(jobId), "r");
+    try {
+      for await (const line of jsonLines(file)) {
+        if (!line.terminated) break;
+        const event = JSON.parse(line.text) as JobEvent;
+        if (event.seq > committed) break;
+        if ((event.type === "operator.steered" || event.type === "codex.turn.started") && event.data?.clientMessageId === clientMessageId) return "duplicate";
+        if (event.type === "codex.turn.failed" && event.data?.failedClientMessageId === clientMessageId) return "failed";
+        if (event.seq === committed) break;
+      }
+      return "unknown";
+    } finally { await file.close(); }
+  }
+
   async isUserMessageRetry(jobId: string, input: AppendUserMessageInput): Promise<boolean> {
-    if (!this.messageClientIds.get(jobId)?.has(input.clientMessageId)) return false;
-    const existing = (await this.readAllMessages(jobId)).find((message) => message.clientMessageId === input.clientMessageId);
+    return this.withReader(jobId, () => this.checkMessageIdentity(jobId, input));
+  }
+
+  private async checkMessageIdentity(jobId: string, input: AppendUserMessageInput): Promise<boolean> {
+    await this.loadMessages(jobId);
+    if (!this.messageOffsets.get(jobId)?.has(input.clientMessageId)) return false;
+    const existing = (await this.readMessagesById(jobId, new Set([input.clientMessageId])))[0];
     const fingerprint = (message: AppendUserMessageInput | ConversationMessage) => JSON.stringify([
       message.content, message.context || "", message.executionMode, message.approvalReviewer,
       message.dataClassification, message.model, message.effort, message.speed ?? "standard",
@@ -498,9 +779,10 @@ export class JobStore {
     return this.exclusive(async () => {
       this.assertAdmissionOpen();
       const record = this.requireJob(jobId);
+      await this.loadProjection(jobId);
       const persistenceFailure = this.conversationFailures.get(jobId);
       if (persistenceFailure) throw persistenceFailure;
-      const ids = this.messageClientIds.get(jobId) ?? new Set<string>();
+      await this.loadMessages(jobId);
       if (await this.isUserMessageRetry(jobId, input)) {
         return { record: structuredClone(record), created: false };
       }
@@ -524,10 +806,9 @@ export class JobStore {
         inputArtifacts: summarizeArtifacts(input.inputArtifacts ?? []),
       };
       await this.materializeInputArtifacts(jobId, input.inputArtifacts ?? []);
-      await appendFile(this.messagesPath(jobId), `${JSON.stringify(message)}\n`, "utf8");
-      ids.add(input.clientMessageId);
-      this.messageClientIds.set(jobId, ids);
-      const updated = await this.mutateUnlocked(jobId, () => ({
+      const updated = await this.mutateUnlocked(jobId, current => {
+        current.inputArtifacts = mergeArtifactSummaries(current.inputArtifacts ?? [], message.inputArtifacts ?? []);
+        return {
         type: "conversation.user_message.appended",
         message: "User added a conversation message.",
         data: {
@@ -535,18 +816,25 @@ export class JobStore {
           characterCount: input.content.length,
           inputArtifacts: message.inputArtifacts?.map(({ id, fileName, chars, bytes, sha256 }) => ({ id, fileName, chars, bytes, sha256 })),
         },
-      }));
-      updated.inputArtifacts = mergeArtifactSummaries(updated.inputArtifacts ?? [], message.inputArtifacts ?? []);
-      const stored = this.requireJob(jobId);
-      stored.inputArtifacts = structuredClone(updated.inputArtifacts);
-      await this.writeManifest(stored);
+        };
+      }, message);
       return { record: updated, created: true };
+    });
+  }
+
+  // A prior pre-start failure can clear manifest.turnId. Use the committed
+  // projection for identity without hydrating messages, artifacts or native history.
+  async lastProjectedTurnId(jobId: string, threadId: string): Promise<string | undefined> {
+    return this.committedRead(jobId, async () => {
+      const projection = await this.loadProjection(jobId);
+      return projection.threadId === threadId ? projection.turns.at(-1)?.turnId : undefined;
     });
   }
 
   async prepareTurn(jobId: string, input: PrepareTurnInput): Promise<JobRecord> {
     return this.mutate(jobId, (record) => {
       this.assertAdmissionOpen();
+      record.restartInterruptedTurnId = undefined;
       record.controlAction = input.controlAction;
       record.status = "preparing";
       record.turnId = undefined;
@@ -572,16 +860,27 @@ export class JobStore {
 
   async hasCompanyHistory(jobId: string, messages?: ConversationMessage[]): Promise<boolean> {
     const job = this.requireJob(jobId);
-    return job.workPackage.dataClassification === "company_approved" ||
+    await this.loadMessages(jobId);
+    return this.companyHistory.has(jobId) || job.workPackage.dataClassification === "company_approved" ||
       job.currentDataClassification === "company_approved" ||
-      (messages ?? await this.readAllMessages(jobId)).some((message) => message.dataClassification === "company_approved");
+      (messages ?? []).some((message) => message.dataClassification === "company_approved");
   }
 
-  async recordDirectRequest(jobId: string, key: string, digest: string, state: "pending" | "completed" | "unknown", inputVersion?: 2): Promise<JobRecord> {
+  async recordDirectRequest(jobId: string, key: string, digest: string, state: "pending" | "completed" | "unknown", inputVersion?: 2 | 3 | 3): Promise<JobRecord> {
     return this.mutate(jobId, (record) => {
       record.directRequests ??= {};
       record.directRequests[key] = { digest, state, ...(inputVersion ? { inputVersion } : {}) };
       return { type: "operator.direct_request", message: "Direct operation receipt updated.", data: { source: "model_direct", requestId: key, state } };
+    });
+  }
+
+  async markNativeDisconnected(jobId: string): Promise<JobRecord> {
+    await this.flushConversation(jobId);
+    return this.mutate(jobId, record => {
+      record.restartInterruptedTurnId = record.turnId;
+      record.status = "interrupted";
+      settlePendingApprovals(record, "expired");
+      return {type:"codex.transport.disconnected",message:"App Server disconnected. Native turn outcome requires readback."};
     });
   }
 
@@ -606,20 +905,31 @@ export class JobStore {
     return this.mutate(jobId, () => ({ type, message, data }));
   }
 
+  async recordNativeRequest(jobId: string, request: NonNullable<JobRecord["nativeRequest"]>) {
+    return this.mutate(jobId, record => {
+      record.nativeRequest = request;
+      return {type: "native.request." + request.state, message: "Native request delivery " + request.state + ".", data: {...request}};
+    });
+  }
+
   async setThread(jobId: string, threadId: string): Promise<JobRecord> {
     const record = await this.mutate(jobId, (record) => {
       record.threadId = threadId;
+      record.nativeRequest = undefined;
       return { type: "codex.thread.started", message: "Codex thread started.", data: { threadId } };
     });
     await this.updateConversation(jobId, (current) => ({ ...current, threadId }));
     return record;
   }
 
-  async setTurn(jobId: string, turnId: string): Promise<JobRecord> {
+  async setTurn(jobId: string, turnId: string, detached = false): Promise<JobRecord> {
     return this.mutate(jobId, (record) => {
+      const clientMessageId = record.nativeRequest?.clientMessageId;
       record.turnId = turnId;
-      record.status = "running";
-      return { type: "codex.turn.started", message: "Codex turn started.", data: { turnId } };
+      record.nativeRequest = undefined;
+      record.restartInterruptedTurnId = detached ? turnId : undefined;
+      record.status = detached ? "interrupted" : "running";
+      return { type: "codex.turn.started", message: "Codex turn started.", data: { turnId, clientMessageId } };
     });
   }
 
@@ -664,21 +974,24 @@ export class JobStore {
     });
   }
 
+  async applyConversationNotification(jobId: string, notification: ConversationNotification, at?: string, coalesce?: boolean): Promise<ConversationThreadProjection>;
+  async applyConversationNotification(jobId: string, notification: ConversationNotification, at: string | undefined, coalesce: boolean, returnProjection: false): Promise<void>;
   async applyConversationNotification(
     jobId: string,
     notification: ConversationNotification,
     at = new Date().toISOString(),
     coalesce = false,
-  ): Promise<ConversationThreadProjection> {
+    returnProjection = true,
+  ): Promise<ConversationThreadProjection | void> {
     this.conversationInputCounts.set(jobId, (this.conversationInputCounts.get(jobId) ?? 0) + 1);
     if (coalesce && isCoalescibleConversationNotification(notification.method)) {
       return this.withConversationLock(jobId, async () => {
         this.requireJob(jobId);
         const failure = this.conversationFailures.get(jobId);
         if (failure) throw failure;
-        const current = this.pendingConversations.get(jobId) ?? this.conversations.get(jobId)!;
+        const current = this.pendingConversations.get(jobId) ?? await this.loadProjection(jobId);
         const next = reduceConversationNotification(current, notification, at);
-        if (next === current) return structuredClone(current);
+        if (next === current) return returnProjection ? structuredClone(current) : undefined;
         // Pending state is never exposed with a durable cursor.
         next.revision = current.revision;
         this.pendingConversations.set(jobId, next);
@@ -689,7 +1002,8 @@ export class JobStore {
         if (!this.conversationTimers.has(jobId)) {
           const timer = setTimeout(() => {
             this.conversationTimers.delete(jobId);
-            void this.flushConversation(jobId).catch(() => {
+            void this.flushConversation(jobId).catch((error) => {
+              this.diagnostics?.observe("journal","timer_flush_failed",{jobId},true);
               // Expose failure even for a diff IO error; do not retry in a tight loop.
               this.conversationFlushFailures.add(jobId);
             });
@@ -697,10 +1011,11 @@ export class JobStore {
           timer.unref();
           this.conversationTimers.set(jobId, timer);
         }
-        return structuredClone(next);
+        return returnProjection ? structuredClone(next) : undefined;
       });
     }
-    return this.updateConversation(jobId, (current) => reduceConversationNotification(current, notification, at));
+    const updated = await this.updateConversation(jobId, (current) => reduceConversationNotification(current, notification, at));
+    if (returnProjection) return structuredClone(updated);
   }
 
   async flushConversation(jobId: string): Promise<void> {
@@ -721,30 +1036,50 @@ export class JobStore {
     at = new Date().toISOString(),
     freshness?: import("./types.js").ConversationFreshness,
   ): Promise<ConversationThreadProjection> {
-    return this.updateConversation(jobId, (current) => hydrateConversationProjection(current, response, at, freshness));
+    return structuredClone(await this.updateConversation(jobId, (current) => hydrateConversationProjection(current, response, at, freshness)));
+  }
+
+  async hydrateCurrentTurn(jobId:string, turnId:string, response: Record<string,unknown>, at:string,
+    freshness: import("./types.js").ConversationFreshness) {
+    return this.updateConversation(jobId,current => {
+      const index = current.turns.findIndex(turn => turn.turnId === turnId);
+      const head = hydrateConversationProjection({...current, turns:index < 0 ? [] : [current.turns[index]]},response,at,{...freshness,
+        bridgeMessagesMetadataOnly:current.freshness?.synchronized || current.freshness?.bridgeMessagesMetadataOnly});
+      if (head.turns.length !== 1 || head.turns[0].turnId !== turnId) throw new Error("NATIVE_TURN_CHANGED");
+      if (index >= 0) {
+        const nativeItems = new Map(head.turns[0].items.map(item => [item.id, item]));
+        for (const live of current.turns[index].items) {
+          const item = nativeItems.get(live.id);
+          if (!item || (live.text && item.text !== live.text && !item.text?.startsWith(live.text))
+            || (live.status === "completed" && item.status !== "completed")) throw new Error("NATIVE_HEAD_BEHIND_COMMIT");
+        }
+      }
+      const turns = current.turns.slice();
+      if (index < 0) turns.push(head.turns[0]); else turns[index] = head.turns[0];
+      return {...head, turns, createdAt:current.createdAt ?? head.createdAt};
+    }).then(projection => structuredClone(projection.turns.find(turn => turn.turnId === turnId)));
   }
 
   async markConversationFreshness(
     jobId: string,
     freshness: import("./types.js").ConversationFreshness,
   ): Promise<ConversationThreadProjection> {
-    return this.updateConversation(jobId, (current) => ({
+    return structuredClone(await this.updateConversation(jobId, (current) => ({
       ...current,
       freshness: structuredClone(freshness),
       revision: current.revision + 1,
-    }));
+    })));
   }
 
-  async complete(jobId: string, result: JobResult): Promise<JobRecord> {
+  async complete(jobId: string, result: JobResult, failedClientMessageId?: string): Promise<JobRecord> {
     await this.flushConversation(jobId);
     return this.exclusive(async () => {
-      await writeFile(this.resultPath(jobId), `${JSON.stringify(result, null, 2)}\n`, "utf8");
-      await writeFile(this.responsePath(jobId), result.output || result.message, "utf8");
+      let message: ConversationMessage | undefined;
       const record = this.requireJob(jobId);
       const assistantMessageId = `assistant:${result.turnId || record.turnId || record.stateVersion}`;
-      const ids = this.messageClientIds.get(jobId) ?? new Set<string>();
-      if (!ids.has(assistantMessageId)) {
-        const message: ConversationMessage = {
+      await this.loadMessages(jobId);
+      if (!this.messageOffsets.get(jobId)!.has(assistantMessageId)) {
+        message = {
           id: randomUUID(),
           clientMessageId: assistantMessageId,
           role: "assistant",
@@ -759,21 +1094,25 @@ export class JobStore {
           effortSource: record.effortSource,
           resultStatus: result.status,
         };
-        await appendFile(this.messagesPath(jobId), `${JSON.stringify(message)}\n`, "utf8");
-        ids.add(assistantMessageId);
-        this.messageClientIds.set(jobId, ids);
       }
       return this.mutateUnlocked(jobId, (current) => {
         settlePendingApprovals(current, result.status === "cancelled" ? "cancelled" : "expired");
+        current.restartInterruptedTurnId = undefined;
+        current.nativeRequest = undefined;
         current.result = result;
         current.status = result.status;
-        return { type: `codex.turn.${result.status}`, message: result.message };
-      });
+        return { type: `codex.turn.${result.status}`, message: result.message, ...(failedClientMessageId ? {data:{failedClientMessageId}} : {}) };
+      }, message, true);
     });
   }
 
   async readArtifact(jobId: string, artifact: "request" | "response" | "diff" | "result", maxChars = 100_000): Promise<string> {
-    this.requireJob(jobId);
+    return this.committedRead(jobId, () => this.readArtifactPrefix(jobId,artifact,maxChars));
+  }
+
+  private async readArtifactPrefix(jobId: string, artifact: JobArtifactKind | "result", maxChars: number) {
+    const record = this.requireJob(jobId);
+    if ((artifact === "response" || artifact === "result") && !record.result) throw new Error(`Artifact '${artifact}' is not available for job '${jobId}'.`);
     const path = artifact === "request"
       ? this.requestPath(jobId)
       : artifact === "response"
@@ -782,8 +1121,12 @@ export class JobStore {
           ? this.diffPath(jobId)
           : this.resultPath(jobId);
     try {
-      const content = await readFile(path, "utf8");
-      return content.length > maxChars ? `${content.slice(0, maxChars)}\n[artifact truncated]\n` : content;
+      let content = "";
+      for await (const block of createReadStream(path, {encoding:"utf8"})) {
+        content += block;
+        if (content.length > maxChars) return content.slice(0,maxChars) + "\n[artifact truncated]\n";
+      }
+      return content;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         throw new Error(`Artifact '${artifact}' is not available for job '${jobId}'.`);
@@ -792,8 +1135,12 @@ export class JobStore {
     }
   }
 
-  async listArtifacts(jobId: string): Promise<JobArtifactDescriptor[]> {
-    this.requireJob(jobId);
+  listArtifacts(jobId: string): Promise<JobArtifactDescriptor[]> {
+    return this.committedRead(jobId, () => this.artifactDescriptors(jobId));
+  }
+
+  private async artifactDescriptors(jobId: string): Promise<JobArtifactDescriptor[]> {
+    const record = this.requireJob(jobId);
     const candidates: Array<{ id: JobArtifactKind; name: string; mimeType: string; path: string }> = [
       { id: "request", name: "request.md", mimeType: "text/markdown", path: this.requestPath(jobId) },
       { id: "response", name: "response.md", mimeType: "text/markdown", path: this.responsePath(jobId) },
@@ -801,16 +1148,28 @@ export class JobStore {
     ];
     const output: JobArtifactDescriptor[] = [];
     for (const candidate of candidates) {
+      if (candidate.id === "response" && !record.result) continue;
       try {
-        const content = await readFile(candidate.path, "utf8");
-        output.push({
-          id: candidate.id,
-          name: candidate.name,
-          mimeType: candidate.mimeType,
-          chars: content.length,
-          bytes: Buffer.byteLength(content, "utf8"),
-          sha256: createHash("sha256").update(content, "utf8").digest("hex"),
-        });
+        const details = await stat(candidate.path,{bigint:true});
+        const stamp = [details.ino,details.size,details.mtimeNs,details.ctimeNs].join("/");
+        const cached = this.artifactCache.get(candidate.path);
+        if (cached?.stamp === stamp) { output.push({...cached.descriptor}); continue; }
+        const hash = createHash("sha256");
+        const anchors = [{chars:0,bytes:0}];
+        let chars = 0, bytes = 0;
+        for await (const chunk of createReadStream(candidate.path, {encoding:"utf8"})) {
+          const text = String(chunk);
+          hash.update(text);
+          chars += text.length;
+          bytes += Buffer.byteLength(text);
+          if (bytes - anchors[anchors.length-1].bytes >= 65536) anchors.push({chars,bytes});
+        }
+        const after = await stat(candidate.path,{bigint:true});
+        if ([after.ino,after.size,after.mtimeNs,after.ctimeNs].join("/") !== stamp || BigInt(bytes) !== after.size)
+          throw new Error("ARTIFACT_CHANGED_OR_INVALID_UTF8");
+        const descriptor = {id:candidate.id, name:candidate.name, mimeType:candidate.mimeType, chars, bytes, sha256:hash.digest("hex")};
+        this.artifactCache.set(candidate.path,{stamp,descriptor,anchors});
+        output.push({...descriptor});
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
@@ -824,15 +1183,37 @@ export class JobStore {
     cursor = 0,
     maxChars = 20_000,
   ): Promise<JobArtifactChunk> {
-    const descriptor = (await this.listArtifacts(jobId)).find((item) => item.id === artifact);
+    return this.committedRead(jobId, () => this.readChunk(jobId, artifact, cursor, maxChars));
+  }
+
+  private async readChunk(jobId:string, artifact:JobArtifactKind, cursor:number, maxChars:number): Promise<JobArtifactChunk> {
+    const descriptor = (await this.artifactDescriptors(jobId)).find((item) => item.id === artifact);
     if (!descriptor) throw new Error(`Artifact '${artifact}' is not available for job '${jobId}'.`);
     if (!Number.isInteger(cursor) || cursor < 0 || cursor > descriptor.chars) throw new Error("Invalid artifact cursor.");
     if (!Number.isInteger(maxChars) || maxChars < 1 || maxChars > 20_000) throw new Error("maxChars must be between 1 and 20000.");
     const path = artifact === "request" ? this.requestPath(jobId) : artifact === "response" ? this.responsePath(jobId) : this.diffPath(jobId);
-    const full = await readFile(path, "utf8");
-    const content = full.slice(cursor, cursor + maxChars);
+    const cached = this.artifactCache.get(path);
+    if (!cached || cached.descriptor.sha256 !== descriptor.sha256) throw new Error("ARTIFACT_CHANGED");
+    let anchor = cached.anchors[0];
+    for (const entry of cached.anchors) {
+      if (entry.chars > cursor) break;
+      anchor = entry;
+    }
+    let pos = anchor.chars, content = "";
+    const stop = Math.min(cursor + maxChars,descriptor.chars);
+    if (pos < stop) {
+      for await (const block of createReadStream(path,{start:anchor.bytes,encoding:"utf8"})) {
+        const text = String(block);
+        content += text.slice(Math.max(0,cursor-pos),Math.max(0,stop-pos));
+        pos += text.length;
+        if (pos >= stop) break;
+      }
+    }
+    const after = await stat(path,{bigint:true});
+    if ([after.ino,after.size,after.mtimeNs,after.ctimeNs].join("/") !== cached.stamp || content.length !== stop-cursor)
+      throw new Error("ARTIFACT_CHANGED");
     const end = cursor + content.length;
-    return { ...descriptor, cursor, nextCursor: end < full.length ? end : undefined, done: end >= full.length, content };
+    return { ...descriptor, cursor, nextCursor: end < descriptor.chars ? end : undefined, done: end >= descriptor.chars, content };
   }
 
   async readInputArtifacts(jobId: string, bundleIds?: string[]): Promise<MaterializedTextArtifact[]> {
@@ -870,8 +1251,11 @@ export class JobStore {
   private async mutateUnlocked(
     jobId: string,
     change: (record: JobRecord) => { type: string; message: string; data?: Record<string, unknown> },
+    message?: ConversationMessage,
+    publishResult = false,
   ): Promise<JobRecord> {
-    const record = this.requireJob(jobId);
+    const previous = this.requireJob(jobId);
+    const record = structuredClone(previous);
     const nextEvent = change(record);
     const now = new Date().toISOString();
     record.updatedAt = now;
@@ -884,31 +1268,136 @@ export class JobStore {
       message: nextEvent.message,
       data: nextEvent.data ? (sanitizeForStorage(nextEvent.data) as Record<string, unknown>) : undefined,
     };
-    await appendFile(this.eventsPath(jobId), `${JSON.stringify(event)}\n`, "utf8");
-    await this.writeManifest(record);
+    // A single owner holds the store lock. Publish the local intent before either
+    // file changes so restart can finish this exact event without calling native.
+    const path = this.manifestPath(jobId) + ".pending";
+    const staged = path + ".tmp";
+    const offset = (await stat(this.eventsPath(jobId))).size;
+    const effects = {message, messageOffset: message ? (await stat(this.messagesPath(jobId))).size : undefined, publishResult};
+    let published = false;
+    this.writingManifests.add(jobId);
+    try {
+      await writeFile(staged, JSON.stringify({record,event,offset, effects}), {encoding:"utf8",flush:true});
+      await rename(staged,path);
+      published = true;
+      await this.applyManifestEffects(record, effects);
+      await appendFile(this.eventsPath(jobId), JSON.stringify(event) + "\n", {encoding:"utf8",flush:true});
+      await this.writeManifest(record);
+      await unlink(path);
+    } catch (error) {
+      if (!published) throw error;
+      try {
+        // We still own the writer lock. Finish only the exact durable intent.
+        const reconciled = await this.recoverManifestEvent(previous);
+        if (reconciled.lastEventSeq === event.seq) return structuredClone(reconciled);
+      } catch (recoveryError) {
+        this.diagnostics?.observe("manifest", "reconciliation_failed", {jobId, seq:event.seq}, true, recoveryError);
+      }
+      this.uncertainManifests.add(jobId);
+      this.diagnostics?.observe("manifest","persistence_failed",{jobId,threadId:record.threadId,turnId:record.turnId,seq:event.seq});
+      this.diagnostics?.record("pipeline_fault",{error});
+      throw error;
+    } finally { this.writingManifests.delete(jobId); }
     return structuredClone(record);
   }
 
-  private async readEvents(jobId: string, afterSeq: number, maxEvents: number): Promise<JobEvent[]> {
-    const content = await readFile(this.eventsPath(jobId), "utf8");
-    return content
-      .split(/\r?\n/)
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as JobEvent)
-      .filter((event) => event.seq > Math.max(0, afterSeq))
-      .slice(0, Math.max(1, Math.min(maxEvents, 200)));
+  private async recoverManifestEvent(current: JobRecord): Promise<JobRecord> {
+    const path = this.manifestPath(current.id) + ".pending";
+    let saved: string;
+    try { saved = await readFile(path,"utf8"); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return current; throw error; }
+    const {record,event,offset,effects} = JSON.parse(saved);
+    if (record?.schemaVersion !== 1 || record.id !== current.id || record.idempotencyKey !== current.idempotencyKey ||
+      !Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(event?.seq) || record.lastEventSeq !== event.seq ||
+      ![0,1].includes(event.seq-current.lastEventSeq) || record.stateVersion-current.stateVersion !== event.seq-current.lastEventSeq) {
+      throw new Error("MANIFEST_EVENT_IDENTITY_MISMATCH");
+    }
+    await reconcileLine(this.eventsPath(current.id), offset, event);
+    if (effects) await this.applyManifestEffects(record, effects);
+    await this.writeManifest(record);
+    await unlink(path);
+    this.diagnostics?.observe("manifest","reconciled",{jobId:current.id,seq:event.seq});
+    return record;
   }
 
-  private async readMessages(jobId: string, maxMessages = 200): Promise<ConversationMessage[]> {
-    return (await this.readAllMessages(jobId)).slice(-Math.max(1, Math.min(maxMessages, 500)));
+  private async readEvents(jobId: string, afterSeq: number, maxEvents: number, committedSeq: number): Promise<JobEvent[]> {
+    if (afterSeq >= committedSeq) return [];
+    const file = await open(this.eventsPath(jobId), "r");
+    const cursor = this.eventCursors.get(jobId);
+    let start = cursor && cursor.seq <= afterSeq ? cursor.offset : 0;
+    const events: JobEvent[] = [];
+    try {
+      if (afterSeq > (cursor && start ? cursor.seq : 0) + maxEvents) {
+        // Binary search on complete event boundaries. The lower bound always
+        // points to the start of a record with no earlier unread target.
+        let high = (await file.stat()).size;
+        while (high - start > 65536) {
+          const mid = Math.floor((start + high) / 2);
+          let boundary = false;
+          let advanced = false;
+          for await (const line of jsonLines(file, mid)) {
+            if (!boundary) { boundary = true; continue; }
+            if (!line.terminated) break;
+            if (JSON.parse(line.text).seq <= afterSeq) { start = line.end; advanced = true; }
+            break;
+          }
+          if (!advanced) high = mid;
+        }
+      }
+      for await (const line of jsonLines(file, start)) {
+        if (!line.text.trim()) continue;
+        const event = JSON.parse(line.text) as JobEvent;
+        if (event.seq > committedSeq) break;
+        if (event.seq > afterSeq) {
+          if (!line.terminated || event.seq !== (events.at(-1)?.seq ?? afterSeq) + 1) throw new Error("EVENT_COMMITTED_GAP");
+          events.push(event);
+        }
+        this.eventCursors.set(jobId, { seq: event.seq, offset: line.end });
+        if (event.seq === committedSeq || events.length >= Math.max(1, Math.min(maxEvents, 200))) break;
+      }
+    } finally { await file.close(); }
+    if ((events.at(-1)?.seq ?? afterSeq) < committedSeq && events.length < Math.max(1,Math.min(maxEvents,200))) throw new Error("EVENT_COMMITTED_GAP");
+    return events;
   }
 
-  private async readAllMessages(jobId: string): Promise<ConversationMessage[]> {
-    const content = await readFile(this.messagesPath(jobId), "utf8");
-    return content
-      .split(/\r?\n/)
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as ConversationMessage);
+  private async readMessagesById(jobId: string, ids: Set<string>): Promise<ConversationMessage[]> {
+    const offsets = this.messageOffsets.get(jobId);
+    const file = await open(this.messagesPath(jobId), "r");
+    const messages: ConversationMessage[] = [];
+    try {
+      for (const id of ids) {
+        const range = offsets?.get(id);
+        if (!range) continue;
+        for await (const line of jsonLines(file,range.start,range.end)) {
+          const msg = JSON.parse(line.text) as ConversationMessage;
+          if (msg.clientMessageId !== id) throw new Error("MESSAGE_INDEX_CHANGED");
+          messages.push(msg);
+        }
+      }
+    } finally { await file.close(); }
+    return messages;
+  }
+
+  private async applyManifestEffects(record: JobRecord, effects: { message?: ConversationMessage; messageOffset?: number; publishResult?: boolean }) {
+    const jobId = record.id;
+    if (effects.message) {
+      const message = effects.message;
+      const start = effects.messageOffset;
+      if (start === undefined || !message.clientMessageId) throw new Error("INVALID_MESSAGE_INTENT");
+      await reconcileLine(this.messagesPath(jobId), start, message);
+      const offsets = this.messageOffsets.get(jobId);
+      if (offsets && !offsets.has(message.clientMessageId)) {
+        offsets.set(message.clientMessageId, {start, end:start + Buffer.byteLength(JSON.stringify(message)) + 1});
+        this.messageIndexBytes.set(jobId, (this.messageIndexBytes.get(jobId) ?? 0) + Buffer.byteLength(message.clientMessageId) + 16);
+        this.cacheMessage(jobId, message);
+      }
+    }
+    if (effects.publishResult) {
+      const result = record.result;
+      if (!result || result.status !== record.status || (result.turnId && result.turnId !== record.turnId)) throw new Error("INVALID_RESULT_INTENT");
+      await replaceDurableText(this.resultPath(jobId), JSON.stringify(result, null, 2) + "\n");
+      await replaceDurableText(this.responsePath(jobId), result.output || result.message);
+    }
   }
 
   private async readConversation(
@@ -918,7 +1407,20 @@ export class JobStore {
     const diagnostics: ConversationPersistenceDiagnostic[] = [];
     const primary = await this.readProjectionCandidate(this.conversationPath(record.id));
     const backup = await this.readProjectionCandidate(this.conversationBackupPath(record.id));
-    const journal = await this.readConversationJournal(record.id);
+    const baseRevision = (primary.projection ?? backup.projection)?.revision ?? 0;
+    let recovered = primary.projection ?? backup.projection;
+    const journal = await this.readConversationJournal(record.id, baseRevision, patch => {
+      recovered ??= createConversationProjection(record.threadId, record.createdAt);
+      if (patch.revision !== recovered.revision + 1) {
+        const failure = persistenceDiagnostic("conversation_journal_gap", "The journal cannot continue the checkpoint.", recovered.revision, patch.revision);
+        throw new ConversationPersistenceError(failure.code, failure.message, [failure]);
+      }
+      try { recovered = applyConversationPatch(recovered, patch); }
+      catch {
+        const failure = persistenceDiagnostic("conversation_replay_failed", "Invalid replayed projection.", baseRevision, patch.revision);
+        throw new ConversationPersistenceError(failure.code, failure.message, [failure]);
+      }
+    });
     diagnostics.push(...journal.diagnostics);
 
     if (primary.state === "corrupt") {
@@ -938,24 +1440,14 @@ export class JobStore {
       ));
     }
 
-    let recovered = primary.projection ?? backup.projection;
-    const hasCorruptCheckpoint = primary.state === "corrupt" || backup.state === "corrupt";
     if (!recovered) {
-      if (journal.patches.length > 0 && journal.patches[0]?.revision === 1) {
-        recovered = createConversationProjection(record.threadId, record.createdAt);
-      } else if (!hasCorruptCheckpoint && journal.patches.length === 0) {
-        recovered = createConversationProjection(record.threadId, record.updatedAt);
-        await this.writeInitialConversation(record.id, recovered);
-        return { projection: recovered, diagnostics };
-      } else {
-        const failure = persistenceDiagnostic(
-          "conversation_replay_failed",
-          "Conversation recovery has no validated checkpoint or replayable revision-zero baseline.",
-          undefined,
-          journal.latestRevision,
-        );
+      if (primary.state === "corrupt" || backup.state === "corrupt") {
+        const failure = persistenceDiagnostic("conversation_replay_failed", "No validated baseline or committed revisions.", undefined, journal.latestRevision);
         throw new ConversationPersistenceError(failure.code, failure.message, [...diagnostics, failure]);
       }
+      recovered = createConversationProjection(record.threadId, record.updatedAt);
+      await this.writeInitialConversation(record.id, recovered);
+      return {projection:recovered, diagnostics};
     }
 
     if (journal.latestRevision !== undefined && recovered.revision > journal.latestRevision) {
@@ -968,31 +1460,7 @@ export class JobStore {
       throw new ConversationPersistenceError(failure.code, failure.message, [...diagnostics, failure]);
     }
 
-    const missing = journal.patches.filter((patch) => patch.revision > recovered!.revision);
-    if (missing.length > 0 && missing[0]?.revision !== recovered.revision + 1) {
-      const failure = persistenceDiagnostic(
-        "conversation_journal_gap",
-        "The committed conversation journal cannot continue from the validated checkpoint revision.",
-        recovered.revision,
-        journal.latestRevision,
-      );
-      throw new ConversationPersistenceError(failure.code, failure.message, [...diagnostics, failure]);
-    }
-
-    const startingRevision = recovered.revision;
-    try {
-      for (const patch of missing) recovered = applyConversationPatch(recovered, patch);
-    } catch {
-      const failure = persistenceDiagnostic(
-        "conversation_replay_failed",
-        "The committed conversation journal could not be replayed into a valid projection.",
-        startingRevision,
-        journal.latestRevision,
-      );
-      throw new ConversationPersistenceError(failure.code, failure.message, [...diagnostics, failure]);
-    }
-
-    const primaryNeedsRepair = primary.state !== "valid" || primary.projection?.revision !== recovered.revision;
+    const primaryNeedsRepair = primary.state !== "valid" || journal.replayed > 0;
     if (primaryNeedsRepair) {
       await this.writeConversation(record.id, recovered);
       diagnostics.push(persistenceDiagnostic(
@@ -1013,6 +1481,7 @@ export class JobStore {
       }
     }
 
+    this.checkpointBytes.set(record.id, (await stat(this.conversationPath(record.id))).size);
     return { projection: recovered, diagnostics: dedupePersistenceDiagnostics(diagnostics) };
   }
 
@@ -1024,7 +1493,7 @@ export class JobStore {
       const record = this.requireJob(jobId);
       const persistenceFailure = this.conversationFailures.get(jobId);
       if (persistenceFailure) throw persistenceFailure;
-      const current = this.conversations.get(jobId) ?? createConversationProjection(record.threadId, record.updatedAt);
+      const current = await this.loadProjection(jobId);
       if (this.pendingConversationCheckpoints.has(jobId)) {
         await this.writeConversation(jobId, current);
         this.pendingConversationCheckpoints.delete(jobId);
@@ -1045,13 +1514,14 @@ export class JobStore {
       let next = update(base);
       if (next === current && !pending) {
         this.conversationFlushFailures.delete(jobId);
-        return structuredClone(current);
+        return current;
       }
       next = { ...next, revision: current.revision + 1 };
       const patch = conversationPatch(current, next);
       try {
         await this.appendConversationJournal(jobId, patch);
-      } catch {
+      } catch (cause) {
+        this.diagnostics?.observe("journal","conversation_journal_write_failed",{jobId,revision:next.revision},true,cause);
         const failure = persistenceDiagnostic(
           "conversation_journal_write_failed",
           "The conversation revision journal could not be committed.",
@@ -1067,14 +1537,17 @@ export class JobStore {
       this.pendingConversations.delete(jobId);
       clearTimeout(this.conversationTimers.get(jobId));
       this.conversationTimers.delete(jobId);
-      this.conversations.set(jobId, structuredClone(next));
-      this.pendingConversationCheckpoints.add(jobId);
+      this.conversations.set(jobId, next);
       this.recentConversationChanges.add(jobId, patch);
       this.conversationCommitCounts.set(jobId, (this.conversationCommitCounts.get(jobId) ?? 0) + 1);
       try {
-        await this.writeConversation(jobId, next);
-      } catch {
-        this.conversations.set(jobId, structuredClone(next));
+        // Checkpoint when replay costs as much IO as the checkpoint. Keep small
+        // checkpoints eager and journal publication independent of promotion.
+        const size = this.checkpointBytes.get(jobId) ?? 0;
+        if (size <= 4096 || (this.replayBytes.get(jobId) ?? 0) >= size) await this.writeConversation(jobId, next);
+      } catch (cause) {
+        this.diagnostics?.observe("checkpoint","conversation_checkpoint_write_failed",{jobId,revision:next.revision},true,cause);
+        this.conversations.set(jobId, next);
         this.pendingConversationCheckpoints.add(jobId);
         const failure = persistenceDiagnostic(
           "conversation_checkpoint_write_failed",
@@ -1085,10 +1558,10 @@ export class JobStore {
         this.addConversationDiagnostic(jobId, failure);
         throw new ConversationPersistenceError(failure.code, failure.message, [failure]);
       }
-      this.conversations.set(jobId, structuredClone(next));
+      this.conversations.set(jobId, next);
       this.pendingConversationCheckpoints.delete(jobId);
       this.conversationFlushFailures.delete(jobId);
-      return structuredClone(next);
+      return next;
     });
   }
 
@@ -1107,7 +1580,9 @@ export class JobStore {
     validateConversationProjection(projection);
     const path = this.conversationPath(jobId);
     const temp = conversationTempPath(path, "tmp");
-    await writeDurableText(temp, serializeConversationProjection(projection));
+    const started = performance.now();
+    const serialized = serializeConversationProjection(projection);
+    await writeDurableText(temp, serialized);
     const staged = await this.readProjectionCandidate(temp);
     if (staged.state !== "valid" || staged.projection?.revision !== projection.revision) {
       await unlink(temp).catch(() => undefined);
@@ -1123,8 +1598,16 @@ export class JobStore {
       if (promoted.state !== "valid" || promoted.projection?.revision !== projection.revision) {
         throw new Error("Promoted conversation checkpoint failed validation.");
       }
+      const anchor = this.lastJournalRecord.get(jobId);
+      if (anchor?.revision === projection.revision) {
+        this.journalAnchors.set(jobId, anchor);
+        await this.saveJournalIndex(jobId);
+      }
+      this.checkpointBytes.set(jobId, Buffer.byteLength(serialized));
+      this.replayBytes.set(jobId, 0);
       const backup = await this.readProjectionCandidate(this.conversationBackupPath(jobId));
       if (backup.state !== "valid") await this.writeConversationBackup(jobId, projection);
+      this.diagnostics?.observe("checkpoint", "promoted", {jobId,revision:projection.revision,bytes:Buffer.byteLength(serialized),elapsedMs:performance.now()-started});
     } finally {
       await unlink(temp).catch(() => undefined);
     }
@@ -1177,113 +1660,151 @@ export class JobStore {
     }
   }
 
+  private async saveJournalIndex(jobId: string) {
+    const anchor = this.journalAnchors.get(jobId);
+    if (!anchor) return;
+    const path = this.conversationEventsPath(jobId);
+    const temp = path + ".index.tmp";
+    try {
+      const f = await stat(path,{bigint:true});
+      const stamp = [f.ino,f.size,f.mtimeNs,f.ctimeNs].join("/");
+      await writeFile(temp, JSON.stringify({...anchor,stamp,digest:indexDigest(jobId,stamp,anchor.revision,anchor.offset)}));
+      await rename(temp, path + ".index");
+    } catch { this.diagnostics?.observe("index","hint_write_failed",{jobId},true); }
+  }
+
   private async appendConversationJournal(jobId: string, patch: ConversationProjectionPatch): Promise<void> {
     validateConversationPatch(patch);
+    const started = performance.now();
     const handle = await open(this.conversationEventsPath(jobId), "a");
     try {
-      await handle.writeFile(`${JSON.stringify(patch)}\n`, "utf8");
+      const line = JSON.stringify(patch) + "\n";
+      await handle.writeFile(line, "utf8");
       await handle.sync();
+      const bytes = Buffer.byteLength(line);
+      try {
+        const size = (await handle.stat()).size;
+        this.observedJournalBytes.set(jobId,size);
+        this.lastJournalRecord.set(jobId, {revision:patch.revision,offset:size-bytes});
+      } catch { this.diagnostics?.observe("index","hint_write_failed",{jobId},true); }
+      await this.saveJournalIndex(jobId);
+      this.diagnostics?.observe("journal", "committed", {jobId, revision:patch.revision, elapsedMs:performance.now()-started, bytes:Buffer.byteLength(line)});
+      this.replayBytes.set(jobId, (this.replayBytes.get(jobId) ?? 0) + Buffer.byteLength(line));
     } finally {
       await handle.close();
     }
   }
 
-  private async readConversationJournal(jobId: string): Promise<ConversationJournalRead> {
+  private async readConversationJournal(jobId: string, baseRevision: number, apply: (patch:ConversationProjectionPatch) => void): Promise<ConversationJournalRead> {
     const path = this.conversationEventsPath(jobId);
-    let content: Buffer;
-    try {
-      content = await readFile(path);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        return { exists: false, patches: [], diagnostics: [] };
-      }
+    let file;
+    try { file = await open(path, "r+"); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { exists: false, replayed: 0, diagnostics: [] };
       throw error;
     }
-    if (content.length === 0) return { exists: true, patches: [], diagnostics: [] };
-
     const diagnostics: ConversationPersistenceDiagnostic[] = [];
-    const patches: ConversationProjectionPatch[] = [];
-    let offset = 0;
+    let replayed = 0;
+    let previous: ConversationProjectionPatch | undefined;
     let lastValidOffset = 0;
-    while (offset < content.length) {
-      const newline = content.indexOf(0x0a, offset);
-      const terminated = newline >= 0;
-      const end = terminated ? newline : content.length;
-      let line = content.subarray(offset, end);
-      if (line.at(-1) === 0x0d) line = line.subarray(0, line.length - 1);
-      const nextOffset = terminated ? end + 1 : end;
-
-      if (line.length === 0) {
-        const failure = persistenceDiagnostic(
-          "conversation_journal_corrupt",
-          "The conversation revision journal contains an empty record before its final boundary.",
-          undefined,
-          patches.at(-1)?.revision,
-        );
-        throw new ConversationPersistenceError(failure.code, failure.message, [...diagnostics, failure]);
-      }
-
-      let patch: ConversationProjectionPatch;
+    try {
+      const identity = await file.stat({bigint:true});
+      this.observedJournalBytes.set(jobId,Number(identity.size));
+      const stamp = [identity.ino,identity.size,identity.mtimeNs,identity.ctimeNs].join("/");
+      const indexPath = path + ".index";
+      let from = 0;
       try {
-        patch = JSON.parse(line.toString("utf8")) as ConversationProjectionPatch;
-        validateConversationPatch(patch);
-      } catch {
-        if (!terminated) {
-          diagnostics.push(persistenceDiagnostic(
-            "conversation_journal_tail_truncated",
-            "An incomplete final conversation journal record was removed after preserving all prior revisions.",
-            undefined,
-            patches.at(-1)?.revision,
-          ));
-          await truncateDurableFile(path, lastValidOffset);
-          break;
-        }
-        const failure = persistenceDiagnostic(
-          "conversation_journal_corrupt",
-          "The conversation revision journal contains a malformed committed record.",
-          undefined,
-          patches.at(-1)?.revision,
-        );
-        throw new ConversationPersistenceError(failure.code, failure.message, [...diagnostics, failure]);
-      }
-
-      const previous = patches.at(-1);
-      if (previous && patch.revision === previous.revision) {
-        if (JSON.stringify(previous) !== JSON.stringify(patch)) {
+        const hint = JSON.parse(await readFile(indexPath, "utf8"));
+        if (hint.stamp === stamp && hint.revision === baseRevision && Number.isSafeInteger(hint.offset) &&
+          hint.offset >= 0 && hint.offset < Number(identity.size) &&
+          hint.digest === indexDigest(jobId, hint.stamp, hint.revision, hint.offset)) from = hint.offset;
+      } catch { /* Disposable hint. Always validate the original journal on a miss. */ }
+      this.diagnostics?.observe("index", from ? "verified_offset" : "full_validation", {jobId, revision:baseRevision,bytes:Number(identity.size)-from});
+      for await (const {text: line, start, end, terminated} of jsonLines(file, from)) {
+        if (line.length === 0) {
           const failure = persistenceDiagnostic(
             "conversation_journal_corrupt",
-            "The conversation revision journal contains conflicting duplicate revisions.",
+            "The conversation revision journal contains an empty record before its final boundary.",
             undefined,
-            patch.revision,
+            previous?.revision,
           );
           throw new ConversationPersistenceError(failure.code, failure.message, [...diagnostics, failure]);
         }
-        diagnostics.push(persistenceDiagnostic(
-          "conversation_journal_duplicate",
-          "An identical duplicate conversation journal revision was ignored.",
-          undefined,
-          patch.revision,
-        ));
-      } else {
-        if (previous && patch.revision !== previous.revision + 1) {
+
+        let patch: ConversationProjectionPatch;
+        try {
+          patch = JSON.parse(line) as ConversationProjectionPatch;
+          validateConversationPatch(patch);
+        } catch {
+          if (!terminated) {
+            diagnostics.push(persistenceDiagnostic(
+              "conversation_journal_tail_truncated",
+              "An incomplete final conversation journal record was removed after preserving all prior revisions.",
+              undefined,
+              previous?.revision,
+            ));
+            await truncateDurableFile(path, lastValidOffset);
+            break;
+          }
           const failure = persistenceDiagnostic(
-            "conversation_journal_gap",
-            "The conversation revision journal is not monotonic and contiguous.",
+            "conversation_journal_corrupt",
+            "The conversation revision journal contains a malformed committed record.",
             undefined,
-            patch.revision,
+            previous?.revision,
           );
           throw new ConversationPersistenceError(failure.code, failure.message, [...diagnostics, failure]);
         }
-        patches.push(patch);
+
+
+        if (previous && patch.revision === previous.revision) {
+          if (JSON.stringify(previous) !== JSON.stringify(patch)) {
+            const failure = persistenceDiagnostic(
+              "conversation_journal_corrupt",
+              "The conversation revision journal contains conflicting duplicate revisions.",
+              undefined,
+              patch.revision,
+            );
+            throw new ConversationPersistenceError(failure.code, failure.message, [...diagnostics, failure]);
+          }
+          diagnostics.push(persistenceDiagnostic(
+            "conversation_journal_duplicate",
+            "An identical duplicate conversation journal revision was ignored.",
+            undefined,
+            patch.revision,
+          ));
+        } else {
+          if (previous && patch.revision !== previous.revision + 1) {
+            const failure = persistenceDiagnostic(
+              "conversation_journal_gap",
+              "The conversation revision journal is not monotonic and contiguous.",
+              undefined,
+              patch.revision,
+            );
+            throw new ConversationPersistenceError(failure.code, failure.message, [...diagnostics, failure]);
+          }
+          if (!previous && from && patch.revision !== baseRevision) {
+            const failure = persistenceDiagnostic("conversation_journal_gap", "Checkpoint anchor revision mismatch.", baseRevision, patch.revision);
+            throw new ConversationPersistenceError(failure.code, failure.message, [failure]);
+          }
+          if (patch.revision > baseRevision) { apply(patch); replayed++; }
+          this.lastJournalRecord.set(jobId, {revision:patch.revision,offset:start});
+          previous = patch;
+          if (patch.revision === baseRevision) this.journalAnchors.set(jobId, {revision: baseRevision, offset: start});
+        }
+        lastValidOffset = end;
+        if (!terminated) {
+          await file.write(Buffer.from("\n"), 0, 1, end);
+          await file.sync();
+        }
       }
-      lastValidOffset = nextOffset;
-      offset = nextOffset;
-    }
+
+      await this.saveJournalIndex(jobId);
+    } finally { await file.close(); }
 
     return {
       exists: true,
-      patches,
-      latestRevision: patches.at(-1)?.revision,
+      replayed,
+      latestRevision: previous?.revision,
       diagnostics: dedupePersistenceDiagnostics(diagnostics),
     };
   }
@@ -1312,6 +1833,7 @@ export class JobStore {
   }
 
   private addConversationDiagnostic(jobId: string, diagnostic: ConversationPersistenceDiagnostic): void {
+    this.diagnostics?.observe("checkpoint", diagnostic.code, {jobId, revision:diagnostic.journalRevision}, true);
     const current = this.conversationDiagnostics.get(jobId) ?? [];
     this.conversationDiagnostics.set(jobId, dedupePersistenceDiagnostics([...current, diagnostic]).slice(-20));
   }
@@ -1357,7 +1879,14 @@ export class JobStore {
     if (!/^[0-9a-f-]{36}$/i.test(jobId)) {
       throw new Error("Invalid job id.");
     }
+    if (this.uncertainManifests.has(jobId)) throw new Error("MANIFEST_EVENT_RECONCILIATION_REQUIRED");
     const record = this.jobs.get(jobId);
+    if (!record && this.summaries.has(jobId)) {
+      // Legacy synchronous get() contract. Only a selected cold manifest is read.
+      const saved = JSON.parse(readFileSync(this.manifestPath(jobId), "utf8")) as JobRecord;
+      if (saved.id !== jobId || saved.schemaVersion !== 1) throw new Error("JOB_MANIFEST_CHANGED");
+      return saved;
+    }
     if (!record) {
       throw new Error(`Unknown job id '${jobId}'.`);
     }
@@ -1367,21 +1896,20 @@ export class JobStore {
   private async writeManifest(record: JobRecord): Promise<void> {
     const path = this.manifestPath(record.id);
     const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
-    await writeFile(temp, `${JSON.stringify(record, null, 2)}\n`, "utf8");
-    try {
-      await rename(temp, path);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "EPERM" && code !== "EEXIST") {
-        throw error;
-      }
-      await copyFile(temp, path);
-      await unlink(temp).catch(() => undefined);
-    }
+    await writeDurableText(temp, `${JSON.stringify(record, null, 2)}\n`);
+    try { await rename(temp, path); }
+    catch (error) { await unlink(temp).catch(() => undefined); throw error; }
+    this.indexRecord(record);
   }
 
   private exclusive<T>(operation: () => Promise<T>): Promise<T> {
-    const run = this.lock.then(operation, operation);
+    const execute = async () => {
+      this.mutations++;
+      try { return await operation(); } finally { this.mutations--;
+        if (this.coldBytes > CONVERSATION_DELIVERY.totalHotBytes && this.coldReads.size) this.trimCold(this.coldReads.keys().next().value!);
+      }
+    };
+    const run = this.lock.then(execute, execute);
     this.lock = run.then(
       () => undefined,
       () => undefined,
@@ -1505,7 +2033,7 @@ export class JobStore {
   }
 
   private requireJobOrPending(jobId: string): JobRecord | undefined {
-    return this.jobs.get(jobId);
+    return this.summaries.has(jobId) ? this.requireJob(jobId) : undefined;
   }
 }
 
@@ -1554,7 +2082,8 @@ function applyConversationPatch(
   validateConversationProjection(current);
   validateConversationPatch(patch);
   if (patch.revision !== current.revision + 1) throw new TypeError("Conversation patch revision is not contiguous.");
-  const next = structuredClone(current);
+  // The recovery projection is exclusively owned until complete validation.
+  const next = current;
   if (patch.replaceAll) next.turns = structuredClone(patch.turns);
   if (patch.threadId !== undefined) next.threadId = patch.threadId;
   if (patch.status !== undefined) next.status = patch.status;
@@ -1596,6 +2125,10 @@ function applyConversationPatch(
   return next;
 }
 
+function indexDigest(jobId: string, stamp: string, revision: number, offset: number) {
+  return createHash("sha256").update(JSON.stringify([jobId,stamp,revision,offset])).digest("hex");
+}
+
 function persistenceDiagnostic(
   code: ConversationPersistenceDiagnosticCode,
   message: string,
@@ -1628,6 +2161,38 @@ function serializeConversationProjection(projection: ConversationThreadProjectio
 
 function conversationTempPath(path: string, suffix: "tmp" | "swap"): string {
   return `${path}.${process.pid}.${randomUUID()}.${suffix}`;
+}
+
+async function reconcileLine(path: string, offset: number, value: unknown) {
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("INVALID_APPEND_OFFSET");
+    const expected = Buffer.from(JSON.stringify(value) + "\n");
+    const file = await open(path,"r+");
+    try {
+      const length = (await file.stat()).size-offset;
+      if (length < 0 || length > expected.length) throw new Error("MANIFEST_EVENT_CURSOR_MISMATCH");
+      const prefix = Buffer.alloc(length);
+      let read = 0;
+      while (read < length) {
+        const {bytesRead} = await file.read(prefix,read,length-read,offset+read);
+        if (!bytesRead) throw new Error("MANIFEST_EVENT_SHORT_READ");
+        read += bytesRead;
+      }
+      if (!expected.subarray(0,length).equals(prefix)) throw new Error("MANIFEST_EVENT_PREFIX_MISMATCH");
+      let written = length;
+      while (written < expected.length) {
+        const {bytesWritten} = await file.write(expected,written,expected.length-written,offset+written);
+        if (!bytesWritten) throw new Error("MANIFEST_EVENT_SHORT_WRITE");
+        written += bytesWritten;
+      }
+      await file.sync();
+    } finally { await file.close(); }
+}
+
+async function replaceDurableText(path: string, content: string) {
+  const temp = conversationTempPath(path, "tmp");
+  await writeDurableText(temp, content);
+  try { await rename(temp, path); }
+  catch (error) { await unlink(temp).catch(() => undefined); throw error; }
 }
 
 async function writeDurableText(path: string, content: string): Promise<void> {
@@ -1686,28 +2251,30 @@ function conversationPatch(
   previous: ConversationThreadProjection,
   next: ConversationThreadProjection,
 ): ConversationProjectionPatch {
-  const removedTurn = previous.turns.some(
-    (turn) => !next.turns.some((candidate) => candidate.turnId === turn.turnId),
-  );
-  const removedItem = previous.turns.some((turn) => {
-    const nextTurn = next.turns.find((candidate) => candidate.turnId === turn.turnId);
-    return Boolean(nextTurn && turn.items.some(
-      (item) => !nextTurn.items.some((candidate) => candidate.id === item.id),
-    ));
+  const oldTurns = new Map(previous.turns.map(turn => [turn.turnId, turn]));
+  const newTurns = new Map(next.turns.map(turn => [turn.turnId, turn]));
+  const removedTurn = previous.turns.some(turn => !newTurns.has(turn.turnId));
+  const removedItem = previous.turns.some(turn => {
+    const other = newTurns.get(turn.turnId);
+    if (!other || turn === other) return false;
+    const ids = new Set(other.items.map(item => item.id));
+    return turn.items.some(item => !ids.has(item.id));
   });
   const replaceAll = removedTurn || removedItem;
   const turns: ConversationProjectionPatch["turns"] = [];
   if (replaceAll) turns.push(...structuredClone(next.turns));
   else {
   for (const nextTurn of next.turns) {
-    const previousTurn = previous.turns.find((turn) => turn.turnId === nextTurn.turnId);
+    const previousTurn = oldTurns.get(nextTurn.turnId);
+    if (previousTurn === nextTurn) continue;
     if (!previousTurn) {
       turns.push(structuredClone(nextTurn));
       continue;
     }
+    const previousItems = new Map(previousTurn.items.map(item => [item.id, item]));
     const items = nextTurn.items.filter((item) => {
-      const previousItem = previousTurn.items.find((candidate) => candidate.id === item.id);
-      return !previousItem || JSON.stringify(previousItem) !== JSON.stringify(item);
+      const previousItem = previousItems.get(item.id);
+      return previousItem !== item && (!previousItem || JSON.stringify(previousItem) !== JSON.stringify(item));
     });
     const metadataChanged = JSON.stringify({
       status: previousTurn.status,
@@ -1725,7 +2292,7 @@ function conversationPatch(
       modelRouting: nextTurn.modelRouting,
     });
     if (items.length || metadataChanged) {
-      turns.push({ ...structuredClone(nextTurn), items: structuredClone(items) });
+      turns.push(structuredClone({ ...nextTurn, items }));
     }
   }
   }
@@ -1775,6 +2342,7 @@ function decodeConversationCursor(cursor: string): { createdAt: string; id: stri
 
 export function toSummary(record: JobRecord): JobSummary {
   return {
+    nativeRequest: record.nativeRequest,
     selectionRecorded: record.selectionRecorded,
     selectionKind: record.selectionKind,
     modelSource: record.modelSource,
@@ -1798,12 +2366,14 @@ export function toSummary(record: JobRecord): JobSummary {
     effort: record.selectionRecorded ? record.effort : record.effort ?? record.workPackage.effort,
     pendingApprovalCount: record.approvals.filter((approval) => approval.state === "pending").length,
     result: record.result,
+    resultScope: !record.result ? undefined : !record.result.turnId ? "unknown_turn" :
+      record.result.turnId === record.turnId ? "current_turn" : "previous_turn",
   };
 }
 
 async function fileExists(path: string): Promise<boolean> {
   try {
-    await readFile(path);
+    await stat(path);
     return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {

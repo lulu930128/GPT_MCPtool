@@ -150,6 +150,10 @@ export class MemoryMaintenance {
     const file = await open(temporary, "w", 0o600);
     try { await file.writeFile(JSON.stringify(state) + "\n", "utf8"); await file.sync(); } finally { await file.close(); }
     await rename(temporary, this.path);
+    if (state) {
+      this.store.diagnostics?.observe("maintenance", state.phase, {intentId:state.intentId,bytes:state.heapUsed});
+      this.store.diagnostics?.record("maintenance_transition");
+    }
   }
 }
 function hasProcessExited(pid: number) {

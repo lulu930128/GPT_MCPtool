@@ -110,3 +110,22 @@ for (const [mode, trigger, expected] of [
     assert.equal(readFileSync(path, "utf8").includes("fixture secret"), false);
   });
 }
+
+test("pipeline summaries aggregate tokens, persist failed-write counts, and preserve correlation without content",t=>{
+  const config=fixture(t), log=new RuntimeDiagnostics(config);
+  t.after(()=>log.dispose());
+  const jobId="00000000-0000-4000-a000-000000000001";
+  for(let i=0;i<48000;i++) log.observe("queue","received",{jobId,threadId:secret,elapsedMs:i%3});
+  assert.equal(rows(log.path).length,1);
+  const other=join(config.dataDir,"other");
+  writeFileSync(other,secret); unlinkSync(log.path); linkSync(other,log.path);
+  assert.equal(log.record("heartbeat"),false);
+  unlinkSync(log.path);
+  assert.equal(log.record("heartbeat"),true);
+  const row=rows(log.path).at(-1);
+  assert.equal(row.writeFailures,1);
+  assert.equal(row.groups[0].count,48000);
+  assert.equal(row.groups[0].maxMs,2);
+  assert.ok(!readFileSync(log.path,"utf8").includes(secret));
+  assert.equal(readFileSync(other,"utf8"),secret);
+});

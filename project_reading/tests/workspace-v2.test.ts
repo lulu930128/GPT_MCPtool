@@ -76,6 +76,31 @@ test("SQLite WAL reader sees committed pages, holds one snapshot across pages an
   } finally { writer.close(); }
 });
 
+test("an abandoned SQLite cursor releases its WAL snapshot after its advertised idle lease", async t => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { config, dir } = await fixture(t);
+  const writer = new DatabaseSync(path.join(dir, "idle.sqlite"));
+  try {
+    writer.exec("PRAGMA journal_mode=WAL; CREATE TABLE t(v); INSERT INTO t VALUES (1),(2),(3)");
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const sessions: import("../src/sqlite-reader.js").SqliteSessions = new Map();
+    const args = { path: "idle.sqlite", operation: "query" as const, sql: "SELECT v FROM t", pageSize: 1 };
+    const page = await inspectSqlite(config, args, sessions);
+    const token = page.cursor!;
+    const worker = sessions.get(token)!.worker;
+    const stopped = new Promise(resolve => worker.once("exit", resolve));
+    writer.exec("INSERT INTO t VALUES (4)");
+    const before = writer.prepare("PRAGMA wal_checkpoint(PASSIVE)").get()!;
+    assert.ok(Number(before.log) > Number(before.checkpointed));
+    t.mock.timers.tick(page.cursorIdleTimeoutMs!);
+    await stopped;
+    assert.equal(sessions.size, 0);
+    await assert.rejects(inspectSqlite(config, { ...args, cursor: token }, sessions), /Unknown SQLite cursor/);
+    const after = writer.prepare("PRAGMA wal_checkpoint(PASSIVE)").get()!;
+    assert.equal(after.log, after.checkpointed);
+  } finally { writer.close(); }
+});
+
 test("Git committed blob including historical env is exact and raw pack/index reads preserve bytes",async t=>{
   const {dir,config}=await fixture(t);
   const git=(...args:string[])=>execFileSync("git",["-C",dir,...args],{windowsHide:true});

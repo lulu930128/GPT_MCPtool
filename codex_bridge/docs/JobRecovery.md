@@ -14,6 +14,8 @@ jobs/<job_id>/
   conversation.json
   conversation.json.bak
   conversation-events.jsonl
+  conversation-events.jsonl.index   # derived checkpoint seek hint
+  manifest.json.pending             # only while publishing a job event
   inbox/
   diff.patch
   result.json
@@ -47,11 +49,58 @@ When the Bridge starts and finds an active job from an earlier process:
 This avoids duplicate side effects after an uncertain shutdown. It also means restart recovery
 requires a user decision.
 
-Conversation projection recovery is separate from retrying a Codex turn. Startup validates the
-active checkpoint and one bounded backup, repairs only an incomplete final journal tail, and replays
-only contiguous committed revisions. It never resends a user message, command, or approval. Middle
-journal corruption and revision gaps remain visible structured failures and do not authorize an empty
-checkpoint reset.
+Startup indexes job manifests. The first reader of a conversation checks the primary and backup,
+then validates the contiguous journal from a verified checkpoint offset. Legacy journals and changed
+or invalid hints are streamed from their beginning. A partial final record can be repaired by the store
+owner. Middle corruption or a gap is reported for that job. A durable journal commit publishes the
+cursor even when checkpoint promotion fails. The next flush can promote that same revision.
+The index is disposable. History, event sequence numbers and job IDs stay in their original files.
+
+A prepared manifest event binds the target job, original idempotency key, state version, sequence,
+event bytes and file offset. After an interrupted write the same owner can finish an exact matching
+prefix and publish the manifest. A different suffix leaves the job in reconciliation-required state.
+Following a native disconnect or controller restart, a read of the exact original native turn can settle
+its terminal outcome. A missing turn, a still-running detached turn, or an unavailable native process
+leaves the Bridge interruption in place. Expired approvals require a fresh native request.
+
+## Reading pipeline evidence
+
+Use the existing `codex_runtime_status` tool with a configured project. The optional `pipeline` request
+reads saved diagnostic samples through the Bridge. Supply the job and poll IDs to join a specific
+Widget observation. Omit both IDs for process-level records. Each read returns up to 50 records from
+the current retained generations. With an older installed version use its existing operational log.
+
+```json
+{"projectId":"<configured-project-id>","pipeline":{"jobId":"<job-uuid>","pollId":"<poll-uuid>","limit":10}}
+```
+
+The owner writes `diagnostics/runtime.jsonl` and suffixes `.1` through `.3` under the configured
+data directory. On Windows the following local read isolates process evidence without dumping any job
+files. Set `$dataDir` to the configured runtime data directory first.
+
+```powershell
+Get-Content -LiteralPath (Join-Path $dataDir 'diagnostics/runtime.jsonl') -Tail 5 -Encoding utf8 |
+  ForEach-Object { $_ | ConvertFrom-Json } |
+  Select-Object at,event,instance,pid,buildId,monotonicMs,memory,gc,loopP99Ms,workload,groups
+```
+
+Match UTC time and build/instance/PID before comparing counters. Monotonic milliseconds and cumulative GC
+counts are process-local. Heartbeat groups are one-minute windows. Anomaly or exit records can include a
+running window, so adding all records will double count. Stage counts measure receipts at different
+boundaries. Match poll, revision, thread and turn before attributing a lag. The HTTP byte delta measures
+socket traffic during a response, including framing. GPU/render presentation, native service internals and
+the Host's internal queue are outside that timer. Stream bytes are measured at ingress when supplied by
+the transport, otherwise queued text uses a UTF-16 estimate. Projection/index estimates and process RSS
+are distinct from retained heap. A heap snapshot would be required to attribute retained object size.
+
+The Widget includes its previous observation on the next read. Local keys `bridge.poll.last`,
+`bridge.poll.applied`, `bridge.poll.timeout`, `bridge.poll.transport_failed` and `bridge.poll.visibility`
+can distinguish the last successful read, a failed read, and a suspended tab in the same session.
+A fully disconnected or destroyed iframe may leave no server acknowledgment. Storage availability and
+lifetime depend on the Host. The most recent sample per stage/reason/job is retained with aggregate counts.
+Missing samples can reflect rotation, write failures, aggregate replacement, or a missing acknowledgment.
+Read `overwrittenBytes`, `writeFailures`, `droppedGroups`, `evictedPollTraces` and `droppedHttpErrors`
+alongside the samples. On abrupt process death the last window may be incomplete.
 
 ## Recovery workflow
 
@@ -117,3 +166,19 @@ Share only the minimum bounded job metadata needed for diagnosis. Redact project
 messages, source text, diffs, commands, environment data, tokens, tunnel ids, and approval payloads.
 Sanitized error class, job state, build id, and event sequence are usually sufficient for first
 triage.
+
+## Native continuation and downgrade (V2.1 candidate)
+
+A saved goal or queued submission can survive loss of the native writer. With the official 0.172.0 App Server, a new writer successfully resumed a thread and automatically executed the pending work using the new writer's model and effort. A resume can therefore have execution side effects before Bridge verifies the returned settings. Even resuming with the original model used low effort when the new writer omitted the effort. Supplying config.model_reasoning_effort restored high in both native controls. Bridge includes that override on a normal continuation with a selected effort. A pre-read of the goal and queue covers work already visible to Bridge. It cannot fence a concurrent native owner. Bridge omits queue submission and goal activation from its app controls until those turns have enforceable execution settings.
+
+When a reply to thread/start or turn/start is lost, retain the job, thread if known, request phase and original client message ID. Use the owner's reconciliation loop or an exact late RPC reply. If no thread ID was recovered from thread/start, manual reconciliation can remain necessary. A second dispatch under a fresh ID can create a second job. For existing chat messages the retry receipt can show unknown while a local submission is waiting, failed when the original start failed, or duplicate after matching native acceptance.
+
+The V2.1 manifest intent can include message bytes and terminal export effects. Before downgrading, close admission, drain writers and allow the candidate owner to finish outstanding manifest intents. Check durable requests and the exact native thread's queue/goal state separately. The old reader was tested on fully committed synthetic archives. Its recovery code cannot replay the candidate's additional side effects from an unfinished intent. Preserve a recoverable copy if the handoff stops partway. No live store was migrated during candidate verification.
+
+## Continuation after a failed native turn (0.172.0)
+
+The job event `codex.resume.verification` joins the local request, thread and previous native turn with the owner's observations. Read its phase, initial/resume/passive status, latest native turn ID/status, direct-input capability, writer evidence and permission field differences. Each settings stage reports its notification and readback count. An exact initial settings snapshot can authorize a no-op with zero additional settings readbacks. The event omits prompts, native error bodies and sandbox paths.
+
+A loaded thread can remain in `systemError` after a quota failure. Continuation requires the exact previous failed native turn, a writable session for direct input, verified profile/sandbox/reviewer/policy and empty automatic-work checks. When the previous attempt failed before turn/start and the manifest has cleared its turn ID, Bridge uses the committed conversation projection to identify the prior turn. A readback reporting an in-progress turn, changed head, another writer, an unconfirmed status or inconsistent permissions stops the new action. An unloaded thread requires a verified rejoin. An unsubscribe receipt alone does not establish unload.
+
+Use the original request ID to inspect the delivery outcome. `action_not_sent` describes a gate failure before the requested turn, compact or review. `settings_verified` records the gate result. The subsequent native request, exact turn ID and terminal history establish action delivery and completion. During unknown delivery, use V2.1 reconciliation and the original client message ID. Use the installed Workspace owner for maintenance after the active Bridge job has finished.

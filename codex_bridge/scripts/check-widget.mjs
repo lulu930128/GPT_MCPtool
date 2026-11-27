@@ -27,7 +27,7 @@ for (const marker of [
   'data-project-toggle=',
   'class="thread"',
   'function renderMessages()',
-  'function reconcileTimeline(thread, entries)',
+  'function reconcileTimeline(thread, entries,',
   'codex_conversation_send',
   'localThreadId: state.selectedJob.localThreadId',
   '本機歷史 · 可續作',
@@ -279,6 +279,7 @@ const pollEnd = inlineScript.indexOf('        document.addEventListener("visibil
 const pollCalls = [];
 const pollApplied = [];
 const pollContext = {
+  crypto: globalThis.crypto, performance,
   state: {
     selectedJob: { id: "job-a", status: "running", conversation: { revision: 1, turns: [] }, nextConversationRevision: 1, conversationHasMore: true },
     selectedConversation: { conversationId: "thread-a" },

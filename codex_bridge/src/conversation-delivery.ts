@@ -20,6 +20,8 @@ export class RecentConversationChanges {
   private readonly jobs = new Map<string, Array<{ patch: ConversationProjectionPatch; bytes: number }>>();
   private bytes = 0;
 
+  get serializedBytes() { return this.bytes; }
+
   add(jobId: string, patch: ConversationProjectionPatch): void {
     const entries = this.jobs.get(jobId) ?? [];
     this.jobs.delete(jobId);

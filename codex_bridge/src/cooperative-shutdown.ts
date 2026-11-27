@@ -18,7 +18,7 @@ async function drainAndClose(runtime: BridgeRuntime, http: BridgeHttpServerHandl
   if (runtime.store.selfReloadDrain) return "ACTIVE_WORK_PRESENT";
   await runtime.store.beginSelfReload(requestId, new Date(Date.now() + 60_000).toISOString());
   if (!observation.canRelease) throw new Error("COOPERATIVE_SHUTDOWN_UNKNOWN");
-  const jobs = runtime.store.listAll();
+  const counts = runtime.store.jobCounts();
   if (runtime.store.memoryDraining && runtime.maintenanceWork) {
     const work = runtime.maintenanceWork();
     // Reads may still be finishing. Freeze HTTP first, then let accepted tools
@@ -27,8 +27,7 @@ async function drainAndClose(runtime: BridgeRuntime, http: BridgeHttpServerHandl
   }
   if ((!runtime.store.memoryDraining && !http.isIdle())
     || (runtime.maintenanceWork && !maintenanceIdle(runtime.maintenanceWork()))
-    || !["idle", "ready"].includes(runtime.controller.status) || jobs.some(job =>
-    ["queued", "preparing", "running", "awaiting_approval"].includes(job.status) || job.pendingApprovalCount > 0)) {
+    || !["idle", "ready"].includes(runtime.controller.status) || (counts.active > 0 || counts.approvals > 0)) {
     await runtime.store.endSelfReload(requestId, () => observation.canRelease);
     if (!observation.canRelease) throw new Error("COOPERATIVE_SHUTDOWN_UNKNOWN");
     return "ACTIVE_WORK_PRESENT";

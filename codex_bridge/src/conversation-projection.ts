@@ -106,8 +106,25 @@ export function reduceConversationNotification(
   notification: ConversationNotification,
   at = new Date().toISOString(),
 ): ConversationThreadProjection {
-  const next = structuredClone(current);
   const params = notification.params ?? {};
+  const next = { ...current, turns: current.turns.slice() };
+  const targetTurn = notification.method === "turn/started" || notification.method === "turn/completed"
+    ? stringValue((isObject(params.turn) ? params.turn : params).id) ?? stringValue(params.turnId)
+    : stringValue(params.turnId) ?? nestedId(params, "turn");
+  const turnIndex = targetTurn ? current.turns.findIndex(turn => turn.turnId === targetTurn) : -1;
+  if (turnIndex >= 0) {
+    const original = current.turns[turnIndex];
+    if (notification.method === "turn/completed" || notification.method === "turn/started") {
+      next.turns[turnIndex] = structuredClone(original);
+    } else {
+      const items = original.items.slice();
+      const targetItem = notification.method === "turn/diff/updated" ? `diff:${targetTurn}` :
+        stringValue(params.itemId) ?? (notification.method === "bridge/approval" ? `approval:${stringValue(params.approvalId) ?? targetTurn}` : undefined);
+      const index = targetItem ? items.findIndex(item => item.id === targetItem) : -1;
+      if (index >= 0) items[index] = { ...items[index] };
+      next.turns[turnIndex] = { ...original, items };
+    }
+  }
   next.threadId = stringValue(params.threadId) ?? nestedId(params, "thread") ?? next.threadId;
 
   if (notification.method === "thread/status/changed") {
@@ -303,7 +320,7 @@ export function mergeConversationMessages(
   // Once App Server history has synchronized successfully, it is authoritative.
   // Unmatched Bridge records may carry metadata, but must not recreate source-deleted
   // messages or overwrite source text by ordinal position.
-  if (metadataOnly || next.freshness?.synchronized) return applyProjectionLimits(next);
+  if (metadataOnly || next.freshness?.synchronized || next.freshness?.bridgeMessagesMetadataOnly) return applyProjectionLimits(next);
 
   for (const message of messages) {
     if (matchedMessageIds.has(message.id)) continue;
@@ -423,6 +440,18 @@ function normalizeItem(
     base.outputTruncated = (stringValue(raw.aggregatedOutput)?.length ?? 0) > MAX_COMMAND_OUTPUT_CHARS;
     base.exitCode = numberValue(raw.exitCode);
     base.durationMs = numberValue(raw.durationMs);
+  } else if (rawType === "collabAgentToolCall") {
+    base.activityType = rawType;
+    const states = isObject(raw.agentsStates) ? raw.agentsStates : {};
+    if (typeof raw.senderThreadId === "string" && Array.isArray(raw.receiverThreadIds)) {
+      base.agentCall = {tool:stringValue(raw.tool) ?? "unknown", parent:raw.senderThreadId,
+        model:stringValue(raw.model), effort:stringValue(raw.reasoningEffort),
+        children:raw.receiverThreadIds.filter((id):id is string => typeof id === "string").map(threadId => {
+          const state = Object.hasOwn(states,threadId) ? states[threadId] : undefined;
+          return {threadId,status:isObject(state) ? stringValue(state.status) ?? "unknown" : "unknown",
+            message:isObject(state) && typeof state.message === "string" ? bounded(redactString(state.message),MAX_ACTIVITY_TEXT_CHARS) : undefined};
+        })};
+    }
   } else if (rawType === "fileChange") {
     base.changes = normalizeChanges(raw.changes);
   } else if (rawType === "mcpToolCall") {

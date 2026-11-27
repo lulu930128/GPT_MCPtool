@@ -8,15 +8,16 @@ const html = readFileSync(new URL("../../web/codex-console.html", import.meta.ur
 const script = html.match(/<script>([\s\S]*?)<\/script>/)![1]!;
 const terminal = new Set(["completed", "failed", "interrupted", "cancelled", "declined"]);
 function fixture(names: string[], context: Record<string, any> = {}) {
+  if (names.includes("sendMessage")) names = [...names,"sendReceiptId","finishSend"];
   const functions = names.map((name) => {
     const start = script.search(new RegExp(`        (?:async )?function ${name}\\(`));
     assert.ok(start >= 0, name);
     const rest = script.slice(start + 1);
-    const next = rest.search(/\n        (?:(?:async )?function |bridgeReady\.then|\$\()/);
+    const next = rest.search(/\n        (?:(?:async )?function |document\.addEventListener|bridgeReady\.then|\$\()/);
     assert.ok(next >= 0, name);
     return script.slice(start, start + 1 + next);
   }).join("\n");
-  const scope: Record<string, any> = { terminal, URL, ...context };
+  const scope: Record<string, any> = { terminal, URL, pendingSends:new Map(), sha256Text:async (text:string) => text, ...context };
   new Script(functions + "\nglobalThis.api = { " + names.join(",") + " };").runInNewContext(scope);
   return { api: scope.api, scope };
 }
@@ -69,7 +70,9 @@ function modelWidgetFixture() {
 
 test("custom model input survives dynamic options, status refresh, selection reload and effort changes", () => {
   const { api, state, $ } = modelWidgetFixture();
-  assert.equal($("#model").options[1].value, "gpt-6-astra/xhigh");
+  assert.deepEqual($("#model").options.slice(1, 4).map((o: any) => o.value), ["gpt-6.2-astra/high", "gpt-6.2-sol/high", "gpt-6.2-sol/medium"]);
+  assert.equal(api.selectedModelId(), "", "New drafts do not inherit the native default model");
+  assert.ok($("#model").options.slice(1, 4).every((o: any) => o.textContent.includes("NOT VERIFIED")));
   assert.deepEqual($("#effort").options.map((o: any) => o.value), [""]);
   $("#model").selectedIndex = $("#model").options.length - 1;
   api.renderModelOptions();
@@ -90,15 +93,31 @@ test("custom model input survives dynamic options, status refresh, selection rel
   assert.equal(api.isCustomModelSelection(), true);
   assert.equal($("#effort").value, "ultra", "Updated capabilities must not silently replace an explicit effort");
   assert.match($("#effort").innerHTML, /未列於此模型/);
-  $("#model").value = "gpt-6.1-sol/medium"; api.renderModelOptions();
+  $("#model").value = "gpt-6.2-sol/medium"; api.renderModelOptions();
   assert.equal($("#custom-model-field").hidden, true);
-  assert.equal(api.selectedModelId(), "gpt-6.1-sol");
+  assert.equal(api.selectedModelId(), "gpt-6.2-sol");
   state.status.models = []; api.renderModelOptions();
   assert.equal(api.isCustomModelSelection(), false, "Native inventory does not replace the selected fixed pair");
-  assert.equal(api.selectedModelId(), "gpt-6.1-sol");
+  assert.equal(api.selectedModelId(), "gpt-6.2-sol");
   api.renderModelOptions("", "");
   assert.equal(api.isCustomModelSelection(), false);
   assert.equal(api.selectedModelId(), "");
+});
+
+test("retired preset jobs retain their exact model and effort in the widget", () => {
+  const { api, state, $ } = modelWidgetFixture();
+  for (const [model, effort] of [["gpt-6-astra", "xhigh"], ["gpt-6.1-sol", "xhigh"], ["gpt-6.1-sol", "medium"]]) {
+    for (const status of ["completed", "running"]) {
+      const job = { model, effort, status };
+      state.selectedJob = job;
+      api.syncSettingsFromJob(job);
+      api.renderModelOptions();
+      assert.equal(api.isCustomModelSelection(), true);
+      assert.equal(api.selectedModelId(), model);
+      assert.equal($("#effort").value, effort);
+      assert.deepEqual(job, { model, effort, status }, "Reading history never rewrites selection");
+    }
+  }
 });
 
 test("memory maintenance banner disables new/send, retains drafts and exposes failure until verified reopening", async () => {
@@ -227,7 +246,7 @@ test("widget sends manual speed for new turns, resets after success, and omits i
   $("#message").value = "Inspect"; $("#mode").value = "plan"; $("#reviewer").value = "auto_review";
   $("#classification").value = "personal"; $("#speed").value = "fast";
   const state: any = { selectedProjectId: "omi", selectedJob: null, draftArtifacts: [], status: { modelPresets: modelPresetCatalog([]) } };
-  $("#model").value = "gpt-6.1-sol/medium";
+  $("#model").value = "gpt-6.2-sol/medium";
   const calls: any[] = [];
   const { api } = fixture(["sendMessage", "syncSettingsFromJob", "renderComposerState", "startNewConversation", "isCustomModelSelection", "selectedModelId", "selectedModelPreset"], {
     state, $, isOperableProjectId: () => true, stageDraftArtifacts: async () => [], deriveTitle: (s: string) => s,
@@ -683,4 +702,36 @@ test("scroll/reveal is bounded and one-time; reduced motion, keyboard rails and 
   assert.match(html, /scroll-snap-type: x proximity/);
   assert.match(html, /button:focus-visible/);
   assert.doesNotMatch(html, /parallax|scroll-snap-type:\s*[^;]*mandatory/);
+});
+
+test("poll timeout, reconnect, instance reset, suspended page and obsolete selection keep the committed cursor", async () => {
+  const id = crypto.randomUUID(), first = crypto.randomUUID(), second = crypto.randomUUID();
+  const state:any = {selectionGeneration:1,bridgeInstance:first,selectedJob:{id,status:"running",stateVersion:2,
+    conversation:{revision:9},nextConversationRevision:9,nextEventSeq:10}};
+  const calls:any[] = [], saves:any[] = [];
+  let reply:any = async () => { throw new Error("Host timeout"); };
+  const document = {hidden:false};
+  const {api} = fixture(["pollSelectedJob"],{state,crypto,performance,document,
+    schedulePoll(){},readPollEvidence(){return null;},savePollEvidence(s:any){saves.push(s);state.lastPollEvidence=s;},
+    callTool:async (_:string,args:any) => {calls.push(args);return reply();},showError(){},
+    updateFromResponse:(r:any,reset:boolean) => {assert.ok(reset);state.selectedJob={...state.selectedJob,...r.structuredContent};}});
+  await api.pollSelectedJob();
+  assert.equal(saves.at(-1).outcome,"timeout");
+  assert.equal(state.selectedJob.nextConversationRevision,9);
+  reply = async () => ({_meta:{bridgeInstance:second},structuredContent:{id,nextConversationRevision:4}});
+  await api.pollSelectedJob();
+  assert.equal(calls.at(-1).recovery,"snapshot");
+  assert.equal(calls.at(-1).poll.previous.outcome,"timeout");
+  assert.equal(saves.at(-1).outcome,"gap");
+  reply = async () => ({_meta:{bridgeInstance:second},structuredContent:{id,status:"running",messages:[],conversation:{revision:4},nextConversationRevision:4,stateVersion:1}});
+  await api.pollSelectedJob();
+  assert.equal(state.selectedJob.nextConversationRevision,4);
+  assert.equal(saves.at(-1).outcome,"applied");
+  document.hidden=true;
+  await api.pollSelectedJob();
+  assert.equal(calls.length,3);
+  document.hidden=false;
+  reply=async()=>{state.selectionGeneration++;return {};};
+  await api.pollSelectedJob();
+  assert.equal(saves.at(-1).outcome,"obsolete");
 });

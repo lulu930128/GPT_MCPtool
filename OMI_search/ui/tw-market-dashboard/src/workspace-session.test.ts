@@ -44,6 +44,17 @@ test("today empty never borrows yesterday research or MA; previous view is expli
   assert.equal(chartSession(legacy).points.length, 0);
 });
 
+test("a new workspace header excludes a consistent prior response from Today chart and summary", () => {
+  const data = fixtures.today_partial;
+  const activeDate = "2026-11-13";
+  const view = chartSession(data, false, activeDate);
+  assert.equal(view.date, activeDate);
+  assert.equal(view.points.length, 0);
+  assert.equal(view.status, "missing");
+  assert.equal(technicalSummary(pane(data), research("today"), false, activeDate).close, null);
+  assert.ok(chartSession(data, false, data.intraday_chart.trade_date).points.length);
+});
+
 test("partial coverage and calendar-owned nontrading session stay labelled", () => {
   assert.match(chartSession(fixtures.today_partial).coverage, /75\/86/);
   const holiday = structuredClone(fixtures.today_partial);

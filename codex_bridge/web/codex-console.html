@@ -2033,7 +2033,7 @@
                     <option value="fast">Fast · 加速</option>
                   </select></label>
                   <label class="custom-model-field" id="custom-model-field" hidden>Model ID
-                    <input id="custom-model" type="text" maxlength="120" autocomplete="off" spellcheck="false" placeholder="例如 gpt-6.1-sol" aria-describedby="custom-model-note" />
+                    <input id="custom-model" type="text" maxlength="120" autocomplete="off" spellcheck="false" placeholder="例如 gpt-6.2-sol" aria-describedby="custom-model-note" />
                     <small id="custom-model-note">手動指定不代表模型已驗證可用；模型與推理強度由 App Server 最終判定。</small>
                   </label>
                   <small class="custom-model-field" id="model-preset-note" role="status">請依工作範圍選擇固定組合；不會自動選擇模型。</small>
@@ -2055,6 +2055,16 @@
       </aside>
     </div>
 
+    <dialog class="operator-drawer" id="native-thread" aria-labelledby="native-title">
+      <div class="artifact-head"><strong id="native-title">原生對話</strong><button id="native-close" type="button">關閉</button></div>
+      <label for="native-kind">檢視內容</label>
+      <select id="native-kind"><option value="goal">工作目標</option><option value="queue">後續工作佇列</option><option value="search">搜尋對話</option><option value="agents">子代理</option><option value="messages">歷史訊息</option></select>
+      <form id="native-search" hidden><label for="native-term">搜尋文字</label><input id="native-term" required><button type="submit">搜尋</button></form>
+      <p id="native-status" role="status"></p><div id="native-rows"></div>
+      <button type="button" id="native-more" hidden>下一頁</button>
+      <form id="native-goal-form" hidden><label for="native-objective">目標內容</label><textarea id="native-objective" required maxlength="4000"></textarea>
+        <button type="submit">儲存為暫停目標</button><button id="native-clear" type="button">清除目標</button></form>
+    </dialog>
     <dialog class="operator-drawer" id="operator-drawer" aria-labelledby="operator-title">
       <div class="operator-head"><div><strong id="operator-title">Codex 狀態</strong><small id="operator-context"></small></div><div><button id="refresh-operator" type="button">重新讀取</button><button id="close-operator" type="button" aria-label="關閉 Codex 狀態">關閉</button></div></div>
       <p class="operator-note">僅顯示本次讀取的摘要；各資料來源可能個別無法使用。</p>
@@ -2073,6 +2083,7 @@
         <div class="artifact-head">
           <strong id="artifact-title">內容</strong>
           <div class="artifact-actions">
+            <button id="prev-artifact" type="button" hidden>上一頁</button><button id="next-artifact" type="button" hidden>下一頁</button>
             <button id="ask-artifact" type="button">交給 ChatGPT</button>
             <button id="copy-artifact" type="button">複製</button>
             <button id="download-artifact" type="button">下載</button>
@@ -2272,7 +2283,7 @@
           return options && options.envelope ? response : response && response.structuredContent;
         }
 
-        function updateFromResponse(response) {
+        function updateFromResponse(response, authoritative = false) {
           const data = response && response.structuredContent;
           if (!data) return;
           if (data.maintenance) state.maintenance = data.maintenance;
@@ -2286,8 +2297,8 @@
           if (data.job) mergeJob(data.job);
           const registryPayload = Array.isArray(data.conversations);
           if (!registryPayload && Array.isArray(data.diagnostics)) applyConversationDiagnostics(data.diagnostics);
-          if (data.unifiedConversation) selectUnifiedConversation(data.unifiedConversation);
-          if (data.id && data.status && Array.isArray(data.messages)) mergeJob(data);
+          if (data.unifiedConversation) selectUnifiedConversation(data.unifiedConversation, authoritative);
+          if (data.id && data.status && (Array.isArray(data.messages) || (data.sameJobState && state.selectedJob?.id === data.id && state.selectedJob.stateVersion === data.stateVersion))) mergeJob(data, authoritative);
           render();
         }
 
@@ -2340,15 +2351,16 @@
           render();
         }
 
-        function mergeJob(job) {
+        function mergeJob(job, authoritative = false) {
           const changed = !state.selectedJob || state.selectedJob.id !== job.id;
           let merged = job;
-          if (!changed) {
+          if (!changed && !authoritative) {
             const previous = state.selectedJob;
             if (Number(job.nextConversationRevision || 0) < Number(previous.nextConversationRevision || 0)
               || Number(job.stateVersion || 0) < Number(previous.stateVersion || 0)) return;
             merged = Object.assign({}, previous, job);
-            if (!job.conversation && previous.conversation) merged.conversation = cloneValue(previous.conversation);
+            if (!job.conversation && previous.conversation) merged.conversation = (job.conversationChanges || []).length
+                ? { ...previous.conversation, turns:previous.conversation.turns.slice() } : previous.conversation;
             if (!merged.conversation && (job.conversationChanges || []).length) {
               state.recoverSnapshot = true;
               schedulePoll();
@@ -2368,7 +2380,7 @@
           } else if (state.selectedConversation.source === "bridge") {
             state.selectedConversation = Object.assign({}, state.selectedConversation, summaryFromJob(merged));
           } else {
-            state.selectedConversation = Object.assign({}, state.selectedConversation, { bridgeJob: merged });
+            state.selectedConversation = Object.assign({}, state.selectedConversation, { bridgeJob: {id:merged.id, status:merged.status} });
           }
           upsertConversation(state.selectedConversation);
           state.selectedProjectId = merged.projectId;
@@ -2408,7 +2420,7 @@
           state.treeSignature = "";
         }
 
-        function selectUnifiedConversation(conversation) {
+        function selectUnifiedConversation(conversation, authoritative = false) {
           const view = conversation.view;
           const summary = Object.assign({}, conversation);
           delete summary.view;
@@ -2418,7 +2430,7 @@
           upsertConversation(summary);
           if (view) {
             if (view.source === "local") selectNativeConversationView(view);
-            else mergeJob(view);
+            else mergeJob(view, authoritative);
           }
           state.treeSignature = "";
         }
@@ -2438,7 +2450,7 @@
             source: "bridge",
             readOnly: Boolean(job.readOnly),
             historyOnly: Boolean(job.readOnly),
-            bridgeJob: job,
+            bridgeJob: {id:job.id,status:job.status},
             automations: [],
           };
         }
@@ -2474,7 +2486,11 @@
             }
             for (const turnPatch of change.turns || []) {
               let turn = (conversation.turns || []).find((candidate) => candidate.turnId === turnPatch.turnId);
-              if (!turn) {
+              if (turn) {
+                const index = conversation.turns.indexOf(turn);
+                turn = { ...turn, items:turn.items.slice() };
+                conversation.turns[index] = turn;
+              } else {
                 turn = Object.assign({}, turnPatch, { items: [] });
                 conversation.turns = conversation.turns || [];
                 conversation.turns.push(turn);
@@ -2506,7 +2522,7 @@
         function upsertRecentJob(job) {
           if (!state.status) return;
           const jobs = (state.status.recentJobs || []).filter((item) => item.id !== job.id);
-          jobs.unshift(job);
+          jobs.unshift({id:job.id, status:job.status, title:job.title, projectId:job.projectId});
           state.status.recentJobs = jobs;
           state.treeSignature = "";
         }
@@ -2587,7 +2603,7 @@
             ? event.target.closest("[data-approval], [data-result-artifact]")
             : null;
           if (!target || !$("#thread").contains(target)) return;
-          if (target.dataset.approval) decideApproval(target.dataset.approval, target.dataset.decision);
+          if (target.dataset.approval) decideApproval(target.dataset.approval, target.dataset.decision, target.closest(".approval-card"));
           else if (target.dataset.resultArtifact) loadArtifact(target.dataset.resultArtifact);
         });
         $("#refresh-status").addEventListener("click", () => withBusy(refreshStatus));
@@ -2595,6 +2611,14 @@
           state.conversationFilter = event.target.value.trim().toLocaleLowerCase("zh-TW");
           renderProjectTree();
         });
+        $("#native-close").addEventListener("click", () => $("#native-thread").close());
+        $("#native-kind").addEventListener("change", () => { nativePage.childId = null; nativeRead(); });
+        $("#native-search").addEventListener("submit", event => { event.preventDefault(); nativeRead(); });
+        $("#native-more").addEventListener("click", () => nativeRead(nativePage.cursor));
+        $("#native-goal-form").addEventListener("submit", event => {
+          event.preventDefault(); nativeChange({kind:"saveGoal",objective:$("#native-objective").value});
+        });
+        $("#native-clear").addEventListener("click", () => nativeChange({kind:"clearGoal"}));
         $("#close-operator").addEventListener("click", () => $("#operator-drawer").close());
         $("#operator-drawer").addEventListener("close", () => {
           const opener = $("#open-operator");
@@ -2633,6 +2657,8 @@
           withBusy(addDraftArtifact);
         });
         $("#close-artifact").addEventListener("click", closeArtifact);
+        $("#prev-artifact").addEventListener("click", () => loadArtifact(state.openedArtifact.id,Math.max(0,state.openedArtifact.cursor-20000)));
+        $("#next-artifact").addEventListener("click", () => loadArtifact(state.openedArtifact.id,state.openedArtifact.nextCursor));
         $("#copy-artifact").addEventListener("click", () => withBusy(copyOpenedArtifact));
         $("#download-artifact").addEventListener("click", () => withBusy(downloadOpenedArtifact));
         $("#ask-artifact").addEventListener("click", () => withBusy(askChatGptAboutArtifact));
@@ -2660,6 +2686,23 @@
           input.style.height = "auto";
           input.style.height = Math.min(max, Math.max(52, input.scrollHeight)) + "px";
           input.scrollTop = scrollTop;
+        }
+
+        // Keep only an opaque draft fingerprint and request ID if the host loses a reply.
+        const pendingSends = new Map();
+        async function sendReceiptId(args) {
+          const key = "bridge.send." + await sha256Text(JSON.stringify(args));
+          let id = pendingSends.get(key);
+          try { id = id || sessionStorage.getItem(key); } catch {}
+          if (!id) id = makeId();
+          pendingSends.set(key,id);
+          try { sessionStorage.setItem(key,id); } catch {}
+          return {id,key};
+        }
+
+        function finishSend(key) {
+          pendingSends.delete(key);
+          try { sessionStorage.removeItem(key); } catch {}
         }
 
         async function sendMessage() {
@@ -2706,22 +2749,25 @@
               constraints: [],
             }, common);
             const preview = await callTool("codex_job_preview", workPackage);
+            const dispatchId = await sendReceiptId(["dispatch",preview.previewDigest]);
             await callTool("codex_job_dispatch", Object.assign({}, preview.workPackage, {
               modelPreset: common.modelPreset,
               modelSelection: common.modelSelection,
               previewDigest: preview.previewDigest,
-              idempotencyKey: makeId(),
+              idempotencyKey: dispatchId.id,
               companyAuthorizationConfirmed: companyAuthorizationConfirmed,
             }));
+            finishSend(dispatchId.key);
           } else {
             const conversationTarget = state.selectedJob.source === "local"
               ? { localThreadId: state.selectedJob.localThreadId }
               : { jobId: state.selectedJob.id };
-            await callTool("codex_conversation_send", Object.assign({}, common, conversationTarget, {
-              clientMessageId: makeId(),
-              message: message,
-              companyAuthorizationConfirmed: companyAuthorizationConfirmed,
-            }));
+            const args = Object.assign({}, common, conversationTarget, {message,companyAuthorizationConfirmed});
+            const receipt = await sendReceiptId(["message",conversationTarget,message,context,common.inputBundleIds]);
+            const sent = await callTool("codex_conversation_send", {...args,clientMessageId:receipt.id});
+            if (sent && sent.delivery === "unknown") throw new Error("訊息已保存在本機，原生回合仍待確認。草稿與原請求編號已保留。");
+            if (sent && sent.delivery === "failed") throw new Error("原請求未能開啟回合，請查看工作結果。草稿與原請求編號已保留。");
+            finishSend(receipt.key);
           }
           $("#message").value = "";
           $("#context").value = "";
@@ -2796,6 +2842,18 @@
           state.pollTimer = setTimeout(pollSelectedJob, delay);
         }
 
+        function readPollEvidence() {
+          try { return JSON.parse(sessionStorage.getItem("bridge.poll.last") || "null"); } catch { return null; }
+        }
+
+        function savePollEvidence(sample) {
+          state.lastPollEvidence = sample;
+          try {
+            sessionStorage.setItem("bridge.poll.last", JSON.stringify(sample));
+            sessionStorage.setItem("bridge.poll." + sample.outcome, JSON.stringify(sample));
+          } catch { /* Storage can be unavailable in embedded Hosts. */ }
+        }
+
         async function pollSelectedJob() {
           const job = state.selectedJob;
           const catchUp = job && (job.hasMore || job.conversationHasMore);
@@ -2804,6 +2862,12 @@
             return;
           }
           state.pollInFlight = true;
+          const connection = state.pollConnection ||= crypto.randomUUID();
+          const pollId = crypto.randomUUID(), started = performance.now();
+          const previous = state.lastPollEvidence || readPollEvidence();
+          const evidence = (outcome, revision, renderMs = 0, instance = state.bridgeInstance) =>
+            savePollEvidence({id:pollId, connection, jobId:job.id, instance, outcome, revision:Number(revision || 0),
+              elapsedMs:performance.now()-started, renderMs, at:Date.now(), hidden:document.hidden});
           const generation = state.selectionGeneration;
           const policy = job.conversationDelivery || {};
           const recover = state.recoverSnapshot || !job.conversation || (state.catchUpStartedAt > 0 &&
@@ -2811,22 +2875,46 @@
               || state.catchUpPages >= (policy.maxCatchUpPages || 4)));
           try {
             let response;
-            if (!terminal.has(job.status) || catchUp || !state.selectedConversation) {
+            const poll = {id:pollId,connection,...(previous && /^(?:local:)?[0-9a-f-]{36}$/i.test(previous.jobId) ? {previous} : {})};
+            if (!terminal.has(job.status) || job.status === "interrupted" || catchUp || !state.selectedConversation) {
               response = await callTool("codex_job_get", {
                 jobId: job.id,
-                afterSeq: Number(job.nextEventSeq || 0),
+                poll: {...poll, ...(!recover && state.bridgeInstance && job.stateVersion > 0
+                  ? {knownState:{jobId:job.id,instance:state.bridgeInstance,stateVersion:job.stateVersion}} : {})},
+                afterSeq: recover ? 0 : Number(job.nextEventSeq || 0),
                 maxEvents: 20,
                 afterConversationRevision: Number(job.nextConversationRevision || 0),
                 ...(recover ? { recovery: "snapshot" } : {}),
               }, { update: false, envelope: true });
             } else {
               response = await callTool("codex_unified_conversation_get", {
-                conversationId: state.selectedConversation.conversationId,
+                conversationId: state.selectedConversation.conversationId, poll,
+                ...(!recover && state.selectedConversation.viewToken ? {ifView:state.selectedConversation.viewToken} : {}),
               }, { update: false, envelope: true });
             }
-            if (generation !== state.selectionGeneration || !state.selectedJob || state.selectedJob.id !== job.id) return;
+            if (generation !== state.selectionGeneration || !state.selectedJob || state.selectedJob.id !== job.id) {
+              evidence("obsolete",job.nextConversationRevision);
+              return;
+            }
+            const instance = response._meta?.bridgeInstance;
+            const newInstance = Boolean(instance && state.bridgeInstance && instance !== state.bridgeInstance);
+            const data = response.structuredContent;
+            if (data?.id !== job.id && !(data?.unifiedConversation && data.unifiedConversation.conversationId === state.selectedConversation?.conversationId)) {
+              throw new Error("對話回應識別不符");
+            }
+            if (newInstance && !data?.conversation && !data?.unifiedConversation?.view) {
+              state.recoverSnapshot = true;
+              evidence("gap",job.nextConversationRevision,0,instance);
+              return;
+            }
             state.recoverSnapshot = false;
-            updateFromResponse(response);
+            state.bridgeInstance = instance || state.bridgeInstance;
+            const applyAt = performance.now();
+            updateFromResponse(response, newInstance);
+            const obsolete = data?.id && (data.nextConversationRevision < state.selectedJob.nextConversationRevision ||
+              data.stateVersion < state.selectedJob.stateVersion);
+            evidence(state.recoverSnapshot ? "gap" : obsolete ? "obsolete" : "applied",
+              state.selectedJob.nextConversationRevision, performance.now()-applyAt);
             if (state.selectedJob.conversationHasMore) {
               if (!state.catchUpStartedAt) state.catchUpStartedAt = Date.now();
               state.catchUpPages += 1;
@@ -2836,6 +2924,7 @@
             }
           } catch (error) {
             if (generation !== state.selectionGeneration) return;
+            evidence(/timed? ?out|timeout|逾時/i.test(String(error)) ? "timeout" : "transport_failed", job.nextConversationRevision);
             state.recoverSnapshot = true;
             showError(error && error.message || String(error));
           } finally {
@@ -2845,6 +2934,12 @@
         }
 
         document.addEventListener("visibilitychange", () => {
+          const last = state.lastPollEvidence;
+          if (last) {
+            const visible = {...last, outcome:document.hidden ? "hidden" : "resumed", hidden:document.hidden, at:Date.now()};
+            try { sessionStorage.setItem("bridge.poll.visibility", JSON.stringify(visible)); } catch {}
+            if (last.outcome === "applied") state.lastPollEvidence = visible;
+          }
           if (!document.hidden) {
             state.recoverSnapshot = true;
             void requestConversationRegistryRefresh().catch(() => undefined);
@@ -3060,6 +3155,89 @@
                 schedulePoll();
               }
             }
+          });
+        }
+
+        let nativePage = {cursor:null, generation:0, identity:"", editable:false};
+        const nativeRequests = new Map();
+
+        function openNativeThread() {
+          const job = state.selectedJob;
+          if (!job || !job.threadId) return;
+          nativePage = {cursor:null,generation:nativePage.generation+1,identity:actionIdentity(job),editable:false};
+          $("#native-kind").value = "goal";
+          $("#native-term").value = "";
+          $("#native-objective").value = "";
+          $("#native-thread").showModal();
+          nativeRead();
+        }
+
+        async function nativeRead(cursor) {
+          const job = state.selectedJob;
+          const kind = $("#native-kind").value;
+          const stamp = ++nativePage.generation;
+          const current = () => stamp === nativePage.generation && nativePage.identity === actionIdentity(state.selectedJob) && $("#native-thread").open;
+          if (!current()) return;
+          const rows = $("#native-rows");
+          rows.replaceChildren();
+          $("#native-more").hidden = true;
+          $("#native-search").hidden = kind !== "search";
+          $("#native-goal-form").hidden = true;
+          $("#native-status").textContent = "";
+          const searchTerm = $("#native-term").value.trim();
+          if (kind === "search" && !searchTerm) return;
+          try {
+            const read = await callTool("codex_thread_inspect",{jobId:job.id,threadId:job.threadId,kind,
+              ...(cursor ? {cursor} : {}), ...(nativePage.childId ? {childId:nativePage.childId} : {}), ...(kind === "search" ? {searchTerm} : {})},{update:false});
+            if (!current()) return;
+            if (!read || read.status !== "available") throw new Error("此功能目前無法讀取 · " + (read && read.code || "UNKNOWN"));
+            nativePage.editable = job.directActionHistoryEligible === true && !job.readOnly && !job.nativeRequest && job.turnId;
+            if (kind === "goal") {
+              const goal = read.data.goal;
+              $("#native-status").textContent = goal ? goal.status + " · " + goal.objective : "目前沒有目標";
+              $("#native-objective").value = goal ? goal.objective : "";
+              $("#native-goal-form").hidden = !nativePage.editable;
+              $("#native-clear").hidden = !goal;
+              return;
+            }
+            const list = read.data.data;
+            nativePage.cursor = read.data.nextCursor;
+            $("#native-more").hidden = !nativePage.cursor;
+            $("#native-status").textContent = (kind === "search" && read.source === "legacy_history" ? "已保存的舊版對話 · " : "") +
+              (list.length ? "本頁 " + list.length + " 筆" : "沒有符合的項目");
+            list.forEach(item => {
+              const row = document.createElement("div");
+              const text = document.createElement("p");
+              text.textContent = kind === "agents" ? [item.agentNickname || item.id,item.agentRole,item.status.type,item.model,item.reasoningEffort].filter(Boolean).join(" · ")
+                : kind === "queue" ? item.text : item.snippet;
+              if (kind === "agents") {
+                const open = document.createElement("button"); open.type = "button"; open.textContent = "查看子代理訊息";
+                open.addEventListener("click", () => { nativePage.childId = item.id; $("#native-kind").value = "messages"; nativeRead(); });
+                row.appendChild(open);
+              }
+              row.appendChild(text);
+              if (kind === "queue" && nativePage.editable) {
+                const remove = document.createElement("button"); remove.type = "button"; remove.textContent = "移出佇列";
+                remove.addEventListener("click", () => nativeChange({kind:"deleteQueued",id:item.id}));
+                row.appendChild(remove);
+              }
+              rows.appendChild(row);
+            });
+          } catch (error) { if (current()) $("#native-status").textContent = error.message; }
+        }
+
+        function nativeChange(operation) {
+          const job = state.selectedJob;
+          if (!nativePage.editable || actionIdentity(job) !== nativePage.identity) return;
+          const key = JSON.stringify([nativePage.identity,operation]);
+          const requestId = nativeRequests.get(key) || makeId();
+          nativeRequests.set(key,requestId);
+          return withBusy(async () => {
+            const receipt = await callTool("codex_thread_manage",{jobId:job.id,threadId:job.threadId,expectedTurnId:job.turnId,requestId,operation},{update:false});
+            if (receipt && (receipt.accepted || receipt.delivery === "duplicate")) {
+              nativeRequests.delete(key);
+              await nativeRead();
+            } else if (nativePage.identity === actionIdentity(job)) $("#native-status").textContent = "原生操作結果待確認。";
           });
         }
 
@@ -3489,8 +3667,14 @@
         function renderHeader() {
           const job = state.selectedJob;
           const project = currentProject();
+          const delivery = job?.conversationDelivery;
+          const syncLabel = delivery?.flushFailed ? "儲存失敗" : delivery?.pending ? "等待寫入" :
+            delivery?.lag ? "正在同步" : job?.status === "running" && job.conversation?.status === "idle" ? "原生對話閒置" :
+            job?.status === "running" && job.conversation?.turns.at(-1)?.items.at(-1)?.type === "reasoningSummary" &&
+              job.conversation.turns.at(-1).items.at(-1).isStreaming ? "原生推理進行中" :
+            job?.status === "running" ? "等待新的通知" : "";
           const signature = JSON.stringify(job
-            ? [job.id, job.title, job.status, job.hasDiff, job.hasResult, (job.artifacts || []).map((item) => [item.id, item.sha256]), state.cancelArmedUntil > Date.now(), state.displayMode,
+            ? [job.id, job.title, job.status, syncLabel, job.resultScope, job.hasDiff, job.hasResult, (job.artifacts || []).map((item) => [item.id, item.sha256]), state.cancelArmedUntil > Date.now(), state.displayMode,
               job.executionMode, job.approvalReviewer, job.model, job.effort, job.speed, job.selectionRecorded, job.modelSource, job.effortSource, job.conversation && [job.conversation.tokenUsage, job.conversation.modelRouting], directActionEligible(job), state.status && state.status.controller]
             : ["new", state.selectedProjectId, state.displayMode]);
           if (signature === state.headerSignature) { syncWorkspacePanels(); return; }
@@ -3499,9 +3683,10 @@
           $("#chat-subtitle").textContent = job
             ? (project && project.name || job.projectName) + (job.source === "local"
               ? (job.readOnly ? " · 本機歷史 · 受保護" : " · 本機歷史 · 可續作") + " · " + statusLabel(job.status)
-              : " · " + statusLabel(job.status))
+              : " · " + statusLabel(job.status) + (syncLabel ? " · " + syncLabel : "") + (job.resultScope === "previous_turn" ? " · 上回合已有結果" : ""))
             : (project ? project.name + " · 新對話" : "選擇專案後開始");
           const active = job && !terminal.has(job.status);
+          if ($("#native-thread").open && nativePage.identity !== actionIdentity(job)) $("#native-thread").close();
           $("#thread-controls").innerHTML = renderThreadControls(job);
           const actions = [];
           actions.push('<button class="head-button" id="open-conversations" type="button" aria-controls="conversation-panel" aria-expanded="false" title="收合或展開對話清單">對話</button>');
@@ -3524,10 +3709,13 @@
               '<button type="button" data-artifact="request">查看工作包</button>' +
               '<button type="button" data-artifact="response" ' + (job.artifacts && job.artifacts.some((item) => item.id === "response") ? "" : "disabled") + '>查看回覆</button>' +
               '<button type="button" data-artifact="diff" ' + (job.hasDiff ? "" : "disabled") + '>查看 Diff</button>' +
+              (job.threadId ? '<button type="button" id="open-native-thread">目標、佇列與對話搜尋</button>' : "") +
               (directActionEligible(job) ? '<button type="button" data-thread-action="review">審查未提交變更</button><button type="button" data-thread-action="compact">壓縮對話</button>' : "") +
               '</div></details>');
           }
           $("#chat-actions").innerHTML = actions.join("");
+          const nativeToggle = $("#open-native-thread");
+          if (nativeToggle) nativeToggle.addEventListener("click", openNativeThread);
           const displayToggle = $("#toggle-display");
           if (displayToggle) displayToggle.addEventListener("click", toggleDisplayMode);
           const openConversations = $("#open-conversations");
@@ -3564,6 +3752,11 @@
               '</strong><span>輸入任務、問題或要續作的背景；選項都在輸入框下方。</span></div></div>';
             return;
           }
+          const renderKey = JSON.stringify([job.id, job.stateVersion, job.status, job.turnId, state.displayMode,
+            (job.approvals || []).map(a => [a.id,a.state]), job.nextConversationRevision]);
+          if (job.conversation && state.timelineProjection === job.conversation && state.timelineRenderKey === renderKey) return;
+          state.timelineProjection = job.conversation;
+          state.timelineRenderKey = renderKey;
           const transcript = $("#transcript");
           const nearBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 120;
           const entries = conversationEntries(job);
@@ -3594,13 +3787,13 @@
           updateNewContentButton();
         }
 
-        function reconcileTimeline(thread, entries) {
+        function reconcileTimeline(thread, entries, signatures = state.timelineSignatures, create = timelineElement) {
           const existing = Array.from(thread.children);
           const keyedNodes = new Map();
           for (const node of existing) {
             const key = node.dataset.timelineKey;
             if (!key || keyedNodes.has(key)) {
-              thread.replaceChildren(...entries.map((entry) => timelineElement(entry)));
+              thread.replaceChildren(...entries.map((entry) => create(entry)));
               return true;
             }
             keyedNodes.set(key, node);
@@ -3611,11 +3804,11 @@
           for (const entry of entries) {
             let node = keyedNodes.get(entry.key);
             if (!node) {
-              node = timelineElement(entry);
+              node = create(entry);
               changed = true;
-            } else if (state.timelineSignatures.get(entry.key) !== entry.signature) {
+            } else if (signatures.get(entry.key) !== entry.signature) {
               const wasAtPosition = node === position;
-              const replacement = timelineElement(entry);
+              const replacement = create(entry);
               if (node.tagName === "DETAILS" && replacement.tagName === "DETAILS") replacement.open = node.open;
               node.replaceWith(replacement);
               node = replacement;
@@ -3666,8 +3859,8 @@
               const approval = item.approvalId && approvalsById.get(item.approvalId);
               if (approval) renderedApprovals.add(approval.id);
               const key = "item:" + turn.turnId + ":" + item.id;
-              const signature = JSON.stringify([item, presentation.get(item.id), approval && [approval.id, approval.state, approval.summary]]);
-              entries.push({ key: key, signature: signature, html: renderConversationItem(item, approval, key, presentation.get(item.id)) });
+              const signature = presentation.has(item.id) || approval ? JSON.stringify([item,presentation.get(item.id),approval]) : item;
+              entries.push({ key: key, signature, get html() { return renderConversationItem(item, approval, key, presentation.get(item.id)); } });
             });
           });
           approvals.filter((approval) => !renderedApprovals.has(approval.id)).forEach((approval) => {
@@ -3696,7 +3889,7 @@
           const narrative = lastNarrativeTurn ? (lastNarrativeTurn.items || []).filter(isNarrative).map((item) => ({ turn: lastNarrativeTurn, item: item })) : [];
           const entries = narrative.map(({ turn, item }) => {
             const key = "dock:" + turn.turnId + ":" + item.id;
-            return { key: key, signature: JSON.stringify(item), html: renderProjectedMessage(item, key) };
+            return { key: key, signature:item, get html() { return renderProjectedMessage(item,key); } };
           });
           approvals.forEach((approval) => {
             const key = "dock-approval:" + approval.id;
@@ -3716,7 +3909,7 @@
             turn.turnId === job.turnId && !isFailedActivity(item) && (item.isStreaming || item.status === "inProgress" || item.status === "pending"));
           if (latestWork) {
             const key = "dock-work:" + latestWork.turn.turnId + ":" + latestWork.item.id;
-            entries.push({ key: key, signature: JSON.stringify(latestWork.item), html: renderDockWork(latestWork.item, key) });
+            entries.push({ key: key, signature:latestWork.item, get html() { return renderDockWork(latestWork.item,key); } });
           } else if (!terminal.has(job.status) && !warnings.length) {
             const key = "dock-active";
             const item = { type: "activity", status: "inProgress", progress: "Codex 正在處理" };
@@ -3746,6 +3939,8 @@
           if (state.displayMode !== "fullscreen") {
             workstream.innerHTML = "";
             summary.textContent = "";
+            state.workstreamRows = undefined;
+            state.workstreamProjection = undefined;
             state.workstreamSignature = "inline";
             return;
           }
@@ -3753,6 +3948,8 @@
           if (!job) {
             const signature = "empty:" + state.selectedProjectId;
             if (state.workstreamSignature === signature) return;
+            state.workstreamRows = undefined;
+            state.workstreamProjection = undefined;
             state.workstreamSignature = signature;
             summary.textContent = "選擇對話後顯示命令、檔案與成品";
             workstream.innerHTML = '<div class="empty-project">尚無工作紀錄</div>';
@@ -3764,20 +3961,38 @@
           const signature = JSON.stringify([
             job.id,
             job.status, job.turnId,
-            turns,
+            job.conversation ? job.conversation.revision : job.stateVersion,
             artifacts.map((artifact) => [artifact.id, artifact.sha256]),
           ]);
-          if (state.workstreamSignature === signature) return;
+          if (state.workstreamSignature === signature && state.workstreamProjection === job.conversation) return;
+          state.workstreamProjection = job.conversation;
           state.workstreamSignature = signature;
           summary.textContent = turns.length + " 個回合 · " + artifacts.length + " 份成品";
-          const itemHtml = turns.map((turn, index) => renderTurnWorkstream(turn, index, job, turns)).join("");
-          const artifactHtml = renderArtifactResults(artifacts);
-          const opened = new Set(Array.from(workstream.querySelectorAll("details[open][data-timeline-key]"), (node) => node.dataset.timelineKey));
-          workstream.innerHTML = itemHtml + artifactHtml || '<div class="empty-project">這個對話還沒有工作紀錄</div>';
-          workstream.querySelectorAll("details[data-timeline-key]").forEach((node) => { if (opened.has(node.dataset.timelineKey)) node.open = true; });
-          workstream.querySelectorAll("[data-result-artifact]").forEach((button) => button.addEventListener("click", () => {
-            loadArtifact(button.dataset.resultArtifact);
-          }));
+          const currentTurn = turns.find(turn => turn.turnId === job.turnId) || turns.at(-1);
+          const old = state.workstreamRows || new Map();
+          const rows = turns.map((turn,index) => {
+            const key = "work:" + turn.turnId;
+            const context = [index,turn === currentTurn,job.status].join("|");
+            const previous = old.get(key);
+            const signature = previous?.turn === turn && previous.context === context ? previous.signature : {};
+            return {key,turn,context,signature,get html() {return renderTurnWorkstream(turn,index,job,turns);}};
+          });
+          if (artifacts.length) rows.push({key:"artifacts",signature:JSON.stringify(artifacts),get html() {return renderArtifactResults(artifacts);}});
+          if (!rows.length) rows.push({key:"empty",signature:"empty",html:'<div class="empty-project">這個對話還沒有工作紀錄</div>'});
+          const opened = new Set(Array.from(workstream.querySelectorAll("details[open][data-timeline-key]"), node => node.dataset.timelineKey));
+          reconcileTimeline(workstream,rows,new Map(Array.from(old, ([key,row])=>[key,row.signature])),row => {
+            const node = htmlElement(row.html);
+            node.dataset.timelineKey = row.key;
+            node.querySelectorAll("details[data-timeline-key]").forEach(detail => {if (opened.has(detail.dataset.timelineKey)) detail.open = true;});
+            return node;
+          });
+          // Keep only identity and presentation context. Render closures capture the
+          // current job and must never retain previous complete conversations.
+          state.workstreamRows = new Map(rows.map(row=>[row.key,{turn:row.turn,context:row.context,signature:row.signature}]));
+          workstream.onclick = event => {
+            const button = event.target.closest("[data-result-artifact]");
+            if (button) loadArtifact(button.dataset.resultArtifact);
+          };
         }
 
         function legacyConversation(messages) {
@@ -3988,10 +4203,13 @@
           if (item.type === "diff") return "工作區 Diff 更新";
           if (item.type === "error") return "Codex 錯誤";
           if (item.type === "approval") return "操作核准";
+          if (item.agentCall) return "子代理 · " + item.agentCall.tool;
           return item.activityType || "Codex activity";
         }
 
         function activitySubtitle(item) {
+          if (item.agentCall) return [item.agentCall.model, item.agentCall.effort, ...item.agentCall.children.map(
+            child => child.threadId + " · " + projectionStatusLabel(child.status) + (child.message ? " · " + child.message : ""))].filter(Boolean).join(" / ");
           if (item.type === "commandExecution") return [item.cwd, formatDuration(item.durationMs), item.exitCode !== undefined ? "exit " + item.exitCode : ""].filter(Boolean).join(" · ");
           if (item.type === "fileChange") return (item.changes || []).map((change) => change.path).join(" · ") || "檔案路徑未公開";
           if (item.type === "mcpToolCall") return [item.progress, formatDuration(item.durationMs)].filter(Boolean).join(" · ");
@@ -4041,6 +4259,17 @@
         }
 
         function renderApproval(approval, timelineKey) {
+          if (approval.kind === "user_input" || approval.kind === "elicitation") {
+            const questions = approval.summary && approval.summary.questions;
+            if (!Array.isArray(questions)) return "";
+            return '<article class="approval-card"' + (timelineKey ? ' data-timeline-key="' + escapeAttr(timelineKey) + '"' : '') +
+              '><strong>Codex 等待你的回答</strong>' + questions.map(q => '<label>' + escapeHtml(q.prompt) +
+              '<select data-native-answer><option value="">請選擇</option>' + q.labels.map((label,i) =>
+                '<option value="' + i + '">' + escapeHtml(label) + '</option>').join("") + '</select></label>').join("") +
+              '<div class="approval-actions"><button type="button" data-approval="' + escapeAttr(approval.id) +
+              '" data-decision="decline">略過</button><button type="button" data-approval="' + escapeAttr(approval.id) +
+              '" data-decision="accept">送出回答</button></div></article>';
+          }
           const title = approval.kind === "command" ? "Codex 要求執行命令" : "Codex 要求套用檔案變更";
           return '<article class="approval-card"' + (timelineKey ? ' data-timeline-key="' + escapeAttr(timelineKey) + '"' : "") + '><div class="approval-top"><div class="approval-title">' +
             escapeHtml(title) + '</div><span class="chat-subtitle">只核准這一次</span></div>' +
@@ -4331,9 +4560,12 @@
           requestAnimationFrame(resizeComposerInput);
         }
 
-        function decideApproval(approvalId, decision) {
+        function decideApproval(approvalId, decision, card) {
           withBusy(async () => {
+            const fields = decision === "accept" && card ? Array.from(card.querySelectorAll("[data-native-answer]")) : [];
+            if (fields.some(field => field.value === "")) throw new Error("請先回答每個問題。");
             await callTool("codex_approval_decide", {
+              ...(fields.length ? {selections:fields.map(field => Number(field.value))} : {}),
               jobId: state.selectedJob.id,
               approvalId: approvalId,
               decision: decision,
@@ -4362,35 +4594,43 @@
           });
         }
 
-        function loadArtifact(artifact) {
-          withBusy(async () => {
-            let cursor = 0;
-            let content = "";
-            let metadata = null;
-            do {
-              const response = await callTool("codex_artifact_read_chunk", {
-                jobId: state.selectedJob.id,
-                artifact: artifact,
-                cursor: cursor,
-                maxChars: 20000,
-              }, { update: false, envelope: true });
-              metadata = response && response.structuredContent && response.structuredContent.artifact;
-              const chunk = response && response._meta && response._meta.artifactContent;
-              if (!metadata || typeof chunk !== "string") throw new Error("Host 沒有回傳可供 Widget 讀取的成品內容。");
-              content += chunk;
-              cursor = metadata.nextCursor;
-            } while (cursor !== undefined && cursor !== null);
-            state.openedArtifact = {
-              id: artifact,
-              jobId: state.selectedJob.id,
-              name: metadata.name,
-              mimeType: metadata.mimeType,
-              content: content,
-            };
-            $("#artifact-title").textContent = artifactLabel(artifact) + " · " + metadata.name;
-            $("#artifact-content").textContent = content;
+        async function readArtifactPage(opened, cursor) {
+          const response = await callTool("codex_artifact_read_chunk", {
+            jobId:opened.jobId, artifact:opened.id, cursor, maxChars:20000,
+          }, {update:false,envelope:true});
+          const metadata = response && response.structuredContent && response.structuredContent.artifact;
+          const content = response && response._meta && response._meta.artifactContent;
+          if (!metadata || typeof content !== "string" || (opened.sha256 && opened.sha256 !== metadata.sha256) ||
+            (metadata.nextCursor != null && metadata.nextCursor <= cursor)) throw new Error("成品已變更或分頁無法確認，請重新開啟。");
+          return {...metadata,content};
+        }
+
+        function loadArtifact(artifact, cursor = 0) {
+          return withBusy(async () => {
+            const selected = state.selectedJob;
+            const generation = state.selectionGeneration;
+            const opened = cursor && state.openedArtifact || {id:artifact,jobId:selected.id};
+            const page = await readArtifactPage(opened,cursor);
+            if (state.selectionGeneration !== generation || state.selectedJob.id !== opened.jobId) return;
+            state.openedArtifact = {...opened,...page,id:artifact,cursor};
+            $("#artifact-title").textContent = artifactLabel(artifact) + " · " + page.name;
+            $("#artifact-content").textContent = page.content;
+            $("#prev-artifact").hidden = !cursor;
+            $("#next-artifact").hidden = page.nextCursor == null;
             $("#artifact").hidden = false;
           });
+        }
+
+        async function fullArtifactText(opened) {
+          if (!opened.cursor && opened.nextCursor == null) return opened.content;
+          const parts = [];
+          let cursor = 0;
+          do {
+            const page = await readArtifactPage(opened,cursor);
+            parts.push(page.content);
+            cursor = page.nextCursor;
+          } while (cursor != null);
+          return parts.join("");
         }
 
         function closeArtifact() {
@@ -4402,7 +4642,7 @@
         async function copyOpenedArtifact() {
           const opened = state.openedArtifact;
           if (!opened) throw new Error("目前沒有開啟的成品。");
-          await copyText(opened.content);
+          await copyText(await fullArtifactText(opened));
           showNotice("已複製 " + opened.name + "。你可以直接貼回公司端的工程稿或 ChatGPT 對話。");
         }
 
@@ -4416,14 +4656,14 @@
                 resource: {
                   uri: "ui://codex-bridge/artifacts/" + encodeURIComponent(opened.jobId) + "/" + encodeURIComponent(opened.id),
                   mimeType: opened.mimeType,
-                  text: opened.content,
+                  text: await fullArtifactText(opened),
                 },
               }],
             });
             showNotice("已交給 ChatGPT 下載 " + opened.name + "。");
             return;
           }
-          await copyText(opened.content);
+          await copyText(await fullArtifactText(opened));
           showNotice("這個 ChatGPT host 尚未提供下載能力，內容已改為複製到剪貼簿。");
         }
 

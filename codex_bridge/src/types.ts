@@ -166,6 +166,7 @@ export interface ConversationItemProjection extends ModelSelectionMetadata {
   progress?: string;
   error?: string;
   activityType?: string;
+  agentCall?: {tool:string; parent:string; model?:string; effort?:string; children:Array<{threadId:string;status:string;message?:string}>};
   approvalId?: string;
   approvalState?: ApprovalState;
   lastDelta?: string;
@@ -208,6 +209,8 @@ export interface ConversationThreadProjection {
 export interface ConversationFreshness {
   historyMode: "legacy" | "paginated";
   synchronized: boolean;
+  scope?: "current_turn";
+  bridgeMessagesMetadataOnly?: boolean;
   sourceAvailability: "available" | "unavailable";
   lastMetadataCheckedAt: string;
   lastHydratedAt?: string;
@@ -285,10 +288,12 @@ export interface JobResult {
 }
 
 export interface JobRecord extends ModelSelectionMetadata {
+  restartInterruptedTurnId?: string;
+  nativeRequest?: NativeRequest;
   speed?: TurnSpeed;
   controlAction?: { kind: "compact" | "review"; priorTurnId: string };
   dispatchSource?: "app" | "model_direct";
-  directRequests?: Record<string, { digest: string; state: "pending" | "completed" | "unknown"; inputVersion?: 2 }>;
+  directRequests?: Record<string, { digest: string; state: "pending" | "completed" | "unknown"; inputVersion?: 2 | 3 | 3 }>;
   schemaVersion: 1;
   id: string;
   idempotencyKey: string;
@@ -312,7 +317,15 @@ export interface JobRecord extends ModelSelectionMetadata {
   result?: JobResult;
 }
 
+export interface NativeRequest {
+  method: "thread/start" | "turn/start";
+  clientMessageId: string;
+  state: "requested" | "unknown";
+}
+
 export interface JobSummary extends ModelSelectionMetadata {
+  nativeRequest?: NativeRequest;
+  resultScope?: "current_turn" | "previous_turn" | "unknown_turn";
   speed?: TurnSpeed;
   id: string;
   projectId: string;

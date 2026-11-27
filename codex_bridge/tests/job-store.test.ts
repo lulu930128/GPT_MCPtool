@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { appendFile, mkdtemp, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { RuntimeDiagnostics } from "../src/runtime-diagnostics.js";
 import { ConversationPersistenceError, JobStore } from "../src/job-store.js";
 import { previewWorkPackage } from "../src/work-package.js";
 
@@ -757,3 +758,166 @@ async function appendAgentDelta(store: JobStore, jobId: string, delta: string): 
 function nonEmptyLines(content: string): string[] {
   return content.split(/\r?\n/).filter(Boolean);
 }
+
+test("checkpoint index skips validated history and falls back after a damaged hint",async t => {
+  const root = await mkdtemp(join(tmpdir(),"bridge-index-fixture-"));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  const {store,jobId} = await createConversationFixture(root,"index");
+  await appendAgentDelta(store,jobId,"one");
+  await appendAgentDelta(store,jobId,"two");
+  const logger = new RuntimeDiagnostics({dataDir:root,projectRoot:root,buildId:"fixture"});
+  t.after(()=>logger.dispose());
+  const reopen = async () => {
+    const next = new JobStore(root,undefined,undefined,logger);
+    await next.initialize();
+    assert.equal(next.workload().projectionCount,0);
+    const view = await next.snapshot(jobId);
+    assert.equal(view.conversation?.revision,2);
+    assert.equal(view.conversation?.turns[0].items[0].text,"onetwo");
+    logger.record("heartbeat");
+    return JSON.parse((await readFile(logger.path,"utf8")).trim().split("\n").at(-1)!);
+  };
+  assert.ok((await reopen()).groups.some((g:{reason:string})=>g.reason === "verified_offset"));
+  await writeFile(join(root,jobId,"conversation-events.jsonl.index"),"{");
+  assert.ok((await reopen()).groups.some((g:{reason:string})=>g.reason === "full_validation"));
+});
+
+test("older client ids and company classifications survive a cold message tail",async t => {
+  const root = await mkdtemp(join(tmpdir(),"bridge-message-index-"));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  const {store,jobId} = await createConversationFixture(root,"messages");
+  const path = join(root,jobId,"messages.jsonl");
+  const initial = JSON.parse(await readFile(path,"utf8"));
+  const older = {...initial, id:"old", clientMessageId:"old-message",content:"舊內容",context:"old",dataClassification:"company_approved"};
+  await appendFile(path,[older,...Array.from({length:220},(_,i)=>({...initial,id:String(i),clientMessageId:"s-"+i}))].map(v=>JSON.stringify(v)).join("\n")+"\n");
+  const next = new JobStore(root);
+  await next.initialize();
+  const view = await next.snapshot(jobId);
+  assert.equal(view.messages.length,200);
+  assert.equal(view.directActionHistoryEligible,false);
+  assert.equal(await next.isUserMessageRetry(jobId,older),true);
+  await assert.rejects(next.isUserMessageRetry(jobId,{...older,content:"conflict"}),/different content/);
+  assert.ok(store.get(jobId));
+});
+
+test("a cold event cursor can seek backward across UTF8 and very long rows",async t => {
+  const root = await mkdtemp(join(tmpdir(),"bridge-event-seek-"));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  const {jobId} = await createConversationFixture(root,"events");
+  const manifest = join(root,jobId,"manifest.json");
+  const record = JSON.parse(await readFile(manifest,"utf8"));
+  const total = 1800;
+  await writeFile(manifest,JSON.stringify({...record,lastEventSeq:total,status:"completed"}));
+  await writeFile(join(root,jobId,"events.jsonl"),Array.from({length:total},(_,i)=>JSON.stringify({
+    seq:i+1, type:"test", at:record.createdAt,message:"例".repeat(i===899 ? 70000 : 200),
+  })).join("\r\n")+"\r\n");
+  const next = new JobStore(root);
+  await next.initialize();
+  for (const cursor of [1750,888,899,900,5,1799]) {
+    const view = await next.snapshot(jobId,cursor,2,0);
+    assert.deepEqual(view.events.map(e=>e.seq),cursor===1799 ? [1800] : [cursor+1,cursor+2]);
+  }
+});
+
+test("cold archives evict projections while preserving every manifest and committed cursor",async t => {
+  const root = await mkdtemp(join(tmpdir(),"bridge-cold-archives-"));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  const {jobId} = await createConversationFixture(root,"seed");
+  const manifest = JSON.parse(await readFile(join(root,jobId,"manifest.json"),"utf8"));
+  const ids = [];
+  for (let i=0;i<9;i++) {
+    const id = randomUUID(), dir = join(root,id);
+    ids.push(id);
+    await mkdir(dir);
+    await writeFile(join(dir,"manifest.json"),JSON.stringify({...manifest,id,idempotencyKey:id,threadId:id,status:"completed"}));
+    const turns = [{turnId:"archived",status:"completed",items:Array.from({length:42},(_,n)=>({
+      id:String(n),turnId:"archived",type:"agentMessage",status:"completed",isStreaming:false,text:"x".repeat(100000),
+    }))}];
+    const checkpoint = JSON.stringify({schemaVersion:1,threadId:id,status:"idle",revision:17000,turns});
+    await writeFile(join(dir,"conversation.json"),checkpoint);
+    await writeFile(join(dir,"conversation.json.bak"),checkpoint);
+    await writeFile(join(dir,"messages.jsonl"),"");
+    await writeFile(join(dir,"events.jsonl"),await readFile(join(root,jobId,"events.jsonl")));
+  }
+  const store = new JobStore(root);
+  await store.initialize();
+  assert.equal(store.workload().projectionCount,0);
+  for (const id of ids) assert.equal((await store.snapshot(id,1,1,17000)).nextConversationRevision,17000);
+  assert.ok(store.workload().projectionCount < ids.length);
+  const view = await store.snapshot(ids[0]);
+  assert.equal(view.threadId,ids[0]);
+  assert.equal(view.conversation?.turns[0].items.length,42);
+  assert.equal(view.nextConversationRevision,17000);
+  assert.equal(store.jobCounts().total,10);
+});
+
+
+test("restart completes only the exact prepared manifest and torn event, once", async t => {
+  const root = await mkdtemp(join(tmpdir(),"bridge-manifest-event-"));
+  t.after(() => rm(root,{recursive:true,force:true}));
+  const {store,jobId} = await createConversationFixture(root,"torn-manifest");
+  const previous = store.get(jobId)!;
+  const record = {...previous,status:"completed",stateVersion:previous.stateVersion+1,lastEventSeq:previous.lastEventSeq+1};
+  const path = join(root,jobId,"events.jsonl");
+  const offset = (await readFile(path)).length;
+  const event = {seq:record.lastEventSeq,at:record.updatedAt,type:"job.completed",message:"回復"};
+  await writeFile(join(root,jobId,"manifest.json.pending"),JSON.stringify({record,event,offset}));
+  await appendFile(path,Buffer.from(JSON.stringify(event)).subarray(0,-4));
+  for (let n=0;n<2;n++) {
+    const reopened = new JobStore(root);
+    await reopened.initialize();
+    assert.equal(reopened.get(jobId)?.status,"completed");
+    assert.deepEqual((await reopened.snapshot(jobId,previous.lastEventSeq)).events,[event]);
+  }
+});
+
+test("same owner repairs manifest promotion and fences a blocked job from unrelated writes", async t => {
+  const root = await mkdtemp(join(tmpdir(),"bridge-repair-"));
+  t.after(() => rm(root,{recursive:true,force:true}));
+  const {store,jobId} = await createConversationFixture(root,"repair");
+  const other = await createConversationFixture(root,"unaffected",store);
+  const owner = store as unknown as {writeManifest(record:import("../src/types.js").JobRecord):Promise<void>};
+  const write = owner.writeManifest.bind(owner);
+  let failures = 1;
+  t.mock.method(owner,"writeManifest",async (record:import("../src/types.js").JobRecord) => {
+    if (record.id === jobId && failures-- > 0) throw Object.assign(new Error("fixture rename"),{code:"EIO"});
+    await write(record);
+  });
+  const first = await store.appendEvent(jobId,"fixture.first","first");
+  failures = 2;
+  await assert.rejects(store.appendEvent(jobId,"fixture.second","second"),/fixture rename/);
+  assert.equal(store.pendingManifestRepairs,1);
+  await store.appendEvent(other.jobId,"fixture.other","other");
+  await store.reconcileManifestWrites();
+  assert.equal(store.pendingManifestRepairs,0);
+  const view = await store.snapshot(jobId,first.lastEventSeq);
+  assert.deepEqual(view.events.map(e=>e.type),["fixture.second"]);
+  assert.equal(view.nextEventSeq,view.serverLastEventSeq);
+});
+
+test("restart repairs a partial UTF-8 assistant append and both terminal artifacts from one intent", async t => {
+  const root = await mkdtemp(join(tmpdir(),"bridge-effects-"));
+  t.after(() => rm(root,{recursive:true,force:true}));
+  const {store,jobId} = await createConversationFixture(root,"effects");
+  const previous = await store.setTurn(jobId,"fixture-turn");
+  const at = new Date().toISOString();
+  const result = {status:"completed",message:"done",output:"測試結果",completedAt:at,turnId:"fixture-turn"};
+  const record = {...previous,status:"completed",result,stateVersion:previous.stateVersion+1,lastEventSeq:previous.lastEventSeq+1};
+  const event = {seq:record.lastEventSeq,at,type:"codex.turn.completed",message:"done"};
+  const message = {id:randomUUID(),clientMessageId:"assistant:fixture-turn",role:"assistant",turnId:"fixture-turn",content:result.output,at};
+  const dir = join(root,jobId), messages = join(dir,"messages.jsonl");
+  const offset = (await readFile(join(dir,"events.jsonl"))).length;
+  const messageOffset = (await readFile(messages)).length;
+  await writeFile(join(dir,"manifest.json.pending"),JSON.stringify({record,event,offset,effects:{message,messageOffset,publishResult:true}}));
+  const bytes = Buffer.from(JSON.stringify(message));
+  await appendFile(messages,bytes.subarray(0,bytes.indexOf(Buffer.from("測"))+1));
+  for (let attempt=0; attempt<2; attempt++) {
+    const recovered = new JobStore(root);
+    await recovered.initialize();
+    const view = await recovered.snapshot(jobId,previous.lastEventSeq);
+    assert.deepEqual(view.events,[event]);
+    assert.equal(view.messages.filter(m=>m.clientMessageId===message.clientMessageId).length,1);
+    assert.equal(await recovered.readArtifact(jobId,"response"),result.output);
+    assert.deepEqual(JSON.parse(await recovered.readArtifact(jobId,"result")),result);
+  }
+});

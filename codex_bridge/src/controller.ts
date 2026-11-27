@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
+import { prepareResumedThread } from "./resume-thread.js";
 import { DirectOperationError } from "./direct-operation-error.js";
-import { ControlPlaneReader } from "./control-plane.js";
+import { ControlPlaneReader, nativeSourceKinds, type ThreadPageKind } from "./control-plane.js";
 import { realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, normalize, parse, relative } from "node:path";
 import type { BridgeConfig } from "./config.js";
+import { NativeDeliveryUnknown } from "./app-server-client.js";
 import type {
   AppServerTransport,
   JsonRpcNotification,
@@ -60,7 +62,7 @@ export interface LocalConversationSendInput extends AppendUserMessageInput {
 export interface ConversationSendResult {
   record: JobRecord;
   accepted: boolean;
-  delivery: "steer" | "turn" | "duplicate";
+  delivery: "steer" | "turn" | "duplicate" | "unknown" | "failed";
 }
 
 type ResolvedConversationSendInput = Omit<ConversationSendInput, "inputArtifacts"> & {
@@ -70,11 +72,14 @@ type ResolvedConversationSendInput = Omit<ConversationSendInput, "inputArtifacts
 interface LiveApproval {
   jobId: string;
   requestId: string | number;
+  questions?: NativeChoiceQuestion[];
 }
 
 export class CodexBridgeController {
   private readonly backgroundTasks = new Set<Promise<void>>();
-  private backgroundFailure?: unknown;
+  private reconciliationTimer?: NodeJS.Timeout;
+  private readonly backgroundFailures = new Map<string, string>();
+  private readonly releaseCandidates = new Map<string,string>();
   private readonly jobsByThread = new Map<string, string>();
   private readonly jobsByTurn = new Map<string, string>();
   private readonly liveApprovals = new Map<string, LiveApproval>();
@@ -92,9 +97,23 @@ export class CodexBridgeController {
   private readonly discoveredProjects = new Map<string, BridgeProject>();
   private readonly notificationEpochs = new Map<string, number>();
   private readonly lastNotificationAt = new Map<string, number>();
+  private readonly verifiedHeads = new Map<string, {turnId:string; fingerprint:string; revision:number}>();
   private readonly activeRecoveries = new Map<string, Promise<boolean>>();
   private readonly activeRecoveryAfter = new Map<string, number>();
   private readonly recoveryDiagnostics = new Map<string, { lastAttemptAt: string; outcome: string }>();
+  private readonly notificationBatches = new Map<string, Array<() => Promise<void>>>();
+  private waitingBytes = 0;
+  private controlLocks = 0;
+  private updatePressure() {
+    this.appServer.setNotificationBacklog?.(this.controlLocks ? 0 : this.waitingBytes);
+  }
+  private readonly waiting = new Set<{at:number; bytes:number}>();
+  pipelineWorkload() {
+    const oldest = this.waiting.values().next().value;
+    return {background:this.backgroundTasks.size, lockQueues:this.jobLocks.size, waiting:this.waiting.size,
+      estimatedQueuedTextBytes:this.waitingBytes, oldestWaitMs:oldest ? performance.now()-oldest.at : 0, recoveries:this.activeRecoveries.size,
+      unmatched:this.unmatchedNotificationCount, mappedTurns:this.jobsByTurn.size, mappedThreads:this.jobsByThread.size};
+  }
   private unmatchedNotificationCount = 0;
   private modelCache?: { expiresAt: number; models: CodexModelOption[] };
 
@@ -106,33 +125,51 @@ export class CodexBridgeController {
   ) {
     this.historyReader = new ThreadHistoryReader(appServer);
     this.controlPlane = new ControlPlaneReader(appServer);
-    this.appServer.on("notification", (message) => this.trackBackground(this.handleNotification(message)));
+    this.appServer.on("notification", (message) => { const task = this.handleNotification(message); if (task) this.trackBackground(task, this.findJobId(message.params ?? {})); });
     this.appServer.on("serverRequest", (message) => this.trackBackground(this.handleServerRequest(message)));
     this.appServer.on("stderr", (line) => this.trackBackground(this.handleStderr(line)));
     this.appServer.on("exit", (error) => this.trackBackground(this.handleExit(error)));
   }
 
   get status(): AppServerTransport["status"] {
-    return this.backgroundFailure ? "unavailable" : this.appServer.status;
+    return this.appServer.status;
   }
 
   get maintenancePending() {
-    return this.backgroundTasks.size + this.activeRecoveries.size + this.jobLocks.size + this.liveApprovals.size;
+    return this.store.pendingManifestRepairs + this.backgroundTasks.size + this.activeRecoveries.size + this.jobLocks.size + this.liveApprovals.size;
+  }
+
+  startReconciliation() {
+    if (this.reconciliationTimer) return;
+    this.reconciliationTimer = setInterval(() => {
+      for (const [jobId,threadId] of this.releaseCandidates) {
+        this.releaseCandidates.delete(jobId);
+        this.trackBackground(this.releaseIdleSubscription(jobId,threadId),jobId);
+      }
+      if (this.store.pendingManifestRepairs) this.trackBackground(this.store.reconcileManifestWrites());
+      for (const id of new Set([...this.jobsByThread.values(), ...this.store.reconciliationJobs])) {
+        try { this.schedulePollRecovery(id); }
+        catch (error) { this.store.diagnostics?.observe("reconcile","job_unavailable",{jobId:id},true,error); }
+      }
+    }, CONVERSATION_DELIVERY.nativeRetryMs);
+    this.reconciliationTimer.unref();
   }
 
   async close(): Promise<void> {
+    clearInterval(this.reconciliationTimer);
     while (this.backgroundTasks.size) await Promise.allSettled([...this.backgroundTasks]);
     await this.appServer.close();
     while (this.backgroundTasks.size) await Promise.allSettled([...this.backgroundTasks]);
     await this.store.flushConversations();
-    if (this.backgroundFailure) throw this.backgroundFailure;
+    if (this.store.pendingManifestRepairs) throw new Error("MANIFEST_EVENT_RECONCILIATION_REQUIRED");
   }
 
-  private trackBackground(task: Promise<void>): void {
+  private trackBackground(task: Promise<void>, jobId?: string): void {
     this.backgroundTasks.add(task);
     void task.then(() => this.backgroundTasks.delete(task), (error) => {
       this.backgroundTasks.delete(task);
-      this.backgroundFailure ??= error;
+      if (jobId) this.backgroundFailures.set(jobId, "background_failed");
+      this.store.diagnostics?.observe("reconcile","background_failed",{jobId},true,error);
     });
   }
 
@@ -194,25 +231,69 @@ export class CodexBridgeController {
     });
   }
 
+  schedulePollRecovery(jobId: string) {
+    const job = this.store.get(jobId);
+    if (!job?.threadId || this.activeRecoveries.has(jobId)) return;
+    if (job.nativeRequest?.method === "turn/start") {
+      // Recovery is read-only. Native history must identify exactly one matching client input.
+      if ((this.activeRecoveryAfter.get(jobId) ?? 0) > Date.now()) return;
+      this.activeRecoveryAfter.set(jobId, Date.now() + CONVERSATION_DELIVERY.nativeRetryMs);
+      const recovery = this.reconcileRequestedTurn(job, job.threadId, job.nativeRequest.clientMessageId);
+      this.activeRecoveries.set(jobId, recovery);
+      this.trackBackground(recovery.then(() => undefined).finally(() => this.activeRecoveries.delete(jobId)), jobId);
+      return;
+    }
+    if (!job.turnId) return;
+    if (this.jobsByThread.get(job.threadId) !== jobId && job.restartInterruptedTurnId !== job.turnId) return;
+    this.trackBackground(this.recoverActiveConversation(jobId, false).then(() => undefined), jobId);
+  }
+
+  private async reconcileRequestedTurn(before: JobRecord, threadId: string, clientMessageId: string) {
+    const {response} = await this.historyReader.read(threadId);
+    const thread = response.thread;
+    if (!isObject(thread) || thread.id !== threadId || !Array.isArray(thread.turns)) return false;
+    const matches = thread.turns.filter(turn => isObject(turn) && Array.isArray(turn.items)
+      && turn.items.some((item: unknown) => isObject(item) && item.type === "userMessage" && item.clientId === clientMessageId));
+    const id = matches.length === 1 && stringValue(matches[0].id);
+    if (!id) return false;
+    return this.withJobLock(before.id, async () => {
+      const current = requireJob(this.store,before.id);
+      if (current.threadId !== threadId || current.nativeRequest?.clientMessageId !== clientMessageId || current.turnId) return false;
+      const detached = this.jobsByThread.get(threadId) !== current.id;
+      await this.store.setTurn(current.id, id, detached);
+      if (!detached) this.jobsByTurn.set(id,current.id);
+      this.activeRecoveryAfter.delete(current.id);
+      return true;
+    });
+  }
+
   /** Native reads never hold the notification lock across App Server IO. */
   async recoverActiveConversation(jobId: string, requested = true): Promise<boolean> {
     const existing = this.activeRecoveries.get(jobId);
     if (existing) return existing;
     const job = requireJob(this.store, jobId);
-    if (!job.threadId || !job.turnId || isTerminal(job.status)) return false;
+    if (!job.threadId || !job.turnId || (isTerminal(job.status) && job.restartInterruptedTurnId !== job.turnId)) return false;
     const now = Date.now();
     if ((this.activeRecoveryAfter.get(jobId) ?? 0) > now) return false;
     if (!requested && now - (this.lastNotificationAt.get(jobId) ?? Date.parse(job.updatedAt)) < CONVERSATION_DELIVERY.activeQuietMs) return false;
     this.activeRecoveryAfter.set(jobId, now + CONVERSATION_DELIVERY.nativeRetryMs);
     this.recoveryDiagnostics.set(jobId, { lastAttemptAt: new Date(now).toISOString(), outcome: "reading" });
-    const recovery = this.readActiveConversation(jobId, job.threadId, job.turnId);
+    const started = performance.now();
+    const recovery = this.readActiveConversation(jobId, job.threadId, job.turnId, !requested);
     this.activeRecoveries.set(jobId, recovery);
     try {
       const applied = await recovery;
       this.recoveryDiagnostics.set(jobId, { lastAttemptAt: new Date(now).toISOString(), outcome: applied ? "applied" : "deferred" });
+      this.store.diagnostics?.observe("native_read", applied ? "applied" : "deferred", {jobId, threadId:job.threadId, turnId:job.turnId, elapsedMs:performance.now()-started});
+      if (applied) this.backgroundFailures.delete(jobId);
       return applied;
     }
     catch (error) {
+      if (error instanceof Error && error.message === "NATIVE_HEAD_BEHIND_COMMIT") {
+        this.recoveryDiagnostics.set(jobId,{lastAttemptAt:new Date(now).toISOString(),outcome:"native_behind"});
+        this.store.diagnostics?.observe("reconcile","native_behind",{jobId,threadId:job.threadId,turnId:job.turnId});
+        return false;
+      }
       this.recoveryDiagnostics.set(jobId, { lastAttemptAt: new Date(now).toISOString(), outcome: "persistence_failed" });
       throw error;
     }
@@ -220,42 +301,59 @@ export class CodexBridgeController {
   }
 
   conversationRecoveryDiagnostics(jobId: string) {
-    return { ...this.recoveryDiagnostics.get(jobId), unmatchedNotificationCount: this.unmatchedNotificationCount };
+    return { backgroundFailure: this.backgroundFailures.get(jobId), ...this.recoveryDiagnostics.get(jobId), lastReceivedAt:this.lastNotificationAt.get(jobId),
+      received:this.notificationEpochs.get(jobId) ?? 0, unmatchedNotificationCount: this.unmatchedNotificationCount };
   }
 
-  private async readActiveConversation(jobId: string, threadId: string, turnId: string): Promise<boolean> {
+  private async readActiveConversation(jobId: string, threadId: string, turnId: string, recentOnly:boolean): Promise<boolean> {
     const baseline = await this.withJobLock(jobId, async () => {
       await this.store.flushConversation(jobId);
       return { epoch: this.notificationEpochs.get(jobId) ?? 0, revision: this.store.conversationRevision(jobId) };
     });
     const checkedAt = new Date().toISOString();
-    let history;
+    let history, headOnly;
     try {
-      history = await this.historyReader.read(threadId);
+      const read = await this.historyReader.readForRecovery(threadId, turnId, recentOnly);
+      history = read.snapshot;
+      headOnly = read.headOnly;
     } catch {
+      this.store.diagnostics?.observe("native_read", "failed", {jobId,threadId,turnId}, true);
       await this.store.appendEvent(jobId, "conversation.recovery.deferred", "Native conversation recovery is temporarily unavailable; the committed projection was preserved.")
         .catch(() => undefined);
       return false;
     }
     return this.withJobLock(jobId, async () => {
       const job = requireJob(this.store, jobId);
-      if (job.threadId !== threadId || job.turnId !== turnId || isTerminal(job.status)
+      if (job.threadId !== threadId || job.turnId !== turnId || (isTerminal(job.status) && job.restartInterruptedTurnId !== turnId)
         || (this.notificationEpochs.get(jobId) ?? 0) !== baseline.epoch
         || this.store.conversationRevision(jobId) !== baseline.revision) return false;
       const thread = history.response.thread as Record<string, unknown> | undefined;
       const turns = Array.isArray(thread?.turns) ? thread.turns : [];
       // An active read may be valid but not yet contain the current turn. Never erase it.
       const activeTurn = turns.find((turn) => isObject(turn) && turn.id === turnId);
-      if (thread?.id !== threadId || !isObject(activeTurn)) return false;
-      const projection = await this.store.hydrateConversation(jobId, history.response, checkedAt, {
-        historyMode: history.metadata.historyMode, synchronized: true, sourceAvailability: "available",
+      if (thread?.id !== threadId || !isObject(activeTurn)) {
+        this.store.diagnostics?.observe("reconcile", "native_identity_unconfirmed", {jobId, threadId, turnId});
+        return false;
+      }
+      const nativeTerminal = ["completed", "failed", "interrupted", "cancelled", "canceled"].includes(String(activeTurn.status));
+      if (job.restartInterruptedTurnId === turnId && !nativeTerminal) {
+        this.store.diagnostics?.observe("reconcile", "detached_native_nonterminal", {jobId, threadId, turnId});
+        return false;
+      }
+      const previous = this.verifiedHeads.get(jobId);
+      if (headOnly && !nativeTerminal && previous?.turnId === turnId && previous.revision === baseline.revision
+        && previous.fingerprint === history.sourceFingerprint) return false;
+      const freshness = { historyMode: history.metadata.historyMode, synchronized: !headOnly, sourceAvailability: "available" as const,
         lastMetadataCheckedAt: checkedAt, lastHydratedAt: checkedAt, sourceFingerprint: history.sourceFingerprint,
-      });
+        ...(headOnly ? {scope:"current_turn" as const} : {}) };
+      const recoveredTurn = headOnly ? await this.store.hydrateCurrentTurn(jobId,turnId,history.response,checkedAt,freshness)
+        : (await this.store.hydrateConversation(jobId, history.response, checkedAt, freshness)).turns.find(turn => turn.turnId === turnId);
+      this.verifiedHeads.set(jobId,{turnId,fingerprint:history.sourceFingerprint,revision:this.store.conversationRevision(jobId)});
       await this.store.appendEvent(jobId, "conversation.recovery.completed", "Active conversation synchronized from native history.", {
         previousRevision: baseline.revision, revision: this.store.conversationRevision(jobId),
       });
-      if (["completed", "failed", "interrupted"].includes(String(activeTurn.status))) {
-        const output = projection.turns.find((turn) => turn.turnId === turnId)?.items.filter((item) => item.type === "agentMessage").at(-1)?.text;
+      if (nativeTerminal) {
+        const output = recoveredTurn?.items.filter((item) => item.type === "agentMessage").at(-1)?.text;
         await this.store.complete(jobId, resultFor(job, completionStatus({ turn: activeTurn }), "Recovered the completed native turn without retrying it.", output));
         this.removeMappings(job);
         this.finalOutputByJob.delete(jobId);
@@ -534,7 +632,7 @@ export class CodexBridgeController {
       inputArtifacts,
     });
     if (created.created) {
-      this.trackBackground(this.execute(created.record.id));
+      this.trackBackground(this.withJobLock(created.record.id, () => this.execute(created.record.id)), created.record.id);
     }
     return created;
   }
@@ -560,8 +658,9 @@ export class CodexBridgeController {
       );
       // Retry identity precedes active-turn gates: an accepted new turn may now be running.
       if (await this.store.isUserMessageRetry(job.id, { ...input, inputArtifacts: stagedInputArtifacts })) {
-        return { record: job, accepted: false, delivery: "duplicate" };
+        return { record: job, accepted: false, delivery: await this.store.nativeMessageDelivery(job.id, input.clientMessageId) };
       }
+      if (job.nativeRequest || job.restartInterruptedTurnId) throw new Error("NATIVE_DELIVERY_PENDING_READBACK");
       if (!active && !isTerminal(job.status)) {
         throw new Error("Wait for the current conversation turn to start before sending another message.");
       }
@@ -584,7 +683,7 @@ export class CodexBridgeController {
       await this.validateModelSelection(input.model, input.effort);
       const appended = await this.store.appendUserMessage(input.jobId, { ...input, inputArtifacts: stagedInputArtifacts });
       if (!appended.created) {
-        return { record: appended.record, accepted: false, delivery: "duplicate" };
+        return { record: appended.record, accepted: false, delivery: await this.store.nativeMessageDelivery(job.id, input.clientMessageId) };
       }
       const inputArtifacts = await this.store.readInputArtifacts(
         input.jobId,
@@ -597,7 +696,7 @@ export class CodexBridgeController {
         if (!job.threadId || !job.turnId) {
           throw new Error("The active conversation does not have a live Codex turn.");
         }
-        await this.appServer.request("turn/steer", {
+        const receipt = await this.appServer.request<{turnId:string}>("turn/steer", {
           threadId: job.threadId,
           expectedTurnId: job.turnId,
           clientUserMessageId: resolvedInput.clientMessageId,
@@ -607,18 +706,20 @@ export class CodexBridgeController {
             artifacts: resolvedInput.inputArtifacts,
           }) }],
         });
+        if (receipt?.turnId !== job.turnId) throw new Error("NATIVE_STEER_TURN_UNCONFIRMED");
         const record = await this.store.appendEvent(job.id, "operator.steered", "Operator sent a conversation message.", {
           source,
-          characterCount: input.content.length,
+          clientMessageId: input.clientMessageId, characterCount: input.content.length,
         });
         return { record, accepted: true, delivery: "steer" };
       }
       if (!job.threadId) {
         throw new Error("This legacy conversation has no Codex thread id and cannot be resumed.");
       }
+      const priorTurnId = job.turnId ?? await this.store.lastProjectedTurnId(job.id, job.threadId);
       const prepared = await this.store.prepareTurn(job.id, input);
       await this.store.appendEvent(job.id, "operator.message", "Conversation message accepted.", { source });
-      this.trackBackground(this.resumeAndExecute(prepared.id, resolvedInput));
+      this.trackBackground(this.withJobLock(prepared.id, () => this.resumeAndExecute(prepared.id, resolvedInput, priorTurnId)), prepared.id);
       return { record: prepared, accepted: true, delivery: "turn" };
   }
 
@@ -640,6 +741,90 @@ export class CodexBridgeController {
     return { projectId, ...await this.controlPlane.inventory(project.path, kind) };
   }
 
+  private async inspectOwnedThread(jobId:string, threadId:string) {
+    const job = requireJob(this.store,jobId);
+    if (!threadId || job.threadId !== threadId) throw new DirectOperationError("DIRECT_THREAD_CHANGED");
+    await this.assertProjectStillOperable(job.project);
+    const metadata = await this.historyReader.readMetadata(threadId);
+    if (typeof metadata.rawThread.cwd !== "string" || comparablePath(await realpath(metadata.rawThread.cwd)) !== comparablePath(job.project.path))
+      throw new DirectOperationError("DIRECT_THREAD_PROJECT_MISMATCH");
+    return {job,metadata};
+  }
+
+  async readThreadPage(input:{jobId:string;threadId:string;kind:ThreadPageKind;cursor?:string;searchTerm?:string;childId?:string}) {
+    const {metadata} = await this.inspectOwnedThread(input.jobId,input.threadId);
+    if (input.childId) {
+      if (input.kind !== "messages") throw new Error("CHILD_VIEW_MISMATCH");
+      const child = await this.historyReader.readMetadata(input.childId);
+      if (child.rawThread.parentThreadId !== input.threadId || typeof child.rawThread.cwd !== "string" ||
+        typeof metadata.rawThread.cwd !== "string" || comparablePath(await realpath(child.rawThread.cwd)) !== comparablePath(await realpath(metadata.rawThread.cwd)))
+        throw new DirectOperationError("DIRECT_THREAD_PROJECT_MISMATCH");
+      return {...await this.controlPlane.threadPage(input.childId,"messages",input.cursor),source:"native_child"};
+    }
+    if (input.kind === "search" && !input.searchTerm?.trim()) throw new Error("SEARCH_TERM_REQUIRED");
+    if (input.kind === "search" && metadata.historyMode === "legacy") {
+      const history = await this.historyReader.read(input.threadId,metadata);
+      const thread = history.response.thread;
+      if (!isObject(thread) || !Array.isArray(thread.turns)) throw new Error("MALFORMED_LEGACY_HISTORY");
+      const term = input.searchTerm!;
+      const prefix = createHash("sha256").update(JSON.stringify([input.threadId,term,history.sourceFingerprint])).digest("hex") + ".";
+      const offset = input.cursor === undefined ? 0 : input.cursor.startsWith(prefix) ? Number(input.cursor.slice(prefix.length)) : NaN;
+      if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("SEARCH_CURSOR_CHANGED");
+      const items:Array<{turnId:string;itemId:string;snippet:string}> = [];
+      let index = 0;
+      // Literal Unicode matches over stored text. Never search the bounded UI checkpoint.
+      const pattern = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "giu");
+      for (const turn of thread.turns) {
+        if (!isObject(turn) || typeof turn.id !== "string" || !Array.isArray(turn.items)) throw new Error("MALFORMED_LEGACY_TURN");
+        for (const item of turn.items) {
+          if (!isObject(item) || typeof item.id !== "string") continue;
+          const message = item.type === "agentMessage" && typeof item.text === "string" ? item.text :
+            item.type === "userMessage" && Array.isArray(item.content) ? item.content.filter(part => isObject(part) && part.type === "text").map(part => part.text).join("\n") : "";
+          for (const match of message.matchAll(pattern)) {
+            if (index++ < offset) continue;
+            if (items.length === 100) return {status:"available",source:"legacy_history",data:{data:items,nextCursor:prefix+(index-1)},truncated:true};
+            const start = match.index!;
+            items.push({turnId:turn.id,itemId:item.id,snippet:redactString(message.slice(Math.max(0,start-100),start+match[0].length+100))});
+          }
+        }
+      }
+      if (offset > index) throw new Error("SEARCH_CURSOR_CHANGED");
+      return {status:"available",source:"legacy_history",data:{data:items,nextCursor:null},truncated:false};
+    }
+    return {...await this.controlPlane.threadPage(input.threadId,input.kind,input.cursor,input.searchTerm),source:"native"};
+  }
+
+  async manageThread(input:{jobId:string;threadId:string;expectedTurnId:string;requestId:string;operation:
+    {kind:"saveGoal"; objective:string} | {kind:"clearGoal"} | {kind:"deleteQueued";id:string}}) {
+    return this.store.withAdmission(() => this.withJobLock(input.jobId,async () => {
+      const {job} = await this.inspectOwnedThread(input.jobId,input.threadId);
+      await this.assertDirectJob(job,false);
+      return this.runDirectRequest(job, "native:"+normalizeIdempotencyKey(input.requestId),input,async () => {
+        if (job.turnId !== input.expectedTurnId || job.nativeRequest || job.restartInterruptedTurnId) throw new DirectOperationError("DIRECT_TURN_CHANGED");
+        const {operation,threadId} = input;
+        switch (operation.kind) {
+          case "saveGoal": {
+            // An active goal may start further turns under native thread defaults.
+            const response = await this.appServer.request("thread/goal/set",{threadId,objective:operation.objective,status:"paused",origin:"user"});
+            if (!isObject(response.goal) || response.goal.threadId !== threadId || response.goal.objective !== operation.objective || response.goal.status !== "paused")
+              throw new Error("GOAL_RECEIPT_UNCONFIRMED");
+            break;
+          }
+          case "clearGoal": {
+            const response = await this.appServer.request("thread/goal/clear",{threadId,origin:"user"});
+            if (response.cleared !== true) throw new Error("GOAL_CLEAR_UNCONFIRMED");
+            break;
+          }
+          case "deleteQueued": {
+            const response = await this.appServer.request("thread/queue/delete",{threadId,queuedSubmissionId:operation.id});
+            if (response.deleted !== true) throw new Error("QUEUE_DELETE_UNCONFIRMED");
+            break;
+          }
+        }
+      });
+    }));
+  }
+
   async directThreadAction(kind: "compact" | "review" | "fork", input: {
     jobId: string; requestId: string; expectedThreadId: string; expectedTurnId: string;
   }) {
@@ -655,28 +840,18 @@ export class CodexBridgeController {
         expectedThreadId: input.expectedThreadId, expectedTurnId: input.expectedTurnId,
       }, async () => {
         if (job.turnId !== input.expectedTurnId) throw new DirectOperationError("DIRECT_TURN_CHANGED");
-        if (!isTerminal(job.status) || job.approvals.some((approval) => approval.state === "pending")) throw new DirectOperationError("DIRECT_THREAD_BUSY");
+        if (job.nativeRequest || job.restartInterruptedTurnId || !isTerminal(job.status) || job.approvals.some((approval) => approval.state === "pending")) throw new DirectOperationError("DIRECT_THREAD_BUSY");
         const projectPath = await realpath(job.project.path);
         if (comparablePath(projectPath) !== comparablePath(job.project.path)) throw new DirectOperationError("DIRECT_PROJECT_CHANGED");
         const metadata = await this.historyReader.readMetadata(input.expectedThreadId);
         if (typeof metadata.rawThread.cwd !== "string" || comparablePath(await realpath(metadata.rawThread.cwd)) !== comparablePath(projectPath)) {
           throw new DirectOperationError("DIRECT_THREAD_PROJECT_MISMATCH");
         }
-        const nativeStatus = isObject(metadata.rawThread.status) ? metadata.rawThread.status.type : metadata.rawThread.status;
-        if (nativeStatus !== "idle" && nativeStatus !== "notLoaded") throw new DirectOperationError("DIRECT_THREAD_BUSY");
         const executionMode = kind === "review" ? "plan" : job.currentExecutionMode ?? job.workPackage.executionMode;
         const approvalReviewer = job.currentApprovalReviewer ?? job.workPackage.approvalReviewer ?? "user";
         const permissions = await this.selectPermissionProfile(job, executionMode);
-        const resumed = await this.appServer.request("thread/resume", {
-          threadId: input.expectedThreadId, cwd: projectPath, runtimeWorkspaceRoots: [projectPath],
-          approvalPolicy: "on-request", approvalsReviewer: approvalReviewer, permissions, excludeTurns: true,
-        });
-        if (nestedId(resumed, "thread") !== input.expectedThreadId) throw new DirectOperationError("DIRECT_THREAD_CHANGED");
-        if (kind === "review") {
-          // A live thread/resume rejoins the existing session without applying its
-          // permissions override. review/start has no per-turn permissions field.
-          await this.applyThreadPermissions(input.expectedThreadId, permissions, approvalReviewer);
-        }
+        await this.prepareContinuation(job, input.expectedThreadId, input.expectedTurnId, input.requestId, kind,
+          permissions, approvalReviewer, job.model, job.effort);
         await this.store.prepareTurn(job.id, {
           executionMode, approvalReviewer, dataClassification: job.currentDataClassification ?? job.workPackage.dataClassification,
           model: job.model, effort: job.effort, controlAction: { kind, priorTurnId: input.expectedTurnId },
@@ -717,10 +892,12 @@ export class CodexBridgeController {
         if (expectedTurnId && (!["running", "awaiting_approval"].includes(job.status) || job.turnId !== expectedTurnId)) throw new DirectOperationError("DIRECT_TURN_CHANGED");
         if (steerOnly && !["running", "awaiting_approval"].includes(job.status)) throw new DirectOperationError("DIRECT_TURN_NOT_ACTIVE");
         if ((steerOnly || ["running", "awaiting_approval"].includes(job.status)) && (!expectedTurnId || job.turnId !== expectedTurnId)) throw new DirectOperationError("DIRECT_TURN_CHANGED");
-        await this.sendMessageLocked({
+        const sent = await this.sendMessageLocked({
           ...input,
           approvalReviewer: input.approvalReviewer ?? job.currentApprovalReviewer ?? job.workPackage.approvalReviewer ?? "user",
         }, "model_direct");
+        if (sent.delivery === "failed") throw new Error("NATIVE_TURN_START_FAILED");
+        if (sent.delivery === "unknown") throw new Error("NATIVE_DELIVERY_PENDING_READBACK");
       }, input.approvalReviewer === undefined ? { ...input, approvalReviewer: "user", expectedTurnId } : undefined);
     }));
   }
@@ -746,6 +923,7 @@ export class CodexBridgeController {
 
   private async runDirectRequest(job: JobRecord, key: string, payload: unknown, operation: () => Promise<void>, legacyPayload?: unknown) {
     const digest = createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+    const messageId = /^(?:send|steer):(.+)$/.exec(key)?.[1];
     const prior = job.directRequests?.[key];
     if (prior) {
       // Before reviewer selection was exposed, the MCP adapter injected user into every message.
@@ -753,16 +931,19 @@ export class CodexBridgeController {
       const legacyMatch = prior.inputVersion === undefined && legacyPayload !== undefined &&
         prior.digest === createHash("sha256").update(JSON.stringify(legacyPayload)).digest("hex");
       if (prior.digest !== digest && !legacyMatch) throw new DirectOperationError("DIRECT_REQUEST_CONFLICT");
-      return { jobId: job.id, accepted: false, delivery: prior.state === "completed" ? "duplicate" : "unknown" };
+      const delivery = messageId && prior.inputVersion === 3
+        ? await this.store.nativeMessageDelivery(job.id, messageId)
+        : prior.state === "completed" ? "duplicate" : "unknown";
+      return { jobId: job.id, accepted: false, delivery };
     }
     if (Object.keys(job.directRequests ?? {}).length >= 10_000) throw new DirectOperationError("DIRECT_REQUEST_LIMIT");
-    await this.store.recordDirectRequest(job.id, key, digest, "pending", 2);
+    await this.store.recordDirectRequest(job.id, key, digest, "pending", messageId ? 3 : 2);
     try {
       await operation();
-      await this.store.recordDirectRequest(job.id, key, digest, "completed", 2);
+      await this.store.recordDirectRequest(job.id, key, digest, "completed", messageId ? 3 : 2);
       return { jobId: job.id, accepted: true, delivery: "accepted" };
     } catch (error) {
-      await this.store.recordDirectRequest(job.id, key, digest, "unknown", 2);
+      await this.store.recordDirectRequest(job.id, key, digest, "unknown", messageId ? 3 : 2);
       throw error;
     }
   }
@@ -877,11 +1058,12 @@ export class CodexBridgeController {
     if (!text || text.length > 4_000) {
       throw new Error("Steering text must be between 1 and 4000 characters.");
     }
-    await this.appServer.request("turn/steer", {
+    const receipt = await this.appServer.request<{turnId:string}>("turn/steer", {
       threadId: job.threadId,
       expectedTurnId: job.turnId,
       input: [{ type: "text", text }],
     });
+    if (receipt?.turnId !== job.turnId) throw new Error("NATIVE_STEER_TURN_UNCONFIRMED");
     return this.store.appendEvent(jobId, "operator.steered", "Operator sent steering guidance.", {
       source: "app",
       characterCount: text.length,
@@ -892,15 +1074,17 @@ export class CodexBridgeController {
     jobId: string,
     approvalId: string,
     decision: "accept" | "decline" | "cancel",
+    selections?: number[],
   ): Promise<JobRecord> {
     this.notificationEpochs.set(jobId, (this.notificationEpochs.get(jobId) ?? 0) + 1);
-    return this.withJobLock(jobId, () => this.decideApprovalLocked(jobId, approvalId, decision));
+    return this.withJobLock(jobId, () => this.decideApprovalLocked(jobId, approvalId, decision, selections));
   }
 
   private async decideApprovalLocked(
     jobId: string,
     approvalId: string,
     decision: "accept" | "decline" | "cancel",
+    selections?: number[],
   ): Promise<JobRecord> {
     const live = this.liveApprovals.get(approvalId);
     if (!live || live.jobId !== jobId) {
@@ -915,7 +1099,25 @@ export class CodexBridgeController {
     ) {
       throw new Error("File changes cannot be accepted while the job is in plan mode.");
     }
-    this.appServer.respond(live.requestId, { decision });
+    if (!approval || approval.state !== "pending" || !["running","awaiting_approval"].includes(job.status) ||
+      (approval.summary.turnId && approval.summary.turnId !== job.turnId)) throw new Error("NATIVE_REQUEST_EXPIRED");
+    let response:Record<string,unknown> = {decision};
+    if (live.questions) {
+      response = safeDeclineResponse(approval.method);
+      if (decision === "accept") {
+        const questions = live.questions;
+        if (!selections || selections.length !== questions.length) throw new Error("NATIVE_INPUT_REQUIRED");
+        const entries = questions.map((question,i) => {
+          const index = selections[i];
+          if (!Number.isInteger(index) || index < 0 || index >= question.labels.length) throw new Error("NATIVE_INPUT_INVALID");
+          const value = question.labels[index];
+          return [question.id,approval.kind === "user_input" ? {answers:[value]} : value];
+        });
+        response = approval.kind === "user_input" ? {answers:Object.fromEntries(entries)}
+          : {action:"accept",content:Object.fromEntries(entries),_meta:null};
+      } else if (decision === "cancel" && approval.kind === "elicitation") response.action = "cancel";
+    } else if (selections) throw new Error("UNEXPECTED_NATIVE_INPUT");
+    this.appServer.respond(live.requestId, response);
     this.liveApprovals.delete(approvalId);
     const state: ApprovalState = decision === "accept" ? "accepted" : decision === "decline" ? "declined" : "cancelled";
     const record = await this.store.resolveApproval(jobId, approvalId, state);
@@ -933,14 +1135,41 @@ export class CodexBridgeController {
     return record;
   }
 
+  private nativeStart(jobId:string, method:"thread/start"|"turn/start", clientMessageId:string, params:Record<string,unknown>) {
+    return this.appServer.request<Record<string,unknown>>(method, params, (response,rejected) => {
+      this.trackBackground(this.withJobLock(jobId, async () => {
+        const current = requireJob(this.store,jobId);
+        if (current.nativeRequest?.method !== method || current.nativeRequest.clientMessageId !== clientMessageId) return;
+        if (rejected) {
+          await this.store.complete(jobId,resultFor(current,"failed","Native server rejected the original request in a late response."),clientMessageId);
+          this.removeMappings(current);
+          return;
+        }
+        const id = isObject(response) && nestedId(response,method === "thread/start" ? "thread" : "turn");
+        if (!id) return;
+        if (method === "thread/start") {
+          await this.store.setThread(jobId,id);
+          await this.store.transition(jobId,"interrupted","Native thread creation confirmed by late reply. No turn was submitted.");
+        } else {
+          await this.store.setTurn(jobId,id,!current.threadId || this.jobsByThread.get(current.threadId) !== jobId);
+          if (current.threadId && this.jobsByThread.get(current.threadId) === jobId) this.jobsByTurn.set(id,jobId);
+          this.activeRecoveryAfter.delete(jobId);
+        }
+        this.store.diagnostics?.observe("reconcile","late_reply",{jobId,threadId:current.threadId,turnId:current.turnId});
+      }),jobId);
+    });
+  }
+
   private async execute(jobId: string): Promise<void> {
     const job = requireJob(this.store, jobId);
+    let savingNativeReply = false;
     try {
       await this.assertProjectStillOperable(job.project);
       await this.store.transition(jobId, "preparing", "Starting the local Codex App Server.");
       await this.appServer.ensureStarted();
       const permissionProfile = await this.selectPermissionProfile(job, job.workPackage.executionMode);
-      const threadResponse = await this.appServer.request<Record<string, unknown>>("thread/start", {
+      await this.store.recordNativeRequest(jobId, {method:"thread/start", clientMessageId:`initial:${jobId}`, state:"requested"});
+      const threadResponse = await this.nativeStart(jobId,"thread/start",`initial:${jobId}`, {
         cwd: job.project.path,
         runtimeWorkspaceRoots: [job.project.path],
         approvalPolicy: "on-request",
@@ -951,10 +1180,12 @@ export class CodexBridgeController {
       });
       const threadId = nestedId(threadResponse, "thread");
       if (!threadId) {
-        throw new Error("Codex App Server did not return a thread id.");
+        throw new NativeDeliveryUnknown("Codex App Server did not return a thread id.");
       }
       this.jobsByThread.set(threadId, jobId);
+      savingNativeReply = true;
       await this.store.setThread(jobId, threadId);
+      savingNativeReply = false;
       if (permissionProfile === "codex-bridge-read-only" &&
         (!isObject(threadResponse.activePermissionProfile) || threadResponse.activePermissionProfile.id !== permissionProfile
           || !isObject(threadResponse.sandbox) || threadResponse.sandbox.type !== "readOnly"
@@ -963,7 +1194,8 @@ export class CodexBridgeController {
       }
       const inputArtifacts = await this.store.readInputArtifacts(jobId, job.workPackage.inputBundleIds);
 
-      const turnResponse = await this.appServer.request<Record<string, unknown>>("turn/start", {
+      await this.store.recordNativeRequest(jobId, {method:"turn/start", clientMessageId:`initial:${job.id}`, state:"requested"});
+      const turnResponse = await this.nativeStart(jobId,"turn/start",`initial:${jobId}`, {
         threadId,
         clientUserMessageId: `initial:${job.id}`,
         cwd: job.project.path,
@@ -983,8 +1215,9 @@ export class CodexBridgeController {
       });
       const turnId = nestedId(turnResponse, "turn");
       if (!turnId) {
-        throw new Error("Codex App Server did not return a turn id.");
+        throw new NativeDeliveryUnknown("Codex App Server did not return a turn id.");
       }
+      savingNativeReply = true;
       this.jobsByTurn.set(turnId, jobId);
       await this.store.setTurn(jobId, turnId);
       await this.store.applyConversationNotification(jobId, {
@@ -992,7 +1225,12 @@ export class CodexBridgeController {
         params: { threadId, turn: isObject(turnResponse.turn) ? turnResponse.turn : { id: turnId, status: "inProgress", items: [] } },
       });
     } catch (error) {
+      if (savingNativeReply) throw error;
       const current = requireJob(this.store, jobId);
+      if (error instanceof NativeDeliveryUnknown && current.nativeRequest) {
+        await this.store.recordNativeRequest(jobId, {...current.nativeRequest, state:"unknown"});
+        return;
+      }
       if (!isTerminal(current.status)) {
         await this.store.complete(jobId, resultFor(current, "failed", `Unable to start Codex work: ${errorMessage(error)}`));
       }
@@ -1000,33 +1238,21 @@ export class CodexBridgeController {
     }
   }
 
-  private async resumeAndExecute(jobId: string, input: ResolvedConversationSendInput): Promise<void> {
+  private async resumeAndExecute(jobId: string, input: ResolvedConversationSendInput, priorTurnId?: string): Promise<void> {
     let job = requireJob(this.store, jobId);
+    let savingNativeReply = false;
     try {
       await this.assertProjectStillOperable(job.project);
       await this.appServer.ensureStarted();
       const permissionProfile = await this.selectPermissionProfile(job, input.executionMode);
-      const resumed = await this.appServer.request<Record<string, unknown>>("thread/resume", {
-        threadId: job.threadId,
-        cwd: job.project.path,
-        runtimeWorkspaceRoots: [job.project.path],
-        approvalPolicy: "on-request",
-        approvalsReviewer: input.approvalReviewer,
-        permissions: permissionProfile,
-        serviceName: "codex-handoff-bridge",
-        ...(input.model ? { model: input.model } : {}),
-      });
-      if (isObject(resumed.thread) && localThreadStatus(resumed.thread.status) === "active") {
-        throw new Error("The resumed Codex thread is active. A new turn and its requested speed cannot be applied.");
-      }
-      const threadId = nestedId(resumed, "thread");
-      if (!threadId || threadId !== job.threadId) {
-        throw new DirectOperationError("PERMISSION_PROFILE_UNVERIFIED", "PERMISSION_PROFILE_UNVERIFIED: resume_thread_mismatch");
-      }
-      await this.applyThreadPermissions(threadId, permissionProfile, input.approvalReviewer);
+      if (!job.threadId) throw new Error("MISSING_NATIVE_THREAD");
+      const threadId = job.threadId;
+      await this.prepareContinuation(job, threadId, priorTurnId, input.clientMessageId, "turn",
+        permissionProfile, input.approvalReviewer, input.model, input.effort);
       this.threadSyncStates.delete(threadId);
       this.jobsByThread.set(threadId, jobId);
-      const turnResponse = await this.appServer.request<Record<string, unknown>>("turn/start", {
+      await this.store.recordNativeRequest(jobId, {method:"turn/start", clientMessageId:input.clientMessageId, state:"requested"});
+      const turnResponse = await this.nativeStart(jobId,"turn/start",input.clientMessageId, {
         threadId,
         clientUserMessageId: input.clientMessageId,
         cwd: job.project.path,
@@ -1046,8 +1272,9 @@ export class CodexBridgeController {
       });
       const turnId = nestedId(turnResponse, "turn");
       if (!turnId) {
-        throw new Error("Codex App Server did not return a turn id.");
+        throw new NativeDeliveryUnknown("Codex App Server did not return a turn id.");
       }
+      savingNativeReply = true;
       this.jobsByTurn.set(turnId, jobId);
       await this.store.setTurn(jobId, turnId);
       await this.store.applyConversationNotification(jobId, {
@@ -1055,9 +1282,14 @@ export class CodexBridgeController {
         params: { threadId, turn: isObject(turnResponse.turn) ? turnResponse.turn : { id: turnId, status: "inProgress", items: [] } },
       });
     } catch (error) {
+      if (savingNativeReply) throw error;
       job = requireJob(this.store, jobId);
+      if (error instanceof NativeDeliveryUnknown && job.nativeRequest) {
+        await this.store.recordNativeRequest(jobId, {...job.nativeRequest, state:"unknown"});
+        return;
+      }
       if (!isTerminal(job.status)) {
-        await this.store.complete(jobId, resultFor(job, "failed", `Unable to continue Codex conversation: ${errorMessage(error)}`));
+        await this.store.complete(jobId, resultFor(job, "failed", `Unable to continue Codex conversation: ${errorMessage(error)}`), input.clientMessageId);
       }
       this.removeMappings(job);
     }
@@ -1097,7 +1329,9 @@ export class CodexBridgeController {
     }
   }
 
-  private async withJobLock<T>(jobId: string, operation: () => Promise<T>): Promise<T> {
+  private async withJobLock<T>(jobId: string, operation: () => Promise<T>, notificationsOnly = false): Promise<T> {
+    this.notificationBatches.delete(jobId);
+    if (!notificationsOnly) { this.controlLocks++; this.updatePressure(); }
     const previous = this.jobLocks.get(jobId) ?? Promise.resolve();
     let release!: () => void;
     const current = new Promise<void>((resolve) => { release = resolve; });
@@ -1108,168 +1342,199 @@ export class CodexBridgeController {
       return await operation();
     } finally {
       release();
+      if (!notificationsOnly) { this.controlLocks--; this.updatePressure(); }
       if (this.jobLocks.get(jobId) === queued) {
         this.jobLocks.delete(jobId);
       }
     }
   }
 
-  private async applyThreadPermissions(threadId: string, permissions: string, approvalReviewer: "user" | "auto_review"): Promise<void> {
-    // settings/update only acknowledges enqueueing. Native can omit notifications
-    // for no-ops; only exact-thread native readback can authorize the next turn.
-    const sandboxType = permissions === ":danger-full-access" ? "dangerFullAccess" : "readOnly";
-    const update = async (params: Record<string, unknown>, expectedProfile: string | null) => {
-      const differences = (settings: Record<string, unknown>, sandboxKey: string): string[] => {
-        const sandbox = settings[sandboxKey];
-        const fields: string[] = [];
-        if (expectedProfile === null ? settings.activePermissionProfile !== null
-          : !isObject(settings.activePermissionProfile) || settings.activePermissionProfile.id !== expectedProfile) fields.push("profile");
-        if (!isObject(sandbox) || sandbox.type !== sandboxType) fields.push("sandbox");
-        if (sandboxType === "readOnly" && (!isObject(sandbox) || sandbox.networkAccess !== true)) fields.push("network");
-        if (settings.approvalPolicy !== "on-request") fields.push("policy");
-        if (settings.approvalsReviewer !== approvalReviewer) fields.push("reviewer");
-        return fields;
-      };
-      let notification = "missing";
-      let phase = "update";
-      let fields: string[] = [];
-      let readbacks = 0;
-      // Bounded field names only: never persist raw native settings or errors.
-      const failure = (reason: string) => new DirectOperationError("PERMISSION_PROFILE_UNVERIFIED",
-        `PERMISSION_PROFILE_UNVERIFIED: stage=${expectedProfile === null ? "sandbox" : "profile"}; reason=${reason}; fields=${fields.join(",") || "none"}; notification=${notification}; readbacks=${readbacks}`);
-      const observed = (message: JsonRpcNotification) => {
-        if (message.method !== "thread/settings/updated" || message.params?.threadId !== threadId) return;
-        const settings = message.params.threadSettings;
-        notification = !isObject(settings) ? "malformed"
-          : differences(settings, "sandboxPolicy").length ? "mismatched" : "matching";
-      };
-      this.appServer.on("notification", observed);
-      let timeout!: ReturnType<typeof setTimeout>;
-      const expired = new Promise<never>((_, reject) => {
-        timeout = setTimeout(() => reject(failure(phase === "poll" ? "readback_mismatch" : `${phase}_timeout`)), 5_000);
-      });
-      try {
-        await Promise.race([expired, this.appServer.request("thread/settings/update", {
-          threadId, ...params, approvalPolicy: "on-request", approvalsReviewer: approvalReviewer,
-        }).catch(() => { throw failure("update_failed"); })]);
-        while (true) {
-          phase = "readback";
-          readbacks += 1;
-          const verified = await Promise.race([expired, this.appServer.request<Record<string, unknown>>(
-            "thread/resume", { threadId, excludeTurns: true },
-          ).catch(() => { throw failure("readback_failed"); })]);
-          // Never retarget a continuation or race an independently active turn.
-          if (nestedId(verified, "thread") !== threadId) {
-            fields = ["threadId"]; throw failure("readback_mismatch");
-          }
-          if (!isObject(verified.thread) || localThreadStatus(verified.thread.status) !== "idle") {
-            fields = ["threadStatus"]; throw failure("thread_not_idle");
-          }
-          fields = differences(verified, "sandbox");
-          if (!fields.length) return;
-          phase = "poll";
-          await Promise.race([expired, new Promise<void>((resolve) => setTimeout(resolve, 100))]);
-        }
-      } finally {
-        clearTimeout(timeout);
-        this.appServer.off("notification", observed);
-      }
-    };
-    if (permissions === ":danger-full-access") {
-      // Native 0.154 can retain the managed filesystem policy when switching from
-      // read-only to the built-in Full Access profile. Apply the native Full Access
-      // policy first, then bind its named profile; never send both in one request.
-      await update({ sandboxPolicy: { type: "dangerFullAccess" } }, null);
-    }
-    await update({ permissions }, permissions);
+  private async assertResumeHasNoAutomaticWork(threadId:string) {
+    // A fresh writer can consume persisted work inside resume, before a later
+    // settings readback. These two native reads do not attach a writer.
+    const [goal,queue] = await Promise.all([
+      this.appServer.request("thread/goal/get",{threadId}),
+      this.appServer.request("thread/queue/list",{threadId,limit:1}),
+    ]);
+    if (goal.goal !== null && (!isObject(goal.goal) || !["paused","complete","blocked","budgetLimited","usageLimited"].includes(String(goal.goal.status))))
+      throw new DirectOperationError("NATIVE_GOAL_REQUIRES_RECONCILIATION");
+    if (!Array.isArray(queue.data) || queue.data.length || queue.nextCursor !== null)
+      throw new DirectOperationError("NATIVE_QUEUE_REQUIRES_RECONCILIATION");
+  }
+
+  private async prepareContinuation(job: JobRecord, threadId: string, priorTurnId: string | undefined,
+    requestId: string, action: "turn" | "review" | "compact", permissions: string,
+    reviewer: "user" | "auto_review", model?: string, effort?: string) {
+    await prepareResumedThread(this.appServer, {
+      threadId, priorTurnId, cwd: job.project.path, action, permissions, reviewer, model, effort,
+      checkAutomaticWork: () => this.assertResumeHasNoAutomaticWork(threadId),
+      record: async data => {
+        await this.store.appendEvent(job.id, "codex.resume.verification", "Native continuation verification.", {
+          jobId: job.id, requestId, ...data,
+        });
+      },
+    });
   }
 
   private async selectPermissionProfile(job: JobRecord, executionMode = job.currentExecutionMode ?? job.workPackage.executionMode): Promise<string> {
     const requiredId = executionMode === "plan" ? "codex-bridge-read-only" : ":danger-full-access";
-    const response = await this.appServer.request<Record<string, unknown>>("permissionProfile/list", {
-      cwd: job.project.path,
-      limit: 100,
-    });
-    const profiles = Array.isArray(response.data) ? response.data : [];
-    const profile = profiles.find(
-      (value) => isObject(value) && stringValue(value.id) === requiredId && value.allowed === true,
-    );
+    const profiles = await this.controlPlane.permissionProfiles(job.project.path);
+    const profile = profiles.status === "available" && profiles.data.find(row => row.id === requiredId && row.allowed);
     if (!profile) {
       throw new Error(`Required Codex permission profile '${requiredId}' is unavailable for this project.`);
     }
     return requiredId;
   }
 
-  private async handleNotification(message: JsonRpcNotification): Promise<void> {
+  private handleNotification(message: JsonRpcNotification): Promise<void> | void {
     const params = message.params ?? {};
     const telemetry = message.method === "thread/tokenUsage/updated" || message.method === "model/rerouted";
     const jobId = this.findJobId(params) ?? (telemetry && typeof params.threadId === "string" ? this.store.findByThreadId(params.threadId)?.id : undefined);
+    if (jobId && message.method === "serverRequest/resolved") {
+      return this.withJobLock(jobId,async () => {
+        const job = this.store.get(jobId);
+        if (!job || job.threadId !== params.threadId) return;
+        for (const [id,live] of this.liveApprovals) {
+          if (live.jobId !== jobId || live.requestId !== params.requestId) continue;
+          this.liveApprovals.delete(id);
+          if (job.approvals.some(a => a.id === id && a.state === "pending")) await this.store.resolveApproval(jobId,id,"expired");
+        }
+      });
+    }
     if (!jobId) {
-      if (/^(item|turn)\//.test(message.method)) this.unmatchedNotificationCount += 1;
+      const scoped = /^(item|turn)\//.test(message.method);
+      if (scoped) this.unmatchedNotificationCount++;
+      const threadId = stringValue(params.threadId) ?? nestedId(params, "thread");
+      const turnId = stringValue(params.turnId) ?? nestedId(params, "turn");
+      this.store.diagnostics?.observe("unmatched", !scoped ? "other_notification" : turnId ? "unmapped_turn" :
+        threadId ? "unmapped_thread" : "missing_identity", { threadId, turnId });
       return;
     }
     // Count at ingress, before locks: a queued delta invalidates an in-flight native read too.
     this.notificationEpochs.set(jobId, (this.notificationEpochs.get(jobId) ?? 0) + 1);
     this.lastNotificationAt.set(jobId, Date.now());
-    await this.withJobLock(jobId, async () => {
-      const job = this.store.get(jobId);
-      if (!job) return;
-      const eventThreadId = stringValue(params.threadId) ?? nestedId(params, "thread");
-      const eventTurnId = stringValue(params.turnId) ?? nestedId(params, "turn");
-      if (eventThreadId && eventThreadId !== job.threadId) return;
-      if (telemetry) {
-        if (eventThreadId !== job.threadId || !eventTurnId || eventTurnId !== job.turnId) return;
-        await this.store.applyConversationNotification(jobId, message.method === "model/rerouted"
-          ? { ...message, params: { ...params, requestedModel: (job.selectionRecorded ? job.model : job.model ?? job.workPackage.model) ?? null } } : message);
-        return;
-      }
-      if (isTerminal(job.status)) return;
-      if (job.controlAction) {
-        if (eventTurnId === job.controlAction.priorTurnId) return;
-        if (!job.turnId && message.method === "turn/started" && eventTurnId) {
-          this.jobsByTurn.set(eventTurnId, jobId);
-          await this.store.setTurn(jobId, eventTurnId);
-        } else if (eventTurnId && eventTurnId !== job.turnId) return;
-      }
+    const text = params.delta ?? params.diff ?? params.message;
+    const received = {at:performance.now(), bytes:message.wireBytes ?? (typeof text === "string" ? text.length*2 : 0)};
+    this.waitingBytes += received.bytes;
+    this.waiting.add(received);
+    this.store.diagnostics?.observe("notification","ingress",{jobId,threadId:stringValue(params.threadId) ?? nestedId(params,"thread"),
+      turnId:stringValue(params.turnId) ?? nestedId(params,"turn"),depth:this.waiting.size,bytes:received.bytes});
+    this.updatePressure();
+    const run = async () => {
+      this.waiting.delete(received);
+      this.waitingBytes -= received.bytes;
+      this.updatePressure();
+      const started = performance.now();
+      const ids = {jobId, threadId:stringValue(params.threadId), turnId:stringValue(params.turnId)};
+      this.store.diagnostics?.observe("queue", "received", {...ids, elapsedMs:started-received.at, depth:this.waiting.size});
       try {
-        await this.store.applyConversationNotification(jobId, message, new Date().toISOString(), true);
-        if (isCoalescibleConversationNotification(message.method)) return;
-        if (message.method === "turn/completed") {
-          const status = completionStatus(params);
-          const output = finalAgentOutput(params) ?? this.finalOutputByJob.get(jobId);
-          await this.store.complete(jobId, resultFor(job, status, completionMessage(params, status), output));
-          this.finalOutputByJob.delete(jobId);
-          this.removeMappings(job);
+        const target = this.store.notificationTarget(jobId);
+        if (!target) return;
+        const eventThreadId = stringValue(params.threadId) ?? nestedId(params, "thread");
+        const eventTurnId = stringValue(params.turnId) ?? nestedId(params, "turn");
+        if (message.method === "turn/completed" && (!eventTurnId || !target.turnId)) {
+          this.store.diagnostics?.observe("unmatched", "missing_identity", ids, true);
           return;
         }
-        if (message.method === "error") {
-          await this.store.appendEvent(jobId, "codex.error", "Codex reported an error.", summarizeParams(params));
+        if ((eventThreadId && eventThreadId !== target.threadId) || (eventTurnId && target.turnId && eventTurnId !== target.turnId)) {
+          this.store.diagnostics?.observe("unmatched", "identity_mismatch", ids);
           return;
         }
-        if (message.method === "item/started" || message.method === "item/completed") {
-          const item = isObject(params.item) ? params.item : params;
-          const phase = message.method === "item/started" ? "started" : "completed";
-          if (phase === "completed" && stringValue(item.type) === "agentMessage") {
-            const text = stringValue(item.text);
-            if (text) this.finalOutputByJob.set(jobId, boundedOutput(text));
-          }
-          if (!shouldPersistItemEvent(item, phase)) {
+        if (isCoalescibleConversationNotification(message.method)) {
+          if (isTerminal(target.status) || (target.priorTurnId && target.priorTurnId === eventTurnId)) {
+            this.store.diagnostics?.observe("unmatched", isTerminal(target.status) ? "already_terminal" : "identity_mismatch", ids);
             return;
           }
-          await this.store.appendEvent(
-            jobId,
-            phase === "started" ? "codex.item.started" : "codex.item.completed",
-            itemMessage(item, phase),
-            itemSummary(item),
-          );
+          try { await this.store.applyConversationNotification(jobId, message, new Date().toISOString(), true, false); }
+          catch (error) {
+            this.store.diagnostics?.observe("notification","persistence_failed",ids,true,error);
+            throw error;
+          }
+          return;
         }
-      } catch (error) {
-        await this.store.appendEvent(jobId, "bridge.event.error", "Failed to persist a Codex event.", {
-          method: message.method,
-          error: errorMessage(error),
-        }).catch(() => undefined);
+        const job = this.store.get(jobId);
+        if (!job) return;
+        if (telemetry) {
+          if (eventThreadId !== job.threadId || !eventTurnId || eventTurnId !== job.turnId) return;
+          await this.store.applyConversationNotification(jobId, message.method === "model/rerouted"
+            ? { ...message, params: { ...params, requestedModel: (job.selectionRecorded ? job.model : job.model ?? job.workPackage.model) ?? null } } : message);
+          return;
+        }
+        if (isTerminal(job.status)) {
+          this.store.diagnostics?.observe("unmatched", "already_terminal", ids);
+          return;
+        }
+        if (job.controlAction) {
+          if (eventTurnId === job.controlAction.priorTurnId) return;
+          if (!job.turnId && message.method === "turn/started" && eventTurnId) {
+            this.jobsByTurn.set(eventTurnId, jobId);
+            await this.store.setTurn(jobId, eventTurnId);
+          } else if (eventTurnId && eventTurnId !== job.turnId) return;
+        }
+        try {
+          await this.store.applyConversationNotification(jobId, message, new Date().toISOString(), true, false);
+          if (message.method === "turn/completed") {
+            const status = completionStatus(params);
+            const output = finalAgentOutput(params) ?? this.finalOutputByJob.get(jobId);
+            await this.store.complete(jobId, resultFor(job, status, completionMessage(params, status), output));
+            this.finalOutputByJob.delete(jobId);
+            this.removeMappings(job);
+            return;
+          }
+          if (message.method === "error") {
+            await this.store.appendEvent(jobId, "codex.error", "Codex reported an error.", summarizeParams(params));
+            return;
+          }
+          if (message.method === "item/started" || message.method === "item/completed") {
+            const item = isObject(params.item) ? params.item : params;
+            const phase = message.method === "item/started" ? "started" : "completed";
+            if (phase === "completed" && stringValue(item.type) === "agentMessage") {
+              const text = stringValue(item.text);
+              if (text) this.finalOutputByJob.set(jobId, boundedOutput(text));
+            }
+            if (!shouldPersistItemEvent(item, phase)) {
+              return;
+            }
+            await this.store.appendEvent(
+              jobId,
+              phase === "started" ? "codex.item.started" : "codex.item.completed",
+              itemMessage(item, phase),
+              itemSummary(item),
+            );
+          }
+        } catch (error) {
+          this.store.diagnostics?.observe("notification", "persistence_failed", ids, true);
+          await this.store.appendEvent(jobId, "bridge.event.error", "Failed to persist a Codex event.", {
+            method: message.method,
+            error: errorMessage(error),
+          }).catch(() => undefined);
+        }
+      } finally {
+        this.store.diagnostics?.observe("service", "handled", {...ids, elapsedMs:performance.now()-started});
       }
-    });
+    };
+    if (!isCoalescibleConversationNotification(message.method)) return this.withJobLock(jobId, run, true);
+    const queued = this.notificationBatches.get(jobId);
+    if (queued) { queued.push(run); return; }
+    const batch = [run];
+    const drain = this.withJobLock(jobId, async () => {
+      try {
+        // A new command/approval reserves its own place in the same lock and seals
+        // this batch. Release each captured notification immediately after use.
+        let firstFailure: unknown;
+        while (batch.length) {
+          const entries = batch.splice(0);
+          for (let index = 0; index < entries.length; index++) {
+            const entry = entries[index];
+            delete entries[index];
+            try { await entry(); } catch (error) { firstFailure ??= error; }
+          }
+        }
+        if (firstFailure) throw firstFailure;
+      } finally { if (this.notificationBatches.get(jobId) === batch) this.notificationBatches.delete(jobId); }
+    }, true);
+    this.notificationBatches.set(jobId, batch);
+    return drain;
   }
 
   private async handleServerRequest(message: JsonRpcServerRequest): Promise<void> {
@@ -1280,7 +1545,8 @@ export class CodexBridgeController {
       this.appServer.respond(message.id, safeDeclineResponse(message.method));
       return;
     }
-    if (kind !== "command" && kind !== "file_change") {
+    const questions = nativeChoiceQuestions(message.method,params);
+    if (kind !== "command" && kind !== "file_change" && !questions) {
       this.appServer.respond(message.id, safeDeclineResponse(message.method));
       await this.store.appendEvent(jobId, "codex.request.declined", "Unsupported interactive request declined by v1 bridge.", {
         method: message.method,
@@ -1310,9 +1576,10 @@ export class CodexBridgeController {
         state: "pending",
         method: message.method,
         createdAt: new Date().toISOString(),
-        summary: summarizeApproval(kind, params),
+        summary: questions ? {turnId, questions:questions.map(q => ({prompt:redactString(q.prompt),labels:q.labels.map(redactString)}))}
+          : summarizeApproval(kind, params),
       };
-      this.liveApprovals.set(approval.id, { jobId, requestId: message.id });
+      this.liveApprovals.set(approval.id, { jobId, requestId: message.id, questions });
       try {
         await this.store.flushConversation(jobId);
         await this.store.addApproval(jobId, approval);
@@ -1329,13 +1596,17 @@ export class CodexBridgeController {
         });
       } catch (error) {
         this.liveApprovals.delete(approval.id);
-        this.appServer.respond(message.id, { decision: "decline" });
+        this.appServer.respond(message.id, safeDeclineResponse(message.method));
       }
     });
   }
 
   private async handleStderr(line: string): Promise<void> {
     const activeJobs = new Set(this.jobsByTurn.values());
+    const level = /\b(panic|fatal)\b/i.test(line) ? "fatal" : /\b(error|failed)\b/i.test(line) ? "error" : "other";
+    this.store.diagnostics?.observe("stderr", level, {depth:activeJobs.size, bytes:Buffer.byteLength(line)}, level === "fatal");
+    this.store.diagnostics?.observe("stderr", activeJobs.size > 1 ? "shared_process" : activeJobs.size ? "single_turn" : "no_mapped_turn",
+      {depth: activeJobs.size, bytes:Buffer.byteLength(line)});
     if (activeJobs.size !== 1) {
       // App Server stderr has no thread identity. With concurrent turns, assigning it to the most
       // recently inserted job would make shared process diagnostics look like per-thread truth.
@@ -1357,24 +1628,23 @@ export class CodexBridgeController {
   }
 
   private async handleExit(error: Error): Promise<void> {
-    const jobIds = new Set(this.jobsByTurn.values());
+    const jobs = new Set([...this.jobsByThread.values(), ...this.jobsByTurn.values()]);
     this.jobsByThread.clear();
     this.jobsByTurn.clear();
     this.liveApprovals.clear();
-    for (const jobId of jobIds) {
+    this.releaseCandidates.clear();
+    // Reserve all per-job barriers before awaiting the first one. Earlier terminal
+    // notifications can still commit their result ahead of this disconnect.
+    await Promise.all([...jobs].map(jobId => this.withJobLock(jobId, async () => {
       const job = this.store.get(jobId);
       if (job && !isTerminal(job.status)) {
-        if (job.turnId) {
-          await this.store.applyConversationNotification(jobId, {
-            method: "turn/completed",
-            params: { threadId: job.threadId, turn: { id: job.turnId, status: "interrupted", items: [] } },
-          }).catch(() => undefined);
-        }
-        await this.store.complete(jobId, resultFor(job, "interrupted", error.message)).catch(() => undefined);
+        this.store.diagnostics?.observe("reconcile","disconnected",{jobId,threadId:job.threadId,turnId:job.turnId},true,error);
+        await this.store.markNativeDisconnected(jobId);
       }
       this.finalOutputByJob.delete(jobId);
+      this.verifiedHeads.delete(jobId);
       this.diagnosticSignaturesByJob.delete(jobId);
-    }
+    })));
   }
 
   private findJobId(params: Record<string, unknown>): string | undefined {
@@ -1386,9 +1656,45 @@ export class CodexBridgeController {
     return threadId ? this.jobsByThread.get(threadId) : undefined;
   }
 
+  async releaseIdleSubscription(jobId:string, threadId:string) {
+    await this.withJobLock(jobId,async () => {
+      const job = requireJob(this.store,jobId);
+      if (!isTerminal(job.status) || job.threadId !== threadId || job.nativeRequest || job.restartInterruptedTurnId ||
+        job.idempotencyKey.startsWith("local-thread:") || this.jobsByThread.has(threadId) || job.approvals.some(row => row.state === "pending")) return;
+      try {
+        const read = await this.historyReader.readMetadata(threadId);
+        if (!isObject(read.rawThread.status) || read.rawThread.status.type !== "idle") return;
+        const [goal,queue,descendants,attached,terminals] = await Promise.all([
+          this.appServer.request("thread/goal/get",{threadId}),this.appServer.request("thread/queue/list",{threadId,limit:1}),
+          this.appServer.request("thread/list",{ancestorThreadId:threadId,sourceKinds:nativeSourceKinds,limit:1}),
+          this.appServer.request("thread/list",{attachedToThreadId:threadId,sourceKinds:nativeSourceKinds,limit:1}),
+          this.appServer.request("thread/backgroundTerminals/list",{threadId,limit:1}),
+        ]);
+        if (goal.goal !== null || [queue,descendants,attached,terminals].some(page =>
+          !Array.isArray(page.data) || page.data.length || page.nextCursor !== null)) return;
+        const result = await this.appServer.request("thread/unsubscribe",{threadId});
+        if (!["unsubscribed","notLoaded","notSubscribed"].includes(String(result.status))) throw new Error("UNSUBSCRIBE_UNCONFIRMED");
+        this.threadSyncStates.delete(threadId);
+        this.hydrationRetryAfter.delete(threadId);
+        this.lastNotificationAt.delete(jobId);
+        this.notificationEpochs.delete(jobId);
+        this.recoveryDiagnostics.delete(jobId);
+        this.activeRecoveryAfter.delete(jobId);
+        this.store.diagnostics?.observe("native_session","subscription_released",{jobId,threadId});
+      } catch (error) {
+        this.store.diagnostics?.observe("native_session","subscription_unconfirmed",{jobId,threadId},true,error);
+      }
+    });
+  }
+
   private removeMappings(job: JobRecord): void {
-    if (job.threadId) this.jobsByThread.delete(job.threadId);
-    if (job.turnId) this.jobsByTurn.delete(job.turnId);
+    for (const [id,approval] of this.liveApprovals) if (approval.jobId === job.id) this.liveApprovals.delete(id);
+    if (job.threadId && this.jobsByThread.get(job.threadId) === job.id) {
+      this.releaseCandidates.set(job.id,job.threadId);
+      this.jobsByThread.delete(job.threadId);
+    }
+    if (job.turnId && this.jobsByTurn.get(job.turnId) === job.id) this.jobsByTurn.delete(job.turnId);
+    this.verifiedHeads.delete(job.id);
     this.diagnosticSignaturesByJob.delete(job.id);
   }
 }
@@ -1402,8 +1708,43 @@ function approvalKind(method: string): ApprovalKind | undefined {
   return undefined;
 }
 
+interface NativeChoiceQuestion {
+  id: string;
+  prompt: string;
+  labels: string[];
+}
+
+function nativeChoiceQuestions(method:string, params:Record<string,unknown>): NativeChoiceQuestion[] | undefined {
+  const questions:NativeChoiceQuestion[] = [];
+  if (method === "item/tool/requestUserInput" && Array.isArray(params.questions)) {
+    for (const q of params.questions) {
+      if (!isObject(q) || q.isSecret !== false || !Array.isArray(q.options) ||
+        typeof q.id !== "string" || typeof q.question !== "string" ||
+        !q.options.every(o => isObject(o) && typeof o.label === "string")) return;
+      questions.push({id:q.id,prompt:q.question,labels:q.options.map(o => o.label)});
+    }
+  } else if (method === "mcpServer/elicitation/request" && params.mode === "form" && isObject(params.requestedSchema)) {
+    const schema = params.requestedSchema;
+    if (schema.type !== "object" || !isObject(schema.properties) ||
+      !Object.keys(schema).every(k => ["type","properties","required","$schema"].includes(k))) return;
+    const properties = schema.properties;
+    if (schema.required !== undefined && (!Array.isArray(schema.required) ||
+      !schema.required.every(k => typeof k === "string" && Object.hasOwn(properties,k)))) return;
+    for (const [id,field] of Object.entries(properties)) {
+      if (!isObject(field) || field.type !== "string" || !Array.isArray(field.enum) ||
+        !Object.keys(field).every(k => ["type","enum","title","description"].includes(k)) ||
+        !field.enum.every(v => typeof v === "string")) return;
+      questions.push({id,prompt:[params.serverName,params.message,field.title || id,field.description].filter(v => typeof v === "string").join(" · "),labels:field.enum});
+    }
+  } else return;
+  if (!questions.length || new Set(questions.map(q => q.id)).size !== questions.length ||
+    questions.some(q => !q.id || !q.prompt || !q.labels.length || q.labels.some(label => !label) ||
+      new Set(q.labels).size !== q.labels.length)) return;
+  return questions;
+}
+
 function safeDeclineResponse(method: string): Record<string, unknown> {
-  if (method.includes("userInput")) return { answers: {} };
+  if (method === "item/tool/requestUserInput" || method.includes("userInput")) return { answers: {} };
   if (method.includes("permissions") || method.includes("Permissions")) {
     return { permissions: {}, scope: "turn", strictAutoReview: true };
   }

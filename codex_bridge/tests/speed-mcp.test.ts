@@ -45,7 +45,7 @@ test("Fast Mode MCP schemas and HTTP wiring cover preview, dispatch, app/local/d
   try {
     await client.connect(transport);
     const tools = (await client.listTools()).tools;
-    const speedJob = { projectId: "smoke", title: "Speed", objective: "Inspect", modelPreset: "gpt-6.1-sol/medium", dataClassification: "personal", idempotencyKey: "speed-http-fixture", previewDigest: "0".repeat(64) };
+    const speedJob = { projectId: "smoke", title: "Speed", objective: "Inspect", modelPreset: "gpt-6.2-sol/medium", dataClassification: "personal", idempotencyKey: "speed-http-fixture", previewDigest: "0".repeat(64) };
     const speedMessage = { jobId: randomUUID(), clientMessageId: "speed-http-fixture", message: "Inspect", executionMode: "plan", approvalReviewer: "auto_review", dataClassification: "personal" };
     for (const name of ["render_codex_console", "codex_job_preview", "codex_job_dispatch", "codex_direct_job_dispatch", "codex_conversation_send", "codex_direct_conversation_send", "codex_direct_job_steer"]) {
       assert.deepEqual((tools.find((tool) => tool.name === name)!.inputSchema.properties!.speed as any).enum, ["standard", "fast"]);
@@ -55,7 +55,7 @@ test("Fast Mode MCP schemas and HTTP wiring cover preview, dispatch, app/local/d
       }
     }
     for (const speed of [undefined, "standard", "fast"]) {
-      const preview: any = await client.callTool({ name: "codex_job_preview", arguments: { projectId: "smoke", title: "Speed", objective: "Inspect", modelPreset: "gpt-6.1-sol/medium", ...(speed ? { speed } : {}) } });
+      const preview: any = await client.callTool({ name: "codex_job_preview", arguments: { projectId: "smoke", title: "Speed", objective: "Inspect", modelPreset: "gpt-6.2-sol/medium", ...(speed ? { speed } : {}) } });
       assert.equal(preview.structuredContent.workPackage.speed, speed ?? "standard");
       const rendered: any = await client.callTool({ name: "render_codex_console", arguments: { projectId: "smoke", ...(speed ? { speed } : {}) } });
       assert.equal(rendered.structuredContent.draft.speed, speed);

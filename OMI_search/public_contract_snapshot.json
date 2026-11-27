@@ -352,10 +352,12 @@
                 "events.calendar",
                 "events.history",
                 "events.upcoming",
+                "events.window",
                 "fundamentals.financials",
                 "fundamentals.revenue",
                 "intraday.bars",
                 "macro.observations",
+                "macro.official_releases",
                 "macro.series",
                 "market.breadth",
                 "market.chips",
@@ -369,6 +371,7 @@
                 "market.sectors",
                 "market.short_volume",
                 "market.volume_state",
+                "news.changes",
                 "news.company_documents",
                 "news.events",
                 "ownership.distribution",
@@ -445,10 +448,12 @@
                 "events.calendar",
                 "events.history",
                 "events.upcoming",
+                "events.window",
                 "fundamentals.financials",
                 "fundamentals.revenue",
                 "intraday.bars",
                 "macro.observations",
+                "macro.official_releases",
                 "macro.series",
                 "market.breadth",
                 "market.chips",
@@ -462,6 +467,7 @@
                 "market.sectors",
                 "market.short_volume",
                 "market.volume_state",
+                "news.changes",
                 "news.company_documents",
                 "news.events",
                 "ownership.distribution",
@@ -541,10 +547,12 @@
                 "events.calendar",
                 "events.history",
                 "events.upcoming",
+                "events.window",
                 "fundamentals.financials",
                 "fundamentals.revenue",
                 "intraday.bars",
                 "macro.observations",
+                "macro.official_releases",
                 "macro.series",
                 "market.breadth",
                 "market.chips",
@@ -558,6 +566,7 @@
                 "market.sectors",
                 "market.short_volume",
                 "market.volume_state",
+                "news.changes",
                 "news.company_documents",
                 "news.events",
                 "ownership.distribution",
@@ -792,6 +801,86 @@
                 },
                 "type": "object"
               },
+              "events.window": {
+                "additionalProperties": false,
+                "properties": {
+                  "country": {
+                    "enum": [
+                      "US",
+                      "TW"
+                    ],
+                    "type": "string"
+                  },
+                  "cursor": {
+                    "maxLength": 2048,
+                    "type": "string"
+                  },
+                  "domain": {
+                    "enum": [
+                      "finance",
+                      "politics",
+                      "technology",
+                      "hazards"
+                    ],
+                    "type": "string"
+                  },
+                  "exchange": {
+                    "enum": [
+                      "TWSE",
+                      "TPEX",
+                      "NASDAQ",
+                      "NYSE"
+                    ],
+                    "type": "string"
+                  },
+                  "from": {
+                    "maxLength": 32,
+                    "type": "string"
+                  },
+                  "symbol": {
+                    "maxLength": 12,
+                    "type": "string"
+                  },
+                  "to": {
+                    "maxLength": 32,
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "macro.official_releases": {
+                "additionalProperties": false,
+                "properties": {
+                  "country": {
+                    "enum": [
+                      "US",
+                      "TW"
+                    ],
+                    "type": "string"
+                  },
+                  "cursor": {
+                    "maxLength": 2048,
+                    "type": "string"
+                  },
+                  "from": {
+                    "maxLength": 32,
+                    "type": "string"
+                  },
+                  "group": {
+                    "maxLength": 40,
+                    "type": "string"
+                  },
+                  "release_id": {
+                    "maxLength": 180,
+                    "type": "string"
+                  },
+                  "to": {
+                    "maxLength": 32,
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
               "market.hot_groups": {
                 "additionalProperties": false,
                 "properties": {
@@ -835,6 +924,29 @@
                     "maximum": 100,
                     "minimum": 1,
                     "type": "integer"
+                  }
+                },
+                "type": "object"
+              },
+              "news.changes": {
+                "additionalProperties": false,
+                "properties": {
+                  "change_type": {
+                    "maxLength": 64,
+                    "type": "string"
+                  },
+                  "cursor": {
+                    "maxLength": 2048,
+                    "type": "string"
+                  },
+                  "domain": {
+                    "enum": [
+                      "finance",
+                      "politics",
+                      "technology",
+                      "hazards"
+                    ],
+                    "type": "string"
                   }
                 },
                 "type": "object"
@@ -1814,10 +1926,12 @@
                 "events.calendar",
                 "events.history",
                 "events.upcoming",
+                "events.window",
                 "fundamentals.financials",
                 "fundamentals.revenue",
                 "intraday.bars",
                 "macro.observations",
+                "macro.official_releases",
                 "macro.series",
                 "market.breadth",
                 "market.chips",
@@ -1831,6 +1945,7 @@
                 "market.sectors",
                 "market.short_volume",
                 "market.volume_state",
+                "news.changes",
                 "news.company_documents",
                 "news.events",
                 "ownership.distribution",
@@ -1970,6 +2085,322 @@
     ],
     "type": "object",
     "x-omi-capabilities": [
+      {
+        "capability_id": "macro.official_releases",
+        "compatibility_schema_versions": [],
+        "default_fields": [
+          "schema_version",
+          "provider",
+          "status",
+          "profile",
+          "items",
+          "generated_at",
+          "coverage",
+          "freshness",
+          "pagination",
+          "query",
+          "warnings",
+          "missing",
+          "source_refs",
+          "returned_count",
+          "decision_usable",
+          "time_basis"
+        ],
+        "default_limit": 10,
+        "deprecated": false,
+        "description": "Canonical OMI capability macro.official_releases.",
+        "domain": null,
+        "event_time_basis": "capability_defined",
+        "fields": [
+          "schema_version",
+          "provider",
+          "status",
+          "profile",
+          "items",
+          "generated_at",
+          "coverage",
+          "freshness",
+          "pagination",
+          "query",
+          "warnings",
+          "missing",
+          "source_refs",
+          "returned_count",
+          "decision_usable",
+          "time_basis"
+        ],
+        "fill_operations": {},
+        "frequency": "atlas_scheduler_owned",
+        "market_schema_versions": [],
+        "market_scopes": [],
+        "markets": [],
+        "parameter_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "country": {
+              "enum": [
+                "US",
+                "TW"
+              ],
+              "type": "string"
+            },
+            "cursor": {
+              "maxLength": 2048,
+              "type": "string"
+            },
+            "from": {
+              "maxLength": 32,
+              "type": "string"
+            },
+            "group": {
+              "maxLength": 40,
+              "type": "string"
+            },
+            "release_id": {
+              "maxLength": 180,
+              "type": "string"
+            },
+            "to": {
+              "maxLength": 32,
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "paths": [
+          "compact.atlas_releases",
+          "data.atlas_releases"
+        ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
+        "replacement_capabilities": [],
+        "schema_version": "omi.atlas.intelligence.v1",
+        "scopes": [
+          "stock",
+          "us_stock",
+          "market",
+          "tw_index",
+          "tw_futures",
+          "us_macro"
+        ],
+        "side_effect_policy": "read_only_local_service",
+        "slot": "atlas_releases",
+        "title": "Official releases and calendar",
+        "unit_semantics": "field_defined",
+        "writes_cache": false
+      },
+      {
+        "capability_id": "events.window",
+        "compatibility_schema_versions": [],
+        "default_fields": [
+          "schema_version",
+          "provider",
+          "status",
+          "profile",
+          "items",
+          "generated_at",
+          "coverage",
+          "freshness",
+          "pagination",
+          "query",
+          "warnings",
+          "missing",
+          "source_refs",
+          "returned_count",
+          "decision_usable",
+          "time_basis"
+        ],
+        "default_limit": 10,
+        "deprecated": false,
+        "description": "Canonical OMI capability events.window.",
+        "domain": null,
+        "event_time_basis": "capability_defined",
+        "fields": [
+          "schema_version",
+          "provider",
+          "status",
+          "profile",
+          "items",
+          "generated_at",
+          "coverage",
+          "freshness",
+          "pagination",
+          "query",
+          "warnings",
+          "missing",
+          "source_refs",
+          "returned_count",
+          "decision_usable",
+          "time_basis"
+        ],
+        "fill_operations": {},
+        "frequency": "atlas_scheduler_owned",
+        "market_schema_versions": [],
+        "market_scopes": [],
+        "markets": [],
+        "parameter_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "country": {
+              "enum": [
+                "US",
+                "TW"
+              ],
+              "type": "string"
+            },
+            "cursor": {
+              "maxLength": 2048,
+              "type": "string"
+            },
+            "domain": {
+              "enum": [
+                "finance",
+                "politics",
+                "technology",
+                "hazards"
+              ],
+              "type": "string"
+            },
+            "exchange": {
+              "enum": [
+                "TWSE",
+                "TPEX",
+                "NASDAQ",
+                "NYSE"
+              ],
+              "type": "string"
+            },
+            "from": {
+              "maxLength": 32,
+              "type": "string"
+            },
+            "symbol": {
+              "maxLength": 12,
+              "type": "string"
+            },
+            "to": {
+              "maxLength": 32,
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "paths": [
+          "compact.atlas_window",
+          "data.atlas_window"
+        ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
+        "replacement_capabilities": [],
+        "schema_version": "omi.atlas.intelligence.v1",
+        "scopes": [
+          "stock",
+          "us_stock",
+          "market",
+          "tw_index",
+          "tw_futures",
+          "us_macro"
+        ],
+        "side_effect_policy": "read_only_local_service",
+        "slot": "atlas_window",
+        "title": "Time-aligned Atlas events",
+        "unit_semantics": "field_defined",
+        "writes_cache": false
+      },
+      {
+        "capability_id": "news.changes",
+        "compatibility_schema_versions": [],
+        "default_fields": [
+          "schema_version",
+          "provider",
+          "status",
+          "profile",
+          "items",
+          "generated_at",
+          "coverage",
+          "freshness",
+          "pagination",
+          "query",
+          "warnings",
+          "missing",
+          "source_refs",
+          "returned_count",
+          "decision_usable",
+          "time_basis"
+        ],
+        "default_limit": 10,
+        "deprecated": false,
+        "description": "Canonical OMI capability news.changes.",
+        "domain": null,
+        "event_time_basis": "capability_defined",
+        "fields": [
+          "schema_version",
+          "provider",
+          "status",
+          "profile",
+          "items",
+          "generated_at",
+          "coverage",
+          "freshness",
+          "pagination",
+          "query",
+          "warnings",
+          "missing",
+          "source_refs",
+          "returned_count",
+          "decision_usable",
+          "time_basis"
+        ],
+        "fill_operations": {},
+        "frequency": "atlas_scheduler_owned",
+        "market_schema_versions": [],
+        "market_scopes": [],
+        "markets": [],
+        "parameter_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "change_type": {
+              "maxLength": 64,
+              "type": "string"
+            },
+            "cursor": {
+              "maxLength": 2048,
+              "type": "string"
+            },
+            "domain": {
+              "enum": [
+                "finance",
+                "politics",
+                "technology",
+                "hazards"
+              ],
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "paths": [
+          "compact.atlas_changes",
+          "data.atlas_changes"
+        ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
+        "replacement_capabilities": [],
+        "schema_version": "omi.atlas.intelligence.v1",
+        "scopes": [
+          "stock",
+          "us_stock",
+          "market",
+          "tw_index",
+          "tw_futures",
+          "us_macro"
+        ],
+        "side_effect_policy": "read_only_local_service",
+        "slot": "atlas_changes",
+        "title": "Atlas change feed",
+        "unit_semantics": "field_defined",
+        "writes_cache": false
+      },
       {
         "capability_id": "target.identity",
         "compatibility_schema_versions": [],
@@ -5580,7 +6011,12 @@
         ],
         "fill_operations": {},
         "frequency": "request",
-        "market_schema_versions": [],
+        "market_schema_versions": [
+          [
+            "US",
+            "us.company.profile.v1"
+          ]
+        ],
         "market_scopes": [],
         "markets": [],
         "parameter_schema": {
@@ -5695,7 +6131,12 @@
         ],
         "fill_operations": {},
         "frequency": "request",
-        "market_schema_versions": [],
+        "market_schema_versions": [
+          [
+            "US",
+            "us.corporate.actions.v1"
+          ]
+        ],
         "market_scopes": [],
         "markets": [],
         "parameter_schema": {
@@ -5717,6 +6158,7 @@
           "type": "object"
         },
         "paths": [
+          "data.corporate_action_interval",
           "compact.corporate_actions",
           "data.corporate_actions"
         ],
@@ -5816,7 +6258,8 @@
         "replacement_capabilities": [],
         "schema_version": "omi.external.company_news.v1",
         "scopes": [
-          "stock"
+          "stock",
+          "us_stock"
         ],
         "side_effect_policy": "read_only_local_service",
         "slot": "company_news",
@@ -6251,6 +6694,7 @@
           "newest_as_of",
           "mixed_as_of",
           "mixed_trade_dates",
+          "trade_date",
           "market_session",
           "current_for_requested_session",
           "is_current",
@@ -6281,6 +6725,7 @@
           "newest_as_of",
           "mixed_as_of",
           "mixed_trade_dates",
+          "trade_date",
           "market_session",
           "current_for_requested_session",
           "is_current",
@@ -6337,6 +6782,7 @@
           "result_count",
           "events",
           "source",
+          "sources",
           "cache_policy",
           "cache_status",
           "empty_result_is_valid",
@@ -6345,7 +6791,7 @@
         ],
         "default_limit": 50,
         "deprecated": false,
-        "description": "Upcoming official Taiwan stock events from the bounded local corporate-event cache. A current empty result is distinct from a missing event cache.",
+        "description": "Upcoming stock events from the applicable market's local corporate-event cache. A current empty result is distinct from a missing event cache.",
         "domain": "events",
         "event_time_basis": "official_event_date",
         "fields": [
@@ -6359,6 +6805,7 @@
           "total_count",
           "events",
           "source",
+          "sources",
           "cache_policy",
           "cache_status",
           "cache_fetched_at",
@@ -6371,7 +6818,8 @@
         "market_schema_versions": [],
         "market_scopes": [],
         "markets": [
-          "TW"
+          "TW",
+          "US"
         ],
         "parameter_schema": {
           "additionalProperties": false,
@@ -6400,11 +6848,12 @@
         "replacement_capabilities": [],
         "schema_version": "omi.capability.v1",
         "scopes": [
-          "stock"
+          "stock",
+          "us_stock"
         ],
         "side_effect_policy": "cache_only",
         "slot": "events_upcoming",
-        "title": "Taiwan stock upcoming events",
+        "title": "Upcoming stock events",
         "unit_semantics": "event_records",
         "writes_cache": false
       },
@@ -10004,10 +10453,10 @@
         "writes_cache": false
       }
     ],
-    "x-omi-capability-registry-digest": "50a61c6618b4447cb61291fba4cf283a53553d314a55115d1a5bd10e59063b71",
+    "x-omi-capability-registry-digest": "ed2d013c2633c4dc105e0eb22330583238cf1d4f368758c984658c30e212fd02",
     "x-omi-capability-registry-version": "omi.capability.registry.v3",
     "x-omi-capability-selection-version": "omi.capability.selection.v2",
-    "x-omi-public-contract-digest": "50a61c6618b4447cb61291fba4cf283a53553d314a55115d1a5bd10e59063b71",
+    "x-omi-public-contract-digest": "ed2d013c2633c4dc105e0eb22330583238cf1d4f368758c984658c30e212fd02",
     "x-omi-targets": [
       {
         "deprecated": false,
@@ -10276,6 +10725,9 @@
     ]
   },
   "capability_ids": [
+    "macro.official_releases",
+    "events.window",
+    "news.changes",
     "target.identity",
     "quote.snapshot",
     "quote.order_book",
@@ -10352,7 +10804,7 @@
   ],
   "capability_registry_version": "omi.capability.registry.v3",
   "contract_version": "omi.decision.v4",
-  "digest": "50a61c6618b4447cb61291fba4cf283a53553d314a55115d1a5bd10e59063b71",
+  "digest": "ed2d013c2633c4dc105e0eb22330583238cf1d4f368758c984658c30e212fd02",
   "schema_version": "omi.mcp.public_contract_snapshot.v1",
   "selection_version": "omi.capability.selection.v2",
   "target_types": [

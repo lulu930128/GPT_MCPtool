@@ -23,7 +23,7 @@ async function main(): Promise<void> {
   const config = await loadBridgeConfig();
   diagnostics = new RuntimeDiagnostics(config);
   await currentProcessIdentity();
-  const runtime = await createBridgeRuntime(config);
+  const runtime = await createBridgeRuntime(config, diagnostics);
   const handle = await startRuntimeHttp(runtime, {
     host: config.httpHost,
     port: config.httpPort,

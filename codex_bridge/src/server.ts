@@ -15,6 +15,13 @@ import { registerSelfReloadTools } from "./self-reload/tools.js";
 
 const WIDGET_URI = "ui://codex-bridge/chat-workspace-v18.html";
 
+const pollSchema = z.object({id:z.string().uuid(), connection:z.string().uuid(),
+          knownState:z.object({jobId:z.string().uuid(),instance:z.string().uuid(),stateVersion:z.number().int().positive()}).optional(),
+          previous:z.object({id:z.string().uuid(), connection:z.string().uuid(), jobId:z.union([z.string().uuid(),z.string().regex(/^local:[0-9a-f-]{36}$/i)]),
+            instance:z.string().uuid().optional(), outcome:z.enum(["applied","timeout","transport_failed","gap","hidden","resumed","obsolete"]),
+            revision:z.number().int().nonnegative(), elapsedMs:z.number().finite().nonnegative(),
+            renderMs:z.number().finite().nonnegative(), at:z.number().int().nonnegative(), hidden:z.boolean()}).optional()}).optional();
+
 const workPackageInput = {
   projectId: z.string().min(2).max(32),
   title: z.string().min(1).max(120),
@@ -127,10 +134,34 @@ export function createCodexBridgeMcpServer(runtime: BridgeRuntime): McpServer {
     annotations: readAnnotations(), inputSchema: {},
   }, async () => safeResult(async () => result(await runtime.controller.usageStatus(), "Account usage status loaded.")));
 
+  server.registerTool("codex_thread_inspect", {
+    description:"Read native goal, queued submissions or message search results for the selected Bridge thread.",
+    annotations:readAnnotations(), _meta:{ui:{visibility:["app"]}}, inputSchema:{jobId:z.string().uuid(),threadId:z.string().min(1),
+      kind:z.enum(["goal","queue","search","agents","messages"]),childId:z.string().min(1).optional(),cursor:z.string().min(1).optional(),searchTerm:z.string().min(1).optional()},
+  }, args => safeResult(async () => result(await runtime.controller.readThreadPage(args),"Thread readback.")));
+
+  server.registerTool("codex_thread_manage", {
+    description:"Save a paused goal, clear a goal, or remove an existing queued submission for the exact selected thread.",
+    annotations:actionAnnotations(false), _meta:{ui:{visibility:["app"]}},inputSchema:{jobId:z.string().uuid(),threadId:z.string().min(1),
+      expectedTurnId:z.string().min(1),requestId:z.string().uuid(),operation:z.discriminatedUnion("kind",[
+        z.object({kind:z.literal("saveGoal"),objective:z.string().trim().min(1).max(4000)}),z.object({kind:z.literal("clearGoal")}),
+        z.object({kind:z.literal("deleteQueued"),id:z.string().min(1)}),
+      ])},
+  }, args => safeResult(async () => result(await runtime.controller.manageThread(args),"Thread operation receipt.")));
+
   server.registerTool("codex_runtime_status", {
     description: "Read normalized server, sandbox, permission profile, provider capability and experimental feature diagnostics for a configured project. Each unavailable component is reported separately.",
-    annotations: readAnnotations(), inputSchema: { projectId: workPackageInput.projectId },
-  }, async (args) => safeResult(async () => result(await runtime.controller.runtimeStatus(args.projectId), "Runtime diagnostics loaded.")));
+    annotations: readAnnotations(), inputSchema: { projectId: workPackageInput.projectId,
+      pipeline:z.object({jobId:z.string().uuid().optional(),pollId:z.string().uuid().optional(),limit:z.number().int().min(1).max(50).default(10)}).optional() },
+  }, async (args) => safeResult(async () => {
+    if (!args.pipeline) return result(await runtime.controller.runtimeStatus(args.projectId), "Runtime diagnostics loaded.");
+    runtime.controller.requireDirectProject(args.projectId);
+    const {jobId,pollId,limit} = args.pipeline;
+    const job = jobId ? runtime.store.get(jobId) : undefined;
+    if (jobId && job?.project.id !== args.projectId) throw new Error("Unknown job in this project.");
+    const pipeline = await runtime.diagnostics?.readRecent(limit,jobId,pollId,job?.threadId);
+    return result({projectId:args.projectId,pipeline:pipeline ?? {status:"unavailable"}},"Saved pipeline diagnostics loaded.");
+  }));
 
   server.registerTool("codex_inventory", {
     description: "Read bounded skills/hooks for a configured project and Codex-side MCP server status. MCP status is server-wide. No paths, hook commands, credentials, tool call, reload or mutation.",
@@ -245,11 +276,16 @@ export function createCodexBridgeMcpServer(runtime: BridgeRuntime): McpServer {
         afterSeq: z.number().int().min(0).optional(),
         maxEvents: z.number().int().min(1).max(200).optional(),
         afterConversationRevision: z.number().int().min(0).optional(),
+        poll: pollSchema,
         recovery: z.enum(["snapshot", "native"]).optional(),
       },
     },
     async (args) => safeResult(async () => {
+      const started = performance.now();
+      const poll = args.poll;
+      recordWidgetObservation(runtime, poll);
       if (args.recovery === "native") await runtime.controller.recoverActiveConversation(args.jobId);
+      else if (poll) runtime.controller.schedulePollRecovery(args.jobId);
       else if (args.recovery !== "snapshot") await runtime.controller.hydrateConversation(args.jobId);
       const snapshot = await runtime.store.snapshot(
         args.jobId,
@@ -259,7 +295,18 @@ export function createCodexBridgeMcpServer(runtime: BridgeRuntime): McpServer {
         args.recovery !== undefined,
       );
       snapshot.conversationRecovery = runtime.controller.conversationRecoveryDiagnostics(args.jobId);
-      return result(snapshot, describeSnapshot(snapshot));
+      runtime.diagnostics?.observe("host_poll", snapshot.conversationDelivery?.reason ?? snapshot.conversationDelivery?.mode ?? "unknown", {
+        jobId:args.jobId, threadId:snapshot.threadId,turnId:snapshot.turnId,revision:snapshot.nextConversationRevision,
+        seq:snapshot.nextEventSeq, poll:poll?.id, connection:poll?.connection, elapsedMs:performance.now()-started,
+      });
+      const known = poll?.knownState;
+      const meta = poll && runtime.diagnostics ? {pollId:poll.id, bridgeInstance:runtime.diagnostics.instance} : undefined;
+      if (known && known.jobId === args.jobId && known.instance === meta?.bridgeInstance
+        && known.stateVersion === snapshot.stateVersion && args.afterConversationRevision !== undefined && !snapshot.conversation) {
+        const {messages, approvals, inputArtifacts, result: _previousResult, ...incremental} = snapshot;
+        return result({...incremental, sameJobState:true}, describeSnapshot(snapshot), meta);
+      }
+      return result(snapshot, describeSnapshot(snapshot), meta);
     }),
   );
 
@@ -336,12 +383,18 @@ export function createCodexBridgeMcpServer(runtime: BridgeRuntime): McpServer {
       title: "Read unified Codex conversation",
       description: "Read one app-only unified conversation with native history and Bridge or automation overlays.",
       annotations: readAnnotations(),
-      inputSchema: { conversationId: z.string().min(1).max(256) },
+      inputSchema: { conversationId: z.string().min(1).max(256), ifView:z.string().max(160).optional(), poll:pollSchema },
       _meta: { ui: { visibility: ["app"] } },
     },
     async (args) => safeResult(async () => {
-      const conversation = await runtime.conversations.get(args.conversationId, "app");
-      return result({ unifiedConversation: conversation }, `Loaded unified Codex conversation ${args.conversationId}.`);
+      const started = performance.now();
+      recordWidgetObservation(runtime,args.poll);
+      const conversation = await runtime.conversations.get(args.conversationId, "app", args.ifView);
+      runtime.diagnostics?.observe("host_poll",conversation.viewUnchanged ? "native_unchanged" : "native_snapshot",{
+        jobId:conversation.bridgeJob?.id, threadId:conversation.threadId, connection:args.poll?.connection,
+        poll:args.poll?.id,elapsedMs:performance.now()-started});
+      return result({ unifiedConversation: conversation }, `Loaded unified Codex conversation ${args.conversationId}.`,
+        args.poll ? {pollId:args.poll.id,bridgeInstance:runtime.diagnostics?.instance} : undefined);
     }),
   );
 
@@ -607,7 +660,9 @@ export function createCodexBridgeMcpServer(runtime: BridgeRuntime): McpServer {
         sent.delivery === "steer"
           ? `Sent guidance to active conversation ${snapshot.id}.`
           : sent.delivery === "turn"
-            ? `Started a new turn in conversation ${snapshot.id}.`
+            ? `Requested a new turn in conversation ${snapshot.id}.`
+            : sent.delivery === "failed" ? "The original message failed to start a turn."
+            : sent.delivery === "unknown" ? "Message recorded locally. Native delivery is unconfirmed."
             : `Returned the existing message for conversation ${snapshot.id}.`,
       );
     }),
@@ -651,17 +706,18 @@ export function createCodexBridgeMcpServer(runtime: BridgeRuntime): McpServer {
     {
       title: "Decide Codex approval",
       description:
-        "Accept, decline, or cancel one exact pending command or file-change request. This action is available only from the interactive app.",
+        "Accept, decline, or cancel one exact pending command, file-change, or native choice request. This action is available only from the interactive app.",
       annotations: actionAnnotations(false),
       inputSchema: {
         jobId: z.string().uuid(),
         approvalId: z.string().uuid(),
         decision: z.enum(["accept", "decline", "cancel"]),
+        selections: z.array(z.number().int().nonnegative()).optional(),
       },
       _meta: { ui: { visibility: ["app"] } },
     },
     async (args) => safeResult(async () => {
-      const job = await runtime.controller.decideApproval(args.jobId, args.approvalId, args.decision);
+      const job = await runtime.controller.decideApproval(args.jobId, args.approvalId, args.decision,args.selections);
       return result(
         { job: await runtime.store.snapshot(job.id, 0) },
         `${args.decision} recorded for approval ${args.approvalId}.`,
@@ -701,6 +757,14 @@ function requireAllowedProject(runtime: BridgeRuntime, projectId: string): void 
 function describeSnapshot(snapshot: JobSnapshot): string {
   const approval = snapshot.pendingApprovalCount === 1 ? " One approval is pending." : snapshot.pendingApprovalCount > 1 ? ` ${snapshot.pendingApprovalCount} approvals are pending.` : "";
   return `Job ${snapshot.id} is ${snapshot.status}.${approval}`;
+}
+
+function recordWidgetObservation(runtime: BridgeRuntime, poll: z.infer<typeof pollSchema>) {
+  const prior = poll?.previous;
+      if (prior) runtime.diagnostics?.observe("widget_ack", prior.outcome, {
+        jobId:prior.jobId, poll:prior.id, connection:prior.connection, revision:prior.revision, instance:prior.instance,
+        elapsedMs:prior.elapsedMs, renderMs:prior.renderMs, observedAtMs:prior.at, hidden:prior.hidden,
+      }, ["timeout","transport_failed","gap"].includes(prior.outcome));
 }
 
 function readAnnotations() {

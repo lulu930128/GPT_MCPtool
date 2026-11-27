@@ -1,6 +1,8 @@
+import { RuntimeDiagnostics } from "../dist/src/runtime-diagnostics.js";
+import { previewWorkPackage } from "../dist/src/work-package.js";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -41,7 +43,9 @@ if (process.platform === "win32") {
 }
 // Keep the real launch-policy checks above, but all smoke writes stay isolated.
 config.handoffDir = join(root, "handoff");
-const runtime = await createBridgeRuntime(config);
+config.codexHome = join(root,"fixture-home");
+const diagnostics = new RuntimeDiagnostics(config);
+const runtime = await createBridgeRuntime(config,diagnostics);
 // Preset/catalog wiring is offline; never launch native discovery in this smoke.
 runtime.controller.listModels = async () => [];
 // Self-reload status otherwise spawns the real native pipe helper. Keep this
@@ -119,6 +123,8 @@ try {
     "codex_text_bundle_append",
     "codex_text_bundle_begin",
     "codex_text_bundle_finalize",
+    "codex_thread_inspect",
+    "codex_thread_manage",
     "codex_unified_conversation_get",
     "codex_unified_conversation_list",
     "codex_usage_status",
@@ -135,6 +141,8 @@ try {
     "codex_job_steer",
     "codex_local_thread_list",
     "codex_local_thread_read",
+    "codex_thread_inspect",
+    "codex_thread_manage",
     "codex_unified_conversation_get",
     "codex_unified_conversation_list",
     "codex_text_bundle_append",
@@ -234,7 +242,7 @@ try {
       assert.equal(properties?.approvalReviewer?.default, undefined, "Defaults are resolved by work-package/controller, not transport.");
     } else assert.equal(properties?.approvalReviewer, undefined);
   }
-  const directInput = { projectId: "smoke", title: "Direct smoke", objective: "Inspect only", modelPreset: "gpt-6.1-sol/medium", dataClassification: "personal", idempotencyKey: "direct-http-smoke" };
+  const directInput = { projectId: "smoke", title: "Direct smoke", objective: "Inspect only", modelPreset: "gpt-6.2-sol/medium", dataClassification: "personal", idempotencyKey: "direct-http-smoke" };
   for (const [change, code] of [[{ projectId: "unknown" }, "DIRECT_PROJECT_NOT_ALLOWLISTED"], [{ dataClassification: "company_approved" }, "DIRECT_COMPANY_AUTHORIZATION_REQUIRES_APP"]]) {
     const rejected = await client.callTool({ name: "codex_direct_job_dispatch", arguments: { ...directInput, ...change } });
     assert.equal(rejected.structuredContent?.error?.code, code);
@@ -353,7 +361,7 @@ try {
 
   const previewResult = await client.callTool({
     name: "codex_job_preview",
-    arguments: { projectId: "smoke", title: "Smoke preview", objective: "Verify the non-mutating contract.", modelPreset: "gpt-6.1-sol/medium", inputBundleIds: [bundleId] },
+    arguments: { projectId: "smoke", title: "Smoke preview", objective: "Verify the non-mutating contract.", modelPreset: "gpt-6.2-sol/medium", inputBundleIds: [bundleId] },
   });
   assert.match(previewResult.structuredContent?.previewDigest, /^[0-9a-f]{64}$/);
   assert.equal(runtime.store.list().length, 0, "Preview must not create a job.");
@@ -372,18 +380,52 @@ try {
   assert.match(widget.contents[0]?.text || "", /本機歷史 · 可續作/);
   assert.match(widget.contents[0]?.text || "", /本機歷史 · 受保護/);
 
+  const previewCreatedJobs = runtime.store.list().length;
+  const fixture = previewWorkPackage({projectId:"smoke",title:"poll",objective:"fixture-only telemetry"});
+  const {record} = await runtime.store.create({...fixture,project:config.projects.get("smoke"),idempotencyKey:randomUUID()});
+  const connection = randomUUID(), first = randomUUID();
+  const poll = async args => client.callTool({name:"codex_job_get",arguments:{jobId:record.id,...args}});
+  const initial = await poll({poll:{connection,id:first}});
+  assert.equal(initial._meta.bridgeInstance,diagnostics.instance);
+  await runtime.store.applyConversationNotification(record.id,{method:"item/agentMessage/delta",params:{threadId:"thread",turnId:"turn",itemId:"item",delta:"sentinel-private"}});
+  const ack = {id:first,connection,jobId:record.id,instance:diagnostics.instance,revision:initial.structuredContent.nextConversationRevision,
+    outcome:"applied",at:Date.now(),elapsedMs:6,renderMs:2,hidden:false};
+  const next = await poll({afterConversationRevision:ack.revision, poll:{connection,id:randomUUID(),previous:ack,
+    knownState:{jobId:record.id,instance:diagnostics.instance,stateVersion:initial.structuredContent.stateVersion}}});
+  assert.equal(next.structuredContent.sameJobState,true);
+  assert.ok(!("messages" in next.structuredContent));
+  const otherInstance = await poll({afterConversationRevision:ack.revision,poll:{connection,id:randomUUID(),
+    knownState:{jobId:record.id,instance:randomUUID(),stateVersion:initial.structuredContent.stateVersion}}});
+  assert.ok(Array.isArray(otherInstance.structuredContent.messages));
+  assert.equal(next.structuredContent.conversationChanges[0].revision,1);
+  diagnostics.record("heartbeat");
+  const persisted = await readFile(diagnostics.path,"utf8");
+  assert.ok(!persisted.includes("sentinel-private") && !persisted.includes("fixture-only telemetry"));
+  const groups = JSON.parse(persisted.trim().split("\n").at(-1)).groups;
+  const applied = groups.find(g=>g.stage==="widget_ack" && g.sample.poll===first);
+  assert.ok(applied.sample.http >= 0 && applied.sample.service >= 0 && applied.sample.bytes > 0);
+  assert.equal(applied.sample.revision,0);
+  const saved = await client.callTool({name:"codex_runtime_status",arguments:{projectId:"smoke",pipeline:{jobId:record.id,pollId:first}}});
+  assert.ok(saved.structuredContent?.pipeline?.records.some(row=>row.groups.some(g=>g.stage==="widget_ack" && g.sample.poll===first)));
+  const foreign = await client.callTool({name:"codex_runtime_status",arguments:{projectId:"smoke",pipeline:{jobId:randomUUID()}}});
+  assert.ok(foreign.isError);
+  assert.equal(runtime.controller.status,"idle");
+
   console.log(JSON.stringify({
     ok: true,
     health: { version: health.version, buildId: health.buildId, controller: health.controller },
     toolCount: tools.length,
     normalExecution: "HTTP_SCHEMA_AND_NOT_DEPLOYED_VERIFIED_NO_OS_EXECUTION",
-    appOnlyActions: 15,
+    appOnlyActions: 17,
     finalizedTextBundle: bundleId,
     widgetMimeType: widget.contents[0]?.mimeType,
-    previewCreatedJobs: runtime.store.list().length,
+    previewCreatedJobs, pollCorrelationVerified:true,
+    pollReceipt:{socketBytes:applied.sample.bytes, httpMs:applied.sample.http, bridgeMs:applied.sample.service,
+      widgetReportedMs:applied.sample.elapsedMs,widgetReportedRenderMs:applied.sample.renderMs,revision:applied.sample.revision},
   }, null, 2));
 } finally {
   await client.close().catch(() => undefined);
   await handle.close();
+  diagnostics.dispose();
   await rm(root, { recursive: true, force: true });
 }

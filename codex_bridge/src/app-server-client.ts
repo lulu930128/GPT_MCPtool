@@ -1,3 +1,4 @@
+import type { RuntimeDiagnostics } from "./runtime-diagnostics.js";
 import { EventEmitter } from "node:events";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
@@ -5,6 +6,7 @@ import { createInterface } from "node:readline";
 export type AppServerStatus = "idle" | "starting" | "ready" | "unavailable";
 
 export interface JsonRpcNotification {
+  wireBytes?: number;
   method: string;
   params?: Record<string, unknown>;
 }
@@ -17,19 +19,31 @@ export interface AppServerTransport {
   readonly status: AppServerStatus;
   /** App Server build reported by initialize; unknown until a successful handshake. */
   readonly protocolVersion?: string | null;
+  setNotificationBacklog?(bytes: number): void;
   ensureStarted(): Promise<void>;
   close(): Promise<void>;
-  request<T = Record<string, unknown>>(method: string, params?: Record<string, unknown>): Promise<T>;
+  request<T = Record<string, unknown>>(method: string, params?: Record<string, unknown>, late?: (result: unknown, rejected: boolean) => void): Promise<T>;
   notify(method: string, params?: Record<string, unknown>): void;
   respond(id: string | number, result: Record<string, unknown>): void;
   on(event: "notification", listener: (message: JsonRpcNotification) => void): this;
   off(event: "notification", listener: (message: JsonRpcNotification) => void): this;
   on(event: "serverRequest", listener: (message: JsonRpcServerRequest) => void): this;
+  off(event: "exit", listener: (error: Error) => void): this;
   on(event: "stderr", listener: (line: string) => void): this;
   on(event: "exit", listener: (error: Error) => void): this;
 }
 
+export class NativeDeliveryUnknown extends Error {}
+export class NativeRpcRejected extends Error {
+  constructor(method: string, error: Record<string, unknown>) {
+    super(`${method} failed: ${rpcErrorMessage(error)}`);
+  }
+}
+
 interface PendingRequest {
+  started: number;
+  threadId?: string;
+  turnId?: string;
   method: string;
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
@@ -37,6 +51,7 @@ interface PendingRequest {
 }
 
 interface AppServerClientOptions {
+  diagnostics?: RuntimeDiagnostics;
   command: string;
   args: string[];
   requestTimeoutMs?: number;
@@ -47,11 +62,28 @@ interface AppServerClientOptions {
 export class CodexAppServerClient extends EventEmitter implements AppServerTransport {
   private child?: ChildProcessWithoutNullStreams;
   private nextId = 1;
+  private readonly lateReplies = new Map<number,(result:unknown,rejected:boolean)=>void>();
   private pending = new Map<number, PendingRequest>();
   private startPromise?: Promise<void>;
   private currentStatus: AppServerStatus = "idle";
   private currentProtocolVersion: string | null = null;
   private closing = false;
+  private pausedAt?: number;
+
+  setNotificationBacklog(bytes: number) {
+    const stream = this.child?.stdout;
+    if (!stream || this.currentStatus !== "ready") return;
+    if (bytes >= stream.readableHighWaterMark && !this.pending.size && !this.closing) {
+      if (this.pausedAt !== undefined) return;
+      this.pausedAt = performance.now();
+      stream.pause();
+      this.options.diagnostics?.observe("queue","stdio_paused",{bytes});
+    } else if (this.pausedAt !== undefined) {
+      stream.resume();
+      this.options.diagnostics?.observe("queue","stdio_resumed",{bytes,elapsedMs:performance.now()-this.pausedAt});
+      this.pausedAt = undefined;
+    }
+  }
   private readonly requestTimeoutMs: number;
 
   constructor(private readonly options: AppServerClientOptions) {
@@ -61,6 +93,13 @@ export class CodexAppServerClient extends EventEmitter implements AppServerTrans
 
   get status(): AppServerStatus {
     return this.currentStatus;
+  }
+
+  workload() {
+    const oldest = this.pending.entries().next().value;
+    return {status:this.status, pid:this.child?.pid, inflight:this.pending.size, oldestRpc:oldest?.[0],
+      oldestRpcMs:oldest ? performance.now()-oldest[1].started : 0, paused:this.pausedAt !== undefined,
+      stdoutBufferedBytes:this.child?.stdout.readableLength, stdinBufferedBytes:this.child?.stdin.writableLength};
   }
 
   get protocolVersion(): string | null {
@@ -87,6 +126,7 @@ export class CodexAppServerClient extends EventEmitter implements AppServerTrans
   async close(): Promise<void> {
     const child = this.child;
     this.closing = true;
+    this.setNotificationBacklog(0);
     if (!child) {
       this.closing = false;
       return;
@@ -96,11 +136,10 @@ export class CodexAppServerClient extends EventEmitter implements AppServerTrans
     await new Promise<void>((resolve, reject) => {
       const done = () => { clearTimeout(timer); this.child = undefined; this.currentStatus = "idle"; this.closing = false; resolve(); };
       const timer = setTimeout(() => {
-        child.off("exit", done);
+        child.off("close", done);
         reject(new Error("APP_SERVER_CLOSE_UNKNOWN"));
       }, 5000);
-      if (child.exitCode !== null || child.signalCode !== null) { done(); return; }
-      child.once("exit", done);
+      child.once("close", done);
       child.stdin.end();
     });
   }
@@ -108,28 +147,10 @@ export class CodexAppServerClient extends EventEmitter implements AppServerTrans
   async request<T = Record<string, unknown>>(
     method: string,
     params: Record<string, unknown> = {},
+    late?: (result:unknown,rejected:boolean) => void,
   ): Promise<T> {
     await this.ensureStarted();
-    const id = this.nextId++;
-    return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`Codex App Server request '${method}' timed out after ${this.requestTimeoutMs} ms.`));
-      }, this.requestTimeoutMs);
-      this.pending.set(id, {
-        method,
-        resolve: (value) => resolve(value as T),
-        reject,
-        timer,
-      });
-      try {
-        this.write({ jsonrpc: "2.0", id, method, params });
-      } catch (error) {
-        clearTimeout(timer);
-        this.pending.delete(id);
-        reject(asError(error));
-      }
-    });
+    return this.requestWithoutStart(method, params, late);
   }
 
   notify(method: string, params: Record<string, unknown> = {}): void {
@@ -157,6 +178,7 @@ export class CodexAppServerClient extends EventEmitter implements AppServerTrans
       throw new Error(`Unable to start Codex App Server: ${asError(error).message}`);
     }
     this.child = child;
+    this.options.diagnostics?.observe("native_session","spawned",{nativePid:child.pid});
     child.stdin.setDefaultEncoding("utf8");
 
     const stdout = createInterface({ input: child.stdout, crlfDelay: Infinity });
@@ -168,9 +190,16 @@ export class CodexAppServerClient extends EventEmitter implements AppServerTrans
       child.once("spawn", resolve);
       child.once("error", reject);
     });
-    child.once("exit", (code, signal) => {
-      const error = new Error(`Codex App Server exited (code=${String(code)}, signal=${String(signal)}).`);
+    // exit can precede the last buffered notification. Resume the pipe to
+    // deliver all lines, then settle requests and disconnect on close.
+    child.once("exit", () => { child.stdout.resume(); });
+    child.once("close", (code, signal) => {
+      if (this.child !== child) return;
+      this.options.diagnostics?.observe("native_session", this.closing ? "closing" : "disconnected", {nativePid:child.pid,depth:this.pending.size});
+      this.options.diagnostics?.record("native_exit", {exitCode:code,signal});
+      const error = new NativeDeliveryUnknown(`Codex App Server exited (code=${String(code)}, signal=${String(signal)}).`);
       this.child = undefined;
+      this.pausedAt = undefined;
       this.currentProtocolVersion = null;
       this.currentStatus = this.closing ? "idle" : "unavailable";
       for (const pending of this.pending.values()) {
@@ -178,6 +207,7 @@ export class CodexAppServerClient extends EventEmitter implements AppServerTrans
         pending.reject(error);
       }
       this.pending.clear();
+      this.lateReplies.clear();
       if (!this.closing) {
         this.emit("exit", error);
       }
@@ -200,6 +230,7 @@ export class CodexAppServerClient extends EventEmitter implements AppServerTrans
         ? /^codex-handoff-bridge\/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?:\s|$)/.exec(result.userAgent)?.[1] ?? null
         : null;
       this.currentStatus = "ready";
+      this.options.diagnostics?.observe("native_session","ready",{nativePid:child.pid});
     } catch (error) {
       this.currentStatus = "unavailable";
       child.kill();
@@ -207,20 +238,32 @@ export class CodexAppServerClient extends EventEmitter implements AppServerTrans
     }
   }
 
-  private requestWithoutStart<T>(method: string, params: Record<string, unknown>): Promise<T> {
+  private requestWithoutStart<T>(method: string, params: Record<string, unknown>, late?: (result:unknown,rejected:boolean) => void): Promise<T> {
+    this.setNotificationBacklog(0); // Responses share stdout with notifications.
+    const started = performance.now();
+    const threadId = typeof params.threadId === "string" ? params.threadId : undefined;
+    const turnId = typeof params.turnId === "string" ? params.turnId : undefined;
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
+        if (late) this.lateReplies.set(id, late);
         this.pending.delete(id);
-        reject(new Error(`Codex App Server request '${method}' timed out after ${this.requestTimeoutMs} ms.`));
+        this.options.diagnostics?.observe("native_rpc", "timeout", {rpc:id, threadId,turnId,elapsedMs:performance.now()-started}, true);
+        reject(new NativeDeliveryUnknown(`Codex App Server request '${method}' timed out after ${this.requestTimeoutMs} ms.`));
       }, this.requestTimeoutMs);
       this.pending.set(id, {
-        method,
+        method, started, threadId, turnId,
         resolve: (value) => resolve(value as T),
         reject,
         timer,
       });
-      this.write({ jsonrpc: "2.0", id, method, params });
+      try {
+        this.write({ jsonrpc: "2.0", id, method, params });
+      } catch (error) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(asError(error));
+      }
     });
   }
 
@@ -242,12 +285,20 @@ export class CodexAppServerClient extends EventEmitter implements AppServerTrans
       const numericId = typeof message.id === "number" ? message.id : Number(message.id);
       const pending = Number.isSafeInteger(numericId) ? this.pending.get(numericId) : undefined;
       if (!pending) {
+        const late = this.lateReplies.get(numericId);
+        if (late) {
+          this.lateReplies.delete(numericId);
+          late(message.result,isObject(message.error));
+        }
         return;
       }
+      this.options.diagnostics?.observe("native_rpc", isObject(message.error) ? "failed" :
+        pending.method === "thread/turns/list" ? "turn_page" : pending.method === "thread/read" ? "thread_read" : "response",
+        {rpc:numericId,threadId:pending.threadId,turnId:pending.turnId,elapsedMs:performance.now()-pending.started,depth:this.pending.size}, isObject(message.error));
       clearTimeout(pending.timer);
       this.pending.delete(numericId);
       if (isObject(message.error)) {
-        pending.reject(new Error(`${pending.method} failed: ${rpcErrorMessage(message.error)}`));
+        pending.reject(new NativeRpcRejected(pending.method, message.error));
       } else {
         pending.resolve(message.result);
       }
@@ -260,7 +311,7 @@ export class CodexAppServerClient extends EventEmitter implements AppServerTrans
     if (typeof message.id === "number" || typeof message.id === "string") {
       this.emit("serverRequest", { id: message.id, method: message.method, params });
     } else {
-      this.emit("notification", { method: message.method, params });
+      this.emit("notification", { method: message.method, params, wireBytes:Buffer.byteLength(line)+1 });
     }
   }
 

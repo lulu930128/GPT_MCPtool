@@ -96,3 +96,14 @@ test("paginated reader detects a concurrent append and retries one consistent sn
   assert.deepEqual(turns.map((turn) => turn.id), ["turn-1", "turn-2", "turn-3"]);
   assert.equal(transport.requests.filter((request) => request.method === "thread/turns/list" && request.params?.sortDirection === "asc").length, 4);
 });
+
+test("quiet paginated turns read only the exact native head",async () => {
+  const fake = new PaginatedTransport(), reader = new ThreadHistoryReader(fake);
+  const head = await reader.readForRecovery("thread-1","turn-2",true);
+  assert.equal(head.headOnly,true);
+  assert.equal(head.snapshot.turnCount,1);
+  assert.deepEqual(fake.requests.map(r=>r.method),["thread/read","thread/turns/list"]);
+  assert.equal(fake.requests[1].params?.sortDirection,"desc");
+  assert.equal(fake.requests[1].params?.limit,1);
+  await assert.rejects(reader.readForRecovery("thread-1","another",true),ThreadHistoryError);
+});

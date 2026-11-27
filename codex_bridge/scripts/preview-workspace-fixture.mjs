@@ -54,6 +54,23 @@ if(m.method==='ui/initialize')result={hostCapabilities:{},hostContext:{displayMo
 if(m.method==='ui/request-display-mode'){mode=m.params.mode;result={mode};context()}
 if(m.method==='tools/call'){calls++;document.querySelector('#calls').textContent='RPC '+calls; const n=m.params.name;window.fixtureCalls.push({name:n,args:m.params.arguments});
 let data=n==='codex_bridge_status'?{...fixture.status,job:fixture.job}:n==='codex_unified_conversation_list'?{conversations:[fixture.summary,...Array.from({length:22},(_,i)=>({...fixture.summary,conversationId:'history-'+i,title:'歷史對話 '+(i+1)+'：檢查對話清單在窄畫面中的標題換行與閱讀層級',bridgeJob:undefined}))],reset:true}:n==='codex_unified_conversation_get'?{unifiedConversation:{...fixture.summary,conversationId:m.params.arguments.conversationId,view:fixture.job}}:n==='codex_job_get'?fixture.job:n==='codex_usage_status'?fixture.usage:n==='codex_runtime_status'?fixture.runtime:n==='codex_inventory'?fixture.inventory:{jobId:fixture.job.id,accepted:true};
+if(n==='codex_thread_inspect'){
+ const args=m.params.arguments;
+ const entries={
+  queue:fixture.removed?[]:[{id:'queued-example',text:'fixture follow-up'}],
+  agents:[{id:'child-example',agentNickname:'Fixture child',status:{type:'idle'}}],
+  messages:[{snippet:args.childId==='child-example'?'child transcript':'parent transcript'}],
+  search:[{snippet:args.cursor?'search page two':'search page one'}]
+ };
+ data={status:'available',source:'native',data:args.kind==='goal'?{goal:fixture.goal||null}:{data:entries[args.kind],nextCursor:args.kind==='search'&&!args.cursor?'second':null}};
+}
+if(n==='codex_thread_manage'){
+ const op=m.params.arguments.operation;
+ if(op.kind==='saveGoal')fixture.goal={status:'paused',objective:op.objective};
+ if(op.kind==='clearGoal')fixture.goal=null;
+ if(op.kind==='deleteQueued')fixture.removed=op.id==='queued-example';
+ data={accepted:true};
+}
 if(n==='codex_approval_decide'){fixture.job.approvals[0].state=m.params.arguments.decision==='accept'?'accepted':'declined';fixture.job.status='completed';fixture.job.stateVersion++;data=fixture.job}
 if(n.startsWith('codex_direct_thread_')){fixture.job.status='preparing';fixture.job.stateVersion++;fixture.job.conversation.status='active'}
 if(n==='codex_text_bundle_begin')data={bundleId:'fixture-bundle'};

@@ -36,7 +36,7 @@
   "dependencies": {
     "@modelcontextprotocol/ext-apps": "^1.0.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@openai/codex": "0.165.0",
+    "@openai/codex": "0.172.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {

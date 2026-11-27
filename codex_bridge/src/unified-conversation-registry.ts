@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { CONVERSATION_DELIVERY } from "./conversation-delivery.js";
 import type { AutomationRegistry } from "./automation-registry.js";
 import type { BridgeConfig } from "./config.js";
 import type { CodexBridgeController } from "./controller.js";
@@ -20,7 +22,12 @@ export type ConversationVisibility = "public" | "app";
 const MAX_UNIFIED_INVENTORY = 10_000;
 
 export class UnifiedConversationRegistry {
-  private readonly nativeSnapshots = new Map<string, { sourceFingerprint: string; snapshot: LocalThreadSnapshot }>();
+  private readonly nativeSnapshots = new Map<string, { sourceFingerprint: string; generation:string; verifiedAt:number; bytes: number; snapshot: LocalThreadSnapshot }>();
+  private snapshotBytes = 0;
+  private readonly continuations = new Map<ConversationVisibility, {scope:string;cursor:string;rows:UnifiedConversationSummary[];
+    offset:number;complete:boolean;diagnostics:UnifiedConversationDiagnostic[]}>();
+
+  cacheWorkload() { return {entries:this.nativeSnapshots.size, serializedBytes:this.snapshotBytes, inventory:this.verifiedNativeInventory.size}; }
   private readonly verifiedNativeInventory = new Map<string, LocalThreadSummary>();
 
   constructor(
@@ -39,6 +46,16 @@ export class UnifiedConversationRegistry {
   }): Promise<UnifiedConversationListPage> {
     const limit = boundedInt(input.limit ?? 50, 1, input.visibility === "public" ? 100 : 2_000);
     const maxConversations = boundedInt(input.maxConversations ?? MAX_UNIFIED_INVENTORY, limit, MAX_UNIFIED_INVENTORY);
+    const scope = JSON.stringify([input.projectId,maxConversations]);
+    const prior = this.continuations.get(input.visibility);
+    if (prior && input.cursor === prior.cursor && prior.scope === scope) {
+      const page = prior.rows.slice(prior.offset,prior.offset+limit);
+      prior.offset += page.length;
+      const nextCursor = prior.offset < prior.rows.length ? encodeCursor(page.at(-1)!) : undefined;
+      if (nextCursor) prior.cursor = nextCursor; else this.continuations.delete(input.visibility);
+      return {conversations:this.materializePage(page), nextCursor, complete:prior.complete && !nextCursor,
+        reset:false, diagnostics:structuredClone(prior.diagnostics)};
+    }
     const diagnostics: UnifiedConversationDiagnostic[] = [];
     const [nativeResult, automationResult] = await Promise.allSettled([
       this.controller.listLocalThreads(undefined, maxConversations),
@@ -75,7 +92,7 @@ export class UnifiedConversationRegistry {
     const nativeByThread = new Map(nativeThreads.map((thread) => [thread.threadId, thread]));
     const jobByThread = new Map<string, JobSummary>();
     const placeholders: JobSummary[] = [];
-    for (const job of this.store.listAll()) {
+    for (const job of this.store.inventory()) {
       if (job.threadId) {
         if (!jobByThread.has(job.threadId)) jobByThread.set(job.threadId, job);
       } else {
@@ -103,22 +120,30 @@ export class UnifiedConversationRegistry {
       .sort(compareConversation)
       .filter(afterCursor(input.cursor));
     const page = filtered.slice(0, limit);
-    const last = page.at(-1);
-    return {
-      conversations: page.map((conversation) => structuredClone(conversation)),
-      nextCursor: filtered.length > page.length && last ? encodeCursor(last) : undefined,
-      complete: nativeResult.status === "fulfilled" && nativePage.complete && filtered.length <= page.length,
-      reset: !input.cursor && nativeResult.status === "fulfilled" && nativePage.complete,
-      diagnostics,
-    };
+    const nextCursor = filtered.length > page.length ? encodeCursor(page.at(-1)!) : undefined;
+    const complete = nativeResult.status === "fulfilled" && nativePage.complete;
+    if (nextCursor) {
+      this.continuations.set(input.visibility,{scope,cursor:nextCursor,rows:filtered,offset:page.length,complete,diagnostics:structuredClone(diagnostics)});
+    } else this.continuations.delete(input.visibility);
+    return {conversations:this.materializePage(page), nextCursor, complete:complete && !nextCursor,
+      reset:!input.cursor && complete, diagnostics};
   }
 
-  async get(conversationId: string, visibility: ConversationVisibility): Promise<UnifiedConversationSnapshot> {
+  private materializePage(page: UnifiedConversationSummary[]) {
+    return page.map(conversation => ({...structuredClone(conversation),
+      bridgeJob:conversation.bridgeJob ? this.store.summary(conversation.bridgeJob.id) : undefined}));
+  }
+
+  async get(conversationId: string, visibility: ConversationVisibility): Promise<UnifiedConversationSnapshot>;
+  async get(conversationId: string, visibility: ConversationVisibility, ifView: string | undefined): Promise<
+    Omit<UnifiedConversationSnapshot,"view"> & {view?:UnifiedConversationSnapshot["view"]; viewUnchanged?:boolean; viewToken?:string}>;
+  async get(conversationId: string, visibility: ConversationVisibility, ifView?:string): Promise<Omit<UnifiedConversationSnapshot,"view"> &
+    {view?:UnifiedConversationSnapshot["view"]; viewUnchanged?:boolean; viewToken?:string}> {
     if (conversationId.startsWith("job:")) {
       const jobId = conversationId.slice(4);
       const job = this.store.get(jobId);
       if (!job || job.threadId) throw new Error("Unknown unified conversation id.");
-      const summary = this.fromJob(this.store.listAll().find((candidate) => candidate.id === jobId)!, []);
+      const summary = this.fromJob(this.store.summary(jobId), []);
       this.assertVisible(summary, visibility);
       return { ...summary, view: await this.store.snapshot(jobId, 0), diagnostics: [] };
     }
@@ -143,17 +168,26 @@ export class UnifiedConversationRegistry {
 
     let local: LocalThreadSnapshot | undefined;
     const cached = this.nativeSnapshots.get(conversationId);
+    let generation: string | undefined;
     try {
       if (!canReadNative) throw nativeFailure;
-      const fresh = await this.controller.readLocalThreadFresh(conversationId, cached?.sourceFingerprint);
+      const fresh = await this.controller.readLocalThreadFresh(conversationId, cached && Date.now()-cached.verifiedAt < 60_000 ? cached.sourceFingerprint : undefined);
       if (fresh.snapshot) {
         local = fresh.snapshot;
-        this.nativeSnapshots.set(conversationId, {
-          sourceFingerprint: fresh.sourceFingerprint,
-          snapshot: structuredClone(fresh.snapshot),
-        });
+        const bytes = Buffer.byteLength(JSON.stringify(local));
+        const previous = this.nativeSnapshots.get(conversationId);
+        if (previous) { this.nativeSnapshots.delete(conversationId); this.snapshotBytes -= previous.bytes; }
+        generation = randomUUID();
+        this.nativeSnapshots.set(conversationId, {sourceFingerprint:fresh.sourceFingerprint, generation,verifiedAt:Date.now(),bytes,snapshot:local});
+        this.snapshotBytes += bytes;
+        while (this.snapshotBytes > CONVERSATION_DELIVERY.totalHotBytes) {
+          const [id, entry] = this.nativeSnapshots.entries().next().value!;
+          this.nativeSnapshots.delete(id);
+          this.snapshotBytes -= entry.bytes;
+        }
       } else if (cached) {
-        local = structuredClone(cached.snapshot);
+        generation = cached.generation;
+        local = cached.snapshot;
       }
     } catch (error) {
       nativeFailure = error;
@@ -208,11 +242,15 @@ export class UnifiedConversationRegistry {
     }
     const summary = this.mergeNative(native, job, automationList);
     this.assertVisible(summary, visibility);
+    const token = (version:number, revision:number) => generation && [generation,version,revision].join(".");
+    if (ifView && generation && ifView === token(job?.stateVersion ?? 0, job ? this.store.conversationRevision(job.id) : 0)) {
+      return {...summary,historyFreshness:local.conversation?.freshness,viewUnchanged:true,viewToken:ifView,diagnostics:dedupeDiagnostics(diagnostics)};
+    }
     if (!job) {
       return {
-        ...summary,
+        ...summary,viewToken:token(0,0),
         historyFreshness: local.conversation?.freshness,
-        view: local,
+        view: structuredClone(local),
         diagnostics: dedupeDiagnostics(diagnostics),
       };
     }
@@ -220,6 +258,7 @@ export class UnifiedConversationRegistry {
     return {
       ...summary,
       historyFreshness: local.conversation?.freshness,
+      viewToken:token(bridgeView.stateVersion,bridgeView.serverConversationRevision),
       view: nativeBackedJobView(local, bridgeView),
       diagnostics: dedupeDiagnostics(diagnostics),
     };
@@ -405,7 +444,7 @@ function compareConversation(left: UnifiedConversationSummary, right: UnifiedCon
 }
 
 function encodeCursor(conversation: UnifiedConversationSummary): string {
-  return Buffer.from(JSON.stringify({ updatedAt: conversation.updatedAt, id: conversation.conversationId }), "utf8").toString("base64url");
+  return Buffer.from(JSON.stringify({ updatedAt: conversation.updatedAt, id: conversation.conversationId, page:randomUUID() }), "utf8").toString("base64url");
 }
 
 function decodeCursor(cursor: string): { updatedAt: string; id: string } {

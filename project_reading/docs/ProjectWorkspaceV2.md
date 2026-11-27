@@ -21,7 +21,7 @@ Tool 傳回的大型結構化輸出只附一段短文字。小結果保留舊的
 
 ## SQLite、Git 與 Runtime
 
-- `inspect_sqlite` 接受 `operation`、`sql`、位置或命名 `parameters`、`pageSize`。傳相同 root/path 與 cursor 讀下一頁，或帶 `close=true` 釋放 reader。單一 statement iterator 保有 SQLite 快照。讀完、錯誤或 MCP session 關閉會釋放 reader 子程序。BLOB 使用 base64，超出 JS 安全整數的值以十進位字串保存。個別 SQL row 超出傳輸預算時，可用 SQL substr 切片。
+- `inspect_sqlite` 接受 `operation`、`sql`、位置或命名 `parameters`、`pageSize`。傳相同 root/path 與 cursor 讀下一頁，或帶 `close=true` 釋放 reader。單一 statement iterator 保有 SQLite 快照。未讀完的回應以 cursorIdleTimeoutMs 告知下一頁期限。每次成功續讀會更新期限；到期後釋放快照，須重新查詢。讀完、錯誤或 MCP session 關閉會釋放 reader 子程序。BLOB 使用 base64，超出 JS 安全整數的值以十進位字串保存。個別 SQL row 超出傳輸預算時，可用 SQL substr 切片。
 - SQL 要求具備原生 setAuthorizer 的 Node SQLite runtime。本次隔離機為 Node 24.14.1。使用 readOnly、query_only、trusted_schema=OFF、停用擴充載入及 SQLite authorizer。WAL 使用原生共享鎖，已提交資料與資料庫/WAL 內容雜湊分開驗證。缺少 WAL sidecar 時回傳 WAL_SIDECAR_UNAVAILABLE，仍可取 raw bytes。raw 檔未提供跨檔交易一致性。依據見 [SQLite WAL](https://sqlite.org/wal.html)、[SQLite PRAGMA](https://sqlite.org/pragma.html) 與 [Node SQLite](https://nodejs.org/api/sqlite.html)。
 - `inspect_git` 使用既有 git-tools runner，可指定 project、path、revision/branch/tag/commit、followRenames。log/history/show/blame/diff/refs 的歷史輸出可按 offset/length 續讀。多頁歷史應帶首回傳的 commit 固定版本。show(path) 的 base64 是解壓後 blob。實際 pack/index/reflog/loose object 內容走 read_file。發現 linked gitdir 或 common dir 在所選 root 外時回報原因。工作樹 diff/status 保留原路徑限制。
 - `inspect_runtime` 採既有九個 update target IDs、CC 診斷快照、release status、TCP、port owner 與 HTTP reader。Workspace 自身能觀察 CPU 累積時間、RSS、heap、eventLoopUtilization。外部 PID 缺少 provider 的指標回未知，HTTP 樣本標記連線範圍。windowMinutes 被保留為請求範圍，目前 coverage 為 point_sample。瀏覽器 navigation、React、main thread 與 GC 未接上觀測器時標 NOT_INSTRUMENTED。

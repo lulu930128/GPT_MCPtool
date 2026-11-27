@@ -43,14 +43,14 @@ function requestMatches(pane: KeyedPane): boolean {
 
 // Presentation projection only. No indicator formula, previous-bar inference or
 // fallback to another timeframe. Chart and research keep independent clocks.
-export function technicalSummary(chart: KeyedPane, research: KeyedPane, previousSession = false) {
+export function technicalSummary(chart: KeyedPane, research: KeyedPane, previousSession = false, expectedTradeDate?: string) {
   const data = chart.data;
   const timeframe = data?.timeframe;
   const historical = record(data?.chart);
   const chartMatches = typeof data?.stock_id === "string" && !!data.stock_id
     && (timeframe === "today" || (["daily", "weekly", "monthly"].includes(String(timeframe))
       && historical.stock_id === data.stock_id && historical.timeframe === timeframe));
-  const session = chartSession(data ?? {}, previousSession);
+  const session = chartSession(data ?? {}, previousSession, expectedTradeDate);
   const active = chartMatches ? record(timeframe === "today" ? { ...record(data?.intraday_chart), points: session.points } : historical) : {};
   const point = record(Array.isArray(active.points) ? active.points.at(-1) : null);
   const time = typeof point.time === "string" && point.time ? point.time : null;

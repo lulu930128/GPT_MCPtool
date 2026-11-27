@@ -102,6 +102,22 @@ export class ThreadHistoryReader {
     }
   }
 
+  async readForRecovery(threadId: string, turnId: string, recentOnly: boolean) {
+    if (!recentOnly) return { snapshot:await this.read(threadId), headOnly:false };
+    const metadata = await this.readMetadata(threadId);
+    if (metadata.historyMode !== "paginated") return { snapshot:await this.read(threadId, metadata), headOnly:false };
+    const page = await this.appServer.request("thread/turns/list", {
+      threadId, limit:1, sortDirection:"desc", itemsView:"full",
+    });
+    const head = Array.isArray(page.data) && page.data[0];
+    if (!isObject(head) || head.id !== turnId || !Array.isArray(head.items)) {
+      throw new ThreadHistoryError("ConversationNormalizationFailed","Current native turn is unverified.");
+    }
+    return { headOnly:true, snapshot:{metadata, pageCount:1, turnCount:1,
+      sourceFingerprint:digest({ ...metadataFingerprintInput(metadata), head }),
+      response:{thread:{...metadata.rawThread, turns:[head]}}} };
+  }
+
   async read(
     threadId: string,
     metadata?: ThreadMetadata,
@@ -209,7 +225,7 @@ export class ThreadHistoryReader {
           throw new ThreadHistoryError("ConversationNormalizationFailed", "Codex App Server returned a missing or duplicate turn id.");
         }
         turnIds.add(turnId);
-        turns.push(structuredClone(value));
+        turns.push(value);
         if (turns.length > this.limits.maxTurns) {
           throw new ThreadHistoryError("HistoryLimitExceeded", `Codex thread exceeds the ${this.limits.maxTurns} turn safety limit.`);
         }

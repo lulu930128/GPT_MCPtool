@@ -9,6 +9,19 @@
   const storageKey = 'jstudy-review-1';
   const allow = new Set(['study_search_items', 'study_get_item', 'study_read_review_workspace', 'study_update_review_workspace', 'study_set_manual_labels', 'study_record_attempt']);
   const emit = (name, data) => (listeners.get(name) || []).forEach(fn => fn(data));
+  function updateContext(changes) {
+    hostContext = { ...hostContext, ...changes };
+    emit('context', hostContext);
+  }
+  window.addEventListener('openai:set_globals', event => {
+    if (mode !== 'compatibility') return;
+    const globals = event.detail?.globals || {};
+    const changes = {};
+    for (const key of ['theme', 'displayMode', 'maxHeight']) {
+      if (Object.hasOwn(globals, key)) changes[key] = globals[key];
+    }
+    updateContext(changes);
+  });
   function notify(method, params) {
     if (window.parent !== window) window.parent.postMessage({ jsonrpc: '2.0', method, params }, origin);
   }
@@ -36,7 +49,7 @@
       else p.resolve(m.result);
     } else if (m.method === 'ui/notifications/tool-result') emit('toolresult', m.params);
     else if (m.method === 'ui/notifications/host-context-changed') {
-      hostContext = { ...hostContext, ...m.params }; emit('context', hostContext);
+      updateContext(m.params);
     }
   });
   function decoded(result) {
@@ -67,7 +80,7 @@
       } catch (error) {
         if (typeof window.openai?.callTool !== 'function') throw error;
         mode = 'compatibility';
-        hostContext = { theme: window.openai.theme, displayMode: window.openai.displayMode,
+        hostContext = { theme: window.openai.theme, displayMode: window.openai.displayMode, maxHeight: window.openai.maxHeight,
           availableDisplayModes: window.openai.requestDisplayMode ? ['inline', 'fullscreen'] : ['inline'] };
       }
       emit('context', hostContext);
@@ -88,8 +101,11 @@
       return decoded(result);
     },
     async expand() {
-      if (mode === 'compatibility') return window.openai?.requestDisplayMode?.({ mode: 'fullscreen' });
-      return request('ui/request-display-mode', { mode: 'fullscreen' });
+      const result = mode === 'compatibility'
+        ? await window.openai.requestDisplayMode({ mode: 'fullscreen' })
+        : await request('ui/request-display-mode', { mode: 'fullscreen' });
+      if (result?.mode) updateContext({ displayMode: result.mode });
+      return result;
     },
     getState() {
       if (window.openai?.widgetState?.schema === storageKey) return window.openai.widgetState;

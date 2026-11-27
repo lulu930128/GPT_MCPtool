@@ -865,6 +865,11 @@ function Start-OmiServer {
 function Start-OmiTunnelOnce {
   param([Parameter(Mandatory = $true)]$Context)
   if (-not (Test-OmiServerHealth -Context $Context)) { throw "SERVER_NOT_READY: Tunnel start requires the adapter core." }
+  Start-VerifiedComponentTunnel -Context $Context
+}
+
+function Start-VerifiedComponentTunnel {
+  param([Parameter(Mandatory = $true)]$Context)
   $ownership = Resolve-OmiRoleOwnership -Context $Context -Role tunnel
   if (Test-OmiTunnelReady -Context $Context) {
     if ($ownership.canMutate -and $ownership.state -eq "OwnedReady") { return }
@@ -1062,7 +1067,33 @@ function Write-OmiSearchLifecycleEvent {
   [IO.File]::AppendAllText($Context.actionLogFile, (($event | ConvertTo-Json -Compress -Depth 5) + [Environment]::NewLine), $script:Utf8NoBom)
 }
 
+function Invoke-ComponentTunnelLifecycle {
+  param([Parameter(Mandatory=$true)]$Context,
+        [Parameter(Mandatory=$true)][ValidateSet("EnsureRunning","RepairConnectivity","ReloadRuntime","ShutdownRuntime")][string]$Action,
+        [Parameter(Mandatory=$true)][scriptblock]$CheckUpstream)
+  $before = Resolve-OmiRoleOwnership -Context $Context -Role tunnel
+  if (-not $before.canMutate) { throw "TUNNEL_OWNERSHIP_UNVERIFIED" }
+  if ($Action -ne "ShutdownRuntime") {
+    if (-not (& $CheckUpstream)) { throw "ATLAS_UPSTREAM_UNAVAILABLE" }
+    if (-not (Test-Path -LiteralPath $Context.tunnelProfilePath -PathType Leaf)) { throw "TUNNEL_PROFILE_MISSING" }
+    if (-not (Test-Path -LiteralPath $Context.secretPath -PathType Leaf)) { throw "TUNNEL_KEY_MISSING" }
+  }
+  if ($Action -in @("ShutdownRuntime","ReloadRuntime") -or ($Action -eq "RepairConnectivity" -and -not (Test-OmiTunnelReady $Context))) {
+    Stop-OmiOwnedRole -Context $Context -Role tunnel
+  }
+  if ($Action -ne "ShutdownRuntime") {
+    Start-VerifiedComponentTunnel -Context $Context
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    while (-not (Test-OmiTunnelReady $Context) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 300 }
+  }
+  $after = Resolve-OmiRoleOwnership -Context $Context -Role tunnel
+  $ok = if ($Action -eq "ShutdownRuntime") { $after.state -eq "Stopped" } else { $after.state -eq "OwnedReady" -and (Test-OmiTunnelReady $Context) }
+  [pscustomobject]@{ok=$ok; action=$Action; before=@{status=$before.state}; after=@{status=$after.state};
+    ownedPids=@(if ($after.canMutate -and $after.pid) {$after.pid}); errorCode=$(if(-not $ok){"TUNNEL_NOT_READY"})}
+}
+
 Export-ModuleMember -Function @(
+  "Invoke-ComponentTunnelLifecycle",
   "New-OmiSearchRuntimeContext",
   "Get-OmiSearchRuntimeStatus",
   "Invoke-OmiSearchLifecycleAction",

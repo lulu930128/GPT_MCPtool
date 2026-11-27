@@ -71,6 +71,31 @@ Reject { Test-McpCcDeploymentVersion $root 'fixture-a' } 'CC_UNLISTED_CODE_FILE'
 [IO.File]::Delete((Join-Path $a '.env'))
 Check ((Test-McpCcDeploymentVersion $root 'fixture-a').version -ceq 'fixture-a') 'restored candidate'
 
+# Exercise the packaged dependency, not the source module used by unit fixtures.
+$memoryPath=Join-Path $a 'src\McpControlCenter.MemoryMaintenance.psm1'
+$inventoryPath=Join-Path $a 'code-inventory.json'
+$inventoryBytes=[IO.File]::ReadAllBytes($inventoryPath)
+$memoryBytes=[IO.File]::ReadAllBytes($memoryPath)
+$inventory=Get-Content -LiteralPath $inventoryPath -Raw -Encoding UTF8|ConvertFrom-Json
+Check ($inventory.inventoryVersion -eq 3) 'new package requires v3 inventory'
+Check (@($inventory.files|Where-Object path -ceq 'src/McpControlCenter.MemoryMaintenance.psm1').Count -eq 1) 'memory worker is hash-bound in package'
+$packagedWorker=Import-Module $memoryPath -Force -PassThru -ErrorAction Stop
+Check ($packagedWorker.ExportedCommands.ContainsKey('Invoke-McpCcMemoryMaintenanceTick')) 'packaged memory worker loads its exported entrypoint'
+Remove-Module $packagedWorker
+try {
+    [IO.File]::Delete($memoryPath)
+    Reject {Test-McpCcDeploymentVersion $root 'fixture-a'} 'CC_CODE_MISSING'
+    # Existing immutable v2 releases remain verifiable for selection/rollback.
+    $inventory.inventoryVersion=2
+    $inventory.files=@($inventory.files|Where-Object path -cne 'src/McpControlCenter.MemoryMaintenance.psm1')
+    Json $inventoryPath $inventory
+    Check ((Test-McpCcDeploymentVersion $root 'fixture-a').version -ceq 'fixture-a') 'historical v2 exact inventory remains valid'
+    Reject {New-McpCcDeploymentCandidate $cc 'fixture-a' -ReuseEquivalent} 'CC_VERSION_CONTENT_CHANGED_USE_NEW_ID'
+} finally {
+    [IO.File]::WriteAllBytes($memoryPath,$memoryBytes)
+    [IO.File]::WriteAllBytes($inventoryPath,$inventoryBytes)
+}
+
 # Complete eight public descriptors, inert entrypoints, and a fake Bridge selector.
 $registry = Get-Content -LiteralPath (Join-Path $cc 'config\registry.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $bridgeRuntime = Join-Path $fixture 'codex_bridge\Runtime'

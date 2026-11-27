@@ -155,8 +155,11 @@
     const options = Object.entries(labels).map(([key, title]) =>
       '<option value="' + key + '"' + (key === 'unmarked' || key === 'suspended' ? ' disabled' : '') +
       '>' + title + '</option>').join('');
+    const reading = item.reading?.trim();
+    const readingLine = reading && reading !== item.title?.trim()
+      ? '<div class="js-reading" lang="ja">' + escape(reading) + '</div>' : '';
     row.innerHTML = '<td><div class="js-word" lang="ja">' + escape(item.title) +
-      '</div><div class="js-reading" lang="ja">' + escape(item.reading) + '</div><span class="js-tag">' +
+      '</div>' + readingLine + '<span class="js-tag">' +
       escape([item.jlpt_level, item.part_of_speech].filter(Boolean).join(' · ')) +
       '</span></td><td class="js-content"><div class="js-meaning">' + escape(meaning(item)) +
       '</div><div class="js-detail"></div><div class="js-review-notes">' + reviewNotes(item.review_content) + '</div></td><td>' +
@@ -200,7 +203,7 @@
     const locked = !state.ready || state.busy || !!state.pending;
     root.querySelectorAll('[data-page],[data-kind],#js-query,#js-level,#js-label-filter,#js-direction,#js-start,#js-end,#js-use-list')
       .forEach(el => { el.disabled = locked; });
-    root.querySelectorAll('.js-manual,#js-page-number,#js-jump,#js-first,#js-bookmark,#js-refresh')
+    root.querySelectorAll('.js-manual,#js-page-number,#js-first,#js-bookmark,#js-refresh')
       .forEach(el => { el.disabled = locked || state.loading; });
     for (const filter of cardFilters) filter.menu.querySelector('fieldset').disabled = locked;
     $('start').disabled = locked || !!state.activeSession || hasEmptySelection();
@@ -296,7 +299,8 @@
       reconcileRows(state.rows);
       $('page-number').value = state.offset / pageSize + 1;
       $('page-number').max = Math.max(1, pageCount());
-      text('page-total', '共 ' + pageCount() + ' 頁');
+      text('page-total', '/ ' + pageCount());
+      show('pagination', state.total > 0);
       text('result-count', state.rows.length ? (state.offset + 1) + '–' + (state.offset + state.rows.length) + ' / ' + state.total : '0 / ' + state.total);
       show('no-results', !state.rows.length);
       const index = position?.index ?? 0;
@@ -347,6 +351,7 @@
     else endRound();
     state.page = name;
     show('library', name === 'library'); show('cards', name === 'cards');
+    show('use-list', name === 'library');
     root.querySelectorAll('[data-page]').forEach(el => el.setAttribute('aria-pressed', String(el.dataset.page === name)));
     if (name === 'cards') {
       $('cards').append($('operation'));
@@ -383,19 +388,22 @@
       text('review-status', '');
       persistPreferences();
     });
-    filter.menu.addEventListener('toggle', () => {
-      if (filter.menu.open) for (const other of cardFilters) if (other !== filter) other.menu.open = false;
-    });
-    filter.menu.addEventListener('keydown', event => {
-      if (event.key !== 'Escape' || !filter.menu.open) return;
+  }
+  const menus = [...cardFilters.map(filter => filter.menu), $('display'), $('reading-menu')];
+  for (const menu of menus) {
+    menu.addEventListener('keydown', event => {
+      if (event.key !== 'Escape' || !menu.open) return;
       event.preventDefault();
       event.stopPropagation();
-      filter.menu.open = false;
-      filter.menu.querySelector('summary').focus();
+      menu.open = false;
+      menu.querySelector('summary').focus();
+    });
+    menu.addEventListener('toggle', () => {
+      if (menu.open) for (const other of menus) if (other !== menu) other.open = false;
     });
   }
   document.addEventListener('click', event => {
-    for (const { menu } of cardFilters) if (menu.open && !menu.contains(event.target)) menu.open = false;
+    for (const menu of menus) if (menu.open && !menu.contains(event.target)) menu.open = false;
   });
   function selection(filter) {
     const selected = filter.inputs.filter(input => input.checked).map(input => input.value).sort();
@@ -743,7 +751,11 @@
     event.preventDefault();
     loadRows(($('page-number').valueAsNumber - 1) * pageSize, null, { pin: true });
   });
-  $('first').addEventListener('click', browseFromStart);
+  $('first').addEventListener('click', () => {
+    $('reading-menu').open = false;
+    $('reading-menu').querySelector('summary').focus();
+    browseFromStart();
+  });
   $('bookmark').addEventListener('click', () => restoreBookmark(state.bookmark));
   $('refresh').addEventListener('click', () => loadRows(state.offset, state.position, { pin: true }));
   $('scroll').addEventListener('scroll', () => {
@@ -821,6 +833,10 @@
   $('expand').addEventListener('click', () => bridge.expand().catch(error => operation(errorText(error))));
   bridge.on('context', context => {
     if (['light', 'dark'].includes(context.theme)) document.documentElement.style.colorScheme = context.theme;
+    root.classList.toggle('js-expanded', ['fullscreen', 'pip'].includes(context.displayMode));
+    const panelHeight = context.containerDimensions?.height ?? context.containerDimensions?.maxHeight ?? context.maxHeight;
+    if (Number.isFinite(panelHeight) && panelHeight > 0) root.style.setProperty('--js-panel-height', panelHeight + 'px');
+    else root.style.removeProperty('--js-panel-height');
     show('expand', context.availableDisplayModes?.includes('fullscreen') && context.displayMode !== 'fullscreen');
   });
   let requestedKind;

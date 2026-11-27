@@ -20,6 +20,8 @@ $script:CodeFiles = @(
 $script:LegacyCodeFiles=@($script:CodeFiles)
 $script:CodeFiles+=@('src/McpControlCenter.NormalDaily.psm1','src/McpControlCenter.WorkspaceUpdate.psm1',
     'src/McpControlCenter.DailyCode.psm1','scripts/runtime-bootstrap.ps1','control-center/update.json')
+$script:Version2CodeFiles=@($script:CodeFiles)
+$script:CodeFiles+=@('src/McpControlCenter.MemoryMaintenance.psm1')
 $script:GeneratedCodeFiles=@('src/NormalOperator.Host.dll')
 
 function Assert-CcDeploymentPath([string]$Path) {
@@ -101,7 +103,7 @@ function Get-McpCcBridgeDeployment([string]$WorkspaceRoot, [switch]$IncludeState
 function Resolve-McpCcDeploymentComponentRoot($Layout, [string]$Id, [string]$RootToken, $Bridge) {
     $folders = @{ project_reading='project_reading'; omi_search='OMI_search'; japanese_study='japanese_study';
         memory_core='Memory Core'; codex_bridge='codex_bridge'; personal_asset_os='personal-asset-os';
-        english_study='english_study'; listening_audio='listening_audio' }
+        english_study='english_study'; listening_audio='listening_audio'; ola_mcp='ola_mcp' }
     if (-not $folders.ContainsKey($Id) -or $RootToken -cne ('..\..\'+$folders[$Id])) { throw 'CC_COMPONENT_ROOT_INVALID' }
     if ($Id -ceq 'codex_bridge') { return $Bridge.root }
     $path = Join-Path $Layout.workspaceRoot $folders[$Id]
@@ -170,11 +172,13 @@ function Test-McpCcDeploymentVersion([string]$Root, [string]$Version) {
     if ($null -eq $layout) { throw 'CC_LAYOUT_INVALID' }
     $receipt = Read-CcDeploymentJson (Join-Path $path 'code-inventory.json')
     if ($receipt.contract -cne 'mcpcc-code-inventory-v1' -or $receipt.version -cne $Version) { throw 'CC_INVENTORY_INVALID' }
-    # Historical v1 rollback remains immutable and valid under its original
-    # exact inventory. Every newly staged v2 requires the native Host binary.
+    # Historical v1/v2 rollback keeps its original exact inventory. New v3
+    # packages also require the memory worker consumed by the tray.
     $modern=$null -ne $receipt.PSObject.Properties['inventoryVersion']
-    if($modern -and $receipt.inventoryVersion -ne 2){throw 'CC_INVENTORY_INVALID'}
-    $files=if(-not $modern){@($script:LegacyCodeFiles)}else{@($script:CodeFiles)+@($script:GeneratedCodeFiles)}
+    if($modern -and $receipt.inventoryVersion -notin @(2,3)){throw 'CC_INVENTORY_INVALID'}
+    $files=if(-not $modern){@($script:LegacyCodeFiles)}elseif($receipt.inventoryVersion -eq 2){
+        @($script:Version2CodeFiles)+@($script:GeneratedCodeFiles)
+    }else{@($script:CodeFiles)+@($script:GeneratedCodeFiles)}
     $actual = @(Get-CcCodeInventory $path $files)
     if (($actual | ConvertTo-Json -Compress) -cne (@($receipt.files) | ConvertTo-Json -Compress)) { throw 'CC_COPY_INTEGRITY_FAILED' }
     # Version trees contain exactly the inventory plus two generated code metadata files.
@@ -226,7 +230,14 @@ function New-McpCcDeploymentCandidate([string]$SourceRoot, [string]$Version,[swi
         }
         $before = @(Get-CcCodeInventory $SourceRoot)
         $registry = Read-CcDeploymentJson (Join-Path $SourceRoot 'config\registry.json')
-        if ($registry.schemaVersion -ne 3 -or @($registry.components).Count -ne 8) { throw 'CC_REGISTRY_V3_EIGHT_REQUIRED' }
+        $coreIds = @('project_reading','omi_search','japanese_study','memory_core','codex_bridge','personal_asset_os','english_study','listening_audio')
+        $ids = @($registry.components | ForEach-Object { [string]$_.id })
+        $expected = @($coreIds)
+        if ($ids -ccontains 'ola_mcp') { $expected += 'ola_mcp' }
+        if ($registry.schemaVersion -ne 3 -or $ids.Count -ne $expected.Count -or
+            @(Compare-Object ($expected | Sort-Object) ($ids | Sort-Object) -CaseSensitive).Count) {
+            throw 'CC_REGISTRY_COMPONENT_SET_INVALID'
+        }
         $pending = Join-Path $root ('staging\'+[guid]::NewGuid().ToString('N'))
         Assert-CcDeploymentPath $pending
         [void][IO.Directory]::CreateDirectory($pending)
@@ -247,7 +258,7 @@ function New-McpCcDeploymentCandidate([string]$SourceRoot, [string]$Version,[swi
         if(($nativeInputs|ConvertTo-Json -Depth 8 -Compress) -cne ((Get-CcNormalHostBuildInputs $pending)|ConvertTo-Json -Depth 8 -Compress)){throw 'CC_NATIVE_BUILD_INPUT_CHANGED'}
         $packaged=@(Get-CcCodeInventory $pending (@($script:CodeFiles)+@($script:GeneratedCodeFiles)))
         Write-CcNewJson (Join-Path $pending 'cc-runtime.json') @{ contract='mcpcc-runtime-v1'; version=$Version }
-        Write-CcNewJson (Join-Path $pending 'code-inventory.json') @{ contract='mcpcc-code-inventory-v1'; inventoryVersion=2; version=$Version; files=$packaged;
+        Write-CcNewJson (Join-Path $pending 'code-inventory.json') @{ contract='mcpcc-code-inventory-v1'; inventoryVersion=3; version=$Version; files=$packaged;
             nativeBuild=@{inputs=$nativeInputs;outputSha256=(Get-FileHash -LiteralPath (Join-Path $pending 'src\NormalOperator.Host.dll') -Algorithm SHA256).Hash} }
         [void][IO.Directory]::CreateDirectory((Join-Path $root 'versions'))
         [IO.Directory]::Move($pending,$target)

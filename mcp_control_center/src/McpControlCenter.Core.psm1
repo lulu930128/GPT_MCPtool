@@ -1069,7 +1069,8 @@ function Read-McpCcRegistryManifest {
     $deployment=Get-McpCcCodeDeployment $managerRoot
     $bridgeDeployment=$null
     if($null -ne $deployment){
-        if($Registry.schemaVersion -ne 3 -or $entries.Count -ne 8 -or
+        $expectedCount = if (@($entries | Where-Object { $_.id -ceq 'ola_mcp' }).Count -eq 1) { 9 } else { 8 }
+        if($Registry.schemaVersion -ne 3 -or $entries.Count -ne $expectedCount -or
             $managerRoot -ine (Split-Path -Parent $PSScriptRoot)){throw 'CC_REGISTRY_LAYOUT_MISMATCH'}
         $workspaceRoot=$deployment.workspaceRoot
         $bridgeDeployment=Get-McpCcBridgeDeployment $workspaceRoot -IncludeState

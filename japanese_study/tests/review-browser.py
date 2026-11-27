@@ -171,7 +171,45 @@ def acceptance(browser, url, args, repo, control, calls, events):
     expect(loc("#js-rows img")).to_have_count(0)
     assert page.frames[1].evaluate("window.pwned") is None
     expect(loc("#js-result-count")).to_have_text("1–50 / 1041")
-    expect(loc("#js-page-total")).to_have_text("共 21 頁")
+    expect(loc("#js-page-total")).to_have_text("/ 21")
+    for action in ("js-refresh", "js-use-list"):
+        assert loc(f"#{action}").bounding_box()["y"] < loc("#js-scroll").bounding_box()["y"]
+    assert loc("#js-title-heading").bounding_box()["width"] <= 220
+    inline_height = loc("#js-scroll").bounding_box()["height"]
+
+    def host_context(changes):
+        page.evaluate("""params => document.querySelector('#app').contentWindow.postMessage(
+            {jsonrpc: '2.0', method: 'ui/notifications/host-context-changed', params}, location.origin)""", changes)
+
+    def check_panel(height):
+        expect(loc("#jstudy-app")).to_have_css("height", f"{height}px")
+        assert loc("#js-library").evaluate("""library => {
+            const list = document.querySelector('#js-scroll');
+            const siblings = Array.from(library.children).slice(Array.from(library.children).indexOf(list) + 1);
+            const used = siblings.filter(el => !el.hidden).reduce((n, el) =>
+              n + el.getBoundingClientRect().height + parseFloat(getComputedStyle(el).marginTop), 0);
+            return Math.abs(library.getBoundingClientRect().bottom - list.getBoundingClientRect().bottom - used) <= 1
+                && list.scrollHeight > list.clientHeight;
+        }""")
+
+    loc("#js-expand").click()
+    check_panel(900)
+    assert loc("#js-scroll").bounding_box()["height"] > inline_height + 200
+    page.locator("#app").evaluate("el => el.style.height = '1080px'")
+    check_panel(1080)
+    loc('[data-kind="grammar"]').click()
+    expect(loc('#js-rows tr[data-item^="grammar:"]')).to_have_count(50)
+    host_context({"containerDimensions": {"height": 740}})
+    check_panel(740)
+    host_context({"displayMode": "inline", "containerDimensions": {}})
+    expect(loc("#js-expand")).to_be_visible()
+    page.locator("#app").evaluate("el => el.style.height = '900px'")
+    expect(loc("#js-scroll")).to_have_css("max-height", f"{int(inline_height)}px")
+    loc('[data-kind="vocab"]').click()
+    expect(loc("#js-result-count")).to_have_text("1–50 / 1041")
+    loc("#js-reading-menu summary").click()
+    loc("#js-first").click()
+    expect(loc("#js-reading-menu summary")).to_be_focused()
     loc("#js-next").click()
     expect(loc("#js-result-count")).to_have_text("51–100 / 1041")
     loc("#js-prev").click()
@@ -287,11 +325,14 @@ def acceptance(browser, url, args, repo, control, calls, events):
 
     expect(rows.first.locator(".js-meaning")).to_have_count(1)
     expect(rows.first.locator("summary")).to_have_count(0)
+    loc("#js-display summary").click()
     loc("#js-hide").check()
     for value in ["試験を受ける。", "參加考試。"]:
         expect(rows.first.get_by_text(value, exact=True)).to_be_hidden()
     expect(rows.first.locator(".js-meaning")).to_be_hidden()
     loc("#js-hide").uncheck()
+    loc("#js-hide").press("Escape")
+    expect(loc("#js-display summary")).to_be_focused()
     for value in ["試験を受ける。", "參加考試。"]:
         expect(rows.first.get_by_text(value, exact=True)).to_be_visible()
     assert rows.first.evaluate("""row => {
@@ -308,6 +349,7 @@ def acceptance(browser, url, args, repo, control, calls, events):
     expect(rows).to_have_count(1)
     expect(rows.first).to_have_attribute("data-item", "vocab:test-1040")
     loc("#js-use-list").click()
+    expect(loc("#js-use-list")).to_be_hidden()
     expect(loc("#js-card-levels summary")).to_contain_text("N4-5")
     expect(loc("#js-card-labels summary")).to_contain_text("未標記")
     expect(loc("#js-review-status")).to_contain_text("文字搜尋僅適用於教材清單")

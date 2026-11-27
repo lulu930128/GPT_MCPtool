@@ -1,30 +1,34 @@
 <!doctype html>
 <html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>日文複習室</title><!--STUDY_CSS--></head><body><div id="jstudy-app" aria-label="日文複習室">
- <header class="js-head"><div class="js-brand">日文複習室</div><button id="js-expand" type="button" hidden>展開</button></header>
+ <header class="js-head"><div class="js-brand">日文複習室</div>
  <nav class="js-nav" aria-label="學習頁面"><button type="button" class="cursor-interaction" data-page="library" aria-pressed="true">單字／文法庫</button><button type="button" class="cursor-interaction" data-page="cards" aria-pressed="false">單字卡複習</button></nav>
+ <div class="js-head-actions"><button id="js-expand" type="button" hidden>展開</button><button id="js-use-list" type="button" class="js-primary cursor-interaction" title="帶入目前等級與熟悉度，前往翻卡設定">隨機翻卡</button></div></header>
  <main class="js-main">
   <section id="js-library" aria-label="單字與文法庫">
    <div class="js-toolbar">
     <div class="js-switch" aria-label="教材類型"><button type="button" class="cursor-interaction" data-kind="vocab" aria-pressed="true">單字</button><button type="button" class="cursor-interaction" data-kind="grammar" aria-pressed="false">文法</button></div>
-    <label class="js-field js-search">搜尋<input id="js-query" type="search" placeholder="日文、讀音或中文意思" autocomplete="off"></label>
-    <label class="js-field">程度<select id="js-level"><option value="all">全部程度</option><option value="N4-5">N4-5</option><option>N5</option><option>N4</option><option>N3</option><option>N2</option><option>N1</option></select></label>
-    <label class="js-field">我的熟悉度<select id="js-label-filter"><option value="all">全部熟悉度</option><option value="unknown">不熟</option><option value="uncertain">不確定</option><option value="known">熟悉</option><option value="unmarked">未標記</option></select></label>
-    <label class="js-field">顯示<select id="js-density"><option value="full">摘要與詳情</option><option value="compact">精簡速覽</option></select></label>
+    <input id="js-query" aria-label="搜尋教材" type="search" placeholder="搜尋日文、讀音或中文意思" autocomplete="off">
+    <select id="js-level" aria-label="程度"><option value="all">全部程度</option><option value="N4-5">N4-5</option><option>N5</option><option>N4</option><option>N3</option><option>N2</option><option>N1</option></select>
+    <select id="js-label-filter" aria-label="我的熟悉度"><option value="all">全部熟悉度</option><option value="unknown">不熟</option><option value="uncertain">不確定</option><option value="known">熟悉</option><option value="unmarked">未標記</option></select>
+    <details id="js-display" class="js-menu"><summary>顯示</summary><div class="js-menu-panel">
+     <label>清單密度<select id="js-density"><option value="full">摘要與詳情</option><option value="compact">精簡速覽</option></select></label>
+     <label class="js-check"><input id="js-hide" type="checkbox">遮住意思</label>
+    </div></details>
    </div>
-   <div class="js-summary"><span id="js-result-count" class="js-muted"></span><label class="js-check"><input id="js-hide" type="checkbox">遮住意思</label></div>
-   <nav class="js-pagination" aria-label="教材分頁">
-    <button id="js-prev" type="button">上一頁</button>
-    <form id="js-page-form"><label>第 <input id="js-page-number" aria-label="頁碼" type="number" min="1" value="1" required> 頁</label>
-    <span id="js-page-total"></span><button id="js-jump" type="submit">跳頁</button></form>
-    <button id="js-next" type="button">下一頁</button>
-    <button id="js-first" type="button">從頭閱讀</button>
+   <div class="js-summary"><div class="js-count-group"><span id="js-result-count"></span><button id="js-refresh" type="button" aria-label="重新整理" title="重新整理">↻</button></div>
+   <div class="js-read-actions">
     <button id="js-bookmark" type="button" hidden>接續上次閱讀</button>
-   </nav>
+    <details id="js-reading-menu" class="js-menu"><summary aria-label="閱讀選項" title="閱讀選項"><span>閱讀</span></summary><div class="js-menu-panel"><button id="js-first" type="button">從頭閱讀</button></div></details>
+   </div>
+   <nav id="js-pagination" class="js-pagination" aria-label="教材分頁">
+    <button id="js-prev" type="button" aria-label="上一頁" title="上一頁">‹</button>
+    <form id="js-page-form"><input id="js-page-number" aria-label="頁碼，按 Enter 跳頁" title="輸入頁碼後按 Enter" type="number" min="1" value="1" enterkeyhint="go" required><span id="js-page-total"></span></form>
+    <button id="js-next" type="button" aria-label="下一頁" title="下一頁">›</button>
+   </nav></div>
    <div id="js-scroll" class="js-scroll" tabindex="0" role="region" aria-label="教材清單"><table class="js-table" aria-label="教材與手動熟悉度"><thead><tr><th id="js-title-heading">單字／讀音</th><th>意思・用法・例句</th><th>我的熟悉度</th></tr></thead><tbody id="js-rows"></tbody></table></div>
    <div id="js-operation" class="js-operation" role="status" aria-live="polite" hidden><span id="js-operation-text"></span><button id="js-retry" type="button" hidden>重試同一筆</button></div>
    <div id="js-no-results" class="js-empty" hidden>沒有符合的項目</div>
-   <div class="js-bottom"><span id="js-status" role="status" aria-live="polite"></span><button id="js-refresh" type="button">重新整理</button></div>
-   <div class="js-review-foot"><button id="js-use-list" type="button" class="js-primary cursor-interaction">用目前條件隨機翻卡</button></div>
+   <div id="js-status" class="js-muted" role="status" aria-live="polite"></div>
   </section>
   <section id="js-cards" aria-label="單字卡複習" hidden>
    <div class="js-context"><span id="js-card-kind"></span></div>

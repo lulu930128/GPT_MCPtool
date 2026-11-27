@@ -9,7 +9,7 @@ function fixture(responses: Record<string, unknown>, protocolVersion?: string | 
     calls.push({ method, params });
     const response = responses[method];
     if (response instanceof Error) throw response;
-    return response;
+    return typeof response === "function" ? response(params) : response;
   } } as AppServerTransport);
   return { reader, calls };
 }
@@ -65,7 +65,9 @@ test("usage failures, unsupported auth and invalid/unsafe integers never become 
 test("runtime diagnostics isolate failures, select safe capabilities and disclose incomplete inventory", async () => {
   const { reader, calls } = fixture({
     "server/diagnostics": { process: { id: 123, residentMemoryBytes: 1024, physicalFootprintBytes: null, path: "private-path" }, gauges: [{ name: "threads", value: 2 }] },
-    "permissionProfile/list": { data: [{ id: "read-only", allowed: true, description: "private-path" }], nextCursor: "private-cursor" },
+    "permissionProfile/list": ({ cursor }: { cursor?: string }) => cursor
+      ? { data: [{ id: "next", allowed: false }], nextCursor: null }
+      : { data: [{ id: "read-only", allowed: true, description: "private-path" }], nextCursor: "private-cursor" },
     "windowsSandbox/readiness": new Error("unsupported platform"),
     "modelProvider/capabilities/read": { namespaceTools: true, imageGeneration: false, webSearch: true, token: "private-token" },
     "experimentalFeature/list": { data: [{ name: "feature", stage: "beta", enabled: false, defaultEnabled: false, description: "private" }], nextCursor: null },
@@ -73,7 +75,7 @@ test("runtime diagnostics isolate failures, select safe capabilities and disclos
   const result = await reader.runtime("configured-project");
   assert.equal(result.server.status, "available");
   assert.equal(result.windowsSandbox.status, "unavailable");
-  assert.equal(result.permissionProfiles.status === "available" && result.permissionProfiles.truncated, true);
+  assert.deepEqual(result.permissionProfiles, { status: "available", data: [{ id: "read-only", allowed: true }, { id: "next", allowed: false }], truncated: false });
   assert.equal(result.modelProvider.status, "available");
   assert.equal(result.experimentalFeatures.status, "available");
   assert.doesNotMatch(JSON.stringify(result), /private|configured-project/);
@@ -112,4 +114,21 @@ test("skills/hooks/MCP inventory never returns paths, commands, schemas, raw aut
   await reader.inventory("configured", "mcp");
   assert.equal(calls.length, 1);
   assert.equal((await reader.inventory("wrong-project", "skills")).skills?.status, "error");
+});
+
+test("a repeating native inventory cursor is invalid and never presented as a complete first page", async () => {
+  const {reader,calls} = fixture({"experimentalFeature/list":{data:[],nextCursor:"same"}});
+  const view = await reader.runtime("fixture");
+  assert.deepEqual(view.experimentalFeatures,{status:"error",code:"INVALID_RESPONSE"});
+  assert.equal(calls.filter(call=>call.method==="experimentalFeature/list").length,2);
+});
+
+test("subagent inventory rejects a different parent and message pages select visible text only", async () => {
+  const {reader} = fixture({"thread/list":{data:[{id:"child",parentThreadId:"foreign"}],nextCursor:null},
+    "thread/items/list":{data:[{turnId:"turn",item:{type:"reasoning",content:"private"}},{turnId:"turn",item:{id:"reply",type:"agentMessage",text:"visible"}}],nextCursor:"more"}});
+  assert.deepEqual(await reader.threadPage("parent","agents"),{status:"error",code:"INVALID_RESPONSE"});
+  const page=await reader.threadPage("child","messages");
+  assert.equal(page.status,"available");
+  assert.match(JSON.stringify(page),/visible/);
+  assert.doesNotMatch(JSON.stringify(page),/private/);
 });

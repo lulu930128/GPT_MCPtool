@@ -12,8 +12,11 @@ export const sqliteInput = {
   pageSize: z.number().int().positive().optional(), cursor: z.string().uuid().optional(), close: z.boolean().optional(),
 };
 type Args = z.infer<z.ZodObject<typeof sqliteInput>>;
-type Session = { worker: ChildProcess; path: string; root: string; busy: boolean };
+type Session = { worker: ChildProcess; path: string; root: string; busy: boolean; idleTimer?: NodeJS.Timeout };
 export type SqliteSessions = Map<string, Session>;
+// Use one tunnel request window between pages. An abandoned statement otherwise
+// holds its WAL read mark until the entire MCP transport is closed.
+const requestWindowMs = 119_000;
 const directSessions: SqliteSessions = new Map();
 
 async function stopReader(child: ChildProcess) {
@@ -40,7 +43,7 @@ export async function inspectSqlite(config: ServerConfig, args: Args, sessions =
   }
   if (args.close && !args.cursor) throw new Error("Closing a SQLite reader requires its cursor.");
   const token = args.cursor ?? randomUUID();
-  const session = args.cursor ? sessions.get(token) : {
+  const session: Session | undefined = args.cursor ? sessions.get(token) : {
     worker: fork(new URL(import.meta.url), ["--sqlite-reader"], {
       execArgv: [], stdio: ["ignore", "ignore", "ignore", "ipc"],
     }),
@@ -48,14 +51,15 @@ export async function inspectSqlite(config: ServerConfig, args: Args, sessions =
   };
   if (!session || session.path !== resolved.absolute || session.root !== resolved.rootId) throw new Error("Unknown SQLite cursor.");
   if (session.busy) throw new Error("SQLite cursor has a page in flight.");
-  if (args.close) { sessions.delete(token); await stopReader(session.worker); return { closed: true, cursor: null, rows: [], columns: [], eof: true }; }
+  clearTimeout(session.idleTimer);
+  if (args.close) { sessions.delete(token); await stopReader(session.worker); return { closed: true, cursor: null, cursorIdleTimeoutMs: null, rows: [], columns: [], eof: true }; }
   session.busy = true;
   sessions.set(token, session);
   const begin = performance.now();
   const worker = session.worker;
   try {
     const page = await new Promise<{ rows: unknown[]; columns: unknown[]; eof: boolean }>((resolve, reject) => {
-      const timer = setTimeout(() => done(new Error("SQLite request reached tunnel deadline.")), 119_000);
+      const timer = setTimeout(() => done(new Error("SQLite request reached tunnel deadline.")), requestWindowMs);
       function done(error?: Error, page?: any) {
         clearTimeout(timer); worker.off("message", message); worker.off("error", done); worker.off("exit", exit);
         if (error) reject(error); else resolve(page);
@@ -68,8 +72,20 @@ export async function inspectSqlite(config: ServerConfig, args: Args, sessions =
       worker.send(request, error => { if (error) done(error); });
     });
     if (page.eof) sessions.delete(token);
-    else { worker.unref(); if (!args.cursor) worker.once("exit", () => sessions.delete(token)); }
-    return { ...page, cursor: page.eof ? null : token, latencyMs: performance.now() - begin, consistency: "sqlite_statement_snapshot" };
+    else {
+      worker.unref();
+      session.idleTimer = setTimeout(() => {
+        if (sessions.get(token) !== session || session.busy) return;
+        sessions.delete(token);
+        worker.kill();
+      }, requestWindowMs);
+      session.idleTimer.unref();
+      if (!args.cursor) worker.once("exit", () => {
+        clearTimeout(session.idleTimer);
+        sessions.delete(token);
+      });
+    }
+    return { ...page, cursor: page.eof ? null : token, latencyMs: performance.now() - begin, consistency: "sqlite_statement_snapshot", cursorIdleTimeoutMs: page.eof ? null : requestWindowMs };
   } catch (error) { sessions.delete(token); await stopReader(worker); throw error; }
   finally { session.busy = false; }
 }

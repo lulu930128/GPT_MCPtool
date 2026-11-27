@@ -136,13 +136,15 @@ export function WorkspaceApp({ bridge }: { bridge: McpAppsBridge }) {
   const displayed = chart.data;
   const displayedFrame = (displayed?.timeframe ?? timeframe) as DashboardChartTimeframe;
   const activeChart = record(displayedFrame === "today" ? displayed?.intraday_chart : displayed?.chart);
-  const sessionChart = chartSession(displayed ?? {}, previousSession);
+  const headerDate = record(header.data?.session).trade_date;
+  const expectedTradeDate = typeof headerDate === "string" ? headerDate : undefined;
+  const sessionChart = chartSession(displayed ?? {}, previousSession, expectedTradeDate);
   const points = displayedFrame === "today" ? sessionChart.points : records(activeChart.points);
   const averages = displayedFrame === "today" && (previousSession || !sessionChart.points.length) ? [] : records(displayed?.moving_averages);
   const overlay = record(activeChart.intraday_overlay);
   const technical = record(research.data?.technical);
   const researchCurrent = research.dataKey === research.key;
-  const summary = technicalSummary(chart, research, previousSession);
+  const summary = technicalSummary(chart, research, previousSession, expectedTradeDate);
   const presentationEvidence = displayed ? technicalPresentation(summary) : undefined;
 
   return <main className="tw-workspace" data-display-mode={presentation.actualDisplayMode} data-workspace-view={workspaceView}>

@@ -1,5 +1,7 @@
 # MCP Control Center
 
+2026-11-18 修復：部署 inventory v3 明確包含 tray 所需的 `McpControlCenter.MemoryMaintenance.psm1`，並驗證打包後可載入其入口；缺少該檔案時拒絕 candidate。歷史 v1/v2 版本仍依各自固定清單驗證，保留回退能力。這修復 Bridge 已排空、維持禁止接單卻未派送 RestartCore 的問題；不改記憶體門檻、工作排空或元件 ownership。見[修復與重啟紀錄](docs/agent-runs/memory-worker-package-20261118/Progress.md)。
+
 2026-11-12 修復：既有 tray 的 maintenance slot 在原 component mutex 內讀取固定 loopback 維護投影，排空後直接委派普通 RestartCore；移除獨立 per-intent claim／receipt gate，不增加交接 ACK、人工確認、manager 或服務。繁忙／preflight 未派送時下一輪仍可處理。Bridge 在真正 Stop/Start 前保存最小 attempt marker，結果不明先讀回 health，不對 restarting 的舊 Core 重派；新 Core 自行驗證 stores、舊 PID 退出及 listener 後恢復准入。普通 Bridge RestartCore 超時不強殺 controller。先採用 CC，再採用 Bridge；source 與正式證據見 [修復紀錄](../codex_bridge/docs/agent-runs/memory-drain-restart-20261110/RecoveryProgress-20261112.md)。
 
 2026-11-05 source：新增獨立版本 `cc-omi-launcher-update-v1` 的固定 Launcher 換版 IPC。既有 tray 的 maintenance worker 執行固定 `C:\project\Open Market Intelligence\scripts\apply-omi-update.ps1`；本機短 client 不建立常駐樹。此路由不加入八元件 auto-start、不修改 Workspace tool enum，亦不把 OMI side effect 夾在 `omi_search` reload 或 CC self-update。正式採用前須先走 CC 官方 source-update，再核對 capability／owner；見 [契約、驗證及 Reviewer 操作順序](docs/OmiLauncherRemoteUpdate.md)。

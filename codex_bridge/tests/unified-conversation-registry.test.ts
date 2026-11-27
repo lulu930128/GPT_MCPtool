@@ -17,6 +17,10 @@ import type {
 } from "../src/types.js";
 import { UnifiedConversationRegistry } from "../src/unified-conversation-registry.js";
 
+function inventory(jobs: JobSummary[]) {
+  return { inventory: () => jobs, summary: (id:string) => jobs.find(job => job.id === id)! };
+}
+
 test("automation registry exposes only bounded safe metadata", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "codex-automation-registry-"));
   context.after(() => rm(root, { recursive: true, force: true }));
@@ -85,7 +89,7 @@ test("unified registry merges one native thread with Bridge and automation overl
   };
   const config = { projects: new Map([["omi", { id: "omi", name: "OMI", path: "C:\\project\\OMI" }]]) } as BridgeConfig;
   const store = {
-    listAll: () => jobs,
+    ...inventory(jobs),
   } as unknown as JobStore;
   const controller = {
     listLocalThreads: async () => nativePage,
@@ -126,7 +130,7 @@ test("native history remains authoritative over a stale Bridge cache and unchang
     },
   } as unknown as CodexBridgeController;
   const store = {
-    listAll: () => [job],
+    ...inventory([job]),
     findByThreadId: () => job,
     snapshot: async () => bridge,
   } as unknown as JobStore;
@@ -148,7 +152,7 @@ test("unified list preserves durable Bridge jobs when App Server inventory is un
   const job = jobSummary("01a032bf-9390-79c3-b8b3-ee84f058ed16");
   const registry = new UnifiedConversationRegistry(
     testBridgeConfig(),
-    { listAll: () => [job] } as unknown as JobStore,
+    { ...inventory([job]) } as unknown as JobStore,
     { listLocalThreads: async () => { throw new Error("offline"); } } as unknown as CodexBridgeController,
     { list: async () => [] } as unknown as AutomationRegistry,
   );
@@ -166,7 +170,7 @@ test("degraded native inventory keeps the last verified registry and has no rese
   let nativeCall = 0;
   const registry = new UnifiedConversationRegistry(
     testBridgeConfig(),
-    { listAll: () => [durableJob] } as unknown as JobStore,
+    { ...inventory([durableJob]) } as unknown as JobStore,
     {
       listLocalThreads: async () => {
         nativeCall += 1;
@@ -196,7 +200,7 @@ test("incomplete native inventory merges current and verified threads without re
   let nativeCall = 0;
   const registry = new UnifiedConversationRegistry(
     testBridgeConfig(),
-    { listAll: () => [] } as unknown as JobStore,
+    { ...inventory([]) } as unknown as JobStore,
     {
       listLocalThreads: async () => {
         nativeCall += 1;
@@ -223,7 +227,7 @@ test("cursor pages are merge-only even when native inventory is healthy", async 
   const thread = localSummary("01a032bf-9390-79c3-b8b3-ee84f058ed16");
   const registry = new UnifiedConversationRegistry(
     testBridgeConfig(),
-    { listAll: () => [] } as unknown as JobStore,
+    { ...inventory([]) } as unknown as JobStore,
     { listLocalThreads: async () => ({ threads: [thread], complete: true }) } as unknown as CodexBridgeController,
     { list: async () => [] } as unknown as AutomationRegistry,
   );
@@ -242,7 +246,7 @@ test("unified get opens a Bridge-only conversation when native history is missin
   const registry = new UnifiedConversationRegistry(
     testBridgeConfig(),
     {
-      listAll: () => [job],
+      ...inventory([job]),
       findByThreadId: () => job,
       snapshot: async () => view,
     } as unknown as JobStore,
@@ -268,7 +272,7 @@ test("unified get reports when the native UI projection is bounded", async () =>
   };
   const registry = new UnifiedConversationRegistry(
     testBridgeConfig(),
-    { listAll: () => [], findByThreadId: () => undefined } as unknown as JobStore,
+    { ...inventory([]), findByThreadId: () => undefined } as unknown as JobStore,
     {
       readLocalThreadFresh: async () => ({ summary: localSummary(threadId), sourceFingerprint: "bounded", snapshot: local }),
     } as unknown as CodexBridgeController,
@@ -288,7 +292,7 @@ test("public get checks native workspace metadata before reading full history", 
   const protectedSummary = { ...localSummary(threadId), projectId: "local:protected", historyOnly: true };
   const registry = new UnifiedConversationRegistry(
     testBridgeConfig(),
-    { listAll: () => [job], findByThreadId: () => job } as unknown as JobStore,
+    { ...inventory([job]), findByThreadId: () => job } as unknown as JobStore,
     {
       readLocalThreadSummary: async () => protectedSummary,
       readLocalThreadFresh: async () => { fullReads += 1; throw new Error("must not run"); },
@@ -304,7 +308,7 @@ test("unified list preserves native conversations when automation metadata is un
   const nativePage: LocalThreadListPage = { threads: [localSummary("01a032bf-9390-79c3-b8b3-ee84f058ed16")], complete: true };
   const registry = new UnifiedConversationRegistry(
     testBridgeConfig(),
-    { listAll: () => [] } as unknown as JobStore,
+    { ...inventory([]) } as unknown as JobStore,
     { listLocalThreads: async () => nativePage } as unknown as CodexBridgeController,
     { list: async () => { throw new Error("automation offline"); } } as unknown as AutomationRegistry,
   );
@@ -318,7 +322,7 @@ test("unified list reports missing automation targets without exposing prompts",
   const missingTarget = "01a00000-0000-7000-8000-000000000099";
   const registry = new UnifiedConversationRegistry(
     testBridgeConfig(),
-    { listAll: () => [] } as unknown as JobStore,
+    { ...inventory([]) } as unknown as JobStore,
     { listLocalThreads: async () => ({ threads: [], complete: true }) } as unknown as CodexBridgeController,
     { list: async () => [{ automationId: "missing", name: "Missing", status: "ACTIVE", schedule: "RRULE:FREQ=DAILY", targetThreadId: missingTarget }] } as unknown as AutomationRegistry,
   );
@@ -418,3 +422,32 @@ function jobSummary(threadId: string): JobSummary {
     pendingApprovalCount: 0,
   };
 }
+
+test("an unchanged verified native page returns a summary and retains all content on recovery",async () => {
+  const thread = localSummary("01a032bf-9390-79c3-b8b3-ee84f058ed16");
+  const snapshot = localSnapshot(thread.threadId,"verified contents");
+  const registry = new UnifiedConversationRegistry(testBridgeConfig(),
+    {...inventory([]),findByThreadId:()=>undefined} as unknown as JobStore,{
+      readLocalThreadFresh:async (_id:string,known?:string)=>({summary:thread,sourceFingerprint:"stable",snapshot:known ? undefined : snapshot}),
+    } as unknown as CodexBridgeController,{list:async()=>[]} as unknown as AutomationRegistry);
+  const first = await registry.get(thread.threadId,"app",undefined);
+  assert.ok(first.view && first.viewToken);
+  const next = await registry.get(thread.threadId,"app",first.viewToken);
+  assert.equal(next.viewUnchanged,true);
+  assert.equal(next.view,undefined);
+  assert.deepEqual((await registry.get(thread.threadId,"app")).view,first.view);
+});
+
+test("continuation pages share one scoped native inventory scan",async () => {
+  const threads = ["01a032bf-9390-79c3-b8b3-ee84f058ed16","01a032bf-9390-79c3-b8b3-ee84f058ed17"].map(localSummary);
+  let scans = 0;
+  const registry = new UnifiedConversationRegistry(testBridgeConfig(),inventory([]) as unknown as JobStore,
+    {listLocalThreads:async()=>{scans++;return {threads,complete:true};}} as unknown as CodexBridgeController,
+    {list:async()=>[]} as unknown as AutomationRegistry);
+  const first = await registry.listPage({visibility:"app",limit:1});
+  const second = await registry.listPage({visibility:"app",limit:1,cursor:first.nextCursor});
+  assert.equal(scans,1);
+  assert.equal(second.reset,false);
+  assert.equal(second.complete,true);
+  assert.notEqual(first.conversations[0].threadId,second.conversations[0].threadId);
+});

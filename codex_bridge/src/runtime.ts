@@ -1,3 +1,4 @@
+import type { RuntimeDiagnostics } from "./runtime-diagnostics.js";
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { MemoryMaintenance, type MaintenanceWork } from "./memory-maintenance.js";
@@ -20,6 +21,7 @@ import { createPowerShellHostPort, type PowerShellHostPort } from "./powershell-
 import { createNativeHostTransport } from "./powershell-approval/host-transport.js";
 
 export interface BridgeRuntime {
+  diagnostics?: RuntimeDiagnostics;
   config: BridgeConfig;
   store: JobStore;
   textBundles: TextBundleStore;
@@ -41,10 +43,10 @@ export interface BridgeRuntime {
   close: () => Promise<void>;
 }
 
-export async function createBridgeRuntime(config: BridgeConfig): Promise<BridgeRuntime> {
+export async function createBridgeRuntime(config: BridgeConfig, diagnostics?: RuntimeDiagnostics): Promise<BridgeRuntime> {
   // Do this before JobStore/text-bundle initialization. Source binding is not a cutover grant.
   await assertInstalledRuntimeActivation(config.installedBinding);
-  const store = new JobStore(config.jobsDir, config.handoffDir);
+  const store = new JobStore(config.jobsDir, config.handoffDir, undefined, diagnostics);
   await store.initialize();
   const textBundles = new TextBundleStore(config.stagingDir);
   await textBundles.initialize();
@@ -52,7 +54,7 @@ export async function createBridgeRuntime(config: BridgeConfig): Promise<BridgeR
   // One component-owned App Server is shared by all Bridge threads. Per-turn cancellation belongs
   // to CodexBridgeController.cancel() and turn/interrupt; this client is never a thread process.
   const appServer = new CodexAppServerClient({
-    command: config.codexCommand,
+    diagnostics, command: config.codexCommand,
     args: config.codexArgs,
     environment: config.codexEnvironment,
     beforeSpawn: config.installedBinding ? () => assertInstalledRuntimeActivation(config.installedBinding) : undefined,
@@ -72,21 +74,26 @@ export async function createBridgeRuntime(config: BridgeConfig): Promise<BridgeR
   const powershellHost = hostPort;
   const activity = { tools: 0, http: 0 };
   const maintenanceWork = (): MaintenanceWork => {
-    const jobs = store.listAll();
-    return { jobs: jobs.filter(j => ["queued", "preparing", "running", "awaiting_approval"].includes(j.status)).length,
-      approvals: jobs.reduce((n, j) => n + j.pendingApprovalCount, 0), operations: store.pendingAdmissions,
+    const counts = store.jobCounts();
+    return { jobs: counts.active,
+      approvals: counts.approvals, operations: store.pendingAdmissions,
       tools: activity.tools, http: activity.http, background: controller.maintenancePending + (hostTransport?.status().active || hostTransport?.status().closed ? 1 : 0),
       controllerReady: ["idle", "ready"].includes(controller.status) };
   };
   const memoryMaintenance = new MemoryMaintenance(store, config.dataDir, {
-    pid: process.pid, instance: randomUUID(), buildId: config.buildId, startedAt: new Date().toISOString(),
+    pid: process.pid, instance: diagnostics?.instance ?? randomUUID(), buildId: config.buildId, startedAt: new Date().toISOString(),
   }, maintenanceWork);
   await memoryMaintenance.initialize();
+  if (diagnostics) diagnostics.workload = () => ({
+    store: store.workload(), appServer:appServer.workload(), controller: controller.pipelineWorkload(), native: conversations.cacheWorkload(),
+    maintenance: memoryMaintenance.snapshot(), http: activity.http, tools: activity.tools,
+  });
   memoryMaintenance.start();
+  controller.startReconciliation();
   // Preflight is an explicit diagnostic action. Startup and pure getters never
   // launch the native helper; missing owner/platform leaves NORMAL/ADMIN closed.
   let closing: Promise<void> | undefined;
-  return { config, store, textBundles, controller, conversations, widgetHtml, privilegedBroker, selfReload, selfReloadHtml,
+  return { diagnostics, config, store, textBundles, controller, conversations, widgetHtml, privilegedBroker, selfReload, selfReloadHtml,
     memoryMaintenance, activity, maintenanceWork,
     ...review, powershellHost, powershellHostTransport: hostTransport, close: () => closing ??= closeResources([
       () => memoryMaintenance.close(), async () => { await hostTransport?.close(); }, () => selfReload.close(), () => privilegedBroker.close(),

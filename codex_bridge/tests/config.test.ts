@@ -53,6 +53,53 @@ test("Full Access is the default; plan and the rollback profile retain sandbox r
   if (process.platform === "win32") assert.ok(config.codexArgs.includes('windows.sandbox="elevated"'));
 });
 
+test("private npm launcher isolates the Desktop registered-core hint without changing parent or sandbox policy", async (t) => {
+  const f = await fixture(t);
+  const launcher = join(f.component, "node_modules", "@openai", "codex", "bin", "codex.js");
+  await mkdir(dirname(launcher), { recursive: true });
+  await writeFile(launcher, "// Synthetic launcher; never executed.\n");
+  const env = { ...f.env, CODEX_BRIDGE_CODEX_COMMAND: undefined, CODEX_WINDOWS_REGISTERED_CORE: "1",
+    codex_windows_registered_core: "1", CODEX_HOME: join(f.component, "codex-home"), PATH: "synthetic-path" };
+  const before = { ...env };
+  const config = await loadBridgeConfig(env);
+  assert.equal(config.codexCommand, process.execPath);
+  assert.equal(config.codexArgs[0], launcher);
+  assert.notEqual(config.codexEnvironment, env);
+  assert.equal(config.codexEnvironment?.CODEX_HOME, env.CODEX_HOME);
+  assert.equal(config.codexEnvironment?.PATH, env.PATH);
+  assert.deepEqual(env, before);
+  if (process.platform === "win32") {
+    assert.ok(!Object.keys(config.codexEnvironment!).some((key) => key.toUpperCase() === "CODEX_WINDOWS_REGISTERED_CORE"));
+    assert.ok(config.codexArgs.includes('windows.sandbox="elevated"'));
+  } else {
+    assert.equal(config.codexEnvironment?.CODEX_WINDOWS_REGISTERED_CORE, "1");
+  }
+});
+
+test("daily private native command drops only the registered-core hint; custom executables remain unchanged", {
+  skip: process.platform !== "win32" || !["x64", "arm64"].includes(process.arch),
+}, async (t) => {
+  const f = await fixture(t);
+  const triple = process.arch === "x64" ? "x86_64-pc-windows-msvc" : "aarch64-pc-windows-msvc";
+  const native = join(f.component, "node_modules", "@openai", `codex-win32-${process.arch}`, "vendor", triple, "bin", "codex.exe");
+  await mkdir(dirname(native), { recursive: true });
+  await writeFile(native, "SYNTHETIC_NOT_EXECUTABLE");
+  const codeRoot = join(f.component, "Runtime", "versions", "fixture-sandbox", "codex_bridge");
+  await mkdir(codeRoot, { recursive: true });
+  const env = { ...f.env, CODEX_BRIDGE_CODEX_COMMAND: native.toUpperCase(), CODEX_BRIDGE_PROJECT_ROOT: codeRoot,
+    CODEX_BRIDGE_CONFIG_ROOT: f.component, CODEX_WINDOWS_REGISTERED_CORE: "1", CODEX_HOME: "fixture-home" };
+  const config = await loadBridgeConfig(env);
+  assert.equal(config.codexEnvironment?.CODEX_WINDOWS_REGISTERED_CORE, undefined);
+  assert.equal(config.codexEnvironment?.CODEX_HOME, "fixture-home");
+  assert.equal(env.CODEX_WINDOWS_REGISTERED_CORE, "1");
+  assert.ok(config.codexArgs.includes('windows.sandbox="elevated"'));
+  for (const command of ["codex", join(f.component, "custom", "codex.exe")]) {
+    const custom = await loadBridgeConfig({ ...env, CODEX_BRIDGE_CODEX_COMMAND: command });
+    assert.equal(custom.codexEnvironment, undefined);
+    assert.equal(custom.codexCommand, command);
+  }
+});
+
 test("environment deny globs exclude only the example and preserve synthetic secret variants", async (t) => {
   const f = await fixture(t);
   const config = await loadBridgeConfig(f.env);

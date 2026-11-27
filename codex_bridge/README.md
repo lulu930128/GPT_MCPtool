@@ -46,7 +46,7 @@ bearer 的入口會回 `AUTHENTICATED_MCP_REQUIRED`。本輪未部署、未驗�
   active send/steer 與 cancel 必須指定 `expectedTurnId`，cancel 另帶 `requestId`。
   同 key 不同內容拒絕；不明 delivery 不重送。Receipt 持久保存，每 job 上限 10,000，達限拒絕新 direct 請求。
 - `codex_model_list(forceRefresh?)` 回傳模型、efforts、fetchedAt、cacheHit 與 controller identity。
-  Bridge 私有 CLI 精確釘版 `0.165.0`，Win32 native 隨官方套件同版安裝；模型可用性與 effort 以實際 App Server 回傳為準。
+  Bridge 私有 CLI 精確釘版 `0.170.0`，Win32 native 隨官方套件同版安裝；模型可用性與 effort 以實際 App Server 回傳為準。
   模型清單會讀取全部分頁；不完整或失敗不偽裝成空清單。
 - Direct content 可操作 user/auto_review job；續接或 steer 省略 reviewer 時沿用既有設定，
   歷史工作缺少 reviewer 時沿用 user。只有使用者明確要求且在 turn 之間才能變更 reviewer。
@@ -83,13 +83,14 @@ bearer 的入口會回 `AUTHENTICATED_MCP_REQUIRED`。本輪未部署、未驗�
   `turn/steer`。
 - Initial turn、follow-up 與 steer 只由使用者明確輸入和純資料標記區段組成。Bridge 仍產生
   `request.md` 供稽核，但不再把稽核模板或行為提示送進模型輸入。
-- Bridge 正常選單固定三組 `modelPreset`：`gpt-6-astra/xhigh`、`gpt-6.1-sol/xhigh`、`gpt-6.1-sol/medium`。
+- Bridge 正常選單固定三組 `modelPreset`：`gpt-6.2-astra/high`、`gpt-6.2-sol/high`、`gpt-6.2-sol/medium`。
   唯一定義在 `src/model-presets.ts`；GUI 從 Bridge status 的 `modelPresets` 讀取，與 native `models` 分開。
-  `gpt-5.6-sol/medium` 不再是固定選項；native `codex_model_list` 仍如實回傳 provider 清單，不增刪或偽造 ID。
+  舊版 preset 不再是新任務的固定選項；native `codex_model_list` 仍如實回傳 provider 清單，不增刪或偽造 ID。
   未列出的模型標為 `NOT VERIFIED`；已列出但不支援該 effort 則為 `UNAVAILABLE`。`NATIVE LISTED` 也只代表清單列出，
-  不代表執行或帳號授權已驗證。選擇未列出的 Sol 6.1 仍只嘗試 exact ID；拒絕時保留原失敗，無 fallback／自動重送。
+  不代表執行或帳號授權已驗證。選擇未列出的 6.2 模型仍只嘗試 exact ID；拒絕時保留原失敗，無 fallback／自動重送。
+  本次 6.2 preset 僅更新 Source 與隔離測試，未 reload／restart／部署，也未提交 6.2 任務驗證執行可用性。
   新任務必須明確傳 `modelPreset`，或完整且吻合的 `model` + `effort`；省略、半組與衝突組合拒絕，不自動選 Astra。
-  ChatGPT 可依任務範圍選擇：複雜跨模組／高風險工作用 Astra xhigh，聚焦深度推理用 Sol xhigh，範圍明確的一般工作用 Sol medium。
+  ChatGPT 可依任務範圍選擇：複雜跨模組／高風險工作用 Astra high，聚焦深度推理用 Sol high，範圍明確的一般工作用 Sol medium。
   這是選擇指引，不是效能或可用性保證；固定組合不控制 Fast Mode、reviewer 或權限。
   Direct continuation／active steer 省略選擇時沿用原設定；執行中不得改組合。歷史 custom model 紀錄不遷移或補造。
   進階「手動指定 Model ID」保留在獨立選項群；MCP 須明確帶 `modelSelection: "custom"` 及非空 `model`，
@@ -227,6 +228,10 @@ Installed release 的工具程式目錄改為 read；owner/runtime 與秘密目�
 
 `npm install` 會安裝固定版本的官方 `@openai/codex` runtime；Bridge 預設以目前 Node 執行其
 `codex.js app-server`，避免 Windows Store App executable 無法由背景 controller spawn 的限制。
+Windows 私有 npm launcher／已核對的私有 native executable 僅在 App Server child environment
+移除繼承的 `CODEX_WINDOWS_REGISTERED_CORE`，避免沒有 MSIX Package Identity 的 CLI 誤選
+Desktop Registered Core Runner。`windows.sandbox="elevated"`、permission profiles 與 `CODEX_HOME`
+保持原設定；不修改父程序、User／Machine 環境或 AppX 註冊。自訂／PATH executable 不套用此推斷。
 Codex 必須在同一個 Windows 使用者下已登入。Bridge 使用現有 Codex 登入，不需要 OpenAI
 Platform API key。若要改用其他 CLI，可在本機設定 `codexCommand` 與 JSON 字串形式的 `codexArgs`。
 
@@ -581,3 +586,9 @@ stdout／stderr 不再受到 16 KiB 截斷或因此中止程序，完整捕獲�
 既有 `installed-release-operator.ps1` 的 `Prepare`、`PlanState`、`BindState` 可使用 `-UpgradeFromReleaseRoot <目前 installed release>` 直接升版。它核對舊 release、Startup 與原 state-binding／cutover 收據，沿用現有私有設定快照；不搬移資料、不回到 source，也不重設現有 ACL。安裝仍由獨立 Windows PowerShell 執行，只有 `Install` 需要系統管理員。
 
 升版期間先保留舊 Tray，讓其原 controller 正常停止 Bridge。第一次 `Cutover` 產生 `UPGRADE_STOPPED` 後，選擇 Tray 的 `Exit control center only`，再執行同一個 `Cutover` 完成版本切換。這是一次性的更新步驟，與執行 PowerShell 請求無關；日常 NORMAL 執行不需要 Tray 點選。只有這個明確的停止階段可續接，UNKNOWN 仍需查明原因，不能重試。
+
+## V2.1 正式版
+
+開發版本鎖定 Codex CLI 0.172.0。「更多」選單的「目標、佇列與對話搜尋」可在 Bridge 管理的對話查看原生目標、佇列、子代理與分頁歷史。符合原有操作條件的工作可儲存暫停的目標、清除目標及移除佇列項目。支援的非秘密選項題與 MCP 列舉表單由操作者在既有核准介面回答。
+
+原生 App Server 重新接手 thread 時，持久化的 Goal 或 Queue 可自行開啟新回合，且實測會採用接手者的模型與推理強度。2026-11-26 已採用 v21-w7-w14-20261126（Build 7f27f218929df398）。App 提供暫停目標與移除佇列項目，自動續跑的設定繼承仍有上述限制。恢復、收據與降版條件見 [JobRecovery.md](docs/JobRecovery.md)。
